@@ -1,0 +1,23 @@
+@paradigm procedural
+
+@import std.memory.allocator
+
+// Route allocations through the debug allocator. p is never freed, so it leaks.
+// q is freed twice, the second a double free. The counters report 1 and 1.
+
+func work(using a: Debug) -> void {
+    p: *int64 = alloc(8)
+    *p = 1
+    q: *int64 = alloc(8)
+    *q = 2
+    free(q)
+    free(q)
+}
+
+func main() -> int32 {
+    mut d := debug()
+    work(d)
+    println(debug_leaks())
+    println(debug_double_frees())
+    return 0
+}

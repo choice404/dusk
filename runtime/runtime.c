@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <string.h>
 
 void cool_println_cstr(const char *s) {
     puts(s);
@@ -23,4 +24,56 @@ void *cool_alloc(size_t n) {
 
 void cool_free(void *p) {
     free(p);
+}
+
+/* Debug allocator. Tracks every allocation in a table so it can report leaks
+   and catch a double free. A freed block is poisoned with 0xDD and kept, not
+   returned to libc, so a use after free reads poison and its address is never
+   handed out again. This trades memory for detection, which is the point in a
+   debug build. */
+#define COOL_DBG_MAX 4096
+static void *cool_dbg_ptr[COOL_DBG_MAX];
+static int64_t cool_dbg_size[COOL_DBG_MAX];
+static int cool_dbg_freed[COOL_DBG_MAX];
+static int cool_dbg_count = 0;
+static int64_t cool_dbg_double = 0;
+
+void *cool_debug_alloc(int64_t n) {
+    void *p = malloc(n);
+    if (cool_dbg_count < COOL_DBG_MAX) {
+        cool_dbg_ptr[cool_dbg_count] = p;
+        cool_dbg_size[cool_dbg_count] = n;
+        cool_dbg_freed[cool_dbg_count] = 0;
+        cool_dbg_count++;
+    }
+    return p;
+}
+
+void cool_debug_free(void *p) {
+    for (int i = 0; i < cool_dbg_count; i++) {
+        if (cool_dbg_ptr[i] == p) {
+            if (cool_dbg_freed[i]) {
+                cool_dbg_double++;
+                return;
+            }
+            cool_dbg_freed[i] = 1;
+            memset(p, 0xDD, (size_t)cool_dbg_size[i]);
+            return;
+        }
+    }
+    cool_dbg_double++;
+}
+
+int64_t cool_debug_leaks(void) {
+    int64_t n = 0;
+    for (int i = 0; i < cool_dbg_count; i++) {
+        if (!cool_dbg_freed[i]) {
+            n++;
+        }
+    }
+    return n;
+}
+
+int64_t cool_debug_double_frees(void) {
+    return cool_dbg_double;
 }

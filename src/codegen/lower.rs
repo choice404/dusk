@@ -28,6 +28,10 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("void @cool_println_cstr(ptr)");
     m.declare("ptr @cool_alloc(i64)");
     m.declare("void @cool_free(ptr)");
+    m.declare("ptr @cool_debug_alloc(i64)");
+    m.declare("void @cool_debug_free(ptr)");
+    m.declare("i64 @cool_debug_leaks()");
+    m.declare("i64 @cool_debug_double_frees()");
     for (name, fields) in &ctx.structs {
         let body = fields
             .iter()
@@ -86,14 +90,15 @@ fn emit_vtables(m: &mut Module, ctx: &Ctx) {
 
 fn emit_thunk(m: &mut Module, ty: &str, meth: &IMethod, name: &str) {
     let mut sig = vec!["ptr %d".to_string()];
-    let mut call_args = vec![format!("%{ty} %self")];
+    // self is passed straight through as the data pointer, since methods now take
+    // the receiver by pointer.
+    let mut call_args = vec!["ptr %d".to_string()];
     for (i, p) in meth.params.iter().enumerate() {
         sig.push(format!("{} %a{i}", p.ll()));
         call_args.push(format!("{} %a{i}", p.ll()));
     }
     let ca = call_args.join(", ");
     let mut body = String::from("entry:\n");
-    body.push_str(&format!("  %self = load %{ty}, ptr %d\n"));
     if matches!(meth.ret, CTy::Void) {
         body.push_str(&format!("  call void @{ty}.{}({ca})\n", meth.name));
         body.push_str("  ret void\n");
@@ -548,7 +553,12 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
     let nom = |n: &str| ctx.nom(n);
     let mut params: Vec<(String, CTy)> = Vec::new();
     if let Some(t) = self_ty {
-        params.push(("self".to_string(), CTy::Struct(t.to_string())));
+        // self comes in by pointer, so a method can mutate the receiver and a
+        // stateful allocator's bump offset persists across calls.
+        params.push((
+            "self".to_string(),
+            CTy::Ptr(Box::new(CTy::Struct(t.to_string()))),
+        ));
     }
     for p in &f.params {
         params.push((p.name.clone(), lower_ty(&p.ty, &nom)));
@@ -568,6 +578,15 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
     let mut fb = Fb::new(m, ctx, ret);
     fb.body.push_str("entry:\n");
     for (i, (pname, ty)) in params.iter().enumerate() {
+        if self_ty.is_some() && i == 0 {
+            // The incoming pointer is self's storage. Bind it as a Struct lvalue,
+            // not a fresh copy, so `self.field` reads and writes the caller's value.
+            if let CTy::Ptr(inner) = ty {
+                fb.locals
+                    .insert(pname.clone(), ((**inner).clone(), format!("%a{i}")));
+            }
+            continue;
+        }
         let ptr = fb.alloca(ty);
         fb.line(&format!("store {} %a{i}, ptr {ptr}", ty.ll()));
         fb.locals.insert(pname.clone(), (ty.clone(), ptr));
@@ -1477,6 +1496,30 @@ impl<'a> Fb<'a> {
                 "sizeof" => self.gen_sizeof(args),
                 "alloc_bytes" => self.gen_alloc_bytes(args),
                 "ptr_add" => self.gen_ptr_add(args),
+                "debug_alloc" => {
+                    let n = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+                    let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
+                    let p = self.fresh();
+                    self.line(&format!("{p} = call ptr @cool_debug_alloc(i64 {ni})"));
+                    Val::new(CTy::Ptr(Box::new(CTy::Int(8))), p)
+                }
+                "debug_free" => {
+                    if let Some(a) = args.first() {
+                        let v = self.gen_expr(a);
+                        self.line(&format!("call void @cool_debug_free(ptr {})", v.op));
+                    }
+                    Val::new(CTy::Void, "")
+                }
+                "debug_leaks" => {
+                    let d = self.fresh();
+                    self.line(&format!("{d} = call i64 @cool_debug_leaks()"));
+                    Val::new(CTy::Int(64), d)
+                }
+                "debug_double_frees" => {
+                    let d = self.fresh();
+                    self.line(&format!("{d} = call i64 @cool_debug_double_frees()"));
+                    Val::new(CTy::Int(64), d)
+                }
                 _ => self.gen_user_call(name, args),
             };
         }
@@ -1491,29 +1534,51 @@ impl<'a> Fb<'a> {
     }
 
     fn gen_method_call(&mut self, base: &Expr, mname: &str, args: &[Expr]) -> Option<Val> {
-        let bv = self.gen_expr(base);
-        if matches!(bv.ty, CTy::Error) {
-            return self.gen_error_method(&bv, mname, args);
-        }
-        if let CTy::Iface(iface) = &bv.ty {
-            let iface = iface.clone();
-            return self.gen_dyn_dispatch(&bv, &iface, mname, args);
-        }
-        let (tyname, selfval) = match &bv.ty {
-            CTy::Struct(t) => (t.clone(), bv.op.clone()),
-            CTy::Ptr(inner) => {
-                if let CTy::Struct(t) = inner.as_ref() {
-                    let loaded = self.load(inner, &bv.op);
-                    (t.clone(), loaded)
-                } else {
-                    return None;
+        // Resolve the receiver to a self pointer so the method can mutate it. An
+        // lvalue passes its address; an rvalue struct is materialized to a slot; a
+        // `*Struct` passes the stored pointer. Error and interface receivers keep
+        // their own dispatch.
+        let (tyname, selfptr) = match self.gen_place(base) {
+            Some((CTy::Struct(t), pptr)) => (t, pptr),
+            Some((CTy::Ptr(inner), pptr)) if matches!(*inner, CTy::Struct(_)) => {
+                let CTy::Struct(t) = *inner else { unreachable!() };
+                let p = self.load(&CTy::Ptr(Box::new(CTy::Struct(t.clone()))), &pptr);
+                (t, p)
+            }
+            Some((CTy::Error, pptr)) => {
+                let v = self.load(&CTy::Error, &pptr);
+                return self.gen_error_method(&Val::new(CTy::Error, v), mname, args);
+            }
+            Some((CTy::Iface(i), pptr)) => {
+                let v = self.load(&CTy::Iface(i.clone()), &pptr);
+                return self.gen_dyn_dispatch(&Val::new(CTy::Iface(i.clone()), v), &i, mname, args);
+            }
+            _ => {
+                let bv = self.gen_expr(base);
+                match &bv.ty {
+                    CTy::Error => return self.gen_error_method(&bv, mname, args),
+                    CTy::Iface(i) => {
+                        let i = i.clone();
+                        return self.gen_dyn_dispatch(&bv, &i, mname, args);
+                    }
+                    CTy::Struct(t) => {
+                        let slot = self.alloca(&bv.ty);
+                        self.line(&format!("store %{t} {}, ptr {slot}", bv.op));
+                        (t.clone(), slot)
+                    }
+                    CTy::Ptr(inner) if matches!(**inner, CTy::Struct(_)) => {
+                        let CTy::Struct(t) = (**inner).clone() else {
+                            unreachable!()
+                        };
+                        (t, bv.op.clone())
+                    }
+                    _ => return None,
                 }
             }
-            _ => return None,
         };
         let key = format!("{tyname}.{mname}");
         let (ret, params) = self.ctx.methods.get(&key).cloned()?;
-        let mut parts = vec![format!("%{tyname} {selfval}")];
+        let mut parts = vec![format!("ptr {selfptr}")];
         for (i, a) in args.iter().enumerate() {
             let v = self.gen_expr(a);
             let target = params.get(i + 1).cloned().unwrap_or(v.ty.clone());
@@ -2138,11 +2203,12 @@ impl<'a> Fb<'a> {
     fn gen_alloc_call(&mut self, size: &str, align: u64) -> String {
         match self.allocator.clone() {
             Some((name, CTy::Struct(a))) => {
+                // Pass the allocator by pointer so a stateful allocator advances in
+                // place across alloc calls.
                 let (_, lp) = self.locals.get(&name).cloned().unwrap();
-                let av = self.load(&CTy::Struct(a.clone()), &lp);
                 let p = self.fresh();
                 self.line(&format!(
-                    "{p} = call ptr @{a}.alloc(%{a} {av}, i64 {size}, i64 {align})"
+                    "{p} = call ptr @{a}.alloc(ptr {lp}, i64 {size}, i64 {align})"
                 ));
                 p
             }
@@ -2175,8 +2241,7 @@ impl<'a> Fb<'a> {
         match self.allocator.clone() {
             Some((name, CTy::Struct(a))) => {
                 let (_, lp) = self.locals.get(&name).cloned().unwrap();
-                let av = self.load(&CTy::Struct(a.clone()), &lp);
-                self.line(&format!("call void @{a}.free(%{a} {av}, ptr {p})"));
+                self.line(&format!("call void @{a}.free(ptr {lp}, ptr {p})"));
             }
             Some((name, CTy::Iface(i))) => {
                 let (_, lp) = self.locals.get(&name).cloned().unwrap();
@@ -2388,8 +2453,22 @@ mod tests {
              func main() -> int32 {\n  p := Point { x: 3, y: 4 }\n  return 0\n}",
         );
         assert!(out.contains("%Point = type { i64, i64 }"));
-        assert!(out.contains("define i64 @Point.sum(%Point %a0)"));
+        assert!(out.contains("define i64 @Point.sum(ptr %a0)"));
         assert!(out.contains("insertvalue %Point"));
+    }
+
+    #[test]
+    fn method_takes_self_by_pointer_and_mutates_in_place() {
+        let out = ir(
+            "struct C { n: int64 }\n\
+             impl C { func bump() -> void { self.n = self.n + 1 } }\n\
+             func main() -> int32 {\n  mut c := C { n: 0 }\n  c.bump()\n  return 0\n}",
+        );
+        // self is a pointer, the call passes the receiver address, and the
+        // mutation writes through that pointer so it persists in the caller.
+        assert!(out.contains("define void @C.bump(ptr %a0)"), "{out}");
+        assert!(out.contains("@C.bump(ptr "), "{out}");
+        assert!(out.contains("getelementptr %C, ptr %a0"), "{out}");
     }
 
     #[test]
@@ -2507,8 +2586,8 @@ mod tests {
             "struct Heap { id: int64 }\n\
              func work(using a: Heap) -> void {\n  p: *int64 = alloc(5)\n  free(p)\n}",
         );
-        assert!(out.contains("@Heap.alloc(%Heap"), "{out}");
-        assert!(out.contains("@Heap.free(%Heap"), "{out}");
+        assert!(out.contains("@Heap.alloc(ptr"), "{out}");
+        assert!(out.contains("@Heap.free(ptr"), "{out}");
         assert!(!out.contains("call ptr @cool_alloc"), "should not fall back to heap: {out}");
     }
 

@@ -1,0 +1,23 @@
+@paradigm procedural
+
+@import std.memory.allocator
+
+// Allocate through a stdlib FixedBuffer passed with `using`. Two eight byte
+// allocations leave the bump offset at 16, proving the offset persists across
+// alloc calls.
+
+func fill(using a: FixedBuffer) -> int64 {
+    p: *int64 = alloc(8)
+    *p = 1
+    q: *int64 = alloc(8)
+    *q = 2
+    return a.used
+}
+
+func main() -> int32 {
+    buf: *int8 = alloc_bytes(64)
+    mut fb := fixed_buffer(buf, 64)
+    println(fill(fb))
+    free(buf)
+    return 0
+}

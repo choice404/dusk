@@ -1,0 +1,44 @@
+@paradigm procedural
+@paradigm oop
+
+// A stateful allocator used through `using`. Each alloc advances the bump
+// offset, and the offset persists across calls because self comes in by
+// pointer. Three eight byte allocations leave used at 24.
+
+interface Allocator {
+    alloc(size: int64, align: int64) -> *void
+    free(p: *void) -> void
+}
+
+struct Bump {
+    base: *int8,
+    used: int64,
+}
+
+impl Allocator for Bump {
+    func alloc(size: int64, align: int64) -> *void {
+        off := self.used
+        p := ptr_add(self.base, off)
+        self.used = off + size
+        return p
+    }
+    func free(p: *void) -> void {
+    }
+}
+
+func fill(using a: Bump) -> int64 {
+    p: *int64 = alloc(8)
+    *p = 1
+    q: *int64 = alloc(8)
+    *q = 2
+    r: *int64 = alloc(8)
+    *r = 3
+    return a.used
+}
+
+func main() -> int32 {
+    buf: *int8 = alloc_bytes(64)
+    mut b := Bump { base: buf, used: 0 }
+    println(fill(b))
+    return 0
+}

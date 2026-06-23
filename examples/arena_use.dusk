@@ -1,0 +1,22 @@
+@paradigm procedural
+
+@import std.memory.arena
+
+// Arena passed through `using`. It implements Allocator, so the builtins alloc
+// and free dispatch to it. Two eight byte allocations leave used at 16.
+
+func fill(using a: Arena) -> int64 {
+    p: *int64 = alloc(8)
+    *p = 1
+    q: *int64 = alloc(8)
+    *q = 2
+    return a.used
+}
+
+func main() -> int32 {
+    a: *Arena = alloc(arena_new(64))
+    println(fill(*a))
+    arena_destroy(a)
+    free(a)
+    return 0
+}

@@ -49,3 +49,7 @@ golden!(m9d, "m9d.dusk", "5\n-1\n0\n-2\n24\n");
 golden!(m9e, "m9e.dusk", "30\n28\n");
 golden!(app, "app.dusk", "42\n42\n99\n-5\n0\n5\n");
 golden!(vec, "vec.dusk", "6\n0\n10\n20\n30\n40\n50\n");
+golden!(allocator, "allocator.dusk", "24\n");
+golden!(stdalloc, "stdalloc.dusk", "16\n");
+golden!(arena_use, "arena_use.dusk", "16\n");
+golden!(debugalloc, "debugalloc.dusk", "1\n1\n");

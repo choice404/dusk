@@ -70,9 +70,37 @@ free(v)
 
 Capacity starts at 4 on the first push and doubles from there.
 
+## std.memory.allocator
+
+The `Allocator` interface and two allocators that implement it. A function that allocates takes an allocator marked `using`, and the builtins `alloc` and `free` dispatch to it. Choosing the allocator type chooses the implementation. A stateful allocator advances in place across calls, since a method takes its receiver by pointer.
+
+| Item                                                   | Description                                          |
+| ------------------------------------------------------ | ---------------------------------------------------- |
+| `interface Allocator`                                  | `alloc(size, align) -> *void` and `free(p) -> void`. |
+| `Heap`                                                 | The libc backed allocator, and the default.          |
+| `heap() -> Heap`                                       | A heap allocator value to pass through `using`.      |
+| `FixedBuffer`                                          | A bump allocator over a caller buffer, no heap.      |
+| `fixed_buffer(base: *int8, cap: int64) -> FixedBuffer` | A fixed buffer allocator over `base`.                |
+| `Debug`                                                | A debug allocator that reports leaks and catches a double free, and poisons freed memory. |
+| `debug() -> Debug`                                     | A debug allocator value to pass through `using`.     |
+| `debug_leaks() -> int64`                               | How many allocations are not yet freed.              |
+| `debug_double_frees() -> int64`                        | How many double or invalid frees were seen.          |
+
+```text
+@import std.memory.allocator
+
+func fill(using a: FixedBuffer) -> int64 {
+    p: *int64 = alloc(8)
+    *p = 1
+    return a.used
+}
+```
+
+With no allocator in scope, `alloc` and `free` use the heap.
+
 ## std.memory.arena
 
-A bump allocator over one backing buffer. Each allocation carves forward from the buffer. Individual frees do nothing, and you reset or destroy the whole arena at once. Pass the arena by pointer so the offset persists.
+A bump allocator over one backing buffer. Each allocation carves forward from the buffer. Individual frees do nothing, and you reset or destroy the whole arena at once. Pass the arena by pointer so the offset persists. Arena also implements `Allocator`, so you can pass it with `using` and let the `alloc` builtin dispatch to it.
 
 | Function                                       | Description                                       |
 | ---------------------------------------------- | ------------------------------------------------- |

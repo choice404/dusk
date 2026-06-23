@@ -1,0 +1,75 @@
+// std.memory.allocator: the Allocator interface and two allocators that
+// implement it. A function that allocates takes an allocator marked `using`, and
+// the builtins alloc and free dispatch to it. Choosing the allocator type
+// chooses the implementation. Pass a stateful allocator and its bump offset
+// advances in place, since methods take the receiver by pointer.
+
+@paradigm procedural
+@paradigm oop
+
+interface Allocator {
+    alloc(size: int64, align: int64) -> *void
+    free(p: *void) -> void
+}
+
+// The libc backed heap allocator. This is the default when no allocator is in
+// scope, so an explicit Heap is only needed to pass one through `using`.
+export struct Heap {
+    tag: int64,
+}
+
+impl Allocator for Heap {
+    func alloc(size: int64, align: int64) -> *void {
+        return alloc_bytes(size)
+    }
+    func free(p: *void) -> void {
+        free(p)
+    }
+}
+
+export func heap() -> Heap {
+    return Heap { tag: 0 }
+}
+
+// A bump allocator over a caller provided buffer. It touches no heap. Allocations
+// carve forward from the buffer and individual frees are a no op.
+export struct FixedBuffer {
+    base: *int8,
+    cap: int64,
+    used: int64,
+}
+
+impl Allocator for FixedBuffer {
+    func alloc(size: int64, align: int64) -> *void {
+        off := self.used
+        p := ptr_add(self.base, off)
+        self.used = off + size
+        return p
+    }
+    func free(p: *void) -> void {
+    }
+}
+
+export func fixed_buffer(base: *int8, cap: int64) -> FixedBuffer {
+    return FixedBuffer { base: base, cap: cap, used: 0 }
+}
+
+// A debug allocator. It tracks each allocation to report leaks and catch a
+// double free, and poisons freed memory with 0xDD. Route a section of code
+// through it with `using`, then read debug_leaks() and debug_double_frees().
+export struct Debug {
+    tag: int64,
+}
+
+impl Allocator for Debug {
+    func alloc(size: int64, align: int64) -> *void {
+        return debug_alloc(size)
+    }
+    func free(p: *void) -> void {
+        debug_free(p)
+    }
+}
+
+export func debug() -> Debug {
+    return Debug { tag: 0 }
+}
