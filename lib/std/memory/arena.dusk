@@ -1,0 +1,29 @@
+// std.memory.arena: a bump allocator over one backing buffer. Allocations carve
+// forward from the buffer; individual frees are a no op, the whole arena is reset
+// or destroyed at once. Pass the arena by pointer so the bump offset persists.
+
+export struct Arena {
+    base: *int8,
+    cap: int64,
+    used: int64,
+}
+
+export func arena_new(cap: int64) -> Arena {
+    b: *int8 = alloc_bytes(cap)
+    return Arena { base: b, cap: cap, used: 0 }
+}
+
+export func arena_alloc(a: *Arena, size: int64) -> *void {
+    off := (*a).used
+    p := ptr_add((*a).base, off)
+    (*a).used = off + size
+    return p
+}
+
+export func arena_reset(a: *Arena) -> void {
+    (*a).used = 0
+}
+
+export func arena_destroy(a: *Arena) -> void {
+    free((*a).base)
+}

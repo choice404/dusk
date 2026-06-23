@@ -1,0 +1,46 @@
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.functional.maybe
+@import std.functional.either
+@import std.memory.arena
+
+func lookup(k: int64) -> Maybe<int64> {
+    if k == 1 {
+        return Maybe.Some(42)
+    }
+    return Maybe.None
+}
+
+func classify(n: int64) -> Either<int64, int64> {
+    if n < 0 {
+        return Either.Left(n)
+    }
+    return Either.Right(n)
+}
+
+func main() -> int32 {
+    // Arena: two bump allocations from one backing buffer.
+    a: *Arena = alloc(arena_new(1024))
+    p: *int64 = arena_alloc(a, 8)
+    *p = 7
+    q: *int64 = arena_alloc(a, 8)
+    *q = 35
+    print_int(*p + *q)
+
+    // Maybe: present and absent lookups.
+    print_int(unwrap_or(lookup(1), 0))
+    print_int(unwrap_or(lookup(2), 99))
+
+    // Either: error case carries its value.
+    print_int(left_or(classify(-5), 0))
+    print_int(left_or(classify(8), 0))
+
+    // String helpers walk the NUL terminated bytes.
+    print_int(str_len("hello"))
+
+    arena_destroy(a)
+    free(a)
+    return 0
+}

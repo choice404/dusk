@@ -1,0 +1,60 @@
+// showcase.cl, exercises the intended 0.1.0 surface: structs, sum types, errors,
+// manual memory plus defer, the allocator model, generics, functional builtins,
+// and stacked paradigms.
+//
+// ILLUSTRATIVE. Does not compile yet, and some syntax is provisional. This file is
+// the north star the milestones build toward, not a conformance test.
+
+@paradigm procedural
+@paradigm functional
+
+@import std.io
+@import std.functional.maybe
+
+export struct Point {
+    x: float64,
+    y: float64,
+}
+
+export enum Shape {
+    Circle(r: float64),
+    Rect(w: float64, h: float64),
+}
+
+export func area(s: Shape) -> float64 {
+    match s {
+        Circle(r)  => return 3.14159 * r * r,
+        Rect(w, h) => return w * h,
+    }
+}
+
+// Fallible function returns (value, error). The caller must handle the error.
+func safe_div(a: int64, b: int64) -> (int64, error) {
+    if b == 0 {
+        return (0, error { message: "divide by zero" })
+    }
+    return (a / b, error {})
+}
+
+// The using allocator parameter designates the ambient allocator for this body.
+// alloc and free resolve to it. With no allocator parameter, main uses the heap.
+func main(using allocator: Allocator) -> int32 {
+    q, e := safe_div(10, 2)
+    e.check(lambda (err: error) -> void {
+        std.io.printerr(err)
+    })
+    std.io.println(q)
+
+    // alloc uses the in scope allocator. defer frees deterministically.
+    p: *Point = alloc(Point { x: 3.0, y: 4.0 })
+    defer free(p)
+
+    // Functional builtins, unlocked by the functional paradigm.
+    // The lambda reads nothing from outer scope here, but it may read by copy.
+    nums: int64[] = [1, 2, 3, 4]
+    doubled := map(nums, lambda (n: int64) -> int64 { return n * 2 })
+    foreach(doubled, lambda (n: int64) -> void { std.io.println(n) })
+
+    std.io.println(area(Circle(2.0)))
+    return 0
+}

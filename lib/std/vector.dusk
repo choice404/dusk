@@ -1,0 +1,44 @@
+// std.vector: a growable array, generic over its element type. Backed by a heap
+// buffer that doubles on demand. Pass the vector by pointer so growth persists.
+
+export struct Vector<T> {
+    data: *T,
+    len: int64,
+    cap: int64,
+}
+
+export func vec_new<T>() -> Vector<T> {
+    return Vector { data: alloc_bytes(0), len: 0, cap: 0 }
+}
+
+export func vec_push<T>(v: *Vector<T>, x: T) -> void {
+    if (*v).len == (*v).cap {
+        mut nc: int64 = (*v).cap * 2
+        if nc == 0 {
+            nc = 4
+        }
+        nd: *T = alloc_bytes(nc * sizeof(T))
+        mut i: int64 = 0
+        while i < (*v).len {
+            nd[i] = (*v).data[i]
+            i = i + 1
+        }
+        free((*v).data)
+        (*v).data = nd
+        (*v).cap = nc
+    }
+    (*v).data[(*v).len] = x
+    (*v).len = (*v).len + 1
+}
+
+export func vec_get<T>(v: *Vector<T>, i: int64) -> T {
+    return (*v).data[i]
+}
+
+export func vec_len<T>(v: *Vector<T>) -> int64 {
+    return (*v).len
+}
+
+export func vec_free<T>(v: *Vector<T>) -> void {
+    free((*v).data)
+}
