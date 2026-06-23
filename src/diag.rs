@@ -33,6 +33,14 @@ impl Diagnostic {
         let (line, col) = line_col(src, self.span.lo);
         format!("{line}:{col}: error: {}", self.msg)
     }
+
+    /// Renders as `line:col: error: msg`, taking the position from `local`, the
+    /// span start with any merge base already removed. Used when several files
+    /// are merged into one program and each keeps its own source for rendering.
+    pub fn render_local(&self, src: &str, local: u32) -> String {
+        let (line, col) = line_col(src, local);
+        format!("{line}:{col}: error: {}", self.msg)
+    }
 }
 
 /// Converts a byte offset to 1 based line and column.

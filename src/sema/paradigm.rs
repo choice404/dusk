@@ -158,7 +158,7 @@ impl Gate {
                     self.expr(a);
                 }
             }
-            ExprKind::Do(binds) => {
+            ExprKind::Do(_, binds) => {
                 self.need_functional("do notation", e.span);
                 for b in binds {
                     self.expr(&b.expr);

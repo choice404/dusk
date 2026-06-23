@@ -89,3 +89,7 @@ The `dawn` binary has four commands. They are `get`, `build`, `run`, and `versio
 ## Status
 
 0.1.0. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
+
+## License
+
+Dual licensed under MIT or Apache 2.0. Pick whichever one fits your use. The full text lives in LICENSE-MIT and LICENSE-APACHE.

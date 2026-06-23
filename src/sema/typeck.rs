@@ -318,7 +318,7 @@ impl TypeChecker {
                 self.walk_match(m);
                 Ty::Unknown
             }
-            ExprKind::Do(binds) => {
+            ExprKind::Do(_, binds) => {
                 for b in binds {
                     self.infer(&b.expr);
                 }
@@ -329,6 +329,23 @@ impl TypeChecker {
     }
 
     fn infer_call(&mut self, f: &Expr, args: &[Expr]) -> Ty {
+        // Method call syntax. The builtin `error` methods have known types; every
+        // other method call stays permissive and returns Unknown for now.
+        if let ExprKind::Field(base, mname) = &f.kind {
+            let is_error = matches!(self.infer(base), Ty::Error);
+            for a in args {
+                self.infer(a);
+            }
+            if is_error {
+                return match mname.as_str() {
+                    "exists" => Ty::Bool,
+                    "toString" => Ty::Str,
+                    "check" | "ignore" => Ty::Unit,
+                    _ => Ty::Unknown,
+                };
+            }
+            return Ty::Unknown;
+        }
         let callee = self.infer(f);
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
         if let Ty::Func(params, ret) = callee {
@@ -494,6 +511,8 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
     }
     match (a, b) {
         (Ty::Array(x, _), Ty::Slice(y)) | (Ty::Slice(x), Ty::Array(y, _)) => compatible(x, y),
+        (Ty::Slice(x), Ty::Slice(y)) => compatible(x, y),
+        (Ty::Array(x, n), Ty::Array(y, m)) if n == m => compatible(x, y),
         (Ty::Ptr(x), Ty::Ptr(y)) => {
             matches!(**x, Ty::Unit) || matches!(**y, Ty::Unit) || compatible(x, y)
         }

@@ -337,7 +337,7 @@ impl Resolver {
             }
             ExprKind::Lambda(l) => self.lambda(l),
             ExprKind::Match(m) => self.match_(m),
-            ExprKind::Do(binds) => {
+            ExprKind::Do(_, binds) => {
                 for b in binds {
                     self.expr(&b.expr);
                 }

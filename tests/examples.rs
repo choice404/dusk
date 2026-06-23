@@ -45,5 +45,7 @@ golden!(m8c, "m8c.dusk", "42\n");
 golden!(m9, "m9.dusk", "2\n4\n6\n8\n10\n2\n4\n15\n120\n");
 golden!(m9b, "m9b.dusk", "11\n21\n31\n21\n");
 golden!(m9c, "m9c.dusk", "30\n5\n");
+golden!(m9d, "m9d.dusk", "5\n-1\n0\n-2\n24\n");
+golden!(m9e, "m9e.dusk", "30\n28\n");
 golden!(app, "app.dusk", "42\n42\n99\n-5\n0\n5\n");
 golden!(vec, "vec.dusk", "6\n0\n10\n20\n30\n40\n50\n");

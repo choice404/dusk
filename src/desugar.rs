@@ -8,17 +8,17 @@
 //! ```
 //!
 //! becomes `bind(m, lambda (x) -> { return bind(n, lambda (y) -> { return unit(x + y) }) })`.
-//! The continuation lambda parameter and return types come from the in scope
-//! `bind` function's second parameter, a function type `(A) -> B`. This supports a
-//! single monad per program, enough for the 0.1.0 functional surface.
+//! The continuation lambda parameter and return types come from the chosen
+//! `bind` function's second parameter, a function type `(A) -> B`. A `do Name { }`
+//! block desugars to `Name.bind` and `Name.unit`, so several monads coexist; a
+//! bare `do` uses the top level `bind` and `unit`.
 
 use crate::diag::Span;
 use crate::parser::ast::*;
 
 /// Rewrites a module, expanding all `do` blocks. Returns a new module.
 pub fn run(module: &Module) -> Module {
-    let cont = bind_cont_type(module);
-    let d = Desugar { cont };
+    let d = Desugar { module };
     Module {
         paradigms: module.paradigms.clone(),
         imports: module.imports.clone(),
@@ -27,11 +27,12 @@ pub fn run(module: &Module) -> Module {
 }
 
 /// The parameter and return types of the continuation lambda passed to `bind`,
-/// read from `bind`'s second parameter `(A) -> B`. Defaults to int64 when absent.
-fn bind_cont_type(module: &Module) -> (Type, Type) {
+/// read from the named `bind` function's second parameter `(A) -> B`. Defaults to
+/// int64 when the function or its signature is absent.
+fn cont_type(module: &Module, bind_name: &str) -> (Type, Type) {
     for item in &module.items {
         if let Item::Func(f) = item {
-            if f.name == "bind" {
+            if f.name == bind_name {
                 if let Some(p) = f.params.get(1) {
                     if let Type::Func(ps, r) = &p.ty {
                         let a = ps.first().cloned().unwrap_or_else(int_ty);
@@ -48,11 +49,11 @@ fn int_ty() -> Type {
     Type::Named("int64".to_string(), Vec::new())
 }
 
-struct Desugar {
-    cont: (Type, Type),
+struct Desugar<'a> {
+    module: &'a Module,
 }
 
-impl Desugar {
+impl Desugar<'_> {
     fn item(&self, item: &Item) -> Item {
         match item {
             Item::Func(f) => Item::Func(self.func(f)),
@@ -157,7 +158,9 @@ impl Desugar {
                 body: self.block(&l.body),
             }),
             ExprKind::Match(m) => ExprKind::Match(Box::new(self.match_(m))),
-            ExprKind::Do(binds) => return self.do_to_calls(binds, e.span),
+            ExprKind::Do(monad, binds) => {
+                return self.do_to_calls(monad.as_deref(), binds, e.span)
+            }
             other => other.clone(),
         };
         Expr { kind, span: e.span }
@@ -165,12 +168,19 @@ impl Desugar {
 
     /// Folds do binds into nested `bind` calls, lifting the final expression with
     /// `unit`. Earlier binds wrap later ones, so evaluation runs top to bottom.
-    fn do_to_calls(&self, binds: &[DoBind], span: Span) -> Expr {
+    fn do_to_calls(&self, monad: Option<&str>, binds: &[DoBind], span: Span) -> Expr {
+        // A named monad uses its namespaced pair, `Name.bind` and `Name.unit`, so
+        // several monads coexist. A bare do uses the top level `bind` and `unit`.
+        let (bind_name, unit_name) = match monad {
+            Some(m) => (format!("{m}.bind"), format!("{m}.unit")),
+            None => ("bind".to_string(), "unit".to_string()),
+        };
+        let cont = cont_type(self.module, &bind_name);
         if binds.is_empty() {
-            return call("unit", vec![unit_lit(span)], span);
+            return call(&unit_name, vec![unit_lit(span)], span);
         }
         let last = self.expr(&binds[binds.len() - 1].expr);
-        let mut acc = call("unit", vec![last], span);
+        let mut acc = call(&unit_name, vec![last], span);
         for (i, b) in binds[..binds.len() - 1].iter().enumerate().rev() {
             let arg = self.expr(&b.expr);
             // The discard name carries a '$', which the lexer cannot produce, so
@@ -180,9 +190,9 @@ impl Desugar {
                 params: vec![Param {
                     using: false,
                     name: pname,
-                    ty: self.cont.0.clone(),
+                    ty: cont.0.clone(),
                 }],
-                ret: self.cont.1.clone(),
+                ret: cont.1.clone(),
                 body: Block {
                     stmts: vec![Stmt::Return(Some(acc))],
                 },
@@ -191,7 +201,7 @@ impl Desugar {
                 kind: ExprKind::Lambda(lam),
                 span,
             };
-            acc = call("bind", vec![arg, lam_expr], span);
+            acc = call(&bind_name, vec![arg, lam_expr], span);
         }
         acc
     }
@@ -256,6 +266,27 @@ mod tests {
     }
 
     #[test]
+    fn named_monad_lowers_to_namespaced_pair() {
+        // `do Name { ... }` desugars to that monad's `Name.bind`, so several
+        // monads can coexist without their bind and unit colliding.
+        let m = desugared(
+            "monad Identity {\n  func bind(x: int64, f: (int64) -> int64) -> int64 { return f(x) }\n  func unit(x: int64) -> int64 { return x }\n}\n\
+             func main() -> int32 {\n  r := do Identity {\n    a <- 10\n    b <- 20\n    a + b\n  }\n  return 0\n}",
+        );
+        let Stmt::Let(l) = main_first_stmt(&m) else {
+            panic!("expected let")
+        };
+        let ExprKind::Call(f, _) = &l.value.kind else {
+            panic!("expected call, got {:?}", l.value.kind)
+        };
+        assert!(
+            matches!(&f.kind, ExprKind::Ident(n) if n == "Identity.bind"),
+            "outer call should be Identity.bind, got {:?}",
+            f.kind
+        );
+    }
+
+    #[test]
     fn no_do_blocks_remain() {
         let m = desugared(
             "func bind(x: int64, f: (int64) -> int64) -> int64 { return f(x) }\n\
@@ -264,7 +295,7 @@ mod tests {
         );
         // Walk the whole tree; assert no Do node survives.
         fn check(e: &Expr) {
-            assert!(!matches!(e.kind, ExprKind::Do(_)), "stray do node");
+            assert!(!matches!(e.kind, ExprKind::Do(..)), "stray do node");
             match &e.kind {
                 ExprKind::Call(f, args) => {
                     check(f);

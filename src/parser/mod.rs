@@ -372,17 +372,20 @@ impl Parser {
     }
 
     /// Parses a `monad Name { funcs }` block, flattening its methods (typically
-    /// `bind` and `unit`) into top level functions. The monad name is a label;
-    /// do notation desugars to the in scope `bind` and `unit`.
+    /// `bind` and `unit`) into top level functions named `Name.method`. The
+    /// namespace lets several monads each define `bind` and `unit`, and a
+    /// `do Name { ... }` block desugars to that monad's pair.
     fn monad_block(&mut self) -> Vec<Func> {
         self.bump();
-        let _name = self.ident();
+        let name = self.ident();
         let mut funcs = Vec::new();
         self.expect(&TokenKind::LBrace);
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
             let exported = self.eat(&TokenKind::Kw(Keyword::Export));
             if self.at(&TokenKind::Kw(Keyword::Func)) {
-                funcs.push(self.func(exported));
+                let mut f = self.func(exported);
+                f.name = format!("{name}.{}", f.name);
+                funcs.push(f);
             } else {
                 self.error("expected a method (func) in monad block");
                 self.bump();
@@ -592,10 +595,13 @@ impl Parser {
     /// it is a do while loop; otherwise it is a monadic do expression statement.
     fn do_stmt(&mut self) -> Stmt {
         let lo = self.span().lo;
-        let elems = self.do_block_elems();
+        let (monad, elems) = self.do_block_elems();
         if self.at(&TokenKind::Kw(Keyword::While)) && !self.nl_here() {
             self.bump();
             let cond = self.expr_no_struct();
+            if monad.is_some() {
+                self.error("a 'do while' loop takes no monad name");
+            }
             let mut stmts = Vec::new();
             for el in elems {
                 match el {
@@ -611,21 +617,29 @@ impl Parser {
                 post_test: true,
             })
         } else {
-            Stmt::Expr(self.do_to_expr(elems, lo))
+            Stmt::Expr(self.do_to_expr(monad, elems, lo))
         }
     }
 
-    /// Parses a monadic `do { ... }` in expression position.
+    /// Parses a monadic `do { ... }` or `do Name { ... }` in expression position.
     fn do_expr(&mut self) -> Expr {
         let lo = self.span().lo;
-        let elems = self.do_block_elems();
-        self.do_to_expr(elems, lo)
+        let (monad, elems) = self.do_block_elems();
+        self.do_to_expr(monad, elems, lo)
     }
 
     /// Parses the body of a `do` block: a sequence of `name <- expr` binds and
     /// ordinary statements, leaving the trailing `while`, if any, for the caller.
-    fn do_block_elems(&mut self) -> Vec<DoElem> {
+    fn do_block_elems(&mut self) -> (Option<String>, Vec<DoElem>) {
         self.bump();
+        // An optional monad name precedes the brace, as in `do Maybe { ... }`.
+        let monad = if matches!(self.peek(), TokenKind::Ident(_))
+            && matches!(self.peek2(), TokenKind::LBrace)
+        {
+            Some(self.ident())
+        } else {
+            None
+        };
         self.expect(&TokenKind::LBrace);
         let mut elems = Vec::new();
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
@@ -646,13 +660,13 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace);
-        elems
+        (monad, elems)
     }
 
     /// Builds a `Do` expression node from parsed do elements. Binds keep their
     /// name; bare expressions become anonymous sequencing steps; the final
-    /// element is the result.
-    fn do_to_expr(&mut self, elems: Vec<DoElem>, lo: u32) -> Expr {
+    /// element is the result. The monad name, if any, selects the desugar target.
+    fn do_to_expr(&mut self, monad: Option<String>, elems: Vec<DoElem>, lo: u32) -> Expr {
         let mut binds = Vec::new();
         for el in elems {
             match el {
@@ -670,7 +684,7 @@ impl Parser {
             self.error("a do block must end in an expression, not a 'x <- e' bind");
         }
         let span = Span::new(lo, self.prev_hi());
-        node(ExprKind::Do(binds), span)
+        node(ExprKind::Do(monad, binds), span)
     }
 
     fn for_(&mut self) -> For {

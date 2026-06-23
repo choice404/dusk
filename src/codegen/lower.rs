@@ -115,6 +115,7 @@ fn emit_thunk(m: &mut Module, ty: &str, meth: &IMethod, name: &str) {
 #[derive(Clone, PartialEq)]
 enum CTy {
     Int(u32),
+    Char,
     F64,
     F32,
     Bool,
@@ -126,6 +127,8 @@ enum CTy {
     Enum(String),
     Iface(String),
     Closure(Vec<CTy>, Box<CTy>),
+    Error,
+    Tuple(Vec<CTy>),
     Unknown,
 }
 
@@ -133,6 +136,7 @@ impl CTy {
     fn ll(&self) -> String {
         match self {
             CTy::Int(n) => format!("i{n}"),
+            CTy::Char => "i8".to_string(),
             CTy::F64 => "double".to_string(),
             CTy::F32 => "float".to_string(),
             CTy::Bool => "i1".to_string(),
@@ -142,6 +146,11 @@ impl CTy {
             CTy::Array(e, n) => format!("[{n} x {}]", e.ll()),
             CTy::Struct(n) | CTy::Enum(n) => format!("%{n}"),
             CTy::Iface(_) | CTy::Closure(..) => "{ ptr, ptr }".to_string(),
+            CTy::Error => "ptr".to_string(),
+            CTy::Tuple(ts) => {
+                let inner = ts.iter().map(|t| t.ll()).collect::<Vec<_>>().join(", ");
+                format!("{{ {inner} }}")
+            }
             CTy::Unknown => "i64".to_string(),
         }
     }
@@ -155,6 +164,7 @@ impl CTy {
                 | CTy::Closure(..)
                 | CTy::Slice(_)
                 | CTy::Array(..)
+                | CTy::Tuple(_)
         )
     }
 
@@ -165,6 +175,7 @@ impl CTy {
     fn int_bits(&self) -> Option<u32> {
         match self {
             CTy::Int(n) => Some(*n),
+            CTy::Char => Some(8),
             CTy::Bool => Some(1),
             _ => None,
         }
@@ -404,6 +415,7 @@ impl Ctx {
     fn size_align(&self, ty: &CTy) -> (u64, u64) {
         match ty {
             CTy::Bool => (1, 1),
+            CTy::Char => (1, 1),
             CTy::Int(n) => {
                 let b = (*n as u64 / 8).max(1);
                 (b, b)
@@ -419,6 +431,17 @@ impl Ctx {
             CTy::Struct(name) => self.fields(name).map(|f| self.layout(f)).unwrap_or((8, 8)),
             CTy::Enum(name) => self.enum_size_align(name),
             CTy::Iface(_) | CTy::Closure(..) => (16, 8),
+            CTy::Error => (8, 8),
+            CTy::Tuple(ts) => {
+                let mut size = 0u64;
+                let mut align = 1u64;
+                for t in ts {
+                    let (s, a) = self.size_align(t);
+                    size = align_up(size, a) + s;
+                    align = align.max(a);
+                }
+                (align_up(size, align), align)
+            }
             CTy::Void => (0, 1),
             CTy::Unknown => (8, 8),
         }
@@ -497,10 +520,11 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
             "int32" | "uint32" => CTy::Int(32),
             "int64" | "uint64" => CTy::Int(64),
             "bool" => CTy::Bool,
-            "char" => CTy::Int(8),
+            "char" => CTy::Char,
             "float64" => CTy::F64,
             "float32" => CTy::F32,
-            "string" => CTy::Ptr(Box::new(CTy::Int(8))),
+            "string" => CTy::Ptr(Box::new(CTy::Char)),
+            "error" => CTy::Error,
             _ => match nom(n) {
                 Nom::Struct => CTy::Struct(n.clone()),
                 Nom::Enum => CTy::Enum(n.clone()),
@@ -515,8 +539,8 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
             ps.iter().map(|p| lower_ty(p, nom)).collect(),
             Box::new(lower_ty(r, nom)),
         ),
+        Type::Tuple(ts) => CTy::Tuple(ts.iter().map(|t| lower_ty(t, nom)).collect()),
         Type::Unit => CTy::Void,
-        _ => CTy::Unknown,
     }
 }
 
@@ -664,11 +688,13 @@ impl<'a> Fb<'a> {
             if fb == tb {
                 return op.to_string();
             }
-            // A bool is an unsigned 1 bit value: zero extend it so true widens to
-            // 1, not the all ones -1 that sext would give.
+            // A bool and a char are unsigned, so zero extend them when widening.
+            // A bool widens to 1, not the all ones -1 that sext would give, and a
+            // char byte at or above 128 widens to its 0 to 255 value, not a
+            // negative number.
             let cast = if tb < fb {
                 "trunc"
-            } else if matches!(from, CTy::Bool) {
+            } else if matches!(from, CTy::Bool | CTy::Char) {
                 "zext"
             } else {
                 "sext"
@@ -775,6 +801,7 @@ impl<'a> Fb<'a> {
 
     fn gen_let(&mut self, l: &Let) {
         if l.binds.len() != 1 {
+            self.gen_let_destructure(l);
             return;
         }
         let bind = &l.binds[0];
@@ -798,6 +825,31 @@ impl<'a> Fb<'a> {
         let ptr = self.alloca(&ty);
         self.line(&format!("store {} {}, ptr {ptr}", ty.ll(), av.op));
         self.locals.insert(bind.name.clone(), (ty, ptr));
+    }
+
+    /// Destructures a tuple value into several locals, as in `q, e := f()`.
+    fn gen_let_destructure(&mut self, l: &Let) {
+        let v = self.gen_expr(&l.value);
+        let elems = match &v.ty {
+            CTy::Tuple(ts) => ts.clone(),
+            _ => return,
+        };
+        for (i, bind) in l.binds.iter().enumerate() {
+            let Some(ety) = elems.get(i).cloned() else {
+                break;
+            };
+            let d = self.fresh();
+            self.line(&format!("{d} = extractvalue {} {}, {i}", v.ty.ll(), v.op));
+            let declared = bind
+                .ty
+                .as_ref()
+                .map(|t| lower_ty(t, &|n| self.ctx.nom(n)))
+                .unwrap_or_else(|| ety.clone());
+            let av = self.adapt(Val::new(ety, d), &declared);
+            let ptr = self.alloca(&declared);
+            self.line(&format!("store {} {}, ptr {ptr}", declared.ll(), av.op));
+            self.locals.insert(bind.name.clone(), (declared, ptr));
+        }
     }
 
     fn gen_if(&mut self, i: &If) {
@@ -946,8 +998,8 @@ impl<'a> Fb<'a> {
             ExprKind::Int(v, suffix) => Val::new(int_ty(suffix), v.to_string()),
             ExprKind::Float(v, _) => Val::new(CTy::F64, format!("0x{:016X}", v.to_bits())),
             ExprKind::Bool(b) => Val::new(CTy::Bool, if *b { "1" } else { "0" }),
-            ExprKind::Char(c) => Val::new(CTy::Int(8), (*c as u8).to_string()),
-            ExprKind::Str(s) => Val::new(CTy::Ptr(Box::new(CTy::Int(8))), self.m.cstring(s)),
+            ExprKind::Char(c) => Val::new(CTy::Char, (*c as u8).to_string()),
+            ExprKind::Str(s) => Val::new(CTy::Ptr(Box::new(CTy::Char)), self.m.cstring(s)),
             ExprKind::Ident(_) | ExprKind::Field(..) | ExprKind::Unary(UnOp::Deref, _) => {
                 self.gen_load(e)
             }
@@ -959,6 +1011,7 @@ impl<'a> Fb<'a> {
                 }
             }
             ExprKind::Array(elems) => self.gen_array_lit(elems, None),
+            ExprKind::Tuple(elems) => self.gen_tuple(elems),
             ExprKind::Unary(op, x) => self.gen_unary(*op, x),
             ExprKind::Binary(op, a, b) => self.gen_binary(*op, a, b),
             ExprKind::Call(f, args) => self.gen_call(f, args),
@@ -1063,6 +1116,9 @@ impl<'a> Fb<'a> {
     }
 
     fn gen_struct_lit(&mut self, name: &str, fields: &[(String, Expr)]) -> Val {
+        if name == "error" {
+            return self.gen_error_lit(fields);
+        }
         let ty = CTy::Struct(name.to_string());
         let mut agg = "undef".to_string();
         for (fname, fexpr) in fields {
@@ -1080,6 +1136,17 @@ impl<'a> Fb<'a> {
             agg = d;
         }
         Val::new(ty, agg)
+    }
+
+    /// Builds an `error` value. An error is a message string pointer, where a
+    /// null pointer means no error. `error {}` is no error and `error { message:
+    /// m }` carries the message m.
+    fn gen_error_lit(&mut self, fields: &[(String, Expr)]) -> Val {
+        let op = match fields.iter().find(|(n, _)| n == "message") {
+            Some((_, e)) => self.gen_expr(e).op,
+            None => "null".to_string(),
+        };
+        Val::new(CTy::Error, op)
     }
 
     fn gen_array_lit(&mut self, elems: &[Expr], hint: Option<CTy>) -> Val {
@@ -1100,6 +1167,24 @@ impl<'a> Fb<'a> {
             agg = d;
         }
         Val::new(aty, agg)
+    }
+
+    /// Builds a tuple aggregate from its element values, as in `(q, e)`.
+    fn gen_tuple(&mut self, elems: &[Expr]) -> Val {
+        let vals: Vec<Val> = elems.iter().map(|e| self.gen_expr(e)).collect();
+        let tty = CTy::Tuple(vals.iter().map(|v| v.ty.clone()).collect());
+        let mut agg = "undef".to_string();
+        for (i, v) in vals.into_iter().enumerate() {
+            let d = self.fresh();
+            self.line(&format!(
+                "{d} = insertvalue {} {agg}, {} {}, {i}",
+                tty.ll(),
+                v.ty.ll(),
+                v.op
+            ));
+            agg = d;
+        }
+        Val::new(tty, agg)
     }
 
     /// Builds a slice `{ ptr, len }` viewing `base[lo..hi]`.
@@ -1310,8 +1395,8 @@ impl<'a> Fb<'a> {
             ExprKind::Int(_, s) => int_ty(s),
             ExprKind::Float(..) => CTy::F64,
             ExprKind::Bool(_) => CTy::Bool,
-            ExprKind::Char(_) => CTy::Int(8),
-            ExprKind::Str(_) => CTy::Ptr(Box::new(CTy::Int(8))),
+            ExprKind::Char(_) => CTy::Char,
+            ExprKind::Str(_) => CTy::Ptr(Box::new(CTy::Char)),
             ExprKind::Ident(n) => self.locals.get(n).map(|(t, _)| t.clone()).unwrap_or(CTy::Unknown),
             ExprKind::Binary(op, a, _) => {
                 use BinOp::*;
@@ -1339,7 +1424,14 @@ impl<'a> Fb<'a> {
                 CTy::Array(e, _) | CTy::Slice(e) | CTy::Ptr(e) => *e,
                 _ => CTy::Unknown,
             },
-            ExprKind::StructLit(name, _) => CTy::Struct(name.clone()),
+            ExprKind::StructLit(name, _) => {
+                if name == "error" {
+                    CTy::Error
+                } else {
+                    CTy::Struct(name.clone())
+                }
+            }
+            ExprKind::Tuple(xs) => CTy::Tuple(xs.iter().map(|x| self.static_ty(x)).collect()),
             _ => CTy::Unknown,
         }
     }
@@ -1400,6 +1492,9 @@ impl<'a> Fb<'a> {
 
     fn gen_method_call(&mut self, base: &Expr, mname: &str, args: &[Expr]) -> Option<Val> {
         let bv = self.gen_expr(base);
+        if matches!(bv.ty, CTy::Error) {
+            return self.gen_error_method(&bv, mname, args);
+        }
         if let CTy::Iface(iface) = &bv.ty {
             let iface = iface.clone();
             return self.gen_dyn_dispatch(&bv, &iface, mname, args);
@@ -1433,6 +1528,36 @@ impl<'a> Fb<'a> {
         let d = self.fresh();
         self.line(&format!("{d} = call {} @{tyname}.{mname}({argstr})", ret.ll()));
         Some(Val::new(ret, d))
+    }
+
+    /// Lowers the builtin methods on `error`: exists, toString, check, ignore.
+    /// An error is a message pointer, null when there is no error.
+    fn gen_error_method(&mut self, ev: &Val, mname: &str, args: &[Expr]) -> Option<Val> {
+        match mname {
+            "exists" => {
+                let d = self.fresh();
+                self.line(&format!("{d} = icmp ne ptr {}, null", ev.op));
+                Some(Val::new(CTy::Bool, d))
+            }
+            "toString" => Some(Val::new(CTy::Ptr(Box::new(CTy::Char)), ev.op.clone())),
+            "ignore" => Some(Val::new(CTy::Void, "")),
+            "check" => {
+                let cv = self.gen_expr(args.first()?);
+                let cond = self.fresh();
+                self.line(&format!("{cond} = icmp ne ptr {}, null", ev.op));
+                let call_l = self.new_label();
+                let end_l = self.new_label();
+                self.cond_br(&cond, &call_l, &end_l);
+                self.place_label(&call_l);
+                self.invoke_closure(&cv, vec![Val::new(CTy::Error, ev.op.clone())]);
+                if !self.terminated {
+                    self.br(&end_l);
+                }
+                self.place_label(&end_l);
+                Some(Val::new(CTy::Void, ""))
+            }
+            _ => None,
+        }
     }
 
     /// Dynamic dispatch through an interface fat pointer: load the method slot
@@ -1877,19 +2002,34 @@ impl<'a> Fb<'a> {
         let cv = self.gen_expr(&args[1]);
         let (data, len, elem) = self.slice_parts(&sv);
         let acc = self.alloca(&elem);
-        let e0v = self.load(&elem, &data);
-        self.line(&format!("store {} {e0v}, ptr {acc}", elem.ll()));
-        let i = self.alloca_raw("i64");
-        self.line(&format!("store i64 1, ptr {i}"));
+        let err = self.alloca_raw("ptr");
+        let seed = self.new_label();
+        let empty = self.new_label();
         let cond = self.new_label();
         let body = self.new_label();
-        let end = self.new_label();
+        let done = self.new_label();
+        // An empty slice has no seed element, so it takes the error path instead
+        // of reading element 0 out of bounds.
+        let nonempty = self.fresh();
+        self.line(&format!("{nonempty} = icmp sgt i64 {len}, 0"));
+        self.cond_br(&nonempty, &seed, &empty);
+        self.place_label(&empty);
+        self.line(&format!("store {} zeroinitializer, ptr {acc}", elem.ll()));
+        let msg = self.m.cstring("reduce on empty slice");
+        self.line(&format!("store ptr {msg}, ptr {err}"));
+        self.br(&done);
+        self.place_label(&seed);
+        let e0v = self.load(&elem, &data);
+        self.line(&format!("store {} {e0v}, ptr {acc}", elem.ll()));
+        self.line(&format!("store ptr null, ptr {err}"));
+        let i = self.alloca_raw("i64");
+        self.line(&format!("store i64 1, ptr {i}"));
         self.br(&cond);
         self.place_label(&cond);
         let iv = self.load(&CTy::Int(64), &i);
         let c = self.fresh();
         self.line(&format!("{c} = icmp slt i64 {iv}, {len}"));
-        self.cond_br(&c, &body, &end);
+        self.cond_br(&c, &body, &done);
         self.place_label(&body);
         let ep = self.fresh();
         self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
@@ -1904,22 +2044,30 @@ impl<'a> Fb<'a> {
         let ni = self.op2("add", "i64", &iv, "1");
         self.line(&format!("store i64 {ni}, ptr {i}"));
         self.br(&cond);
-        self.place_label(&end);
+        self.place_label(&done);
         let r = self.load(&elem, &acc);
-        Val::new(elem, r)
+        let e = self.load(&CTy::Error, &err);
+        let tty = CTy::Tuple(vec![elem.clone(), CTy::Error]);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {} undef, {} {r}, 0", tty.ll(), elem.ll()));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {} {a}, ptr {e}, 1", tty.ll()));
+        Val::new(tty, b)
     }
 
     fn gen_print(&mut self, args: &[Expr]) -> Val {
         if let Some(a) = args.first() {
             let v = self.gen_expr(a);
             match &v.ty {
-                CTy::Ptr(_) => self.line(&format!("call void @cool_println_cstr(ptr {})", v.op)),
+                CTy::Ptr(_) | CTy::Error => {
+                    self.line(&format!("call void @cool_println_cstr(ptr {})", v.op))
+                }
                 CTy::F64 | CTy::F32 => {
                     let d = self.coerce(&v.ty, &v.op, &CTy::F64);
                     self.line(&format!("call void @cool_print_f64(double {d})"));
                 }
                 CTy::Struct(_) | CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void
-                | CTy::Unknown => {}
+                | CTy::Tuple(_) | CTy::Unknown => {}
                 _ => {
                     let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
                     self.line(&format!("call void @cool_print_i64(i64 {d})"));
@@ -2424,6 +2572,45 @@ mod tests {
         let out = ir("func f() -> void {\n  print(true)\n}");
         assert!(out.contains("zext i1"), "{out}");
         assert!(!out.contains("sext i1"), "{out}");
+    }
+
+    #[test]
+    fn char_widens_with_zext_not_sext() {
+        // A char is an unsigned byte. Widening to an int must zero extend so a
+        // byte at or above 128 stays 0 to 255, not a negative from sext.
+        let out = ir("func f() -> void {\n  print('A')\n}");
+        assert!(out.contains("zext i8"), "{out}");
+        assert!(!out.contains("sext i8"), "{out}");
+    }
+
+    #[test]
+    fn multi_bind_destructures_tuple() {
+        // `q, e := f()` must extract both tuple elements into locals.
+        let out = ir(
+            "func f() -> (int64, error) { return (5, error {}) }\n\
+             func g() -> void {\n  q, e := f()\n  print(q)\n}",
+        );
+        assert!(out.contains("extractvalue"), "{out}");
+    }
+
+    #[test]
+    fn error_exists_is_a_null_check() {
+        let out = ir(
+            "func f() -> (int64, error) { return (5, error {}) }\n\
+             func g() -> void {\n  q, e := f()\n  if e.exists() { print(q) }\n}",
+        );
+        assert!(out.contains("icmp ne ptr"), "{out}");
+    }
+
+    #[test]
+    fn reduce_returns_pair_and_guards_empty() {
+        let out = ir(
+            "func f(xs: int64[]) -> void {\n  s, e := reduce(xs, lambda (a: int64, b: int64) -> int64 { return a + b })\n  print(s)\n}",
+        );
+        // The empty case stores an error message instead of reading element 0.
+        assert!(out.contains("reduce on empty slice"), "{out}");
+        // reduce yields a { i64, ptr } pair.
+        assert!(out.contains("{ i64, ptr }"), "{out}");
     }
 
     #[test]

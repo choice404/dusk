@@ -210,7 +210,10 @@ pub enum ExprKind {
     StructLit(String, Vec<(String, Expr)>),
     Lambda(Lambda),
     Match(Box<Match>),
-    Do(Vec<DoBind>),
+    /// A monadic `do` block, with an optional monad name as in `do Maybe { ... }`.
+    /// The name selects which `bind` and `unit` the block desugars to, so several
+    /// monads can coexist. A bare `do` uses the top level `bind` and `unit`.
+    Do(Option<String>, Vec<DoBind>),
     /// `sizeof` of a resolved type. Produced only by the monomorphizer when a
     /// `sizeof(T)` over a type parameter is substituted to its concrete type, so
     /// composite types such as slices and tuples are sized correctly.
