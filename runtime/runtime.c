@@ -121,3 +121,86 @@ int64_t cool_write_file(const char *path, const char *data) {
     }
     return (int64_t)wr;
 }
+
+/* Read one line from stdin into a freshly malloc'd NUL terminated buffer with
+   the trailing newline stripped, returning NULL at end of input so the caller's
+   error channel fires. Reads byte by byte through fgetc, so it needs no feature
+   macros and behaves the same whether stdin is a terminal, a pipe, or a file. An
+   empty line returns "", distinct from the NULL that marks end of input. */
+char *cool_read_line(void) {
+    size_t cap = 128;
+    size_t len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        return NULL;
+    }
+    int c = fgetc(stdin);
+    if (c == EOF) {
+        free(buf);
+        return NULL;
+    }
+    while (c != EOF && c != '\n') {
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) {
+                free(buf);
+                return NULL;
+            }
+            buf = nb;
+        }
+        buf[len] = (char)c;
+        len++;
+        c = fgetc(stdin);
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Read all of stdin into a freshly malloc'd NUL terminated buffer, returning
+   NULL only on allocation failure. Empty stdin reads as the empty string, not an
+   error, since the whole of an empty stream is nothing. */
+char *cool_read_all(void) {
+    size_t cap = 1024;
+    size_t len = 0;
+    char *buf = malloc(cap);
+    if (!buf) {
+        return NULL;
+    }
+    int c = fgetc(stdin);
+    while (c != EOF) {
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (!nb) {
+                free(buf);
+                return NULL;
+            }
+            buf = nb;
+        }
+        buf[len] = (char)c;
+        len++;
+        c = fgetc(stdin);
+    }
+    buf[len] = '\0';
+    return buf;
+}
+
+/* Parse a base 10 floating point number, setting *ok to 1 on success and 0 when
+   the string is empty or has trailing characters strtod did not consume. The
+   value is returned through the result and the validity through *ok, so the
+   caller can build a (float64, error) pair. */
+double cool_parse_float(const char *s, int64_t *ok) {
+    if (s[0] == '\0') {
+        *ok = 0;
+        return 0.0;
+    }
+    char *end;
+    double v = strtod(s, &end);
+    if (*end != '\0') {
+        *ok = 0;
+        return 0.0;
+    }
+    *ok = 1;
+    return v;
+}

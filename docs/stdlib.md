@@ -11,19 +11,29 @@ Imported names are flat. After `@import std.io` you call `print_int` and `print_
 
 ## std.io
 
-Console output over the `println` builtin.
+Console output over the `println` builtin, plus typed line input that reads a line and parses it.
 
-| Function                        | Description                     |
-| ------------------------------- | ------------------------------- |
-| `print_int(n: int64) -> void`   | Print an integer and a newline. |
-| `print_line(s: string) -> void` | Print a string and a newline.   |
+| Function                            | Description                                  |
+| ----------------------------------- | -------------------------------------------- |
+| `print_int(n: int64) -> void`       | Print an integer and a newline.              |
+| `print_line(s: string) -> void`     | Print a string and a newline.                |
+| `read_int() -> (int64, error)`      | Read one line and parse it as a base 10 int. |
+| `read_float() -> (float64, error)`  | Read one line and parse it as a float.       |
 
 ```text
 @import std.io
 
 print_int(42)
 print_line("hello")
+
+n, e := read_int()
+if e.exists() {
+    return 1
+}
+print_int(n * 2)
 ```
+
+`read_int` and `read_float` read one line through the `read_line` builtin and parse it, so the error exists at end of input or when the line is not a number.
 
 ### File I/O
 
@@ -44,21 +54,63 @@ print_line(s)
 
 A failed read hands back the empty string and an error that exists. The string `read_file` returns lives on the heap, so free it with `free` once you are done with it.
 
+### Console input
+
+`read_line` and `read_all` are builtins that read from stdin. `read_line` reads one line, `read_all` reads the whole stream. Each returns a `(string, error)` pair. For `read_line` the error exists at end of input, so a read loop stops when it fires, while `read_all` errors only on an allocation failure, since the whole of an empty stream is the empty string. A line keeps no trailing newline, and an empty line is the empty string, which is distinct from end of input. Both read from the terminal when stdin is not redirected, and from a pipe or a file when it is.
+
+| Builtin                          | Description                                        |
+| -------------------------------- | -------------------------------------------------- |
+| `read_line() -> (string, error)` | Read one line from stdin, the error marking end of input. |
+| `read_all() -> (string, error)`  | Read all of stdin into one string.                 |
+
+```text
+print_line("what is your name?")
+name, err := read_line()
+if err.exists() {
+    return 0
+}
+print_line(name)
+```
+
+dusk has no `break`, so read until end of input with a done flag.
+
+```text
+mut done: bool = false
+while !done {
+    line, e := read_line()
+    if e.exists() {
+        done = true
+    } else {
+        print_line(line)
+    }
+}
+```
+
 ## std.string
 
 Read only helpers over NUL terminated strings.
 
-| Function                               | Description                                 |
-| -------------------------------------- | ------------------------------------------- |
-| `str_len(s: string) -> int64`          | Length up to the NUL terminator.            |
-| `str_eq(a: string, b: string) -> bool` | True when both strings hold the same bytes. |
+| Function                                              | Description                                 |
+| ----------------------------------------------------- | ------------------------------------------- |
+| `str_len(s: string) -> int64`                         | Length up to the NUL terminator.            |
+| `str_eq(a: string, b: string) -> bool`                | True when both strings hold the same bytes. |
+| `parse_int(s: string) -> (int64, error)`              | Parse a signed base 10 integer.             |
+| `parse_int_radix(s: string, base: int64) -> (int64, error)` | Parse a signed integer in a base from 2 to 36. |
+| `parse_float(s: string) -> (float64, error)`          | Parse a base 10 float.                      |
 
 ```text
 @import std.string
 
 n := str_len("hello")        // 5
 same := str_eq("a", "a")     // true
+
+v, e := parse_int("42")      // 42
+e.ignore()
+h, he := parse_int_radix("0xFF", 16)   // 255
+he.ignore()
 ```
+
+`parse_int` takes a base 10 string, so a `0x`, `0o`, or `0b` prefix fails on the prefix letter. `parse_int_radix` takes the base and accepts the matching prefix, `0x` for 16, `0o` for 8, `0b` for 2, but never infers the base from the prefix. Each parser returns the value with an error you must handle.
 
 ## std.vector
 

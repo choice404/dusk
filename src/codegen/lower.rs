@@ -34,6 +34,9 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("i64 @cool_debug_double_frees()");
     m.declare("ptr @cool_read_file(ptr)");
     m.declare("i64 @cool_write_file(ptr, ptr)");
+    m.declare("ptr @cool_read_line()");
+    m.declare("ptr @cool_read_all()");
+    m.declare("double @cool_parse_float(ptr, ptr)");
     for (name, fields) in &ctx.structs {
         let body = fields
             .iter()
@@ -1524,6 +1527,9 @@ impl<'a> Fb<'a> {
                 }
                 "read_file" => self.gen_read_file(args),
                 "write_file" => self.gen_write_file(args),
+                "read_line" => self.gen_stdin_read("cool_read_line", "end of input"),
+                "read_all" => self.gen_stdin_read("cool_read_all", "cannot read stdin"),
+                "parse_float" => self.gen_parse_float(args),
                 _ => self.gen_user_call(name, args),
             };
         }
@@ -2212,6 +2218,56 @@ impl<'a> Fb<'a> {
         let err = self.fresh();
         self.line(&format!("{err} = select i1 {bad}, ptr {msg}, ptr null"));
         Val::new(CTy::Error, err)
+    }
+
+    /// A stdin reader builtin. Calls the named runtime function, which returns a
+    /// heap string or null, and packages the result as a `(string, error)` pair.
+    /// A null hands back the empty string and an error that exists, so a read
+    /// loop stops on it. `read_line` reads one line with its newline stripped and
+    /// nulls at end of input, `read_all` reads the whole stream and nulls only on
+    /// allocation failure.
+    fn gen_stdin_read(&mut self, runtime_fn: &str, err_msg: &str) -> Val {
+        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let buf = self.fresh();
+        self.line(&format!("{buf} = call ptr @{runtime_fn}()"));
+        let isnull = self.fresh();
+        self.line(&format!("{isnull} = icmp eq ptr {buf}, null"));
+        let msg = self.m.cstring(err_msg);
+        let empty = self.m.cstring("");
+        let err = self.fresh();
+        self.line(&format!("{err} = select i1 {isnull}, ptr {msg}, ptr null"));
+        let data = self.fresh();
+        self.line(&format!("{data} = select i1 {isnull}, ptr {empty}, ptr {buf}"));
+        let tty = CTy::Tuple(vec![str_ty, CTy::Error]);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {} undef, ptr {data}, 0", tty.ll()));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {} {a}, ptr {err}, 1", tty.ll()));
+        Val::new(tty, b)
+    }
+
+    /// parse_float(s): parses a base 10 float through the runtime strtod, which
+    /// signals validity through an out pointer. Returns a `(float64, error)` pair
+    /// whose error exists when the string is empty or not fully a number.
+    fn gen_parse_float(&mut self, args: &[Expr]) -> Val {
+        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let s = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let sp = self.coerce(&s.ty, &s.op, &str_ty);
+        let okslot = self.alloca_raw("i64");
+        let val = self.fresh();
+        self.line(&format!("{val} = call double @cool_parse_float(ptr {sp}, ptr {okslot})"));
+        let ok = self.load(&CTy::Int(64), &okslot);
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp eq i64 {ok}, 0"));
+        let msg = self.m.cstring("cannot parse float");
+        let err = self.fresh();
+        self.line(&format!("{err} = select i1 {bad}, ptr {msg}, ptr null"));
+        let tty = CTy::Tuple(vec![CTy::F64, CTy::Error]);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {} undef, double {val}, 0", tty.ll()));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {} {a}, ptr {err}, 1", tty.ll()));
+        Val::new(tty, b)
     }
 
     /// ptr_add(p, n): the pointer n bytes past p, keeping p's pointer type. Raw

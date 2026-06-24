@@ -18,3 +18,107 @@ export func str_eq(a: string, b: string) -> bool {
     }
     return b[i] == 0
 }
+
+// The value of byte c as a digit in the given base, or -1 when c is not a digit
+// the base accepts. '0' to '9' map to 0 to 9 and letters to 10 to 35, upper or
+// lower case.
+func digit_val(c: int64, base: int64) -> int64 {
+    mut v: int64 = -1
+    if c >= 48 {
+        if c <= 57 {
+            v = c - 48
+        }
+    }
+    if c >= 65 {
+        if c <= 90 {
+            v = c - 55
+        }
+    }
+    if c >= 97 {
+        if c <= 122 {
+            v = c - 87
+        }
+    }
+    if v >= base {
+        return -1
+    }
+    return v
+}
+
+// Parse a signed integer in the given base, from 2 to 36, returning the value
+// and an error. An optional sign leads. A base that has a canonical prefix
+// accepts it, 0x or 0X for 16, 0o or 0O for 8, and 0b or 0B for 2, but the base
+// is never inferred from the prefix. A prefix that does not match the base, like
+// 0x under base 10, is read as digits and fails on the bad digit. An empty input
+// or a digit the base rejects is an error.
+export func parse_int_radix(s: string, base: int64) -> (int64, error) {
+    if base < 2 {
+        return (0, error { message: "base must be between 2 and 36" })
+    }
+    if base > 36 {
+        return (0, error { message: "base must be between 2 and 36" })
+    }
+    mut i: int64 = 0
+    mut neg: bool = false
+    sign: int64 = s[0]
+    if sign == 45 {
+        neg = true
+        i = 1
+    }
+    if sign == 43 {
+        i = 1
+    }
+    lead: int64 = s[i]
+    if lead == 48 {
+        nx: int64 = s[i + 1]
+        if base == 16 {
+            if nx == 120 {
+                i = i + 2
+            }
+            if nx == 88 {
+                i = i + 2
+            }
+        }
+        if base == 8 {
+            if nx == 111 {
+                i = i + 2
+            }
+            if nx == 79 {
+                i = i + 2
+            }
+        }
+        if base == 2 {
+            if nx == 98 {
+                i = i + 2
+            }
+            if nx == 66 {
+                i = i + 2
+            }
+        }
+    }
+    mut acc: int64 = 0
+    mut count: int64 = 0
+    while s[i] != 0 {
+        cc: int64 = s[i]
+        dv: int64 = digit_val(cc, base)
+        if dv < 0 {
+            return (0, error { message: "invalid digit for base" })
+        }
+        acc = acc * base + dv
+        count = count + 1
+        i = i + 1
+    }
+    if count == 0 {
+        return (0, error { message: "no digits to parse" })
+    }
+    if neg {
+        acc = 0 - acc
+    }
+    return (acc, error {})
+}
+
+// Parse a signed base 10 integer. A 0x, 0o, or 0b prefix is not base 10, so it
+// fails on the prefix letter. Use parse_int_radix for another base.
+export func parse_int(s: string) -> (int64, error) {
+    return parse_int_radix(s, 10)
+}

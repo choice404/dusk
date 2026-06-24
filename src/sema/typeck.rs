@@ -573,7 +573,8 @@ fn named_ty(n: &str) -> Ty {
 /// permissive and infer to Unknown.
 fn builtin_ret(name: &str) -> Option<Ty> {
     match name {
-        "read_file" => Some(Ty::Tuple(vec![Ty::Str, Ty::Error])),
+        "read_file" | "read_line" | "read_all" => Some(Ty::Tuple(vec![Ty::Str, Ty::Error])),
+        "parse_float" => Some(Ty::Tuple(vec![Ty::Float, Ty::Error])),
         "write_file" => Some(Ty::Error),
         _ => None,
     }

@@ -1,7 +1,8 @@
 //! Golden integration tests: compile and run each example, check its stdout.
 //! These exercise the whole pipeline end to end and guard against regressions.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// Compiles and runs an example through the built `dusk` binary, returning its
 /// stdout. Panics if the compiler itself fails.
@@ -56,3 +57,47 @@ golden!(debugalloc, "debugalloc.dusk", "1\n1\n");
 golden!(qualified, "qualified.dusk", "qualified\n9\n");
 golden!(map, "map.dusk", "3\n1\n22\n3\n-1\n");
 golden!(fileio, "fileio.dusk", "persisted\n9\n");
+golden!(parse, "parse.dusk", "255\n255\n10\n15\n-42\n-1\n4\n-2\n");
+
+/// Runs an example feeding `input` to its stdin, so a program that reads with
+/// `read_line` can be exercised deterministically from a pipe.
+fn run_stdin(example: &str, input: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_dusk");
+    let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
+    let mut child = Command::new(bin)
+        .arg("run")
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn dusk");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait dusk");
+    assert!(
+        out.status.success(),
+        "input.dusk did not run cleanly: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn input_reads_lines_from_stdin() {
+    let out = run_stdin("input.dusk", "Alice\nfoo\nbar\n");
+    assert_eq!(
+        out,
+        "what is your name?\nAlice\nenter lines, end with ctrl-d:\nfoo\nbar\n2\n"
+    );
+}
+
+#[test]
+fn readnum_reads_typed_input() {
+    let out = run_stdin("readnum.dusk", "21\n2.5\n");
+    assert_eq!(out, "enter an int:\n42\nenter a float:\n3.5\n");
+}
