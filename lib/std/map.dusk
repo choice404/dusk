@@ -1,0 +1,144 @@
+// std.map: a hash map from string keys to values, generic over the value type V.
+// Open addressing with linear probing over heap buffers that double and rehash
+// once the table is half full, which keeps an empty slot reachable so a probe
+// always terminates. Pass the map by pointer so inserts and growth persist.
+// Keys are compared by their NUL terminated bytes.
+
+@import std.string
+@import std.functional.maybe
+
+export struct Map<V> {
+    used: *bool,
+    keys: *string,
+    vals: *V,
+    len: int64,
+    cap: int64,
+}
+
+// A polynomial rolling hash over the key bytes. Overflow wraps, so the result
+// may be negative; the callers take the modulo and fold a negative index back
+// into range.
+export func map_hash(s: string) -> int64 {
+    mut h: int64 = 0
+    mut i: int64 = 0
+    while s[i] != 0 {
+        c: int64 = s[i]
+        h = h * 31 + c
+        i = i + 1
+    }
+    return h
+}
+
+export func map_new<V>() -> Map<V> {
+    cap: int64 = 8
+    u: *bool = alloc_bytes(cap * sizeof(bool))
+    mut i: int64 = 0
+    while i < cap {
+        u[i] = false
+        i = i + 1
+    }
+    k: *string = alloc_bytes(cap * sizeof(string))
+    v: *V = alloc_bytes(cap * sizeof(V))
+    return Map { used: u, keys: k, vals: v, len: 0, cap: cap }
+}
+
+// The slot a key probes to, folded into range. A negative hash, from overflow,
+// lands back in 0 to cap minus 1.
+func map_slot<V>(m: *Map<V>, k: string) -> int64 {
+    mut idx: int64 = map_hash(k) % (*m).cap
+    if idx < 0 {
+        idx = idx + (*m).cap
+    }
+    return idx
+}
+
+// Doubles the table and reinserts every live entry. The old buffers are freed
+// after the move. len resets to zero and climbs again as the entries reinsert,
+// staying under the new half full threshold so no nested grow fires.
+func map_grow<V>(m: *Map<V>) -> void {
+    old_used: *bool = (*m).used
+    old_keys: *string = (*m).keys
+    old_vals: *V = (*m).vals
+    old_cap: int64 = (*m).cap
+    ncap: int64 = old_cap * 2
+    nu: *bool = alloc_bytes(ncap * sizeof(bool))
+    mut i: int64 = 0
+    while i < ncap {
+        nu[i] = false
+        i = i + 1
+    }
+    (*m).used = nu
+    (*m).keys = alloc_bytes(ncap * sizeof(string))
+    (*m).vals = alloc_bytes(ncap * sizeof(V))
+    (*m).cap = ncap
+    (*m).len = 0
+    mut j: int64 = 0
+    while j < old_cap {
+        if old_used[j] {
+            map_put(m, old_keys[j], old_vals[j])
+        }
+        j = j + 1
+    }
+    free(old_used)
+    free(old_keys)
+    free(old_vals)
+}
+
+export func map_put<V>(m: *Map<V>, k: string, v: V) -> void {
+    if (*m).len * 2 >= (*m).cap {
+        map_grow(m)
+    }
+    mut idx: int64 = map_slot(m, k)
+    while (*m).used[idx] {
+        if str_eq((*m).keys[idx], k) {
+            (*m).vals[idx] = v
+            return
+        }
+        idx = idx + 1
+        if idx == (*m).cap {
+            idx = 0
+        }
+    }
+    (*m).used[idx] = true
+    (*m).keys[idx] = k
+    (*m).vals[idx] = v
+    (*m).len = (*m).len + 1
+}
+
+export func map_get<V>(m: *Map<V>, k: string) -> Maybe<V> {
+    mut idx: int64 = map_slot(m, k)
+    while (*m).used[idx] {
+        if str_eq((*m).keys[idx], k) {
+            return Maybe.Some((*m).vals[idx])
+        }
+        idx = idx + 1
+        if idx == (*m).cap {
+            idx = 0
+        }
+    }
+    return Maybe.None
+}
+
+export func map_has<V>(m: *Map<V>, k: string) -> bool {
+    mut idx: int64 = map_slot(m, k)
+    while (*m).used[idx] {
+        if str_eq((*m).keys[idx], k) {
+            return true
+        }
+        idx = idx + 1
+        if idx == (*m).cap {
+            idx = 0
+        }
+    }
+    return false
+}
+
+export func map_len<V>(m: *Map<V>) -> int64 {
+    return (*m).len
+}
+
+export func map_free<V>(m: *Map<V>) -> void {
+    free((*m).used)
+    free((*m).keys)
+    free((*m).vals)
+}

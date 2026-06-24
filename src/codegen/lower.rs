@@ -32,6 +32,8 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("void @cool_debug_free(ptr)");
     m.declare("i64 @cool_debug_leaks()");
     m.declare("i64 @cool_debug_double_frees()");
+    m.declare("ptr @cool_read_file(ptr)");
+    m.declare("i64 @cool_write_file(ptr, ptr)");
     for (name, fields) in &ctx.structs {
         let body = fields
             .iter()
@@ -1520,6 +1522,8 @@ impl<'a> Fb<'a> {
                     self.line(&format!("{d} = call i64 @cool_debug_double_frees()"));
                     Val::new(CTy::Int(64), d)
                 }
+                "read_file" => self.gen_read_file(args),
+                "write_file" => self.gen_write_file(args),
                 _ => self.gen_user_call(name, args),
             };
         }
@@ -2165,6 +2169,49 @@ impl<'a> Fb<'a> {
         let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
         let p = self.gen_alloc_call(&ni, 8);
         Val::new(CTy::Ptr(Box::new(CTy::Int(8))), p)
+    }
+
+    /// read_file(path): slurps the whole file into a heap string, returning a
+    /// `(string, error)` pair. On failure the data is the empty string and the
+    /// error carries a message, so the caller's must handle rule still fires.
+    fn gen_read_file(&mut self, args: &[Expr]) -> Val {
+        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let p = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let pp = self.coerce(&p.ty, &p.op, &str_ty);
+        let buf = self.fresh();
+        self.line(&format!("{buf} = call ptr @cool_read_file(ptr {pp})"));
+        let isnull = self.fresh();
+        self.line(&format!("{isnull} = icmp eq ptr {buf}, null"));
+        let msg = self.m.cstring("cannot read file");
+        let empty = self.m.cstring("");
+        let err = self.fresh();
+        self.line(&format!("{err} = select i1 {isnull}, ptr {msg}, ptr null"));
+        let data = self.fresh();
+        self.line(&format!("{data} = select i1 {isnull}, ptr {empty}, ptr {buf}"));
+        let tty = CTy::Tuple(vec![str_ty, CTy::Error]);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {} undef, ptr {data}, 0", tty.ll()));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {} {a}, ptr {err}, 1", tty.ll()));
+        Val::new(tty, b)
+    }
+
+    /// write_file(path, contents): writes the string to the file, returning an
+    /// `error` that exists when the write fails.
+    fn gen_write_file(&mut self, args: &[Expr]) -> Val {
+        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let path = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let pp = self.coerce(&path.ty, &path.op, &str_ty);
+        let data = args.get(1).map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let dp = self.coerce(&data.ty, &data.op, &str_ty);
+        let rc = self.fresh();
+        self.line(&format!("{rc} = call i64 @cool_write_file(ptr {pp}, ptr {dp})"));
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp slt i64 {rc}, 0"));
+        let msg = self.m.cstring("cannot write file");
+        let err = self.fresh();
+        self.line(&format!("{err} = select i1 {bad}, ptr {msg}, ptr null"));
+        Val::new(CTy::Error, err)
     }
 
     /// ptr_add(p, n): the pointer n bytes past p, keeping p's pointer type. Raw

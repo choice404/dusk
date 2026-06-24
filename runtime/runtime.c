@@ -77,3 +77,47 @@ int64_t cool_debug_leaks(void) {
 int64_t cool_debug_double_frees(void) {
     return cool_dbg_double;
 }
+
+/* File I/O. read slurps a whole file into a freshly malloc'd NUL terminated
+   buffer, returning NULL on any failure so the caller's error channel can fire.
+   The caller owns the buffer and may free it. write truncates the file and
+   writes the NUL terminated data, returning the byte count or -1 on failure. */
+char *cool_read_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long n = ftell(f);
+    if (n < 0) {
+        fclose(f);
+        return NULL;
+    }
+    rewind(f);
+    char *buf = malloc((size_t)n + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t rd = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[rd] = '\0';
+    return buf;
+}
+
+int64_t cool_write_file(const char *path, const char *data) {
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return -1;
+    }
+    size_t len = strlen(data);
+    size_t wr = fwrite(data, 1, len, f);
+    fclose(f);
+    if (wr != len) {
+        return -1;
+    }
+    return (int64_t)wr;
+}

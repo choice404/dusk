@@ -7,7 +7,7 @@ The dusk standard library lives under `lib/std` and is written in dusk. Import a
 @import std.functional.maybe
 ```
 
-Imported names are flat for now. After `@import std.io` you call `print_int` and `print_line` with no prefix. Enum constructors keep their type name, so you write `Maybe.Some(42)` and `Maybe.None`.
+Imported names are flat. After `@import std.io` you call `print_int` and `print_line` with no prefix. You can also qualify a call through its module path, so `std.io.print_line("hi")` reaches the same function. Enum constructors keep their type name, so you write `Maybe.Some(42)` and `Maybe.None`.
 
 ## std.io
 
@@ -24,6 +24,25 @@ Console output over the `println` builtin.
 print_int(42)
 print_line("hello")
 ```
+
+### File I/O
+
+`read_file` and `write_file` are builtins, so they are available everywhere without an import, the same way `print` is. `read_file` returns a `(string, error)` pair and `write_file` returns an `error`, so the must handle rule applies and a caller resolves the failure through `exists`, `check`, or `ignore`.
+
+| Builtin                                               | Description                              |
+| ----------------------------------------------------- | ---------------------------------------- |
+| `read_file(path: string) -> (string, error)`          | Read the whole file into a heap string.  |
+| `write_file(path: string, contents: string) -> error` | Write the string to the file, truncating it. |
+
+```text
+werr := write_file("/tmp/note.txt", "persisted")
+werr.ignore()
+s, rerr := read_file("/tmp/note.txt")
+rerr.ignore()
+print_line(s)
+```
+
+A failed read hands back the empty string and an error that exists. The string `read_file` returns lives on the heap, so free it with `free` once you are done with it.
 
 ## std.string
 
@@ -69,6 +88,35 @@ free(v)
 ```
 
 Capacity starts at 4 on the first push and doubles from there.
+
+## std.map
+
+A hash map from string keys to values, generic over the value type. It uses open addressing with linear probing over heap buffers that double and rehash once the table is half full. Pass the map by pointer so inserts and growth persist across calls. Keys are compared by their bytes.
+
+| Function                                          | Description                              |
+| ------------------------------------------------- | ---------------------------------------- |
+| `map_new<V>() -> Map<V>`                          | A new empty map.                         |
+| `map_put<V>(m: *Map<V>, k: string, v: V) -> void` | Insert the value, or overwrite the key.  |
+| `map_get<V>(m: *Map<V>, k: string) -> Maybe<V>`   | The value for a key, or `None` when absent. |
+| `map_has<V>(m: *Map<V>, k: string) -> bool`       | True when the key is present.            |
+| `map_len<V>(m: *Map<V>) -> int64`                 | The entry count.                         |
+| `map_free<V>(m: *Map<V>) -> void`                 | Free the backing buffers.                |
+| `map_hash(s: string) -> int64`                    | The key hash, exposed for reuse.         |
+
+```text
+@import std.map
+@import std.functional.maybe
+
+m: *Map<int64> = alloc(map_new())
+map_put(m, "two", 2)
+map_put(m, "two", 22)
+println(map_len(m))                       // 1
+println(unwrap_or(map_get(m, "two"), 0))  // 22
+map_free(m)
+free(m)
+```
+
+`map_get` returns a `Maybe<V>`, so import `std.functional.maybe` to unwrap it. Capacity starts at 8 and doubles each time the map fills to half. `map_free` releases the buffers, not the key strings, which the caller still owns.
 
 ## std.memory.allocator
 

@@ -53,3 +53,6 @@ golden!(allocator, "allocator.dusk", "24\n");
 golden!(stdalloc, "stdalloc.dusk", "16\n");
 golden!(arena_use, "arena_use.dusk", "16\n");
 golden!(debugalloc, "debugalloc.dusk", "1\n1\n");
+golden!(qualified, "qualified.dusk", "qualified\n9\n");
+golden!(map, "map.dusk", "3\n1\n22\n3\n-1\n");
+golden!(fileio, "fileio.dusk", "persisted\n9\n");

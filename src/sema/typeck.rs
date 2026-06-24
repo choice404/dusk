@@ -346,6 +346,18 @@ impl TypeChecker {
             }
             return Ty::Unknown;
         }
+        // A builtin with a known return type, unless a user function of the same
+        // name shadows it, in which case the normal signature path wins.
+        if let ExprKind::Ident(name) = &f.kind {
+            if !self.sigs.contains_key(name) {
+                if let Some(ty) = builtin_ret(name) {
+                    for a in args {
+                        self.infer(a);
+                    }
+                    return ty;
+                }
+            }
+        }
         let callee = self.infer(f);
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
         if let Ty::Func(params, ret) = callee {
@@ -553,6 +565,17 @@ fn named_ty(n: &str) -> Ty {
         "error" => Ty::Error,
         "void" => Ty::Unit,
         _ => Ty::Named(n.to_string()),
+    }
+}
+
+/// The return type of a builtin that carries one, so a destructure or an error
+/// method on its result types precisely. Builtins without an entry stay
+/// permissive and infer to Unknown.
+fn builtin_ret(name: &str) -> Option<Ty> {
+    match name {
+        "read_file" => Some(Ty::Tuple(vec![Ty::Str, Ty::Error])),
+        "write_file" => Some(Ty::Error),
+        _ => None,
     }
 }
 

@@ -16,7 +16,7 @@ use crate::parser::ast::*;
 const BUILTINS: &[&str] = &[
     "alloc", "free", "print", "println", "printerr", "sizeof", "alloc_bytes", "ptr_add", "map",
     "filter", "reduce", "fold", "foreach", "debug_alloc", "debug_free", "debug_leaks",
-    "debug_double_frees",
+    "debug_double_frees", "read_file", "write_file",
 ];
 
 /// Resolves names and checks scope rules for a module, returning diagnostics.
