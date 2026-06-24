@@ -356,6 +356,18 @@ impl TypeChecker {
                     }
                     return ty;
                 }
+                // print and println take an optional format string. With a value
+                // argument the first argument is a literal whose holes the rest
+                // fill, checked here so codegen can expand it directly.
+                if (name == "print" || name == "println") && !args.is_empty() {
+                    for a in args {
+                        self.infer(a);
+                    }
+                    if args.len() >= 2 {
+                        self.check_format(args);
+                    }
+                    return Ty::Unit;
+                }
             }
         }
         let callee = self.infer(f);
@@ -376,6 +388,32 @@ impl TypeChecker {
             return *ret;
         }
         Ty::Unknown
+    }
+
+    /// Checks a formatted `print` or `println`. The first argument must be a
+    /// string literal, and its hole count must match the number of value
+    /// arguments, so codegen can expand the call with no runtime format parser.
+    fn check_format(&mut self, args: &[Expr]) {
+        let ExprKind::Str(fmt) = &args[0].kind else {
+            self.err(
+                "a formatted print needs a string literal as its first argument",
+                args[0].span,
+            );
+            return;
+        };
+        match crate::fmt::parse(fmt) {
+            Ok(segs) => {
+                let holes = crate::fmt::holes(&segs);
+                let given = args.len() - 1;
+                if holes != given {
+                    self.err(
+                        format!("format string has {holes} hole(s) but {given} argument(s) were given"),
+                        args[0].span,
+                    );
+                }
+            }
+            Err(msg) => self.err(msg, args[0].span),
+        }
     }
 
     fn infer_lambda(&mut self, l: &Lambda) -> Ty {

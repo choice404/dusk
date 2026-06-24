@@ -9,6 +9,7 @@ pub mod codegen;
 pub mod desugar;
 pub mod diag;
 pub mod driver;
+pub mod fmt;
 pub mod lexer;
 pub mod loader;
 pub mod mono;

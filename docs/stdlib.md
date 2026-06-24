@@ -11,7 +11,24 @@ Imported names are flat. After `@import std.io` you call `print_int` and `print_
 
 ## std.io
 
-Console output over the `println` builtin, plus typed line input that reads a line and parses it.
+Console output over the `print` and `println` builtins, plus typed line input that reads a line and parses it.
+
+`print` and `println` are builtins, available everywhere without an import. `print` writes a value with no newline and `println` appends one, each handling a string, an int, a float, a bool, or a char. Build a line piece by piece with `print`, then close it with `println`.
+
+```text
+print("score: ")
+print(42)
+println("")        // ends the line
+```
+
+With a value argument, the first argument is a format string whose `{}` holes the rest fill in order. Write `{{` or `}}` for a literal brace. The format string is a literal expanded at compile time, so each hole prints its value by type with no runtime format parser and no allocation, and a hole count that does not match the arguments is a compile error.
+
+```text
+println("hello {}", name)            // hello Ada
+println("I am {} and I am {}", name, age)
+print("no newline {}", 7)
+println("{{braces}} and a hole {}", 99)   // {braces} and a hole 99
+```
 
 | Function                            | Description                                  |
 | ----------------------------------- | -------------------------------------------- |

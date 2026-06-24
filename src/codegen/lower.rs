@@ -24,7 +24,10 @@ pub fn compile(module: &ast::Module) -> String {
     let ctx = Ctx::new(module);
     let mut m = Module::new("dusk", DEFAULT_TRIPLE);
     m.declare("void @cool_print_i64(i64)");
+    m.declare("void @cool_println_i64(i64)");
     m.declare("void @cool_print_f64(double)");
+    m.declare("void @cool_println_f64(double)");
+    m.declare("void @cool_print_cstr(ptr)");
     m.declare("void @cool_println_cstr(ptr)");
     m.declare("ptr @cool_alloc(i64)");
     m.declare("void @cool_free(ptr)");
@@ -1484,7 +1487,8 @@ impl<'a> Fb<'a> {
                 return self.gen_user_call(name, args);
             }
             return match name.as_str() {
-                "print" | "println" => self.gen_print(args),
+                "print" => self.gen_print(args, false),
+                "println" => self.gen_print(args, true),
                 "alloc" => self.gen_alloc(args),
                 "free" => {
                     if let Some(a) = args.first() {
@@ -2130,24 +2134,72 @@ impl<'a> Fb<'a> {
         Val::new(tty, b)
     }
 
-    fn gen_print(&mut self, args: &[Expr]) -> Val {
+    /// print and println. `print` writes the value with no newline, `println`
+    /// appends one. Each value type routes to its own runtime pair, a string or
+    /// error through the cstring printer, a float through the float printer, and
+    /// everything else widened to an int.
+    fn gen_print(&mut self, args: &[Expr], newline: bool) -> Val {
+        // With a value argument past the format string, this is a formatted call.
+        if args.len() >= 2 {
+            return self.gen_format_print(args, newline);
+        }
         if let Some(a) = args.first() {
             let v = self.gen_expr(a);
-            match &v.ty {
-                CTy::Ptr(_) | CTy::Error => {
-                    self.line(&format!("call void @cool_println_cstr(ptr {})", v.op))
+            self.print_value(&v, newline);
+        }
+        Val::new(CTy::Void, "")
+    }
+
+    /// Prints one value, routed to its runtime printer by type. `newline` picks
+    /// the `println` variant that appends a newline over the `print` variant that
+    /// does not. A non scalar value prints nothing, as before.
+    fn print_value(&mut self, v: &Val, newline: bool) {
+        let suffix = if newline { "ln" } else { "" };
+        match &v.ty {
+            CTy::Ptr(_) | CTy::Error => {
+                self.line(&format!("call void @cool_print{suffix}_cstr(ptr {})", v.op))
+            }
+            CTy::F64 | CTy::F32 => {
+                let d = self.coerce(&v.ty, &v.op, &CTy::F64);
+                self.line(&format!("call void @cool_print{suffix}_f64(double {d})"));
+            }
+            CTy::Struct(_) | CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void
+            | CTy::Tuple(_) | CTy::Unknown => {}
+            _ => {
+                let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
+                self.line(&format!("call void @cool_print{suffix}_i64(i64 {d})"));
+            }
+        }
+    }
+
+    /// A formatted print. The format string is a literal, validated in sema, so
+    /// it expands at compile time into the literal segments printed verbatim and
+    /// the holes printed by value type, with one trailing newline for `println`.
+    /// No runtime format parser and no allocation.
+    fn gen_format_print(&mut self, args: &[Expr], newline: bool) -> Val {
+        let segs = match &args[0].kind {
+            ExprKind::Str(s) => crate::fmt::parse(s).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let mut ai = 1;
+        for seg in &segs {
+            match seg {
+                crate::fmt::Seg::Lit(text) => {
+                    let c = self.m.cstring(text);
+                    self.line(&format!("call void @cool_print_cstr(ptr {c})"));
                 }
-                CTy::F64 | CTy::F32 => {
-                    let d = self.coerce(&v.ty, &v.op, &CTy::F64);
-                    self.line(&format!("call void @cool_print_f64(double {d})"));
-                }
-                CTy::Struct(_) | CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void
-                | CTy::Tuple(_) | CTy::Unknown => {}
-                _ => {
-                    let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
-                    self.line(&format!("call void @cool_print_i64(i64 {d})"));
+                crate::fmt::Seg::Hole => {
+                    if let Some(a) = args.get(ai) {
+                        let v = self.gen_expr(a);
+                        self.print_value(&v, false);
+                    }
+                    ai += 1;
                 }
             }
+        }
+        if newline {
+            let nl = self.m.cstring("\n");
+            self.line(&format!("call void @cool_print_cstr(ptr {nl})"));
         }
         Val::new(CTy::Void, "")
     }
@@ -2724,7 +2776,7 @@ mod tests {
             "func f(xs: int64[]) -> void {\n  foreach(xs, lambda (n: int64) -> void { println(n) })\n}",
         );
         assert!(out.contains("icmp slt i64"));
-        assert!(out.contains("call void @cool_print_i64"));
+        assert!(out.contains("call void @cool_println_i64"));
     }
 
     #[test]

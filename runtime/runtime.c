@@ -6,15 +6,29 @@
 #include <inttypes.h>
 #include <string.h>
 
+/* print writes the value with no newline, println appends one. The builtins
+   print and println in the language map to the matching pair per value type. */
+void cool_print_cstr(const char *s) {
+    fputs(s, stdout);
+}
+
 void cool_println_cstr(const char *s) {
     puts(s);
 }
 
 void cool_print_i64(int64_t v) {
+    printf("%" PRId64, v);
+}
+
+void cool_println_i64(int64_t v) {
     printf("%" PRId64 "\n", v);
 }
 
 void cool_print_f64(double v) {
+    printf("%g", v);
+}
+
+void cool_println_f64(double v) {
     printf("%g\n", v);
 }
 
