@@ -122,3 +122,75 @@ export func parse_int_radix(s: string, base: int64) -> (int64, error) {
 export func parse_int(s: string) -> (int64, error) {
     return parse_int_radix(s, 10)
 }
+
+// A growable, heap backed string. The buffer always holds a NUL after the last
+// character, so sb_cstr hands back a valid string view with no extra work. Build
+// it on the heap with alloc(sb_new()) and pass it by pointer so growth persists,
+// the same shape std.vector uses.
+export struct StringBuilder {
+    data: *char,
+    len: int64,
+    cap: int64,
+}
+
+export func sb_new() -> StringBuilder {
+    d: *char = alloc_bytes(8)
+    d[0] = 0
+    return StringBuilder { data: d, len: 0, cap: 8 }
+}
+
+// Append one character, growing the buffer when the character and its NUL would
+// not fit. The NUL terminator is rewritten after every push.
+export func sb_push_char(s: *StringBuilder, c: char) -> void {
+    if (*s).len + 1 >= (*s).cap {
+        mut nc: int64 = (*s).cap * 2
+        if nc < 8 {
+            nc = 8
+        }
+        nd: *char = alloc_bytes(nc)
+        mut i: int64 = 0
+        while i < (*s).len {
+            nd[i] = (*s).data[i]
+            i = i + 1
+        }
+        free((*s).data)
+        (*s).data = nd
+        (*s).cap = nc
+    }
+    (*s).data[(*s).len] = c
+    (*s).len = (*s).len + 1
+    (*s).data[(*s).len] = 0
+}
+
+// Append every character of a string up to its NUL.
+export func sb_push(s: *StringBuilder, t: string) -> void {
+    mut i: int64 = 0
+    while t[i] != 0 {
+        sb_push_char(s, t[i])
+        i = i + 1
+    }
+}
+
+export func sb_size(s: *StringBuilder) -> int64 {
+    return (*s).len
+}
+
+// View the built bytes as a string. The buffer is always NUL terminated, so this
+// is a zero cost reinterpret. The view borrows the buffer and is valid until the
+// builder next grows or is freed.
+export func sb_cstr(s: *StringBuilder) -> string {
+    return cstr((*s).data)
+}
+
+export func sb_free(s: *StringBuilder) -> void {
+    free((*s).data)
+}
+
+// Concatenate two strings into a fresh heap builder. Ownership moves to the
+// caller, who frees the buffer with sb_free and the builder struct with free.
+export func concat(a: string, b: string) -> *StringBuilder {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, a)
+    sb_push(s, b)
+    return s
+}

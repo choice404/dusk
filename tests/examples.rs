@@ -59,6 +59,7 @@ golden!(map, "map.dusk", "3\n1\n22\n3\n-1\n");
 golden!(fileio, "fileio.dusk", "persisted\n9\n");
 golden!(parse, "parse.dusk", "255\n255\n10\n15\n-42\n-1\n4\n-2\n");
 golden!(printing, "printing.dusk", "score: 42\nabc\nAda is 36\n{braces} and 7\n");
+golden!(strbuf, "strbuf.dusk", "dusk and dawn\n13\nhello, world\n");
 
 /// Runs an example feeding `input` to its stdin, so a program that reads with
 /// `read_line` can be exercised deterministically from a pipe.

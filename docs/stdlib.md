@@ -129,6 +129,39 @@ he.ignore()
 
 `parse_int` takes a base 10 string, so a `0x`, `0o`, or `0b` prefix fails on the prefix letter. `parse_int_radix` takes the base and accepts the matching prefix, `0x` for 16, `0o` for 8, `0b` for 2, but never infers the base from the prefix. Each parser returns the value with an error you must handle.
 
+### Mutable strings
+
+`StringBuilder` is a growable, heap backed string. Build it on the heap with `alloc(sb_new())` and pass it by pointer so growth persists, the same shape `std.vector` uses. The buffer keeps a NUL after the last character, so `sb_cstr` hands back a valid `string` view at no cost.
+
+| Function                                           | Description                                 |
+| -------------------------------------------------- | ------------------------------------------- |
+| `sb_new() -> StringBuilder`                        | A fresh empty builder.                      |
+| `sb_push_char(s: *StringBuilder, c: char) -> void` | Append one character.                       |
+| `sb_push(s: *StringBuilder, t: string) -> void`    | Append every character of a string.         |
+| `sb_size(s: *StringBuilder) -> int64`              | The number of characters built.             |
+| `sb_cstr(s: *StringBuilder) -> string`             | View the built bytes as a string.           |
+| `sb_free(s: *StringBuilder) -> void`               | Free the backing buffer.                    |
+| `concat(a: string, b: string) -> *StringBuilder`   | Join two strings into a fresh heap builder. |
+
+```text
+@import std.string
+
+g := alloc(sb_new())
+sb_push(g, "dusk")
+sb_push_char(g, 32)          // a space
+sb_push(g, "and dawn")
+println(sb_cstr(g))          // dusk and dawn
+sb_free(g)
+free(g)
+
+r := concat("hello, ", "world")
+println(sb_cstr(r))          // hello, world
+sb_free(r)
+free(r)
+```
+
+A builder owns its buffer. `sb_free` releases the buffer and `free` releases the builder struct, so a heap builder is freed with both. `concat` returns a builder whose ownership moves to the caller. The `cstr` builtin underneath `sb_cstr` reinterprets a NUL terminated `*char` as a `string` at no runtime cost, and the view stays valid until the builder next grows or is freed.
+
 ## std.vector
 
 A growable array, generic over its element type. The buffer lives on the heap and doubles when it fills. Pass the vector by pointer so growth persists across calls.

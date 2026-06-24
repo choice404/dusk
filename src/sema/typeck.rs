@@ -614,6 +614,7 @@ fn builtin_ret(name: &str) -> Option<Ty> {
         "read_file" | "read_line" | "read_all" => Some(Ty::Tuple(vec![Ty::Str, Ty::Error])),
         "parse_float" => Some(Ty::Tuple(vec![Ty::Float, Ty::Error])),
         "write_file" => Some(Ty::Error),
+        "cstr" => Some(Ty::Str),
         _ => None,
     }
 }

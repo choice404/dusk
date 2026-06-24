@@ -1529,6 +1529,13 @@ impl<'a> Fb<'a> {
                     self.line(&format!("{d} = call i64 @cool_debug_double_frees()"));
                     Val::new(CTy::Int(64), d)
                 }
+                "cstr" => {
+                    // Reinterpret a NUL terminated char buffer as a string view.
+                    // Both are an LLVM ptr, so this relabels the type and emits
+                    // no instruction.
+                    let v = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+                    Val::new(CTy::Ptr(Box::new(CTy::Char)), v.op)
+                }
                 "read_file" => self.gen_read_file(args),
                 "write_file" => self.gen_write_file(args),
                 "read_line" => self.gen_stdin_read("cool_read_line", "end of input"),
