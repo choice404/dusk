@@ -8,9 +8,9 @@
 @import std.functional.maybe
 
 export struct Map<V> {
-    used: *bool,
-    keys: *string,
-    vals: *V,
+    used: *raw bool,
+    keys: *raw string,
+    vals: *raw V,
     len: int64,
     cap: int64,
 }
@@ -31,14 +31,14 @@ export func map_hash(s: string) -> int64 {
 
 export func map_new<V>() -> Map<V> {
     cap: int64 = 8
-    u: *bool = alloc_bytes(cap * sizeof(bool))
+    u: *raw bool = alloc_bytes(cap * sizeof(bool))
     mut i: int64 = 0
     while i < cap {
         u[i] = false
         i = i + 1
     }
-    k: *string = alloc_bytes(cap * sizeof(string))
-    v: *V = alloc_bytes(cap * sizeof(V))
+    k: *raw string = alloc_bytes(cap * sizeof(string))
+    v: *raw V = alloc_bytes(cap * sizeof(V))
     return Map { used: u, keys: k, vals: v, len: 0, cap: cap }
 }
 
@@ -56,12 +56,12 @@ func map_slot<V>(m: *Map<V>, k: string) -> int64 {
 // after the move. len resets to zero and climbs again as the entries reinsert,
 // staying under the new half full threshold so no nested grow fires.
 func map_grow<V>(m: *Map<V>) -> void {
-    old_used: *bool = (*m).used
-    old_keys: *string = (*m).keys
-    old_vals: *V = (*m).vals
+    old_used: *raw bool = (*m).used
+    old_keys: *raw string = (*m).keys
+    old_vals: *raw V = (*m).vals
     old_cap: int64 = (*m).cap
     ncap: int64 = old_cap * 2
-    nu: *bool = alloc_bytes(ncap * sizeof(bool))
+    nu: *raw bool = alloc_bytes(ncap * sizeof(bool))
     mut i: int64 = 0
     while i < ncap {
         nu[i] = false

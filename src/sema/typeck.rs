@@ -29,6 +29,7 @@ enum Ty {
     Unit,
     Error,
     Ptr(Box<Ty>),
+    RawPtr(Box<Ty>),
     Slice(Box<Ty>),
     Array(Box<Ty>, u64),
     Tuple(Vec<Ty>),
@@ -89,6 +90,7 @@ impl TypeChecker {
         match t {
             Ty::Named(n) if self.ifaces.contains(&n) => Ty::Unknown,
             Ty::Ptr(b) => Ty::Ptr(Box::new(self.fix(*b))),
+            Ty::RawPtr(b) => Ty::RawPtr(Box::new(self.fix(*b))),
             Ty::Slice(b) => Ty::Slice(Box::new(self.fix(*b))),
             Ty::Array(b, n) => Ty::Array(Box::new(self.fix(*b)), n),
             Ty::Tuple(xs) => Ty::Tuple(xs.into_iter().map(|x| self.fix(x)).collect()),
@@ -490,7 +492,7 @@ impl TypeChecker {
     fn check_unary(&mut self, op: UnOp, t: &Ty, span: Span) -> Ty {
         match op {
             UnOp::Deref => match t {
-                Ty::Ptr(inner) => (**inner).clone(),
+                Ty::Ptr(inner) | Ty::RawPtr(inner) => (**inner).clone(),
                 Ty::Unknown => Ty::Unknown,
                 _ => {
                     self.err("cannot dereference a non pointer value", span);
@@ -582,6 +584,7 @@ fn lower(t: &Type, generics: &HashSet<String>) -> Ty {
             }
         }
         Type::Ptr(b) => Ty::Ptr(Box::new(lower(b, generics))),
+        Type::RawPtr(b) => Ty::RawPtr(Box::new(lower(b, generics))),
         Type::Slice(b) => Ty::Slice(Box::new(lower(b, generics))),
         Type::Array(b, n) => Ty::Array(Box::new(lower(b, generics)), *n),
         Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| lower(t, generics)).collect()),

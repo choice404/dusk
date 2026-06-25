@@ -185,6 +185,7 @@ impl<'a> Mono<'a> {
             }
             Type::Named(n, _) => Type::Named(n.clone(), Vec::new()),
             Type::Ptr(b) => Type::Ptr(Box::new(self.emit_ty(b))),
+            Type::RawPtr(b) => Type::RawPtr(Box::new(self.emit_ty(b))),
             Type::Slice(b) => Type::Slice(Box::new(self.emit_ty(b))),
             Type::Array(b, n) => Type::Array(Box::new(self.emit_ty(b)), *n),
             Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.emit_ty(x)).collect()),
@@ -757,7 +758,7 @@ fn mentions(ty: &Type, names: &HashSet<String>) -> bool {
     match ty {
         Type::Named(n, args) if args.is_empty() => names.contains(n),
         Type::Named(_, args) => args.iter().any(|a| mentions(a, names)),
-        Type::Ptr(b) | Type::Slice(b) | Type::Array(b, _) => mentions(b, names),
+        Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => mentions(b, names),
         Type::Tuple(xs) => xs.iter().any(|x| mentions(x, names)),
         Type::Func(ps, r) => ps.iter().any(|p| mentions(p, names)) || mentions(r, names),
         Type::Unit => false,
@@ -780,6 +781,7 @@ fn subst_apply(ty: &Type, subst: &Subst) -> Type {
             Type::Named(n.clone(), args.iter().map(|a| subst_apply(a, subst)).collect())
         }
         Type::Ptr(b) => Type::Ptr(Box::new(subst_apply(b, subst))),
+        Type::RawPtr(b) => Type::RawPtr(Box::new(subst_apply(b, subst))),
         Type::Slice(b) => Type::Slice(Box::new(subst_apply(b, subst))),
         Type::Array(b, n) => Type::Array(Box::new(subst_apply(b, subst)), *n),
         Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| subst_apply(x, subst)).collect()),
@@ -854,6 +856,7 @@ fn flat(ty: &Type) -> String {
             format!("{n}${}${}", args.len(), parts.join("$"))
         }
         Type::Ptr(b) => format!("$p${}", flat(b)),
+        Type::RawPtr(b) => format!("$rp${}", flat(b)),
         Type::Slice(b) => format!("$s${}", flat(b)),
         Type::Array(b, n) => format!("$a{n}${}", flat(b)),
         Type::Tuple(xs) => {

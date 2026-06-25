@@ -397,6 +397,16 @@ impl Parser {
 
     fn type_(&mut self) -> Type {
         if self.eat(&TokenKind::Star) {
+            // `*raw T` is a thin pointer with no generation, the low level buffer
+            // and allocator layer. A bare `*T` is the managed generational
+            // pointer. `raw` is contextual: it only modifies the pointer when a
+            // type follows, so a type named `raw` still works as a pointee.
+            if matches!(self.peek(), TokenKind::Ident(s) if s == "raw")
+                && matches!(self.peek2(), TokenKind::Ident(_) | TokenKind::Star)
+            {
+                self.bump();
+                return Type::RawPtr(Box::new(self.type_()));
+            }
             return Type::Ptr(Box::new(self.type_()));
         }
         let mut ty = self.base_type();
@@ -1171,6 +1181,29 @@ mod tests {
         assert!(matches!(f.params[0].ty, Type::Ptr(_)));
         assert!(matches!(f.params[1].ty, Type::Slice(_)));
         assert!(matches!(f.params[2].ty, Type::Array(_, 4)));
+    }
+
+    #[test]
+    fn raw_pointer_type_is_distinct_from_managed() {
+        let m = parse_ok("func f(a: *int64, b: *raw int64, c: *raw *int64) -> void { return }");
+        let Item::Func(f) = &m.items[0] else {
+            panic!()
+        };
+        // A bare `*T` is the managed pointer, `*raw T` the thin one, and `raw`
+        // nests, so `*raw *int64` is a raw pointer to a managed pointer.
+        assert!(matches!(f.params[0].ty, Type::Ptr(_)));
+        assert!(matches!(f.params[1].ty, Type::RawPtr(_)));
+        assert!(matches!(&f.params[2].ty, Type::RawPtr(inner) if matches!(&**inner, Type::Ptr(_))));
+
+        // `raw` only modifies when a type follows, so `*raw` alone stays a
+        // managed pointer to a type named raw, keeping raw usable as a name.
+        let m2 = parse_ok("func g(x: *raw) -> void { return }");
+        let Item::Func(g) = &m2.items[0] else {
+            panic!()
+        };
+        assert!(
+            matches!(&g.params[0].ty, Type::Ptr(inner) if matches!(&**inner, Type::Named(n, _) if n == "raw"))
+        );
     }
 
     #[test]

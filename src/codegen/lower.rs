@@ -134,6 +134,7 @@ enum CTy {
     Bool,
     Void,
     Ptr(Box<CTy>),
+    RawPtr(Box<CTy>),
     Slice(Box<CTy>),
     Array(Box<CTy>, u64),
     Struct(String),
@@ -155,6 +156,7 @@ impl CTy {
             CTy::Bool => "i1".to_string(),
             CTy::Void => "void".to_string(),
             CTy::Ptr(_) => "ptr".to_string(),
+            CTy::RawPtr(_) => "ptr".to_string(),
             CTy::Slice(_) => "{ ptr, i64 }".to_string(),
             CTy::Array(e, n) => format!("[{n} x {}]", e.ll()),
             CTy::Struct(n) | CTy::Enum(n) => format!("%{n}"),
@@ -436,6 +438,7 @@ impl Ctx {
             CTy::F32 => (4, 4),
             CTy::F64 => (8, 8),
             CTy::Ptr(_) => (8, 8),
+            CTy::RawPtr(_) => (8, 8),
             CTy::Slice(_) => (16, 8),
             CTy::Array(e, n) => {
                 let (es, ea) = self.size_align(e);
@@ -546,6 +549,7 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
             },
         },
         Type::Ptr(b) => CTy::Ptr(Box::new(lower_ty(b, nom))),
+        Type::RawPtr(b) => CTy::RawPtr(Box::new(lower_ty(b, nom))),
         Type::Slice(b) => CTy::Slice(Box::new(lower_ty(b, nom))),
         Type::Array(b, n) => CTy::Array(Box::new(lower_ty(b, nom)), *n),
         Type::Func(ps, r) => CTy::Closure(
@@ -700,7 +704,7 @@ impl<'a> Fb<'a> {
         match &r {
             CTy::Void => self.line("ret void"),
             CTy::F64 | CTy::F32 => self.line(&format!("ret {} 0.0", r.ll())),
-            CTy::Ptr(_) => self.line("ret ptr null"),
+            CTy::Ptr(_) | CTy::RawPtr(_) => self.line("ret ptr null"),
             _ if r.is_aggregate() => self.line(&format!("ret {} zeroinitializer", r.ll())),
             _ => self.line(&format!("ret {} 0", r.ll())),
         }
@@ -953,7 +957,7 @@ impl<'a> Fb<'a> {
             }
             ExprKind::Unary(UnOp::Deref, p) => {
                 let pv = self.gen_expr(p);
-                if let CTy::Ptr(inner) = pv.ty {
+                if let CTy::Ptr(inner) | CTy::RawPtr(inner) = pv.ty {
                     Some((*inner, pv.op))
                 } else {
                     None
@@ -989,7 +993,7 @@ impl<'a> Fb<'a> {
                     self.line(&format!("{p} = getelementptr {}, ptr {data}, i64 {i}", elem.ll()));
                     Some(((**elem).clone(), p))
                 }
-                CTy::Ptr(elem) => {
+                CTy::Ptr(elem) | CTy::RawPtr(elem) => {
                     let pv = self.load(&CTy::Ptr(elem.clone()), &bptr);
                     let p = self.fresh();
                     self.line(&format!("{p} = getelementptr {}, ptr {pv}, i64 {i}", elem.ll()));
@@ -1007,7 +1011,7 @@ impl<'a> Fb<'a> {
                     self.line(&format!("{p} = getelementptr {}, ptr {data}, i64 {i}", elem.ll()));
                     Some(((**elem).clone(), p))
                 }
-                CTy::Ptr(elem) => {
+                CTy::Ptr(elem) | CTy::RawPtr(elem) => {
                     let p = self.fresh();
                     self.line(&format!("{p} = getelementptr {}, ptr {}, i64 {i}", elem.ll(), bv.op));
                     Some(((**elem).clone(), p))
@@ -1448,7 +1452,7 @@ impl<'a> Fb<'a> {
                 _ => CTy::Unknown,
             },
             ExprKind::Index(base, _) => match self.static_ty(base) {
-                CTy::Array(e, _) | CTy::Slice(e) | CTy::Ptr(e) => *e,
+                CTy::Array(e, _) | CTy::Slice(e) | CTy::Ptr(e) | CTy::RawPtr(e) => *e,
                 _ => CTy::Unknown,
             },
             ExprKind::StructLit(name, _) => {
@@ -2784,6 +2788,21 @@ mod tests {
         );
         assert!(out.contains("icmp slt i64"));
         assert!(out.contains("call void @cool_println_i64"));
+    }
+
+    #[test]
+    fn print_omits_the_newline_and_println_appends_it() {
+        // Swapping the two runtime calls would invert the trailing newline, the
+        // exact regression the 0.1.5 print split fixed. print must reach the bare
+        // printer and println the ln one, each checked in isolation so a swap can
+        // not hide behind the other call also being present.
+        let p = ir("func f(x: int64) -> void {\n  print(x)\n}");
+        assert!(p.contains("call void @cool_print_i64"), "{p}");
+        assert!(!p.contains("call void @cool_println_i64"), "{p}");
+
+        let pl = ir("func f(x: int64) -> void {\n  println(x)\n}");
+        assert!(pl.contains("call void @cool_println_i64"), "{pl}");
+        assert!(!pl.contains("call void @cool_print_i64"), "{pl}");
     }
 
     #[test]

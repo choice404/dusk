@@ -90,6 +90,7 @@ pub struct Impl {
 pub enum Type {
     Named(String, Vec<Type>),
     Ptr(Box<Type>),
+    RawPtr(Box<Type>),
     Slice(Box<Type>),
     Array(Box<Type>, u64),
     Tuple(Vec<Type>),
