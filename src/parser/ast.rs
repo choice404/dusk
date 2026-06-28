@@ -119,6 +119,7 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Let {
     pub mutable: bool,
+    pub is_ref: bool,
     pub infer: bool,
     pub binds: Vec<Bind>,
     pub value: Expr,

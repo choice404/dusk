@@ -517,9 +517,16 @@ impl Parser {
             TokenKind::Kw(Keyword::Do) => Some(self.do_stmt()),
             TokenKind::Kw(Keyword::Mut) => {
                 self.bump();
-                Some(Stmt::Let(self.let_rest(true)))
+                Some(Stmt::Let(self.let_rest(true, false)))
             }
-            _ if self.is_binding_start() => Some(Stmt::Let(self.let_rest(false))),
+            // `ref y = x` binds a non owning alias. `ref` is contextual: it only
+            // leads a binding when an identifier follows, so `ref` stays usable
+            // as a name elsewhere.
+            TokenKind::Ident(s) if s == "ref" && matches!(self.peek2(), TokenKind::Ident(_)) => {
+                self.bump();
+                Some(Stmt::Let(self.let_rest(false, true)))
+            }
+            _ if self.is_binding_start() => Some(Stmt::Let(self.let_rest(false, false))),
             _ => {
                 let e = self.expr();
                 if self.eat(&TokenKind::Assign) {
@@ -540,7 +547,7 @@ impl Parser {
             )
     }
 
-    fn let_rest(&mut self, mutable: bool) -> Let {
+    fn let_rest(&mut self, mutable: bool, is_ref: bool) -> Let {
         let mut binds = Vec::new();
         loop {
             let name = self.ident();
@@ -566,6 +573,7 @@ impl Parser {
         let value = self.expr();
         Let {
             mutable,
+            is_ref,
             infer,
             binds,
             value,

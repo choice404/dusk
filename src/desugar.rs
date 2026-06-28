@@ -87,6 +87,7 @@ impl Desugar<'_> {
         match s {
             Stmt::Let(l) => Stmt::Let(Let {
                 mutable: l.mutable,
+                is_ref: l.is_ref,
                 infer: l.infer,
                 binds: l.binds.clone(),
                 value: self.expr(&l.value),

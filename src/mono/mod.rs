@@ -322,6 +322,7 @@ impl<'a> Mono<'a> {
                 }
                 Stmt::Let(Let {
                     mutable: l.mutable,
+                    is_ref: l.is_ref,
                     infer: l.infer,
                     binds,
                     value,

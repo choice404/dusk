@@ -386,6 +386,10 @@ impl TypeChecker {
                     }
                     return pt;
                 }
+                if name == "move" {
+                    // move(x) transfers ownership; its value and type are x's.
+                    return args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                }
             }
         }
         let callee = self.infer(f);

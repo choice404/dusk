@@ -1635,6 +1635,12 @@ impl<'a> Fb<'a> {
                     let v = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
                     Val::new(CTy::RawPtr(Box::new(CTy::Char)), v.op)
                 }
+                "move" => {
+                    // move(x) transfers ownership to the caller. Its value is x's,
+                    // a copy of the fat pointer; the source is invalidated by the
+                    // static check, not at runtime.
+                    args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0)
+                }
                 "read_file" => self.gen_read_file(args),
                 "write_file" => self.gen_write_file(args),
                 "read_line" => self.gen_stdin_read("cool_read_line", "end of input"),
