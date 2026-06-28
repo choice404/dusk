@@ -155,9 +155,23 @@ void cool_gen_fault(void) {
     abort();
 }
 
-/* File I/O. read slurps a whole file into a freshly malloc'd NUL terminated
-   buffer, returning NULL on any failure so the caller's error channel can fire.
-   The caller owns the buffer and may free it. write truncates the file and
+/* Copies a NUL terminated buffer into a generationally allocated buffer and
+   frees the temporary, so a string handed back to the language can be freed with
+   the same generational heap as every other allocation. Returns NULL, after
+   freeing the temporary, when the allocation fails. */
+static char *cool_gen_dup(char *tmp, size_t len) {
+    char *out = (char *)cool_gen_alloc((int64_t)len + 1);
+    if (out) {
+        memcpy(out, tmp, len + 1);
+    }
+    free(tmp);
+    return out;
+}
+
+/* File I/O. read slurps a whole file into a generationally allocated NUL
+   terminated buffer, returning NULL on any failure so the caller's error channel
+   can fire. The caller owns the buffer and frees it with the language `free`,
+   which routes to the same generational heap. write truncates the file and
    writes the NUL terminated data, returning the byte count or -1 on failure. */
 char *cool_read_file(const char *path) {
     FILE *f = fopen(path, "rb");
@@ -174,7 +188,7 @@ char *cool_read_file(const char *path) {
         return NULL;
     }
     rewind(f);
-    char *buf = malloc((size_t)n + 1);
+    char *buf = (char *)cool_gen_alloc((int64_t)n + 1);
     if (!buf) {
         fclose(f);
         return NULL;
@@ -231,7 +245,7 @@ char *cool_read_line(void) {
         c = fgetc(stdin);
     }
     buf[len] = '\0';
-    return buf;
+    return cool_gen_dup(buf, len);
 }
 
 /* Read all of stdin into a freshly malloc'd NUL terminated buffer, returning
@@ -260,7 +274,7 @@ char *cool_read_all(void) {
         c = fgetc(stdin);
     }
     buf[len] = '\0';
-    return buf;
+    return cool_gen_dup(buf, len);
 }
 
 /* Parse a base 10 floating point number, setting *ok to 1 on success and 0 when

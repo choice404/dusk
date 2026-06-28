@@ -370,6 +370,22 @@ impl TypeChecker {
                     }
                     return Ty::Unit;
                 }
+                if name == "ptr_add" {
+                    // ptr_add is raw byte arithmetic over the raw pointer layer.
+                    // A managed *T is a fat value, not a raw operand, so reject it
+                    // and point at *raw T. A *void, a pointer to Unit, stays raw.
+                    let pt = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                    if matches!(&pt, Ty::Ptr(inner) if !matches!(&**inner, Ty::Unit)) {
+                        self.err(
+                            "ptr_add takes a raw pointer; use *raw T or *void, not a managed *T",
+                            f.span,
+                        );
+                    }
+                    for a in args.iter().skip(1) {
+                        self.infer(a);
+                    }
+                    return pt;
+                }
             }
         }
         let callee = self.infer(f);

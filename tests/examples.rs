@@ -56,6 +56,14 @@ fn double_free_faults() {
     assert!(err.contains("double free"), "{err}");
 }
 
+#[test]
+fn method_call_after_free_faults() {
+    let (out, err, ok) = run_raw("methodfree.dusk");
+    assert!(!ok, "a method call on a freed receiver must fault");
+    assert_eq!(out, "7\n", "the valid call prints before the fault");
+    assert!(err.contains("use of a freed or stale pointer"), "{err}");
+}
+
 macro_rules! golden {
     ($name:ident, $file:literal, $expected:literal) => {
         #[test]

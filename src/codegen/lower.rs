@@ -1662,7 +1662,11 @@ impl<'a> Fb<'a> {
             Some((CTy::Struct(t), pptr)) => (t, pptr),
             Some((CTy::Ptr(inner), pptr)) if matches!(*inner, CTy::Struct(_)) => {
                 let CTy::Struct(t) = *inner else { unreachable!() };
-                let p = self.load(&CTy::RawPtr(Box::new(CTy::Struct(t.clone()))), &pptr);
+                // Load the full fat pointer and check its generation before
+                // dispatch, so a method call on a freed receiver faults the same
+                // way an explicit dereference does.
+                let fat = self.load(&CTy::Ptr(Box::new(CTy::Struct(t.clone()))), &pptr);
+                let p = self.fat_checked(&fat);
                 (t, p)
             }
             Some((CTy::Error, pptr)) => {
@@ -1690,7 +1694,7 @@ impl<'a> Fb<'a> {
                         let CTy::Struct(t) = (**inner).clone() else {
                             unreachable!()
                         };
-                        let data = self.fat_data(&bv.op);
+                        let data = self.fat_checked(&bv.op);
                         (t, data)
                     }
                     _ => return None,
@@ -2435,12 +2439,16 @@ impl<'a> Fb<'a> {
         let p = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
         let n = args.get(1).map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
         let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
-        let ty = match &p.ty {
-            CTy::Ptr(_) | CTy::RawPtr(_) => p.ty.clone(),
-            _ => CTy::RawPtr(Box::new(CTy::Int(8))),
+        // ptr_add works in raw pointers. A managed *T is rejected in sema, but
+        // drop its generation defensively here so a fat value never reaches a
+        // gep, and always hand back a raw pointer.
+        let (op, ty) = match &p.ty {
+            CTy::RawPtr(_) => (p.op.clone(), p.ty.clone()),
+            CTy::Ptr(inner) => (self.fat_data(&p.op), CTy::RawPtr(inner.clone())),
+            _ => (p.op.clone(), CTy::RawPtr(Box::new(CTy::Int(8)))),
         };
         let d = self.fresh();
-        self.line(&format!("{d} = getelementptr i8, ptr {}, i64 {ni}", p.op));
+        self.line(&format!("{d} = getelementptr i8, ptr {op}, i64 {ni}"));
         Val::new(ty, d)
     }
 
@@ -3036,7 +3044,7 @@ mod tests {
     #[test]
     fn ptr_add_offsets_a_pointer() {
         let out = ir(
-            "func f(p: *int8) -> *int8 {\n  return ptr_add(p, 16)\n}",
+            "func f(p: *raw int8) -> *raw int8 {\n  return ptr_add(p, 16)\n}",
         );
         assert!(out.contains("getelementptr i8, ptr"), "{out}");
     }

@@ -1,8 +1,8 @@
 # dusk Language Specification
 
-## Status, design locked for 0.1.0
+## Status, 0.1.0 baseline with 0.2.x additions
 
-This is the language reference for dusk 0.1.0. It describes what the language is.
+This is the language reference for dusk. The sections below describe the 0.1.0 core. The 0.2.x line layers memory safety on top, so where this document says strings are immutable, pointers are a single kind, or memory safety is debug only, the current language differs. It has a growable `StringBuilder` with concatenation, a split between a managed `*T` and a raw `*raw T` or `*void`, and a default generational heap that checks every managed dereference, faulting on a use after free or a double free.
 
 ---
 
@@ -306,13 +306,12 @@ An allocator is any type that implements the built in `Allocator` interface.
 
 ```text
 interface Allocator {
-    alloc(size: int64, align: int64) -> *void;
-    free(p: *void) -> void;
-    resize(p: *void, new_size: int64) -> bool;
+    alloc(size: int64, align: int64) -> *void
+    free(p: *void) -> void
 }
 ```
 
-The standard library ships three allocators that implement this interface. A heap allocator, the default, backed by libc. An arena allocator that frees everything at once. A fixed buffer allocator with no heap, for embedded or scratch use. Users can write their own allocator by implementing the interface.
+The standard library ships four allocators that implement this interface. A heap allocator, the default, backed by libc. An arena allocator that frees everything at once. A fixed buffer allocator with no heap, for embedded or scratch use. A debug allocator that reports leaks and catches a double free. Users can write their own allocator by implementing the interface.
 
 ### `alloc` and `free` Are Sugar Over the In Scope Allocator
 
