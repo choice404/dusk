@@ -92,6 +92,69 @@ int64_t cool_debug_double_frees(void) {
     return cool_dbg_double;
 }
 
+/* Generational heap for managed pointers. Each managed allocation carries a 16
+   byte header in front of the data, holding the payload size and a generation,
+   with the generation in the word right before the data so a check is a single
+   load at p minus 8. free bumps the generation and parks the block on a size
+   matched free list. A later allocation of the same size reuses the block with
+   its now advanced generation, so a stale reference still holding the old
+   generation mismatches and faults at its next dereference. The generation
+   never resets for a block, which is what keeps reuse sound. */
+#define COOL_GEN_HDR 16
+#define COOL_GEN_FREE_MAX 4096
+static void *cool_gen_free_ptr[COOL_GEN_FREE_MAX];
+static int64_t cool_gen_free_sz[COOL_GEN_FREE_MAX];
+static int cool_gen_free_n = 0;
+
+void *cool_gen_alloc(int64_t size) {
+    for (int i = 0; i < cool_gen_free_n; i++) {
+        if (cool_gen_free_sz[i] == size) {
+            void *p = cool_gen_free_ptr[i];
+            cool_gen_free_n--;
+            cool_gen_free_ptr[i] = cool_gen_free_ptr[cool_gen_free_n];
+            cool_gen_free_sz[i] = cool_gen_free_sz[cool_gen_free_n];
+            return p;
+        }
+    }
+    char *base = malloc(COOL_GEN_HDR + (size_t)size);
+    if (!base) {
+        return NULL;
+    }
+    int64_t *hdr = (int64_t *)base;
+    hdr[0] = size;
+    hdr[1] = 1;
+    return base + COOL_GEN_HDR;
+}
+
+void cool_gen_free(void *p) {
+    if (!p) {
+        return;
+    }
+    // Double free guard: a block already parked on the free list must not be
+    // parked again, or a later allocation could hand the same address out twice.
+    for (int i = 0; i < cool_gen_free_n; i++) {
+        if (cool_gen_free_ptr[i] == p) {
+            fflush(stdout);
+            fputs("fatal: double free\n", stderr);
+            abort();
+        }
+    }
+    int64_t *gen = (int64_t *)((char *)p - 8);
+    *gen += 1;
+    int64_t *size = (int64_t *)((char *)p - COOL_GEN_HDR);
+    if (cool_gen_free_n < COOL_GEN_FREE_MAX) {
+        cool_gen_free_ptr[cool_gen_free_n] = p;
+        cool_gen_free_sz[cool_gen_free_n] = *size;
+        cool_gen_free_n++;
+    }
+}
+
+void cool_gen_fault(void) {
+    fflush(stdout);
+    fputs("fatal: use of a freed or stale pointer\n", stderr);
+    abort();
+}
+
 /* File I/O. read slurps a whole file into a freshly malloc'd NUL terminated
    buffer, returning NULL on any failure so the caller's error channel can fire.
    The caller owns the buffer and may free it. write truncates the file and

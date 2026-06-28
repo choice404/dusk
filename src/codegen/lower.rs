@@ -31,6 +31,9 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("void @cool_println_cstr(ptr)");
     m.declare("ptr @cool_alloc(i64)");
     m.declare("void @cool_free(ptr)");
+    m.declare("ptr @cool_gen_alloc(i64)");
+    m.declare("void @cool_gen_free(ptr)");
+    m.declare("void @cool_gen_fault()");
     m.declare("ptr @cool_debug_alloc(i64)");
     m.declare("void @cool_debug_free(ptr)");
     m.declare("i64 @cool_debug_leaks()");
@@ -155,7 +158,7 @@ impl CTy {
             CTy::F32 => "float".to_string(),
             CTy::Bool => "i1".to_string(),
             CTy::Void => "void".to_string(),
-            CTy::Ptr(_) => "ptr".to_string(),
+            CTy::Ptr(_) => "{ ptr, i64 }".to_string(),
             CTy::RawPtr(_) => "ptr".to_string(),
             CTy::Slice(_) => "{ ptr, i64 }".to_string(),
             CTy::Array(e, n) => format!("[{n} x {}]", e.ll()),
@@ -173,7 +176,8 @@ impl CTy {
     fn is_aggregate(&self) -> bool {
         matches!(
             self,
-            CTy::Struct(_)
+            CTy::Ptr(_)
+                | CTy::Struct(_)
                 | CTy::Enum(_)
                 | CTy::Iface(_)
                 | CTy::Closure(..)
@@ -437,7 +441,7 @@ impl Ctx {
             }
             CTy::F32 => (4, 4),
             CTy::F64 => (8, 8),
-            CTy::Ptr(_) => (8, 8),
+            CTy::Ptr(_) => (16, 8),
             CTy::RawPtr(_) => (8, 8),
             CTy::Slice(_) => (16, 8),
             CTy::Array(e, n) => {
@@ -539,7 +543,7 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
             "char" => CTy::Char,
             "float64" => CTy::F64,
             "float32" => CTy::F32,
-            "string" => CTy::Ptr(Box::new(CTy::Char)),
+            "string" => CTy::RawPtr(Box::new(CTy::Char)),
             "error" => CTy::Error,
             _ => match nom(n) {
                 Nom::Struct => CTy::Struct(n.clone()),
@@ -548,7 +552,16 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
                 Nom::None => CTy::Unknown,
             },
         },
-        Type::Ptr(b) => CTy::Ptr(Box::new(lower_ty(b, nom))),
+        Type::Ptr(b) => {
+            // *void is the erased raw currency of the allocator and FFI layer
+            // (D23), a thin pointer, not a managed generational one. The parser
+            // lowers the `void` type to Unit, so a pointer to Unit is *void.
+            if matches!(&**b, Type::Unit) {
+                CTy::RawPtr(Box::new(CTy::Void))
+            } else {
+                CTy::Ptr(Box::new(lower_ty(b, nom)))
+            }
+        }
         Type::RawPtr(b) => CTy::RawPtr(Box::new(lower_ty(b, nom))),
         Type::Slice(b) => CTy::Slice(Box::new(lower_ty(b, nom))),
         Type::Array(b, n) => CTy::Array(Box::new(lower_ty(b, nom)), *n),
@@ -569,7 +582,7 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
         // stateful allocator's bump offset persists across calls.
         params.push((
             "self".to_string(),
-            CTy::Ptr(Box::new(CTy::Struct(t.to_string()))),
+            CTy::RawPtr(Box::new(CTy::Struct(t.to_string()))),
         ));
     }
     for p in &f.params {
@@ -593,7 +606,7 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
         if self_ty.is_some() && i == 0 {
             // The incoming pointer is self's storage. Bind it as a Struct lvalue,
             // not a fresh copy, so `self.field` reads and writes the caller's value.
-            if let CTy::Ptr(inner) = ty {
+            if let CTy::Ptr(inner) | CTy::RawPtr(inner) = ty {
                 fb.locals
                     .insert(pname.clone(), ((**inner).clone(), format!("%a{i}")));
             }
@@ -699,12 +712,61 @@ impl<'a> Fb<'a> {
         self.terminated = true;
     }
 
+    /// Builds a managed fat pointer value `{ data, gen }` from a raw data pointer
+    /// and a generation.
+    fn fat(&mut self, data: &str, gen: &str) -> String {
+        let a = self.fresh();
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, i64 }} undef, ptr {data}, 0"
+        ));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {gen}, 1"));
+        b
+    }
+
+    /// Extracts the raw data pointer from a managed fat pointer with no check.
+    /// Used where a freed pointer is acceptable, like free itself.
+    fn fat_data(&mut self, fat: &str) -> String {
+        let d = self.fresh();
+        self.line(&format!("{d} = extractvalue {{ ptr, i64 }} {fat}, 0"));
+        d
+    }
+
+    /// Extracts the raw data pointer and emits the generation check. When the
+    /// remembered generation is not the untracked sentinel 0, it must equal the
+    /// live generation in the header word at data minus 8, or the program faults
+    /// on a freed or stale pointer.
+    fn fat_checked(&mut self, fat: &str) -> String {
+        let data = self.fat_data(fat);
+        let gen = self.fresh();
+        self.line(&format!("{gen} = extractvalue {{ ptr, i64 }} {fat}, 1"));
+        let chk = self.new_label();
+        let skip = self.new_label();
+        let z = self.fresh();
+        self.line(&format!("{z} = icmp eq i64 {gen}, 0"));
+        self.cond_br(&z, &skip, &chk);
+        self.place_label(&chk);
+        let hp = self.fresh();
+        self.line(&format!("{hp} = getelementptr i8, ptr {data}, i64 -8"));
+        let cur = self.fresh();
+        self.line(&format!("{cur} = load i64, ptr {hp}"));
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp ne i64 {cur}, {gen}"));
+        let fault = self.new_label();
+        self.cond_br(&bad, &fault, &skip);
+        self.place_label(&fault);
+        self.line("call void @cool_gen_fault()");
+        self.br(&skip);
+        self.place_label(&skip);
+        data
+    }
+
     fn default_ret(&mut self) {
         let r = self.ret.clone();
         match &r {
             CTy::Void => self.line("ret void"),
             CTy::F64 | CTy::F32 => self.line(&format!("ret {} 0.0", r.ll())),
-            CTy::Ptr(_) | CTy::RawPtr(_) => self.line("ret ptr null"),
+            CTy::RawPtr(_) => self.line("ret ptr null"),
             _ if r.is_aggregate() => self.line(&format!("ret {} zeroinitializer", r.ll())),
             _ => self.line(&format!("ret {} 0", r.ll())),
         }
@@ -743,6 +805,15 @@ impl<'a> Fb<'a> {
             let d = self.fresh();
             self.line(&format!("{d} = fptosi {} {op} to {}", from.ll(), to.ll()));
             return d;
+        }
+        // A managed pointer narrows to a raw pointer by dropping its generation,
+        // for returning or passing a *T where the raw *void layer is expected.
+        if matches!(from, CTy::Ptr(_)) && matches!(to, CTy::RawPtr(_)) {
+            return self.fat_data(op);
+        }
+        // A raw pointer widens to a managed pointer as untracked, generation 0.
+        if matches!(from, CTy::RawPtr(_)) && matches!(to, CTy::Ptr(_)) {
+            return self.fat(op, "0");
         }
         op.to_string()
     }
@@ -957,10 +1028,13 @@ impl<'a> Fb<'a> {
             }
             ExprKind::Unary(UnOp::Deref, p) => {
                 let pv = self.gen_expr(p);
-                if let CTy::Ptr(inner) | CTy::RawPtr(inner) = pv.ty {
-                    Some((*inner, pv.op))
-                } else {
-                    None
+                match pv.ty {
+                    CTy::Ptr(inner) => {
+                        let data = self.fat_checked(&pv.op);
+                        Some((*inner, data))
+                    }
+                    CTy::RawPtr(inner) => Some((*inner, pv.op)),
+                    _ => None,
                 }
             }
             ExprKind::Index(base, idx) => {
@@ -988,13 +1062,20 @@ impl<'a> Fb<'a> {
                     Some(((**elem).clone(), p))
                 }
                 CTy::Slice(elem) => {
-                    let data = self.load(&CTy::Ptr(elem.clone()), &bptr);
+                    let data = self.load(&CTy::RawPtr(elem.clone()), &bptr);
                     let p = self.fresh();
                     self.line(&format!("{p} = getelementptr {}, ptr {data}, i64 {i}", elem.ll()));
                     Some(((**elem).clone(), p))
                 }
-                CTy::Ptr(elem) | CTy::RawPtr(elem) => {
-                    let pv = self.load(&CTy::Ptr(elem.clone()), &bptr);
+                CTy::RawPtr(elem) => {
+                    let pv = self.load(&CTy::RawPtr(elem.clone()), &bptr);
+                    let p = self.fresh();
+                    self.line(&format!("{p} = getelementptr {}, ptr {pv}, i64 {i}", elem.ll()));
+                    Some(((**elem).clone(), p))
+                }
+                CTy::Ptr(elem) => {
+                    let fat = self.load(&CTy::Ptr(elem.clone()), &bptr);
+                    let pv = self.fat_checked(&fat);
                     let p = self.fresh();
                     self.line(&format!("{p} = getelementptr {}, ptr {pv}, i64 {i}", elem.ll()));
                     Some(((**elem).clone(), p))
@@ -1011,9 +1092,15 @@ impl<'a> Fb<'a> {
                     self.line(&format!("{p} = getelementptr {}, ptr {data}, i64 {i}", elem.ll()));
                     Some(((**elem).clone(), p))
                 }
-                CTy::Ptr(elem) | CTy::RawPtr(elem) => {
+                CTy::RawPtr(elem) => {
                     let p = self.fresh();
                     self.line(&format!("{p} = getelementptr {}, ptr {}, i64 {i}", elem.ll(), bv.op));
+                    Some(((**elem).clone(), p))
+                }
+                CTy::Ptr(elem) => {
+                    let pv = self.fat_checked(&bv.op);
+                    let p = self.fresh();
+                    self.line(&format!("{p} = getelementptr {}, ptr {pv}, i64 {i}", elem.ll()));
                     Some(((**elem).clone(), p))
                 }
                 _ => None,
@@ -1030,7 +1117,7 @@ impl<'a> Fb<'a> {
             ExprKind::Float(v, _) => Val::new(CTy::F64, format!("0x{:016X}", v.to_bits())),
             ExprKind::Bool(b) => Val::new(CTy::Bool, if *b { "1" } else { "0" }),
             ExprKind::Char(c) => Val::new(CTy::Char, (*c as u8).to_string()),
-            ExprKind::Str(s) => Val::new(CTy::Ptr(Box::new(CTy::Char)), self.m.cstring(s)),
+            ExprKind::Str(s) => Val::new(CTy::RawPtr(Box::new(CTy::Char)), self.m.cstring(s)),
             ExprKind::Ident(_) | ExprKind::Field(..) | ExprKind::Unary(UnOp::Deref, _) => {
                 self.gen_load(e)
             }
@@ -1081,7 +1168,7 @@ impl<'a> Fb<'a> {
                 }
                 CTy::Slice(elem) => {
                     let (idx, fty) = match field.as_str() {
-                        "ptr" => (0, CTy::Ptr(elem.clone())),
+                        "ptr" => (0, CTy::RawPtr(elem.clone())),
                         "len" => (1, CTy::Int(64)),
                         _ => return Val::i0(),
                     };
@@ -1427,7 +1514,7 @@ impl<'a> Fb<'a> {
             ExprKind::Float(..) => CTy::F64,
             ExprKind::Bool(_) => CTy::Bool,
             ExprKind::Char(_) => CTy::Char,
-            ExprKind::Str(_) => CTy::Ptr(Box::new(CTy::Char)),
+            ExprKind::Str(_) => CTy::RawPtr(Box::new(CTy::Char)),
             ExprKind::Ident(n) => self.locals.get(n).map(|(t, _)| t.clone()).unwrap_or(CTy::Unknown),
             ExprKind::Binary(op, a, _) => {
                 use BinOp::*;
@@ -1445,7 +1532,7 @@ impl<'a> Fb<'a> {
             ExprKind::Field(base, name) => match self.static_ty(base) {
                 CTy::Struct(t) => self.ctx.field(&t, name).map(|(_, ty)| ty).unwrap_or(CTy::Unknown),
                 CTy::Slice(elem) => match name.as_str() {
-                    "ptr" => CTy::Ptr(elem),
+                    "ptr" => CTy::RawPtr(elem),
                     "len" => CTy::Int(64),
                     _ => CTy::Unknown,
                 },
@@ -1497,7 +1584,15 @@ impl<'a> Fb<'a> {
                 "free" => {
                     if let Some(a) = args.first() {
                         let v = self.gen_expr(a);
-                        self.gen_free_call(&v.op);
+                        // A managed pointer unwraps to its data pointer with no
+                        // check, since freeing a stale pointer is the double free
+                        // the generation catches at the next deref. A raw pointer
+                        // is already a data pointer. Both free through the heap.
+                        let data = match &v.ty {
+                            CTy::Ptr(_) => self.fat_data(&v.op),
+                            _ => v.op.clone(),
+                        };
+                        self.gen_free_call(&data);
                     }
                     Val::new(CTy::Void, "")
                 }
@@ -1514,7 +1609,7 @@ impl<'a> Fb<'a> {
                     let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
                     let p = self.fresh();
                     self.line(&format!("{p} = call ptr @cool_debug_alloc(i64 {ni})"));
-                    Val::new(CTy::Ptr(Box::new(CTy::Int(8))), p)
+                    Val::new(CTy::RawPtr(Box::new(CTy::Int(8))), p)
                 }
                 "debug_free" => {
                     if let Some(a) = args.first() {
@@ -1538,7 +1633,7 @@ impl<'a> Fb<'a> {
                     // Both are an LLVM ptr, so this relabels the type and emits
                     // no instruction.
                     let v = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
-                    Val::new(CTy::Ptr(Box::new(CTy::Char)), v.op)
+                    Val::new(CTy::RawPtr(Box::new(CTy::Char)), v.op)
                 }
                 "read_file" => self.gen_read_file(args),
                 "write_file" => self.gen_write_file(args),
@@ -1567,7 +1662,7 @@ impl<'a> Fb<'a> {
             Some((CTy::Struct(t), pptr)) => (t, pptr),
             Some((CTy::Ptr(inner), pptr)) if matches!(*inner, CTy::Struct(_)) => {
                 let CTy::Struct(t) = *inner else { unreachable!() };
-                let p = self.load(&CTy::Ptr(Box::new(CTy::Struct(t.clone()))), &pptr);
+                let p = self.load(&CTy::RawPtr(Box::new(CTy::Struct(t.clone()))), &pptr);
                 (t, p)
             }
             Some((CTy::Error, pptr)) => {
@@ -1595,7 +1690,8 @@ impl<'a> Fb<'a> {
                         let CTy::Struct(t) = (**inner).clone() else {
                             unreachable!()
                         };
-                        (t, bv.op.clone())
+                        let data = self.fat_data(&bv.op);
+                        (t, data)
                     }
                     _ => return None,
                 }
@@ -1629,7 +1725,7 @@ impl<'a> Fb<'a> {
                 self.line(&format!("{d} = icmp ne ptr {}, null", ev.op));
                 Some(Val::new(CTy::Bool, d))
             }
-            "toString" => Some(Val::new(CTy::Ptr(Box::new(CTy::Char)), ev.op.clone())),
+            "toString" => Some(Val::new(CTy::RawPtr(Box::new(CTy::Char)), ev.op.clone())),
             "ignore" => Some(Val::new(CTy::Void, "")),
             "check" => {
                 let cv = self.gen_expr(args.first()?);
@@ -2167,7 +2263,7 @@ impl<'a> Fb<'a> {
     fn print_value(&mut self, v: &Val, newline: bool) {
         let suffix = if newline { "ln" } else { "" };
         match &v.ty {
-            CTy::Ptr(_) | CTy::Error => {
+            CTy::RawPtr(_) | CTy::Error => {
                 self.line(&format!("call void @cool_print{suffix}_cstr(ptr {})", v.op))
             }
             CTy::F64 | CTy::F32 => {
@@ -2237,14 +2333,14 @@ impl<'a> Fb<'a> {
         let n = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
         let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
         let p = self.gen_alloc_call(&ni, 8);
-        Val::new(CTy::Ptr(Box::new(CTy::Int(8))), p)
+        Val::new(CTy::RawPtr(Box::new(CTy::Int(8))), p)
     }
 
     /// read_file(path): slurps the whole file into a heap string, returning a
     /// `(string, error)` pair. On failure the data is the empty string and the
     /// error carries a message, so the caller's must handle rule still fires.
     fn gen_read_file(&mut self, args: &[Expr]) -> Val {
-        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let str_ty = CTy::RawPtr(Box::new(CTy::Char));
         let p = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
         let pp = self.coerce(&p.ty, &p.op, &str_ty);
         let buf = self.fresh();
@@ -2268,7 +2364,7 @@ impl<'a> Fb<'a> {
     /// write_file(path, contents): writes the string to the file, returning an
     /// `error` that exists when the write fails.
     fn gen_write_file(&mut self, args: &[Expr]) -> Val {
-        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let str_ty = CTy::RawPtr(Box::new(CTy::Char));
         let path = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
         let pp = self.coerce(&path.ty, &path.op, &str_ty);
         let data = args.get(1).map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
@@ -2290,7 +2386,7 @@ impl<'a> Fb<'a> {
     /// nulls at end of input, `read_all` reads the whole stream and nulls only on
     /// allocation failure.
     fn gen_stdin_read(&mut self, runtime_fn: &str, err_msg: &str) -> Val {
-        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let str_ty = CTy::RawPtr(Box::new(CTy::Char));
         let buf = self.fresh();
         self.line(&format!("{buf} = call ptr @{runtime_fn}()"));
         let isnull = self.fresh();
@@ -2313,7 +2409,7 @@ impl<'a> Fb<'a> {
     /// signals validity through an out pointer. Returns a `(float64, error)` pair
     /// whose error exists when the string is empty or not fully a number.
     fn gen_parse_float(&mut self, args: &[Expr]) -> Val {
-        let str_ty = CTy::Ptr(Box::new(CTy::Char));
+        let str_ty = CTy::RawPtr(Box::new(CTy::Char));
         let s = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
         let sp = self.coerce(&s.ty, &s.op, &str_ty);
         let okslot = self.alloca_raw("i64");
@@ -2340,8 +2436,8 @@ impl<'a> Fb<'a> {
         let n = args.get(1).map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
         let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
         let ty = match &p.ty {
-            CTy::Ptr(_) => p.ty.clone(),
-            _ => CTy::Ptr(Box::new(CTy::Int(8))),
+            CTy::Ptr(_) | CTy::RawPtr(_) => p.ty.clone(),
+            _ => CTy::RawPtr(Box::new(CTy::Int(8))),
         };
         let d = self.fresh();
         self.line(&format!("{d} = getelementptr i8, ptr {}, i64 {ni}", p.op));
@@ -2356,11 +2452,25 @@ impl<'a> Fb<'a> {
         self.line(&format!("{szp} = getelementptr {}, ptr null, i64 1", pointee.ll()));
         let sz = self.fresh();
         self.line(&format!("{sz} = ptrtoint ptr {szp} to i64"));
-        let p = self.gen_alloc_call(&sz, align);
+        // The default heap is the generational allocator: it writes a generation
+        // into the header word at p minus 8, read into the fat pointer so every
+        // deref is checked. A `using` allocator hands back untracked memory, so
+        // the generation is the sentinel 0 and the deref check is skipped.
+        let (p, gen) = if self.allocator.is_none() {
+            let p = self.fresh();
+            self.line(&format!("{p} = call ptr @cool_gen_alloc(i64 {sz})"));
+            let hp = self.fresh();
+            self.line(&format!("{hp} = getelementptr i8, ptr {p}, i64 -8"));
+            let g = self.load(&CTy::Int(64), &hp);
+            (p, g)
+        } else {
+            (self.gen_alloc_call(&sz, align), "0".to_string())
+        };
         if let Some(v) = value {
             self.line(&format!("store {} {}, ptr {p}", pointee.ll(), v.op));
         }
-        Val::new(CTy::Ptr(Box::new(pointee)), p)
+        let fat = self.fat(&p, &gen);
+        Val::new(CTy::Ptr(Box::new(pointee)), fat)
     }
 
     /// Allocates `size` bytes through the in scope `using` allocator, dispatching
@@ -2394,8 +2504,11 @@ impl<'a> Fb<'a> {
                 }
             }
             _ => {
+                // The default heap is the generational allocator. Every block,
+                // managed or a raw buffer, carries a header so free can return it
+                // to the size matched free list and the generation stays sound.
                 let p = self.fresh();
-                self.line(&format!("{p} = call ptr @cool_alloc(i64 {size})"));
+                self.line(&format!("{p} = call ptr @cool_gen_alloc(i64 {size})"));
                 p
             }
         }
@@ -2418,7 +2531,7 @@ impl<'a> Fb<'a> {
                     self.line(&format!("call void @cool_free(ptr {p})"));
                 }
             }
-            _ => self.line(&format!("call void @cool_free(ptr {p})")),
+            _ => self.line(&format!("call void @cool_gen_free(ptr {p})")),
         }
     }
 
@@ -2640,8 +2753,11 @@ mod tests {
     #[test]
     fn alloc_and_deref() {
         let out = ir("func f() -> int64 {\n  q: *int64 = alloc(100)\n  return *q\n}");
-        assert!(out.contains("call ptr @cool_alloc"));
-        assert!(out.contains("getelementptr i64, ptr null"));
+        // alloc goes through the generational heap and the deref checks the
+        // remembered generation against the header, faulting on a stale pointer.
+        assert!(out.contains("call ptr @cool_gen_alloc"), "{out}");
+        assert!(out.contains("getelementptr i64, ptr null"), "{out}");
+        assert!(out.contains("call void @cool_gen_fault()"), "{out}");
     }
 
     #[test]
@@ -2760,7 +2876,7 @@ mod tests {
     #[test]
     fn default_alloc_uses_heap() {
         let out = ir("func f() -> int64 {\n  p: *int64 = alloc(5)\n  return *p\n}");
-        assert!(out.contains("call ptr @cool_alloc"));
+        assert!(out.contains("call ptr @cool_gen_alloc"), "{out}");
     }
 
     #[test]
@@ -2776,7 +2892,7 @@ mod tests {
         let out = ir(
             "func f(xs: int64[]) -> void {\n  ys := map(xs, lambda (n: int64) -> int64 { return n })\n}",
         );
-        assert!(out.contains("call ptr @cool_alloc"), "map allocates result: {out}");
+        assert!(out.contains("call ptr @cool_gen_alloc"), "map allocates result: {out}");
         assert!(out.contains("icmp slt i64"), "map loops: {out}");
         assert!(out.contains("call i64 "), "map invokes the closure indirectly: {out}");
     }
@@ -2823,7 +2939,7 @@ mod tests {
         // sizeof lowers to a null GEP + ptrtoint; alloc_bytes to a raw allocation.
         assert!(out.contains("getelementptr i64, ptr null, i64 1"), "{out}");
         assert!(out.contains("ptrtoint ptr"), "{out}");
-        assert!(out.contains("call ptr @cool_alloc"), "{out}");
+        assert!(out.contains("call ptr @cool_gen_alloc"), "{out}");
     }
 
     #[test]

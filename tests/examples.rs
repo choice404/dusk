@@ -22,6 +22,40 @@ fn run(example: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Compiles and runs an example, returning its stdout, stderr, and whether it
+/// exited cleanly. Unlike `run`, it tolerates a non zero exit, so a program that
+/// faults at runtime, like a use after free, can be checked.
+fn run_raw(example: &str) -> (String, String, bool) {
+    let bin = env!("CARGO_BIN_EXE_dusk");
+    let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
+    let out = Command::new(bin)
+        .arg("run")
+        .arg(&path)
+        .output()
+        .expect("spawn dusk");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+#[test]
+fn use_after_free_faults() {
+    let (out, err, ok) = run_raw("uaf.dusk");
+    assert!(!ok, "use after free must fault");
+    assert_eq!(out, "42\n", "the valid deref prints before the fault");
+    assert!(err.contains("use of a freed or stale pointer"), "{err}");
+}
+
+#[test]
+fn double_free_faults() {
+    let (out, err, ok) = run_raw("doublefree.dusk");
+    assert!(!ok, "double free must fault");
+    assert_eq!(out, "5\n");
+    assert!(err.contains("double free"), "{err}");
+}
+
 macro_rules! golden {
     ($name:ident, $file:literal, $expected:literal) => {
         #[test]
@@ -60,6 +94,7 @@ golden!(fileio, "fileio.dusk", "persisted\n9\n");
 golden!(parse, "parse.dusk", "255\n255\n10\n15\n-42\n-1\n4\n-2\n");
 golden!(printing, "printing.dusk", "score: 42\nabc\nAda is 36\n{braces} and 7\n");
 golden!(strbuf, "strbuf.dusk", "dusk and dawn\n13\nhello, world\n");
+golden!(genref, "genref.dusk", "10\n15\n3\n4\n30\n");
 
 /// Runs an example feeding `input` to its stdin, so a program that reads with
 /// `read_line` can be exercised deterministically from a pipe.
