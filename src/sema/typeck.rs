@@ -38,11 +38,21 @@ enum Ty {
     Unknown,
 }
 
+/// Ownership state of a managed pointer binding, for the single owner rules.
+/// A non managed binding has no entry at all.
+#[derive(Clone, Copy, PartialEq)]
+enum Own {
+    Owner,
+    Borrow,
+    Moved,
+}
+
 struct TypeChecker {
     sigs: HashMap<String, (Vec<Ty>, Ty)>,
     ifaces: HashSet<String>,
     enums: HashMap<String, Vec<String>>,
     scopes: Vec<HashMap<String, Ty>>,
+    owns: Vec<HashMap<String, Own>>,
     cur_generics: HashSet<String>,
     cur_ret: Ty,
     errors: Vec<Diagnostic>,
@@ -55,6 +65,7 @@ impl TypeChecker {
             ifaces: HashSet::new(),
             enums: HashMap::new(),
             scopes: Vec::new(),
+            owns: Vec::new(),
             cur_generics: HashSet::new(),
             cur_ret: Ty::Unit,
             errors: Vec::new(),
@@ -125,6 +136,11 @@ impl TypeChecker {
         }
         for p in &f.params {
             let ty = self.lower(&p.ty);
+            // A pointer parameter is a borrow with no keyword; the callee never
+            // owns or frees it.
+            if is_managed(&ty) {
+                self.declare_own(&p.name, Own::Borrow);
+            }
             self.declare(&p.name, ty);
         }
         for s in &f.body.stmts {
@@ -139,10 +155,12 @@ impl TypeChecker {
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.owns.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.owns.pop();
     }
 
     fn declare(&mut self, name: &str, ty: Ty) {
@@ -164,16 +182,49 @@ impl TypeChecker {
         Ty::Unknown
     }
 
+    /// Records the ownership state of a managed pointer binding in the current
+    /// scope. Only `*T` bindings get an entry; raw and non pointer bindings do
+    /// not participate in the single owner rules.
+    fn declare_own(&mut self, name: &str, own: Own) {
+        if let Some(scope) = self.owns.last_mut() {
+            scope.insert(name.to_string(), own);
+        }
+    }
+
+    fn own_of(&self, name: &str) -> Option<Own> {
+        for scope in self.owns.iter().rev() {
+            if let Some(o) = scope.get(name) {
+                return Some(*o);
+            }
+        }
+        None
+    }
+
+    fn set_moved(&mut self, name: &str) {
+        for scope in self.owns.iter_mut().rev() {
+            if scope.contains_key(name) {
+                scope.insert(name.to_string(), Own::Moved);
+                return;
+            }
+        }
+    }
+
     fn err(&mut self, msg: impl Into<String>, span: Span) {
         self.errors.push(Diagnostic::new(msg, span));
     }
 
     fn block(&mut self, b: &Block) {
+        // Snapshot ownership so a move inside a conditional or loop branch does
+        // not leak out to the straight line code after it. The static pass is
+        // single block with no cross branch data flow; the runtime generation
+        // check backstops a move that a branch actually took.
+        let saved = self.owns.clone();
         self.push_scope();
         for s in &b.stmts {
             self.stmt(s);
         }
         self.pop_scope();
+        self.owns = saved;
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -184,6 +235,18 @@ impl TypeChecker {
                 let rt = self.infer(rhs);
                 if !compatible(&lt, &rt) {
                     self.err("assignment type mismatch", lhs.span);
+                }
+                // `q = p` aliases two owners exactly like the let form copy, so
+                // flag it the same rather than leaving it to the runtime.
+                if is_managed(&lt) {
+                    if let (ExprKind::Ident(_), ExprKind::Ident(src)) = (&lhs.kind, &rhs.kind) {
+                        if matches!(self.own_of(src), Some(Own::Owner)) {
+                            self.err(
+                                "cannot copy an owning pointer; bind a `ref` alias or `move` it",
+                                rhs.span,
+                            );
+                        }
+                    }
                 }
             }
             Stmt::Return(Some(e)) => {
@@ -243,9 +306,13 @@ impl TypeChecker {
                     }
                     lt
                 }
-                None => vt,
+                None => vt.clone(),
             };
-            self.declare(&b.name, ty);
+            self.declare(&b.name, ty.clone());
+            if is_managed(&ty) {
+                let own = self.binding_own(l, &vt);
+                self.declare_own(&b.name, own);
+            }
             return;
         }
         let parts = match &vt {
@@ -261,7 +328,50 @@ impl TypeChecker {
                 Some(t) => self.lower(t),
                 None => pt,
             };
+            // A destructured managed pointer is conservatively an owner, so it is
+            // tracked and freeing it is not wrongly rejected. The static copy
+            // check for the destructure itself falls to the runtime backstop.
+            if is_managed(&ty) {
+                self.declare_own(&b.name, Own::Owner);
+            }
             self.declare(&b.name, ty);
+        }
+    }
+
+    /// The ownership of a single managed pointer binding. A `ref` binding is a
+    /// non owning alias; alloc, move, or a pointer returning call produce an
+    /// owner; a plain copy of a borrow is a borrow; and a plain copy of an owner
+    /// is the flagged single owner violation.
+    fn binding_own(&mut self, l: &Let, vt: &Ty) -> Own {
+        if l.is_ref {
+            return Own::Borrow;
+        }
+        match &l.value.kind {
+            // A call owns its managed `*T` result, since a pointer return moves
+            // ownership out. A call that returns `*void` or a raw pointer, like
+            // an arena bump, hands back a view into something else, not a fresh
+            // owner, so the binding borrows.
+            ExprKind::Call(..) => {
+                if is_managed(vt) {
+                    Own::Owner
+                } else {
+                    Own::Borrow
+                }
+            }
+            ExprKind::Ident(src) => match self.own_of(src) {
+                Some(Own::Owner) => {
+                    self.err(
+                        "cannot copy an owning pointer; bind a `ref` alias or `move` it",
+                        l.value.span,
+                    );
+                    Own::Owner
+                }
+                _ => Own::Borrow,
+            },
+            // A projection that detaches a managed pointer, a deref, field, or
+            // index, is treated as an owner so freeing it is not rejected; the
+            // runtime generation check backstops any aliasing this does not see.
+            _ => Own::Owner,
         }
     }
 
@@ -272,7 +382,12 @@ impl TypeChecker {
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Char(_) => Ty::Char,
             ExprKind::Str(_) => Ty::Str,
-            ExprKind::Ident(name) => self.lookup(name),
+            ExprKind::Ident(name) => {
+                if matches!(self.own_of(name), Some(Own::Moved)) {
+                    self.err("use of a moved pointer", e.span);
+                }
+                self.lookup(name)
+            }
             ExprKind::Unary(op, x) => {
                 let t = self.infer(x);
                 self.check_unary(*op, &t, e.span)
@@ -370,6 +485,12 @@ impl TypeChecker {
                     }
                     return Ty::Unit;
                 }
+                if name == "alloc" {
+                    // alloc(v) yields a managed *T owner of the value's type, so
+                    // the single owner pass engages even for the inferred form.
+                    let inner = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                    return Ty::Ptr(Box::new(inner));
+                }
                 if name == "ptr_add" {
                     // ptr_add is raw byte arithmetic over the raw pointer layer.
                     // A managed *T is a fat value, not a raw operand, so reject it
@@ -387,8 +508,39 @@ impl TypeChecker {
                     return pt;
                 }
                 if name == "move" {
-                    // move(x) transfers ownership; its value and type are x's.
-                    return args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                    // move(x) transfers ownership; its value and type are x's, and
+                    // the source binding is invalidated so a later use is rejected.
+                    let t = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                    if let Some(a) = args.first() {
+                        if let ExprKind::Ident(src) = &a.kind {
+                            if matches!(self.own_of(src), Some(Own::Borrow)) {
+                                self.err(
+                                    "cannot move a borrowed pointer; only its owner can be moved",
+                                    a.span,
+                                );
+                            }
+                            self.set_moved(src);
+                        }
+                    }
+                    return t;
+                }
+                if name == "free" {
+                    // Only an owner frees. Freeing a borrow, a ref alias or a
+                    // pointer parameter, is rejected; its owner frees it instead.
+                    if let Some(a) = args.first() {
+                        let t = self.infer(a);
+                        if is_managed(&t) {
+                            if let ExprKind::Ident(p) = &a.kind {
+                                if matches!(self.own_of(p), Some(Own::Borrow)) {
+                                    self.err(
+                                        "cannot free a borrowed pointer; only its owner frees it",
+                                        a.span,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    return Ty::Unit;
                 }
             }
         }
@@ -577,6 +729,13 @@ fn elem_of(t: &Ty) -> Ty {
     }
 }
 
+/// Whether a type is a managed pointer subject to the single owner rules. A
+/// `*void`, which is `Ty::Ptr(Unit)`, is the raw allocator currency and is
+/// exempt, as is every `*raw T`.
+fn is_managed(ty: &Ty) -> bool {
+    matches!(ty, Ty::Ptr(inner) if !matches!(&**inner, Ty::Unit))
+}
+
 fn compatible(a: &Ty, b: &Ty) -> bool {
     if a == b || matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) {
         return true;
@@ -684,6 +843,67 @@ mod tests {
     fn deref_non_pointer() {
         let e = errs("func f() -> int64 {\n  x := 5\n  return *x\n}");
         assert!(e.iter().any(|d| d.msg.contains("dereference")));
+    }
+
+    #[test]
+    fn copying_an_owner_is_rejected() {
+        let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  q: *int64 = p\n  free(q)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("copy an owning pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn use_after_move_is_rejected() {
+        let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  q: *int64 = move(p)\n  free(p)\n  free(q)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("moved pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn freeing_a_borrow_is_rejected() {
+        let e = errs("func sink(p: *int64) -> void {\n  free(p)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("borrowed pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn ref_alias_and_move_are_allowed() {
+        // A ref aliases without copying ownership, and move transfers it; neither
+        // is an ownership error, so the only diagnostics here are unrelated.
+        let e = errs(
+            "func f() -> void {\n  p: *int64 = alloc(5)\n  ref r: *int64 = p\n  println(*r)\n  q: *int64 = move(p)\n  free(q)\n}",
+        );
+        assert!(
+            !e.iter().any(|d| d.msg.contains("owning")
+                || d.msg.contains("moved pointer")
+                || d.msg.contains("borrowed pointer")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn assignment_copy_of_owner_is_rejected() {
+        let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  mut q: *int64 = alloc(9)\n  q = p\n  free(p)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("copy an owning pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn moving_a_borrow_is_rejected() {
+        let e = errs("func sink(p: *int64) -> void {\n  q: *int64 = move(p)\n  free(q)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("move a borrowed pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn inferred_alloc_binding_is_an_owner() {
+        // alloc infers to a managed pointer, so the inferred `:=` form is tracked
+        // and a copy of it is the single owner violation.
+        let e = errs("func f() -> void {\n  x := alloc(5)\n  y := x\n  free(x)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("copy an owning pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn a_conditional_move_does_not_leak_past_the_branch() {
+        // The static pass is single block: a move inside an if does not invalidate
+        // the binding after the branch; the runtime generation check backstops it.
+        let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  if true {\n    q: *int64 = move(p)\n    free(q)\n    return\n  }\n  free(p)\n}");
+        assert!(!e.iter().any(|d| d.msg.contains("moved pointer")), "{e:?}");
     }
 
     #[test]

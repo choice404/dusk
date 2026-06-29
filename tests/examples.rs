@@ -103,6 +103,7 @@ golden!(parse, "parse.dusk", "255\n255\n10\n15\n-42\n-1\n4\n-2\n");
 golden!(printing, "printing.dusk", "score: 42\nabc\nAda is 36\n{braces} and 7\n");
 golden!(strbuf, "strbuf.dusk", "dusk and dawn\n13\nhello, world\n");
 golden!(genref, "genref.dusk", "10\n15\n3\n4\n30\n");
+golden!(ownership, "ownership.dusk", "2\n2\n");
 
 /// Runs an example feeding `input` to its stdin, so a program that reads with
 /// `read_line` can be exercised deterministically from a pipe.

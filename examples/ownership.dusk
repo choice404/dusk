@@ -1,0 +1,23 @@
+@paradigm procedural
+
+// Single owner pointers. An owner is bound from alloc; passing it to a function
+// borrows it; a ref aliases it without owning; move transfers ownership. Only
+// the owner frees, and a use of a moved or copied owner is a compile error.
+struct Box {
+    n: int64,
+}
+
+func bump(b: *Box) -> void {
+    (*b).n = (*b).n + 1
+}
+
+func main() -> int32 {
+    owner: *Box = alloc(Box { n: 1 })
+    bump(owner)
+    ref alias: *Box = owner
+    println((*alias).n)
+    moved: *Box = move(owner)
+    println((*moved).n)
+    free(moved)
+    return 0
+}
