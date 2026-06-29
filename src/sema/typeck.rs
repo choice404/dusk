@@ -254,6 +254,7 @@ impl TypeChecker {
                 if !compatible(&self.cur_ret.clone(), &t) {
                     self.err("return type does not match the function's return type", e.span);
                 }
+                self.check_escape(e, &t);
             }
             Stmt::Return(None) => {
                 if !compatible(&self.cur_ret.clone(), &Ty::Unit) {
@@ -373,6 +374,53 @@ impl TypeChecker {
             // runtime generation check backstops any aliasing this does not see.
             _ => Own::Owner,
         }
+    }
+
+    /// Rejects the clear cases of a value escaping its frame through a return: a
+    /// slice that views a frame local fixed array, and a closure that captures a
+    /// local. A managed pointer escape is covered by the generation check, not
+    /// here, since dusk has no address of operator and so every pointer is heap.
+    fn check_escape(&mut self, e: &Expr, t: &Ty) {
+        // A slice that views a frame local array dangles once the function
+        // returns and the stack array is reclaimed. A heap backed slice, like a
+        // map result, or a slice parameter, whose backing the caller owns, is
+        // fine. The backing is a local array exactly when the sliced base, or the
+        // returned value itself for the array to slice coercion, has array type.
+        if matches!(self.cur_ret, Ty::Slice(_)) {
+            let backs_local_array = match &e.kind {
+                ExprKind::Index(base, idx) if matches!(idx.kind, ExprKind::Range(..)) => {
+                    matches!(self.infer(base), Ty::Array(..))
+                }
+                _ => matches!(t, Ty::Array(..)),
+            };
+            if backs_local_array {
+                self.err(
+                    "a slice into a local array escapes its frame; put the backing on the heap",
+                    e.span,
+                );
+            }
+        }
+        // A closure that captures a frame local has its environment on the stack,
+        // reclaimed at return, so the escaped closure dangles. A closure with no
+        // captures is a plain function pointer and may be returned.
+        if let ExprKind::Lambda(l) = &e.kind {
+            if self.lambda_captures_local(l) {
+                self.err(
+                    "a closure that captures a local escapes its frame; it cannot be returned",
+                    e.span,
+                );
+            }
+        }
+    }
+
+    /// Whether a lambda reads any variable bound in an enclosing scope, which
+    /// makes its environment a frame local that must not escape.
+    fn lambda_captures_local(&self, l: &Lambda) -> bool {
+        let mut used = Vec::new();
+        let mut bound: HashSet<String> = l.params.iter().map(|p| p.name.clone()).collect();
+        crate::parser::ast::collect_block(&l.body, &mut used, &mut bound);
+        used.iter()
+            .any(|n| !bound.contains(n) && self.scopes.iter().any(|s| s.contains_key(n)))
     }
 
     fn infer(&mut self, e: &Expr) -> Ty {
@@ -904,6 +952,34 @@ mod tests {
         // the binding after the branch; the runtime generation check backstops it.
         let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  if true {\n    q: *int64 = move(p)\n    free(q)\n    return\n  }\n  free(p)\n}");
         assert!(!e.iter().any(|d| d.msg.contains("moved pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn slice_into_local_array_cannot_escape() {
+        let e = errs("func f() -> int64[] {\n  xs: int64[3] = [1, 2, 3]\n  return xs[0..3]\n}");
+        assert!(e.iter().any(|d| d.msg.contains("escapes its frame")), "{e:?}");
+    }
+
+    #[test]
+    fn capturing_closure_cannot_escape() {
+        let e = errs(
+            "func f() -> (int64) -> int64 {\n  x: int64 = 10\n  return lambda (n: int64) -> int64 { return n + x }\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("escapes its frame")), "{e:?}");
+    }
+
+    #[test]
+    fn returning_a_slice_of_a_slice_parameter_is_allowed() {
+        let e = errs("func f(xs: int64[]) -> int64[] {\n  return xs[0..2]\n}");
+        assert!(!e.iter().any(|d| d.msg.contains("escapes")), "{e:?}");
+    }
+
+    #[test]
+    fn returning_a_non_capturing_closure_is_allowed() {
+        let e = errs(
+            "func f() -> (int64) -> int64 {\n  return lambda (n: int64) -> int64 { return n + 1 }\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("escapes")), "{e:?}");
     }
 
     #[test]

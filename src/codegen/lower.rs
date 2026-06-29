@@ -1832,7 +1832,7 @@ impl<'a> Fb<'a> {
     fn lambda_captures(&self, l: &Lambda) -> Vec<(String, CTy)> {
         let mut used = Vec::new();
         let mut bound: HashSet<String> = l.params.iter().map(|p| p.name.clone()).collect();
-        collect_block(&l.body, &mut used, &mut bound);
+        ast::collect_block(&l.body, &mut used, &mut bound);
         let mut caps = Vec::new();
         let mut seen = HashSet::new();
         for n in used {
@@ -2618,100 +2618,6 @@ fn int_ty(suffix: &Option<String>) -> CTy {
         Some("i16") | Some("u16") => CTy::Int(16),
         Some("i32") | Some("u32") => CTy::Int(32),
         _ => CTy::Int(64),
-    }
-}
-
-fn collect_block(b: &Block, used: &mut Vec<String>, bound: &mut HashSet<String>) {
-    for s in &b.stmts {
-        collect_stmt(s, used, bound);
-    }
-}
-
-fn collect_stmt(s: &Stmt, used: &mut Vec<String>, bound: &mut HashSet<String>) {
-    match s {
-        Stmt::Let(l) => {
-            collect_expr(&l.value, used, bound);
-            for b in &l.binds {
-                bound.insert(b.name.clone());
-            }
-        }
-        Stmt::Assign(a, b) => {
-            collect_expr(a, used, bound);
-            collect_expr(b, used, bound);
-        }
-        Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => collect_expr(e, used, bound),
-        Stmt::Return(None) => {}
-        Stmt::If(i) => {
-            collect_expr(&i.cond, used, bound);
-            collect_block(&i.then, used, bound);
-            if let Some(e) = &i.els {
-                collect_block(e, used, bound);
-            }
-        }
-        Stmt::While(w) => {
-            collect_expr(&w.cond, used, bound);
-            collect_block(&w.body, used, bound);
-        }
-        Stmt::For(f) => {
-            collect_expr(&f.iter, used, bound);
-            bound.insert(f.var.clone());
-            collect_block(&f.body, used, bound);
-        }
-        Stmt::Match(m) => collect_match(m, used, bound),
-    }
-}
-
-fn collect_match(m: &ast::Match, used: &mut Vec<String>, bound: &mut HashSet<String>) {
-    collect_expr(&m.scrut, used, bound);
-    for arm in &m.arms {
-        match &arm.pat {
-            Pattern::Variant(_, binds) => {
-                for b in binds {
-                    bound.insert(b.clone());
-                }
-            }
-            Pattern::Ident(n) => {
-                bound.insert(n.clone());
-            }
-            Pattern::Wildcard => {}
-        }
-        collect_block(&arm.body, used, bound);
-    }
-}
-
-fn collect_expr(e: &Expr, used: &mut Vec<String>, bound: &mut HashSet<String>) {
-    match &e.kind {
-        ExprKind::Ident(n) => used.push(n.clone()),
-        ExprKind::Unary(_, x) => collect_expr(x, used, bound),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
-            collect_expr(a, used, bound);
-            collect_expr(b, used, bound);
-        }
-        ExprKind::Call(f, args) => {
-            collect_expr(f, used, bound);
-            for a in args {
-                collect_expr(a, used, bound);
-            }
-        }
-        ExprKind::Field(b, _) => collect_expr(b, used, bound),
-        ExprKind::Tuple(xs) | ExprKind::Array(xs) => {
-            for x in xs {
-                collect_expr(x, used, bound);
-            }
-        }
-        ExprKind::StructLit(_, fs) => {
-            for (_, v) in fs {
-                collect_expr(v, used, bound);
-            }
-        }
-        ExprKind::Lambda(l) => {
-            for p in &l.params {
-                bound.insert(p.name.clone());
-            }
-            collect_block(&l.body, used, bound);
-        }
-        ExprKind::Match(m) => collect_match(m, used, bound),
-        _ => {}
     }
 }
 
