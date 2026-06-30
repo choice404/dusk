@@ -256,6 +256,9 @@ impl<'a> Mono<'a> {
                 }));
             }
             Item::Interface(i) => self.out.push(Item::Interface(i.clone())),
+            // A foreign block has no generics, so it passes through untouched. It
+            // must be carried forward, since codegen reads it for the declares.
+            Item::Foreign(fb) => self.out.push(Item::Foreign(fb.clone())),
             _ => {}
         }
     }
@@ -891,6 +894,7 @@ mod tests {
                 Item::Enum(en) => en.name.clone(),
                 Item::Impl(im) => format!("impl {}", im.ty),
                 Item::Interface(it) => it.name.clone(),
+                Item::Foreign(_) => "foreign".to_string(),
             })
             .collect()
     }

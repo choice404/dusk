@@ -196,6 +196,7 @@ impl Parser {
             TokenKind::Kw(Keyword::Enum) => Some(Item::Enum(self.enum_(exported))),
             TokenKind::Kw(Keyword::Interface) => Some(Item::Interface(self.interface(exported))),
             TokenKind::Kw(Keyword::Impl) => Some(Item::Impl(self.impl_())),
+            TokenKind::Kw(Keyword::Foreign) => Some(Item::Foreign(self.foreign())),
             _ => {
                 if exported {
                     self.error("expected an item after 'export'");
@@ -347,6 +348,35 @@ impl Parser {
             generics,
             methods,
         }
+    }
+
+    /// `foreign "C" { func name(params) -> ret ... }`. Each entry is a function
+    /// signature with no body, prefixed by `func` like an ordinary declaration.
+    /// The abi string and the raw pointer boundary are validated in the checker.
+    fn foreign(&mut self) -> Foreign {
+        self.bump();
+        let abi = if matches!(self.peek(), TokenKind::Str(_)) {
+            match self.take_kind() {
+                TokenKind::Str(s) => s,
+                _ => unreachable!(),
+            }
+        } else {
+            self.error("expected a calling convention string after 'foreign', such as \"C\"");
+            String::new()
+        };
+        let mut funcs = Vec::new();
+        self.expect(&TokenKind::LBrace);
+        while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            self.expect(&TokenKind::Kw(Keyword::Func));
+            let name = self.ident();
+            let params = self.params();
+            self.expect(&TokenKind::Arrow);
+            let ret = self.type_();
+            self.eat(&TokenKind::Semi);
+            funcs.push(ForeignFunc { name, params, ret });
+        }
+        self.expect(&TokenKind::RBrace);
+        Foreign { abi, funcs }
     }
 
     fn impl_(&mut self) -> Impl {
@@ -1102,6 +1132,25 @@ mod tests {
              impl Display for Point { func toString() -> string { return \"p\" } }",
         );
         assert_eq!(m.items.len(), 4);
+    }
+
+    #[test]
+    fn foreign_block_parses() {
+        let m = parse_ok(
+            "foreign \"C\" {\n\
+             func abs(n: int32) -> int32\n\
+             func labs(n: int64) -> int64\n\
+             }",
+        );
+        assert_eq!(m.items.len(), 1);
+        let Item::Foreign(fb) = &m.items[0] else {
+            panic!("expected a foreign block")
+        };
+        assert_eq!(fb.abi, "C");
+        assert_eq!(fb.funcs.len(), 2);
+        assert_eq!(fb.funcs[0].name, "abs");
+        assert_eq!(fb.funcs[0].params.len(), 1);
+        assert_eq!(fb.funcs[1].name, "labs");
     }
 
     #[test]

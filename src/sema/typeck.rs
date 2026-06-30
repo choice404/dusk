@@ -86,11 +86,26 @@ impl TypeChecker {
             }
         }
         for item in &module.items {
-            if let Item::Func(f) = item {
-                let gens: HashSet<String> = f.generics.iter().cloned().collect();
-                let params = f.params.iter().map(|p| self.fix(lower(&p.ty, &gens))).collect();
-                let ret = self.fix(lower(&f.ret, &gens));
-                self.sigs.insert(f.name.clone(), (params, ret));
+            match item {
+                Item::Func(f) => {
+                    let gens: HashSet<String> = f.generics.iter().cloned().collect();
+                    let params = f.params.iter().map(|p| self.fix(lower(&p.ty, &gens))).collect();
+                    let ret = self.fix(lower(&f.ret, &gens));
+                    self.sigs.insert(f.name.clone(), (params, ret));
+                }
+                Item::Foreign(fb) => {
+                    // A foreign function is non generic, so its signature lowers
+                    // against an empty generic set. It joins the same table an
+                    // ordinary call resolves against, so the call is type checked.
+                    let gens = HashSet::new();
+                    for ff in &fb.funcs {
+                        let params =
+                            ff.params.iter().map(|p| self.fix(lower(&p.ty, &gens))).collect();
+                        let ret = self.fix(lower(&ff.ret, &gens));
+                        self.sigs.insert(ff.name.clone(), (params, ret));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -122,9 +137,51 @@ impl TypeChecker {
                         self.func(m, true);
                     }
                 }
+                Item::Foreign(fb) => self.check_foreign(fb),
                 _ => {}
             }
         }
+    }
+
+    /// A foreign block ties external C symbols into the program. The abi must be
+    /// "C", and every parameter and return type sits on the raw pointer layer, a
+    /// scalar, a `*raw T`, or a `*void`. A managed `*T` carries a generation
+    /// header C cannot read, so it never crosses, and an aggregate passed by value
+    /// is left to a later interop release.
+    fn check_foreign(&mut self, fb: &Foreign) {
+        if fb.abi != "C" {
+            self.err(
+                format!("unsupported foreign abi \"{}\", only \"C\" is supported", fb.abi),
+                Span::new(0, 0),
+            );
+        }
+        let empty = HashSet::new();
+        for ff in &fb.funcs {
+            for p in &ff.params {
+                let ty = self.fix(lower(&p.ty, &empty));
+                self.check_foreign_ty(&ty, &ff.name);
+            }
+            let ret = self.fix(lower(&ff.ret, &empty));
+            self.check_foreign_ty(&ret, &ff.name);
+        }
+    }
+
+    fn check_foreign_ty(&mut self, ty: &Ty, fname: &str) {
+        if foreign_ty_ok(ty) {
+            return;
+        }
+        let msg = if is_managed(ty) {
+            format!(
+                "foreign function '{fname}' uses a managed pointer at the C boundary; \
+                 use *raw T or *void, since a managed *T carries a generation C cannot read"
+            )
+        } else {
+            format!(
+                "foreign function '{fname}' uses a type the C boundary does not support yet; \
+                 a foreign signature takes scalars and raw pointers, *raw T or *void"
+            )
+        };
+        self.err(msg, Span::new(0, 0));
     }
 
     fn func(&mut self, f: &Func, is_method: bool) {
@@ -784,6 +841,18 @@ fn is_managed(ty: &Ty) -> bool {
     matches!(ty, Ty::Ptr(inner) if !matches!(&**inner, Ty::Unit))
 }
 
+/// The types a foreign C signature may use. The boundary is the raw pointer
+/// layer, so a scalar, a `*raw T`, or a `*void` crosses, and `void` is a valid
+/// return. A managed `*T` and an aggregate passed by value do not cross.
+fn foreign_ty_ok(ty: &Ty) -> bool {
+    match ty {
+        Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Unit => true,
+        Ty::RawPtr(_) => true,
+        Ty::Ptr(inner) => matches!(**inner, Ty::Unit),
+        _ => false,
+    }
+}
+
 fn compatible(a: &Ty, b: &Ty) -> bool {
     if a == b || matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) {
         return true;
@@ -867,6 +936,34 @@ mod tests {
     fn arithmetic_mismatch() {
         let e = errs("func f() -> int64 { return 1 + true }");
         assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn foreign_managed_pointer_rejected() {
+        let e = errs(
+            "foreign \"C\" { func bad(p: *int64) -> int32 }\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(
+            e.iter().any(|d| d.msg.contains("managed pointer at the C boundary")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn foreign_bad_abi_rejected() {
+        let e = errs(
+            "foreign \"Rust\" { func abs(n: int32) -> int32 }\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("only \"C\" is supported")), "{e:?}");
+    }
+
+    #[test]
+    fn foreign_raw_pointer_ok() {
+        let e = errs(
+            "foreign \"C\" { func memset(dst: *raw int8, c: int32, n: int64) -> *void }\n\
+             func main() -> int32 { return 0 }",
+        );
+        assert!(e.is_empty(), "raw pointer boundary should be accepted: {e:?}");
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub enum Item {
     Enum(Enum),
     Interface(Interface),
     Impl(Impl),
+    Foreign(Foreign),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +86,23 @@ pub struct Impl {
     pub iface: Option<String>,
     pub ty: String,
     pub methods: Vec<Func>,
+}
+
+/// A block of external function declarations bound to a calling convention, as in
+/// `foreign "C" { func write(fd: int32, buf: *raw int8, count: int) -> int }`. The
+/// functions have no body. They resolve to a C symbol of the same name at link,
+/// and the boundary trades in raw pointers only, never a managed `*T`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Foreign {
+    pub abi: String,
+    pub funcs: Vec<ForeignFunc>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignFunc {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]

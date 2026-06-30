@@ -65,6 +65,11 @@ impl Resolver {
                     globals.insert(i.name.clone());
                 }
                 Item::Impl(_) => {}
+                Item::Foreign(fb) => {
+                    for ff in &fb.funcs {
+                        globals.insert(ff.name.clone());
+                    }
+                }
             }
         }
         // Only the namespace root is accepted leniently. Real imported symbols
@@ -365,6 +370,9 @@ fn item_name(item: &Item) -> Option<&str> {
         Item::Enum(e) => Some(&e.name),
         Item::Interface(i) => Some(&i.name),
         Item::Impl(_) => None,
+        // A foreign block declares several names, so it has no single item name.
+        // The names still register as globals above so calls resolve.
+        Item::Foreign(_) => None,
     }
 }
 

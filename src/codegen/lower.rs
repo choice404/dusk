@@ -43,6 +43,19 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("ptr @cool_read_line()");
     m.declare("ptr @cool_read_all()");
     m.declare("double @cool_parse_float(ptr, ptr)");
+    // External C functions from a foreign block. Their signatures already sit in
+    // ctx.fns, so a call lowers like any other user call; here they are declared
+    // so clang binds them against libc at link.
+    for item in &module.items {
+        if let Item::Foreign(fb) = item {
+            for ff in &fb.funcs {
+                if let Some((ret, params)) = ctx.fns.get(&ff.name) {
+                    let ps = params.iter().map(|p| p.ll()).collect::<Vec<_>>().join(", ");
+                    m.declare(&format!("{} @{}({ps})", ret.ll(), ff.name));
+                }
+            }
+        }
+    }
     for (name, fields) in &ctx.structs {
         let body = fields
             .iter()
@@ -370,6 +383,13 @@ impl Ctx {
                         let mut params = vec![CTy::Struct(im.ty.clone())];
                         params.extend(method.params.iter().map(|p| lower_ty(&p.ty, &nom)));
                         methods.insert(format!("{}.{}", im.ty, method.name), (ret, params));
+                    }
+                }
+                Item::Foreign(fb) => {
+                    for ff in &fb.funcs {
+                        let ret = lower_ty(&ff.ret, &nom);
+                        let params = ff.params.iter().map(|p| lower_ty(&p.ty, &nom)).collect();
+                        fns.insert(ff.name.clone(), (ret, params));
                     }
                 }
                 _ => {}
@@ -2632,6 +2652,16 @@ mod tests {
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
         compile(&m)
+    }
+
+    #[test]
+    fn foreign_block_declares_and_calls() {
+        let out = ir(
+            "foreign \"C\" { func abs(n: int32) -> int32 }\n\
+             func main() -> int32 { return abs(-5) }",
+        );
+        assert!(out.contains("declare i32 @abs(i32)"), "{out}");
+        assert!(out.contains("call i32 @abs("), "{out}");
     }
 
     #[test]

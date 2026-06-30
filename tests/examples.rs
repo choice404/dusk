@@ -41,6 +41,12 @@ fn run_raw(example: &str) -> (String, String, bool) {
 }
 
 #[test]
+fn foreign_calls_libc() {
+    // A foreign block declares libc abs and labs, called like ordinary functions.
+    assert_eq!(run("foreign.dusk"), "5\n7\n");
+}
+
+#[test]
 fn use_after_free_faults() {
     let (out, err, ok) = run_raw("uaf.dusk");
     assert!(!ok, "use after free must fault");

@@ -255,6 +255,22 @@ p: *int64 = alloc(100)   // p points to a heap int64 initialized to 100
 
 After `free(p)`, the binding `p` is consumed. Using it again is a compile error where statically determinable, and a trapping poison value in debug builds.
 
+### Foreign Functions
+
+Added in 0.2.4. A `foreign` block declares functions that live in an external C library, so dusk code can call into libc and other C code. The functions have no body. Each binds to a C symbol of the same name at link.
+
+```text
+foreign "C" {
+    func abs(n: int32) -> int32
+    func write(fd: int32, buf: *raw int8, count: int64) -> int64
+}
+```
+
+The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function.
+
+- Only the `"C"` calling convention is supported.
+- A struct passed by value across the boundary, a variadic foreign function, and a library other than libc are deferred to a later interop release.
+
 ### Sum Types (Enums)
 
 Tagged unions are a first class, paradigm agnostic data type, like structs. A value is exactly one of several named variants, each optionally carrying payload data. Sum types back the standard library monads (Maybe, Either, Result) and pattern matching, and writing the compiler itself for a future bootstrap needs them.

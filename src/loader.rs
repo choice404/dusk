@@ -194,7 +194,7 @@ fn shift_item(it: &mut Item, base: u32) {
                 shift_block(&mut m.body, base);
             }
         }
-        Item::Struct(_) | Item::Enum(_) | Item::Interface(_) => {}
+        Item::Struct(_) | Item::Enum(_) | Item::Interface(_) | Item::Foreign(_) => {}
     }
 }
 
@@ -320,7 +320,7 @@ fn fold_item(it: &mut Item, ns: &HashSet<String>) {
                 fold_block(&mut m.body, ns);
             }
         }
-        Item::Struct(_) | Item::Enum(_) | Item::Interface(_) => {}
+        Item::Struct(_) | Item::Enum(_) | Item::Interface(_) | Item::Foreign(_) => {}
     }
 }
 
@@ -458,6 +458,9 @@ fn exported_names(m: &Module) -> HashSet<String> {
             Item::Enum(e) => (e.exported, &e.name),
             Item::Interface(i) => (i.exported, &i.name),
             Item::Impl(_) => continue,
+            // A foreign block has no single name or export marker. Its functions
+            // are module local; an exported dusk wrapper is what crosses modules.
+            Item::Foreign(_) => continue,
         };
         if exported {
             names.insert(name.clone());
