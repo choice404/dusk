@@ -41,6 +41,17 @@ fn run_raw(example: &str) -> (String, String, bool) {
 }
 
 #[test]
+fn for_loop_over_array() {
+    assert_eq!(run("forloop.dusk"), "6\n");
+}
+
+#[test]
+fn main_argc_argv_builds_slice() {
+    // Run with no extra arguments, so argv holds just the program name.
+    assert_eq!(run("args.dusk"), "1\n");
+}
+
+#[test]
 fn foreign_calls_libc() {
     // A foreign block declares libc abs and labs, called like ordinary functions.
     assert_eq!(run("foreign.dusk"), "5\n7\n");
@@ -59,7 +70,25 @@ fn double_free_faults() {
     let (out, err, ok) = run_raw("doublefree.dusk");
     assert!(!ok, "double free must fault");
     assert_eq!(out, "5\n");
-    assert!(err.contains("double free"), "{err}");
+    // The free now runs the generation check, so a double free faults as a freed
+    // or stale pointer at the free site, the same check a dereference runs.
+    assert!(err.contains("freed or stale pointer"), "{err}");
+}
+
+#[test]
+fn array_index_out_of_bounds_faults() {
+    let (out, err, ok) = run_raw("bounds.dusk");
+    assert!(!ok, "an out of bounds index must fault");
+    assert_eq!(out, "1\n", "the in bounds index prints before the fault");
+    assert!(err.contains("index out of bounds"), "{err}");
+}
+
+#[test]
+fn stale_free_of_reused_block_faults() {
+    let (out, err, ok) = run_raw("stalefree.dusk");
+    assert!(!ok, "freeing a stale pointer to a reused block must fault");
+    assert_eq!(out, "2\n", "q's valid deref prints before the stale free faults");
+    assert!(err.contains("freed or stale pointer"), "{err}");
 }
 
 #[test]

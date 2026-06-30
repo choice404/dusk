@@ -155,6 +155,15 @@ void cool_gen_fault(void) {
     abort();
 }
 
+/* Reports an array or slice index outside its bounds. Codegen emits a check
+   before each array or slice index and calls this on a miss, so an out of range
+   access traps instead of reading or writing past the end. */
+void cool_bounds_fault(void) {
+    fflush(stdout);
+    fputs("fatal: index out of bounds\n", stderr);
+    abort();
+}
+
 /* Copies a NUL terminated buffer into a generationally allocated buffer and
    frees the temporary, so a string handed back to the language can be freed with
    the same generational heap as every other allocation. Returns NULL, after

@@ -70,6 +70,7 @@ pub fn load(root_path: &str) -> Program {
 
     let mut exports: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     let mut namespaces: HashSet<String> = HashSet::new();
+    let mut ns_exports: HashMap<String, HashSet<String>> = HashMap::new();
     while let Some((imports, dir, importer)) = work.pop() {
         for imp in &imports {
             let Some((file, leaf)) = resolve(imp, &dir, &stdlib) else {
@@ -79,13 +80,16 @@ pub fn load(root_path: &str) -> Program {
             // Register the module's dotted path as a callable namespace, so a
             // later `std.io.println(x)` folds to the merged global `println`. A
             // leaf import names a symbol, so its module is the path minus the leaf.
-            if !imp.contains('/') {
+            let mod_ns = if !imp.contains('/') {
                 let modpath = match &leaf {
                     Some(_) => imp.rsplit_once('.').map(|(m, _)| m).unwrap_or(imp.as_str()),
                     None => imp.as_str(),
                 };
                 add_namespace(&mut namespaces, modpath);
-            }
+                Some(modpath.to_string())
+            } else {
+                None
+            };
             let cfile = canon(&file.to_string_lossy());
             let path = file.to_string_lossy().into_owned();
             if visited.insert(cfile.clone()) {
@@ -94,6 +98,13 @@ pub fn load(root_path: &str) -> Program {
                     work.push((m.imports.clone(), dir_of(&file), path.clone()));
                     register(&mut files, &mut base, &path, src, &mut m);
                     items.extend(m.items);
+                }
+            }
+            // Map the module namespace to its exported names, so a qualified call
+            // through it can be checked against what the module actually exports.
+            if let Some(modpath) = mod_ns {
+                if let Some(ex) = exports.get(&cfile) {
+                    ns_exports.entry(modpath).or_default().extend(ex.iter().cloned());
                 }
             }
             // A leaf import, like `std.io.print_line`, names a symbol. The parent
@@ -115,9 +126,18 @@ pub fn load(root_path: &str) -> Program {
     }
 
     // Fold qualified module calls into bare calls now that every imported
-    // namespace is known, so `std.io.println(x)` reaches the merged global.
+    // namespace is known, so `std.io.println(x)` reaches the merged global. The
+    // fold also rejects a call to a private name through a module namespace.
+    let mut fold = FoldCtx {
+        ns: &namespaces,
+        exports: &ns_exports,
+        errs: Vec::new(),
+    };
     for it in &mut items {
-        fold_item(it, &namespaces);
+        fold_item(it, &mut fold);
+    }
+    for d in &fold.errs {
+        errors.push(render_diag(&files, d));
     }
 
     Program {
@@ -312,69 +332,91 @@ fn flatten_path(e: &Expr) -> Option<String> {
 /// `std.io.println(x)`, becomes `println(x)`, the flat global the loader merged.
 /// A field access on a value, like `v.push(x)` or `e.exists()`, has a prefix that
 /// is not a namespace, so it is left as a method call.
-fn fold_item(it: &mut Item, ns: &HashSet<String>) {
+/// Carries the fold pass's read only namespace set, the per module export sets
+/// for the privacy check, and the diagnostics it collects along the way.
+struct FoldCtx<'a> {
+    ns: &'a HashSet<String>,
+    exports: &'a HashMap<String, HashSet<String>>,
+    errs: Vec<Diagnostic>,
+}
+
+fn fold_item(it: &mut Item, ctx: &mut FoldCtx) {
     match it {
-        Item::Func(f) => fold_block(&mut f.body, ns),
+        Item::Func(f) => fold_block(&mut f.body, ctx),
         Item::Impl(i) => {
             for m in &mut i.methods {
-                fold_block(&mut m.body, ns);
+                fold_block(&mut m.body, ctx);
             }
         }
         Item::Struct(_) | Item::Enum(_) | Item::Interface(_) | Item::Foreign(_) => {}
     }
 }
 
-fn fold_block(b: &mut Block, ns: &HashSet<String>) {
+fn fold_block(b: &mut Block, ctx: &mut FoldCtx) {
     for s in &mut b.stmts {
-        fold_stmt(s, ns);
+        fold_stmt(s, ctx);
     }
 }
 
-fn fold_stmt(s: &mut Stmt, ns: &HashSet<String>) {
+fn fold_stmt(s: &mut Stmt, ctx: &mut FoldCtx) {
     match s {
-        Stmt::Let(l) => fold_expr(&mut l.value, ns),
+        Stmt::Let(l) => fold_expr(&mut l.value, ctx),
         Stmt::Assign(a, b) => {
-            fold_expr(a, ns);
-            fold_expr(b, ns);
+            fold_expr(a, ctx);
+            fold_expr(b, ctx);
         }
-        Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => fold_expr(e, ns),
+        Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => fold_expr(e, ctx),
         Stmt::Return(None) => {}
         Stmt::If(i) => {
-            fold_expr(&mut i.cond, ns);
-            fold_block(&mut i.then, ns);
+            fold_expr(&mut i.cond, ctx);
+            fold_block(&mut i.then, ctx);
             if let Some(e) = &mut i.els {
-                fold_block(e, ns);
+                fold_block(e, ctx);
             }
         }
         Stmt::While(w) => {
-            fold_expr(&mut w.cond, ns);
-            fold_block(&mut w.body, ns);
+            fold_expr(&mut w.cond, ctx);
+            fold_block(&mut w.body, ctx);
         }
         Stmt::For(f) => {
-            fold_expr(&mut f.iter, ns);
-            fold_block(&mut f.body, ns);
+            fold_expr(&mut f.iter, ctx);
+            fold_block(&mut f.body, ctx);
         }
-        Stmt::Match(m) => fold_match(m, ns),
+        Stmt::Match(m) => fold_match(m, ctx),
     }
 }
 
-fn fold_match(m: &mut Match, ns: &HashSet<String>) {
-    fold_expr(&mut m.scrut, ns);
+fn fold_match(m: &mut Match, ctx: &mut FoldCtx) {
+    fold_expr(&mut m.scrut, ctx);
     for a in &mut m.arms {
-        fold_block(&mut a.body, ns);
+        fold_block(&mut a.body, ctx);
     }
 }
 
-fn fold_expr(e: &mut Expr, ns: &HashSet<String>) {
+fn fold_expr(e: &mut Expr, ctx: &mut FoldCtx) {
+    let span = e.span;
     match &mut e.kind {
         ExprKind::Call(f, args) => {
-            fold_expr(f, ns);
+            fold_expr(f, ctx);
             for a in args.iter_mut() {
-                fold_expr(a, ns);
+                fold_expr(a, ctx);
             }
             let rewrite = match &f.kind {
                 ExprKind::Field(base, leaf) => match flatten_path(base) {
-                    Some(prefix) if ns.contains(&prefix) => Some(leaf.clone()),
+                    Some(prefix) if ctx.ns.contains(&prefix) => {
+                        // A qualified module call may only reach an exported name.
+                        // A private leaf is rejected rather than silently folded
+                        // to the merged global it would otherwise hit.
+                        if let Some(ex) = ctx.exports.get(&prefix) {
+                            if !ex.contains(leaf) {
+                                ctx.errs.push(Diagnostic::new(
+                                    format!("'{leaf}' is private to module '{prefix}'"),
+                                    span,
+                                ));
+                            }
+                        }
+                        Some(leaf.clone())
+                    }
                     _ => None,
                 },
                 _ => None,
@@ -383,27 +425,27 @@ fn fold_expr(e: &mut Expr, ns: &HashSet<String>) {
                 f.kind = ExprKind::Ident(leaf);
             }
         }
-        ExprKind::Unary(_, x) => fold_expr(x, ns),
+        ExprKind::Unary(_, x) => fold_expr(x, ctx),
         ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
-            fold_expr(a, ns);
-            fold_expr(b, ns);
+            fold_expr(a, ctx);
+            fold_expr(b, ctx);
         }
-        ExprKind::Field(x, _) => fold_expr(x, ns),
+        ExprKind::Field(x, _) => fold_expr(x, ctx),
         ExprKind::Tuple(xs) | ExprKind::Array(xs) => {
             for x in xs {
-                fold_expr(x, ns);
+                fold_expr(x, ctx);
             }
         }
         ExprKind::StructLit(_, fs) => {
             for (_, x) in fs {
-                fold_expr(x, ns);
+                fold_expr(x, ctx);
             }
         }
-        ExprKind::Lambda(l) => fold_block(&mut l.body, ns),
-        ExprKind::Match(m) => fold_match(m, ns),
+        ExprKind::Lambda(l) => fold_block(&mut l.body, ctx),
+        ExprKind::Match(m) => fold_match(m, ctx),
         ExprKind::Do(_, binds) => {
             for b in binds {
-                fold_expr(&mut b.expr, ns);
+                fold_expr(&mut b.expr, ctx);
             }
         }
         ExprKind::Int(..)
@@ -609,8 +651,10 @@ mod tests {
         );
         let mut ns = HashSet::new();
         add_namespace(&mut ns, "std.io");
+        let exports = HashMap::new();
+        let mut fold = FoldCtx { ns: &ns, exports: &exports, errs: Vec::new() };
         for it in &mut m.items {
-            fold_item(it, &ns);
+            fold_item(it, &mut fold);
         }
         let Item::Func(f) = &m.items[0] else { panic!() };
         // The qualified module call folds to the bare leaf function.
@@ -635,14 +679,36 @@ mod tests {
         let mut m = parse_module("func f() -> void {\n  Maybe.Some(1)\n}");
         let mut ns = HashSet::new();
         add_namespace(&mut ns, "std.functional.maybe");
+        let exports = HashMap::new();
+        let mut fold = FoldCtx { ns: &ns, exports: &exports, errs: Vec::new() };
         for it in &mut m.items {
-            fold_item(it, &ns);
+            fold_item(it, &mut fold);
         }
         let Item::Func(f) = &m.items[0] else { panic!() };
         assert!(
             matches!(first_call_callee(f, 0), ExprKind::Field(..)),
             "enum constructor should stay a field access: {:?}",
             first_call_callee(f, 0)
+        );
+    }
+
+    #[test]
+    fn fold_rejects_private_qualified_call() {
+        let mut m = parse_module("func f() -> void {\n  mylib.secret()\n}");
+        let mut ns = HashSet::new();
+        add_namespace(&mut ns, "mylib");
+        let mut exports = HashMap::new();
+        let mut ex = HashSet::new();
+        ex.insert("visible".to_string());
+        exports.insert("mylib".to_string(), ex);
+        let mut fold = FoldCtx { ns: &ns, exports: &exports, errs: Vec::new() };
+        for it in &mut m.items {
+            fold_item(it, &mut fold);
+        }
+        assert!(
+            fold.errs.iter().any(|d| d.msg.contains("private to module 'mylib'")),
+            "a private qualified call should be rejected: {:?}",
+            fold.errs
         );
     }
 }

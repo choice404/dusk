@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use crate::codegen::llvm::Module;
 use crate::codegen::DEFAULT_TRIPLE;
 use crate::parser::ast::{
-    self, Arm, BinOp, Block, Expr, ExprKind, Func, If, Item, Lambda, Let, Pattern, Stmt, Type, UnOp,
-    While,
+    self, Arm, BinOp, Block, Expr, ExprKind, For, Func, If, Item, Lambda, Let, Pattern, Stmt, Type,
+    UnOp, While,
 };
 
 /// Compiles a module to LLVM IR text. Generics are monomorphized first.
@@ -34,6 +34,7 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("ptr @cool_gen_alloc(i64)");
     m.declare("void @cool_gen_free(ptr)");
     m.declare("void @cool_gen_fault()");
+    m.declare("void @cool_bounds_fault()");
     m.declare("ptr @cool_debug_alloc(i64)");
     m.declare("void @cool_debug_free(ptr)");
     m.declare("i64 @cool_debug_leaks()");
@@ -71,6 +72,17 @@ pub fn compile(module: &ast::Module) -> String {
     }
     for item in &module.items {
         match item {
+            // `main(argc: int32, argv: string[])` cannot be the C entry directly,
+            // since the runtime calls `main(int, char**)`. Emit the user body under
+            // an internal name and a C ABI `@main` wrapper that wraps argc and argv
+            // into the dusk string slice.
+            Item::Func(f) if f.name == "main" && main_is_argc_argv(&ctx, f) => {
+                let mut renamed = f.clone();
+                renamed.name = "dusk__main".to_string();
+                let def = gen_func(&mut m, &ctx, &renamed, None);
+                m.push_function(def);
+                m.push_function(emit_main_wrapper(&ctx, f));
+            }
             Item::Func(f) => {
                 let def = gen_func(&mut m, &ctx, f, None);
                 m.push_function(def);
@@ -594,6 +606,33 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
     }
 }
 
+/// True for the `main(argc: int32, argv: string[])` form, the only main that
+/// needs the C ABI entry wrapper. A no argument main is already a valid C entry.
+fn main_is_argc_argv(ctx: &Ctx, f: &Func) -> bool {
+    let nom = |n: &str| ctx.nom(n);
+    f.params.len() == 2
+        && matches!(lower_ty(&f.params[0].ty, &nom), CTy::Int(32))
+        && matches!(lower_ty(&f.params[1].ty, &nom), CTy::Slice(_))
+}
+
+/// The C ABI entry wrapper for an argc/argv main. It receives `(int, char**)`,
+/// builds the dusk `string[]` slice as `{ argv, argc }`, and calls the renamed
+/// user main, handing back its result as the process exit code.
+fn emit_main_wrapper(ctx: &Ctx, f: &Func) -> String {
+    let nom = |n: &str| ctx.nom(n);
+    let rty = lower_ty(&f.ret, &nom).ll();
+    format!(
+        "define {rty} @main(i32 %argc, ptr %argv) {{\n\
+         entry:\n  \
+         %len = sext i32 %argc to i64\n  \
+         %s0 = insertvalue {{ ptr, i64 }} undef, ptr %argv, 0\n  \
+         %s1 = insertvalue {{ ptr, i64 }} %s0, i64 %len, 1\n  \
+         %r = call {rty} @dusk__main(i32 %argc, {{ ptr, i64 }} %s1)\n  \
+         ret {rty} %r\n\
+         }}"
+    )
+}
+
 fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> String {
     let nom = |n: &str| ctx.nom(n);
     let mut params: Vec<(String, CTy)> = Vec::new();
@@ -781,6 +820,21 @@ impl<'a> Fb<'a> {
         data
     }
 
+    /// Emits a bounds check for an array or slice index. An unsigned compare
+    /// catches a negative index too, since it wraps to a large value, so one
+    /// compare covers both ends. On a miss the program traps through the runtime.
+    fn bounds_check(&mut self, i: &str, len: &str) {
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp uge i64 {i}, {len}"));
+        let fault = self.new_label();
+        let ok = self.new_label();
+        self.cond_br(&bad, &fault, &ok);
+        self.place_label(&fault);
+        self.line("call void @cool_bounds_fault()");
+        self.br(&ok);
+        self.place_label(&ok);
+    }
+
     fn default_ret(&mut self) {
         let r = self.ret.clone();
         match &r {
@@ -917,7 +971,7 @@ impl<'a> Fb<'a> {
                 self.gen_expr(e);
             }
             Stmt::Match(m) => self.gen_match(&m.scrut, &m.arms, None),
-            Stmt::For(_) => {}
+            Stmt::For(f) => self.gen_for(f),
         }
     }
 
@@ -1030,6 +1084,55 @@ impl<'a> Fb<'a> {
         self.place_label(&end_l);
     }
 
+    /// `for x in iter`. Resolves the iterable to a data pointer, a length, and an
+    /// element type, then loops an index from zero, binding `x` to each element in
+    /// a fresh slot the body reads. Mirrors the `foreach` builtin's loop shape.
+    fn gen_for(&mut self, f: &For) {
+        let (data, len, elem) = self.for_source(&f.iter);
+        let slot = self.alloca(&elem);
+        self.locals.insert(f.var.clone(), (elem.clone(), slot.clone()));
+        let i = self.alloca_raw("i64");
+        self.line(&format!("store i64 0, ptr {i}"));
+        let cond = self.new_label();
+        let body = self.new_label();
+        let end = self.new_label();
+        self.br(&cond);
+        self.place_label(&cond);
+        let iv = self.load(&CTy::Int(64), &i);
+        let c = self.fresh();
+        self.line(&format!("{c} = icmp slt i64 {iv}, {len}"));
+        self.cond_br(&c, &body, &end);
+        self.place_label(&body);
+        let ep = self.fresh();
+        self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        let ev = self.load(&elem, &ep);
+        self.line(&format!("store {} {ev}, ptr {slot}", elem.ll()));
+        self.gen_block(&f.body.stmts);
+        if !self.terminated {
+            let ni = self.op2("add", "i64", &iv, "1");
+            self.line(&format!("store i64 {ni}, ptr {i}"));
+            self.br(&cond);
+        }
+        self.place_label(&end);
+    }
+
+    /// The data pointer, length, and element type a `for` loop iterates. An array
+    /// lvalue iterates in place through its address with a static length. A slice
+    /// uses its fat pointer parts. An array rvalue spills to a slot so its elements
+    /// have an address.
+    fn for_source(&mut self, iter: &Expr) -> (String, String, CTy) {
+        if let Some((CTy::Array(elem, n), addr)) = self.gen_place(iter) {
+            return (addr, n.to_string(), *elem);
+        }
+        let sv = self.gen_collection(iter);
+        if let CTy::Array(elem, n) = sv.ty.clone() {
+            let slot = self.alloca(&sv.ty);
+            self.line(&format!("store {} {}, ptr {slot}", sv.ty.ll(), sv.op));
+            return (slot, n.to_string(), *elem);
+        }
+        self.slice_parts(&sv)
+    }
+
     /// Returns the address and type of an lvalue, or None for an rvalue.
     fn gen_place(&mut self, e: &Expr) -> Option<(CTy, String)> {
         match &e.kind {
@@ -1073,7 +1176,8 @@ impl<'a> Fb<'a> {
     fn elem_addr(&mut self, base: &Expr, i: &str) -> Option<(CTy, String)> {
         if let Some((bty, bptr)) = self.gen_place(base) {
             match &bty {
-                CTy::Array(elem, _) => {
+                CTy::Array(elem, n) => {
+                    self.bounds_check(i, &n.to_string());
                     let p = self.fresh();
                     self.line(&format!(
                         "{p} = getelementptr {}, ptr {bptr}, i64 0, i64 {i}",
@@ -1082,6 +1186,13 @@ impl<'a> Fb<'a> {
                     Some(((**elem).clone(), p))
                 }
                 CTy::Slice(elem) => {
+                    let lenp = self.fresh();
+                    self.line(&format!(
+                        "{lenp} = getelementptr {{ ptr, i64 }}, ptr {bptr}, i32 0, i32 1"
+                    ));
+                    let len = self.fresh();
+                    self.line(&format!("{len} = load i64, ptr {lenp}"));
+                    self.bounds_check(i, &len);
                     let data = self.load(&CTy::RawPtr(elem.clone()), &bptr);
                     let p = self.fresh();
                     self.line(&format!("{p} = getelementptr {}, ptr {data}, i64 {i}", elem.ll()));
@@ -1106,6 +1217,9 @@ impl<'a> Fb<'a> {
             let bv = self.gen_expr(base);
             match &bv.ty {
                 CTy::Slice(elem) => {
+                    let len = self.fresh();
+                    self.line(&format!("{len} = extractvalue {{ ptr, i64 }} {}, 1", bv.op));
+                    self.bounds_check(i, &len);
                     let data = self.fresh();
                     self.line(&format!("{data} = extractvalue {{ ptr, i64 }} {}, 0", bv.op));
                     let p = self.fresh();
@@ -1604,12 +1718,13 @@ impl<'a> Fb<'a> {
                 "free" => {
                     if let Some(a) = args.first() {
                         let v = self.gen_expr(a);
-                        // A managed pointer unwraps to its data pointer with no
-                        // check, since freeing a stale pointer is the double free
-                        // the generation catches at the next deref. A raw pointer
-                        // is already a data pointer. Both free through the heap.
+                        // A managed pointer checks its remembered generation against
+                        // the live header before freeing, so freeing a stale pointer
+                        // to a reused block faults at the free rather than corrupting
+                        // the live owner. A raw pointer is already a data pointer and
+                        // carries no generation. Both free through the heap.
                         let data = match &v.ty {
-                            CTy::Ptr(_) => self.fat_data(&v.op),
+                            CTy::Ptr(_) => self.fat_checked(&v.op),
                             _ => v.op.clone(),
                         };
                         self.gen_free_call(&data);

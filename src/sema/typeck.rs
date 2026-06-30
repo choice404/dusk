@@ -51,6 +51,17 @@ struct TypeChecker {
     sigs: HashMap<String, (Vec<Ty>, Ty)>,
     ifaces: HashSet<String>,
     enums: HashMap<String, Vec<String>>,
+    // Each struct's generic flag and its declared fields, for struct literal
+    // validation. A generic struct checks field names only, since matching a
+    // field's type parameter against a concrete value needs inference.
+    structs: HashMap<String, (bool, Vec<(String, Ty)>)>,
+    // Interface conformance state. `iface_methods` holds each interface's
+    // required method names and arities, `impls` the `(interface, type)` pairs an
+    // `impl` block declares, and `raw_sigs` the unfixed parameter types, so a call
+    // can tell a concrete struct from the interface a parameter expects.
+    iface_methods: HashMap<String, Vec<(String, usize)>>,
+    impls: HashSet<(String, String)>,
+    raw_sigs: HashMap<String, Vec<Ty>>,
     scopes: Vec<HashMap<String, Ty>>,
     owns: Vec<HashMap<String, Own>>,
     cur_generics: HashSet<String>,
@@ -64,6 +75,10 @@ impl TypeChecker {
             sigs: HashMap::new(),
             ifaces: HashSet::new(),
             enums: HashMap::new(),
+            structs: HashMap::new(),
+            iface_methods: HashMap::new(),
+            impls: HashSet::new(),
+            raw_sigs: HashMap::new(),
             scopes: Vec::new(),
             owns: Vec::new(),
             cur_generics: HashSet::new(),
@@ -77,10 +92,17 @@ impl TypeChecker {
             match item {
                 Item::Interface(i) => {
                     self.ifaces.insert(i.name.clone());
+                    let methods = i.methods.iter().map(|m| (m.name.clone(), m.params.len())).collect();
+                    self.iface_methods.insert(i.name.clone(), methods);
                 }
                 Item::Enum(e) => {
                     let variants = e.variants.iter().map(|v| v.name.clone()).collect();
                     self.enums.insert(e.name.clone(), variants);
+                }
+                Item::Impl(im) => {
+                    if let Some(iface) = &im.iface {
+                        self.impls.insert((iface.clone(), im.ty.clone()));
+                    }
                 }
                 _ => {}
             }
@@ -89,6 +111,8 @@ impl TypeChecker {
             match item {
                 Item::Func(f) => {
                     let gens: HashSet<String> = f.generics.iter().cloned().collect();
+                    self.raw_sigs
+                        .insert(f.name.clone(), f.params.iter().map(|p| lower(&p.ty, &gens)).collect());
                     let params = f.params.iter().map(|p| self.fix(lower(&p.ty, &gens))).collect();
                     let ret = self.fix(lower(&f.ret, &gens));
                     self.sigs.insert(f.name.clone(), (params, ret));
@@ -104,6 +128,16 @@ impl TypeChecker {
                         let ret = self.fix(lower(&ff.ret, &gens));
                         self.sigs.insert(ff.name.clone(), (params, ret));
                     }
+                }
+                Item::Struct(s) => {
+                    let gens: HashSet<String> = s.generics.iter().cloned().collect();
+                    let is_gen = !gens.is_empty();
+                    let fields = s
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), self.fix(lower(&f.ty, &gens))))
+                        .collect();
+                    self.structs.insert(s.name.clone(), (is_gen, fields));
                 }
                 _ => {}
             }
@@ -133,6 +167,7 @@ impl TypeChecker {
             match item {
                 Item::Func(f) => self.func(f, false),
                 Item::Impl(im) => {
+                    self.check_impl_complete(im);
                     for m in &im.methods {
                         self.func(m, true);
                     }
@@ -182,6 +217,43 @@ impl TypeChecker {
             )
         };
         self.err(msg, Span::new(0, 0));
+    }
+
+    /// Validates a struct literal against the struct's declared fields. Every
+    /// field value is inferred first, then the set is checked for a duplicate, an
+    /// unknown field, and a missing field, with a type check on each field of a
+    /// non generic struct. An unknown struct name stays permissive, since it may
+    /// be imported or a generic instantiation the checker does not track yet.
+    fn check_struct_lit(&mut self, name: &str, fields: &[(String, Expr)], span: Span) {
+        let vals: Vec<Ty> = fields.iter().map(|(_, v)| self.infer(v)).collect();
+        let Some((is_gen, declared)) = self.structs.get(name).cloned() else {
+            return;
+        };
+        for i in 0..fields.len() {
+            for j in (i + 1)..fields.len() {
+                if fields[i].0 == fields[j].0 {
+                    self.err(format!("field '{}' is set more than once in '{name}'", fields[i].0), span);
+                }
+            }
+        }
+        for ((fname, fexpr), vty) in fields.iter().zip(&vals) {
+            match declared.iter().find(|(dn, _)| dn == fname) {
+                None => self.err(format!("'{name}' has no field '{fname}'"), fexpr.span),
+                Some((_, dty)) => {
+                    if !is_gen && !compatible(dty, vty) {
+                        self.err(
+                            format!("field '{fname}' of '{name}' is set to a value of the wrong type"),
+                            fexpr.span,
+                        );
+                    }
+                }
+            }
+        }
+        for (dn, _) in &declared {
+            if !fields.iter().any(|(fname, _)| fname == dn) {
+                self.err(format!("struct literal for '{name}' is missing field '{dn}'"), span);
+            }
+        }
     }
 
     fn func(&mut self, f: &Func, is_method: bool) {
@@ -293,14 +365,29 @@ impl TypeChecker {
                 if !compatible(&lt, &rt) {
                     self.err("assignment type mismatch", lhs.span);
                 }
-                // `q = p` aliases two owners exactly like the let form copy, so
-                // flag it the same rather than leaving it to the runtime.
                 if is_managed(&lt) {
-                    if let (ExprKind::Ident(_), ExprKind::Ident(src)) = (&lhs.kind, &rhs.kind) {
-                        if matches!(self.own_of(src), Some(Own::Owner)) {
+                    // `q = p` aliases two owners exactly like the let form copy, so
+                    // flag it the same. This takes priority, naming the precise
+                    // mistake when both sides are owners.
+                    let copy_of_owner = match (&lhs.kind, &rhs.kind) {
+                        (ExprKind::Ident(_), ExprKind::Ident(src)) => {
+                            matches!(self.own_of(src), Some(Own::Owner))
+                        }
+                        _ => false,
+                    };
+                    if copy_of_owner {
+                        self.err(
+                            "cannot copy an owning pointer; bind a `ref` alias or `move` it",
+                            rhs.span,
+                        );
+                    } else if let ExprKind::Ident(dst) = &lhs.kind {
+                        // Reassigning an owning pointer drops the allocation it
+                        // holds without freeing it, a leak. A borrowing cursor, as
+                        // in a list walk, is not an owner and may advance.
+                        if matches!(self.own_of(dst), Some(Own::Owner)) {
                             self.err(
-                                "cannot copy an owning pointer; bind a `ref` alias or `move` it",
-                                rhs.span,
+                                "cannot reassign an owning pointer; it leaks the allocation it holds, free it first or bind a new pointer",
+                                lhs.span,
                             );
                         }
                     }
@@ -347,7 +434,17 @@ impl TypeChecker {
             }
             Stmt::Match(m) => self.walk_match(m),
             Stmt::Expr(e) => {
-                self.infer(e);
+                let t = self.infer(e);
+                // A fallible expression used as a bare statement drops its error.
+                // The spec requires every error to be handled, so bind the result
+                // and handle the error with exists, check, or ignore. A blessed
+                // handler returns bool or unit, so it is not flagged here.
+                if ty_has_error(&t) {
+                    self.err(
+                        "this expression's error result is ignored; bind it and handle the error with exists, check, or ignore",
+                        e.span,
+                    );
+                }
             }
         }
     }
@@ -530,9 +627,7 @@ impl TypeChecker {
                 Ty::Slice(Box::new(elem))
             }
             ExprKind::StructLit(name, fields) => {
-                for (_, v) in fields {
-                    self.infer(v);
-                }
+                self.check_struct_lit(name, fields, e.span);
                 named_ty(name)
             }
             ExprKind::Lambda(l) => self.infer_lambda(l),
@@ -663,10 +758,68 @@ impl TypeChecker {
                         self.err(format!("argument {} has the wrong type", i + 1), args[i].span);
                     }
                 }
+                // The fixed parameter types lower an interface to Unknown, so they
+                // accept any value. The unfixed signature keeps the interface name,
+                // so a concrete struct passed for an interface is checked here.
+                if let ExprKind::Ident(name) = &f.kind {
+                    if let Some(raw) = self.raw_sigs.get(name).cloned() {
+                        for (rp, a) in raw.iter().zip(&arg_tys) {
+                            self.check_conformance(rp, a, f.span);
+                        }
+                    }
+                }
             }
             return *ret;
         }
         Ty::Unknown
+    }
+
+    /// Rejects passing a concrete struct where an interface is expected unless the
+    /// struct implements it. Only fires when both sides are known by name, an
+    /// interface expected and a concrete struct given, so an Unknown or a generic
+    /// stays permissive.
+    fn check_conformance(&mut self, expected: &Ty, actual: &Ty, span: Span) {
+        if let (Ty::Named(iface), Ty::Named(concrete)) = (expected, actual) {
+            if self.ifaces.contains(iface)
+                && !self.ifaces.contains(concrete)
+                && self.structs.contains_key(concrete)
+                && !self.impls.contains(&(iface.clone(), concrete.clone()))
+            {
+                self.err(
+                    format!("'{concrete}' does not implement interface '{iface}'; add an 'impl {iface} for {concrete}'"),
+                    span,
+                );
+            }
+        }
+    }
+
+    /// Checks that an `impl I for T` provides every method the interface requires,
+    /// each with the same parameter count, so an incomplete impl is rejected before
+    /// codegen emits an undefined vtable.
+    fn check_impl_complete(&mut self, im: &Impl) {
+        let Some(iface) = im.iface.clone() else {
+            return;
+        };
+        let Some(required) = self.iface_methods.get(&iface).cloned() else {
+            return;
+        };
+        for (mname, arity) in &required {
+            match im.methods.iter().find(|m| &m.name == mname) {
+                None => self.err(
+                    format!("impl {iface} for {} is missing method '{mname}'", im.ty),
+                    Span::new(0, 0),
+                ),
+                Some(m) if m.params.len() != *arity => self.err(
+                    format!(
+                        "method '{mname}' in impl {iface} for {} has {} parameter(s), the interface requires {arity}",
+                        im.ty,
+                        m.params.len()
+                    ),
+                    Span::new(0, 0),
+                ),
+                Some(_) => {}
+            }
+        }
     }
 
     /// Checks a formatted `print` or `println`. The first argument must be a
@@ -853,6 +1006,16 @@ fn foreign_ty_ok(ty: &Ty) -> bool {
     }
 }
 
+/// Whether a type carries an error, directly or as a component of a tuple, so a
+/// bare statement of this type would drop an error that must be handled.
+fn ty_has_error(t: &Ty) -> bool {
+    match t {
+        Ty::Error => true,
+        Ty::Tuple(ts) => ts.iter().any(ty_has_error),
+        _ => false,
+    }
+}
+
 fn compatible(a: &Ty, b: &Ty) -> bool {
     if a == b || matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) {
         return true;
@@ -967,6 +1130,54 @@ mod tests {
     }
 
     #[test]
+    fn struct_literal_unknown_field_rejected() {
+        let e = errs("struct S { x: int64 }\nfunc main() -> int32 {\n  s := S { y: 5 }\n  return 0\n}");
+        assert!(e.iter().any(|d| d.msg.contains("no field 'y'")), "{e:?}");
+    }
+
+    #[test]
+    fn struct_literal_missing_field_rejected() {
+        let e = errs("struct S { x: int64, y: int64 }\nfunc main() -> int32 {\n  s := S { x: 1 }\n  return 0\n}");
+        assert!(e.iter().any(|d| d.msg.contains("missing field 'y'")), "{e:?}");
+    }
+
+    #[test]
+    fn struct_literal_complete_ok() {
+        let e = errs("struct S { x: int64, y: int64 }\nfunc main() -> int32 {\n  s := S { x: 1, y: 2 }\n  return 0\n}");
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn passing_struct_without_impl_is_rejected() {
+        let e = errs("interface I { get() -> int64 }\nstruct S { x: int64 }\nfunc take(i: I) -> int64 { return i.get() }\nfunc f() -> void {\n  s := S { x: 1 }\n  take(s)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("does not implement interface 'I'")), "{e:?}");
+    }
+
+    #[test]
+    fn incomplete_impl_is_rejected() {
+        let e = errs("interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { }");
+        assert!(e.iter().any(|d| d.msg.contains("missing method 'get'")), "{e:?}");
+    }
+
+    #[test]
+    fn struct_with_impl_satisfies_interface() {
+        let e = errs("interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return self.x } }\nfunc take(i: I) -> int64 { return i.get() }\nfunc f() -> void {\n  s := S { x: 1 }\n  take(s)\n}");
+        assert!(!e.iter().any(|d| d.msg.contains("implement interface")), "{e:?}");
+    }
+
+    #[test]
+    fn discarding_a_fallible_call_is_rejected() {
+        let e = errs("func fail() -> error { return error { message: \"x\" } }\nfunc f() -> void {\n  fail()\n}");
+        assert!(e.iter().any(|d| d.msg.contains("error result is ignored")), "{e:?}");
+    }
+
+    #[test]
+    fn handling_a_fallible_result_is_ok() {
+        let e = errs("func fail() -> error { return error { message: \"x\" } }\nfunc f() -> void {\n  e := fail()\n  e.ignore()\n}");
+        assert!(!e.iter().any(|d| d.msg.contains("error result is ignored")), "{e:?}");
+    }
+
+    #[test]
     fn condition_must_be_bool() {
         let e = errs("func f() -> void {\n  if 5 {\n    return\n  }\n  return\n}");
         assert!(e.iter().any(|d| d.msg.contains("bool")));
@@ -1027,6 +1238,23 @@ mod tests {
     fn assignment_copy_of_owner_is_rejected() {
         let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  mut q: *int64 = alloc(9)\n  q = p\n  free(p)\n}");
         assert!(e.iter().any(|d| d.msg.contains("copy an owning pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn reassigning_an_owner_is_rejected() {
+        let e = errs("func f() -> void {\n  mut p: *int64 = alloc(5)\n  p = alloc(9)\n  free(p)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("reassign an owning pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn reassigning_a_borrow_cursor_is_allowed() {
+        // A borrowing cursor, like a list walk variable, is not an owner, so it
+        // may advance without tripping the reassignment or copy rules.
+        let e = errs("func walk(head: *int64) -> void {\n  mut cur: *int64 = head\n  cur = head\n  println(*cur)\n}");
+        assert!(
+            !e.iter().any(|d| d.msg.contains("reassign") || d.msg.contains("owning")),
+            "{e:?}"
+        );
     }
 
     #[test]

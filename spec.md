@@ -189,17 +189,17 @@ c := 200u64     // uint64
 
 ### Strings
 
-A string is a built in fat pointer made of a pointer and a length. There are no null terminators. String literals do not require heap allocation.
+A string is a pointer to a NUL terminated buffer of `char`, a read only view that costs one machine word. String literals do not heap allocate, since the literal bytes live in static storage.
 
 ```text
-s: string = "hello"   // fat pointer: { ptr: *char, len: int64 }
+s: string = "hello"   // a pointer to the NUL terminated bytes
 ```
 
-- Strings are immutable in 0.1.0.
-- String length is always known without scanning.
-- There is no buffer overrun from null terminator ambiguity.
+- A string value is immutable. The growable `StringBuilder` in `std.string`, added in 0.2.0, builds and concatenates strings on the heap.
+- A string's length is found by scanning to the NUL, which `std.string`'s `str_len` does. The NUL keeps a string view compatible with C and the foreign interface.
+- The `cstr` builtin reinterprets a NUL terminated `*char` buffer as a string at no runtime cost.
 
-Mutable strings, concatenation, and Unicode are deferred past 0.1.0.
+Unicode handling is deferred past the 0.2.x line.
 
 ### Arrays and Slices
 
@@ -613,11 +613,11 @@ result: Maybe<int32> = do {
 
 `error` is a built in type. It is not imported from any library.
 
-`error` carries three fields.
+`error` carries a human readable message. It is a pointer to the NUL terminated message text, and the empty, non error value is a null pointer.
 
-- `message: string`. Required, a human readable description.
-- `code: int32`. Optional error code.
-- `source: string`. Optional source location.
+- `message: string`. A human readable description, read with `toString`.
+
+A numeric code and a source location are not part of the current representation. They may return in a later release.
 
 It has four methods.
 
