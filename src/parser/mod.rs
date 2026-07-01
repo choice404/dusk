@@ -142,10 +142,13 @@ impl Parser {
             }
         }
         let mut items = Vec::new();
+        let mut monads = Vec::new();
         while !self.at_eof() {
             let before = self.pos;
             if self.at(&TokenKind::Kw(Keyword::Monad)) {
-                for f in self.monad_block() {
+                let (name, span, funcs) = self.monad_block();
+                monads.push((name, span));
+                for f in funcs {
                     items.push(Item::Func(f));
                 }
             } else if let Some(it) = self.item() {
@@ -160,6 +163,7 @@ impl Parser {
             Module {
                 paradigms,
                 imports,
+                monads,
                 items,
             },
             self.errors,
@@ -208,6 +212,7 @@ impl Parser {
 
     fn func(&mut self, exported: bool) -> Func {
         self.bump();
+        let span = self.span();
         let name = self.ident();
         let generics = self.generics();
         let params = self.params();
@@ -217,6 +222,7 @@ impl Parser {
         Func {
             exported,
             name,
+            span,
             generics,
             params,
             ret,
@@ -354,6 +360,7 @@ impl Parser {
     /// signature with no body, prefixed by `func` like an ordinary declaration.
     /// The abi string and the raw pointer boundary are validated in the checker.
     fn foreign(&mut self) -> Foreign {
+        let span = self.span();
         self.bump();
         let abi = if matches!(self.peek(), TokenKind::Str(_)) {
             match self.take_kind() {
@@ -376,10 +383,11 @@ impl Parser {
             funcs.push(ForeignFunc { name, params, ret });
         }
         self.expect(&TokenKind::RBrace);
-        Foreign { abi, funcs }
+        Foreign { abi, span, funcs }
     }
 
     fn impl_(&mut self) -> Impl {
+        let span = self.span();
         self.bump();
         let first = self.ident();
         let (iface, ty) = if self.eat(&TokenKind::Kw(Keyword::For)) {
@@ -398,14 +406,16 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace);
-        Impl { iface, ty, methods }
+        Impl { iface, ty, span, methods }
     }
 
     /// Parses a `monad Name { funcs }` block, flattening its methods (typically
     /// `bind` and `unit`) into top level functions named `Name.method`. The
     /// namespace lets several monads each define `bind` and `unit`, and a
-    /// `do Name { ... }` block desugars to that monad's pair.
-    fn monad_block(&mut self) -> Vec<Func> {
+    /// `do Name { ... }` block desugars to that monad's pair. Returns the monad's
+    /// name and keyword span too, recorded on the module for the paradigm gate.
+    fn monad_block(&mut self) -> (String, Span, Vec<Func>) {
+        let span = self.span();
         self.bump();
         let name = self.ident();
         let mut funcs = Vec::new();
@@ -422,7 +432,7 @@ impl Parser {
             }
         }
         self.expect(&TokenKind::RBrace);
-        funcs
+        (name, span, funcs)
     }
 
     fn type_(&mut self) -> Type {

@@ -99,6 +99,8 @@ export func area(s: Shape) -> float64 { ... }
 
 Only exported names can be imported elsewhere. There is no paradigm restriction on exports. An exported function or type is usable from any file regardless of either file's paradigm directives. This keeps the cross file story simple and matches the rule that user defined names are paradigm agnostic.
 
+A private name never crosses a file boundary, neither as a qualified call nor as a bare one, and two imported modules may each keep a private helper of the same name without colliding.
+
 ---
 
 ## Paradigm System
@@ -179,6 +181,8 @@ Inference uses these defaults.
 - Float literals become `float64`.
 - For other types such as `uint8` or `float32`, use a literal suffix or an annotation.
 
+Numeric widths never mix silently. Arithmetic, comparison, assignment, and argument passing take operands of one width, so an `int32` next to an `int64` is a compile error rather than a truncation. A bare literal adapts to the width beside it, and a literal that cannot fit its annotated width is rejected.
+
 Literal suffixes select a non default type without an annotation.
 
 ```text
@@ -215,7 +219,8 @@ argv: string[]                // slice of strings, as passed to main
 ```
 
 - Slice length is always known. No scanning, no null terminator.
-- Bounds are checked in debug builds.
+- Every array and slice index is bounds checked and traps when it misses, negatives included.
+- A range slice validates `lo <= hi <= len` against its base, so a slice can never claim a length past its backing.
 - A dynamic array is provided in the standard library as `std.vector`, a heap backed generic type.
 
 ### Immutability and Mutability
@@ -230,6 +235,8 @@ mut y: int32 = 5   // mutable, can be reassigned
 Function scope restriction on mutability.
 
 A mutable variable is only mutable within the function it was declared in. Nested function definitions and closures can read it but cannot mutate it.
+
+Immutability covers projections. An element or field store, `xs[i] = v` or `p.x = v`, needs its root binding declared `mut`, the same as the bare `xs = v` form. A store through a pointer dereference or through a slice writes the buffer the binding views, not the binding, so it is governed by the pointee's rules instead.
 
 ```text
 func outer() -> void {
@@ -297,6 +304,7 @@ func area(s: Shape) -> float64 {
 
 - Variants can be empty (`Empty`) or carry named fields.
 - `match` is exhaustive. A missing variant is a compile error.
+- `match` is defined over enum values only. A scalar or struct scrutinee is a compile error.
 - Generic sum types are written `Maybe<T>`. They are monomorphized at compile time.
 - Layout is a tag (the smallest integer that fits the variant count) plus storage for the largest variant's payload.
 
@@ -344,6 +352,8 @@ func work(using allocator: Allocator) -> void {
 
 This keeps allocation explicit at the boundary, since the signature shows the function needs an allocator, while keeping the body readable. Users never redefine `alloc`. They implement the `Allocator` interface and pass it in. No other builtin or function is overridable, and there is no function overloading.
 
+`free` must run under the allocator that produced the pointer. A `using` scope routes `free` to the scope's allocator, so freeing a default heap block inside one hands it to the wrong allocator, the same caller matches rule C allocators follow.
+
 Dispatch is static when the allocator's concrete type is known at that point, which is the common case and is zero cost. It falls back to a vtable call only when the allocator type is erased behind the interface.
 
 The allocation size is inferred from the declared type on the left hand side. The programmer does not pass a byte size, which prevents size and type mismatch bugs.
@@ -353,6 +363,8 @@ x: *int64 = alloc(100)     // 8 bytes, initialized to 100
 y: *char  = alloc('c')     // 1 byte, initialized to 'c'
 z: *int64 = alloc()        // 8 bytes, uninitialized
 ```
+
+The uninitialized form requires the pointer annotation, since the annotation is what sizes the block. A bare `x := alloc()` is a compile error.
 
 ### Dereferencing
 
@@ -374,6 +386,8 @@ y: int64 = *p + 1
 ```
 
 `defer` makes deallocation deterministic and visible without any ownership tracking.
+
+A `defer` sits at the top level of its function. Registration is lexical and every return replays the list, so a `defer` inside a conditional or a loop cannot be honored and is a compile error. Dynamic registration is planned.
 
 ### Arena Allocation
 
@@ -417,6 +431,8 @@ func main(argc: int32, argv: string[], using allocator: Allocator) -> int32 { ..
 ```
 
 `main` returns an `int32` exit code. `0` means success. If `main` declares a `using allocator` parameter, the program runs with that allocator as the ambient allocator. With no allocator parameter the default heap allocator is used.
+
+The allocator form is planned. The compiler rejects it until the entry wrapper that constructs the ambient allocator lands, so a program never reads a garbage register where the allocator should be.
 
 ---
 
@@ -573,6 +589,8 @@ The standard library ships these monads through import.
 | ------------ | --------------------------------- |
 | Maybe<T>     | an optional value                 |
 | Either<L, R> | one of two possible types         |
+
+Do notation currently desugars against a monad whose `bind` has concrete types. A `bind` generic over the element type is not yet monomorphized through `do`, so ground monads work and fully generic ones wait on a later release.
 | Result<T, E> | success or a typed failure        |
 | IO<T>        | wraps side effecting computations |
 | List<T>      | the list monad                    |
@@ -702,13 +720,14 @@ Builtins are always available regardless of paradigm directives unless noted.
 
 ### Always Available
 
-| Builtin | Signature            | Description                                  |
-| ------- | -------------------- | -------------------------------------------- |
-| alloc   | alloc(value?) -> \*T | heap allocate through the in scope allocator |
-| free    | free(p: \*T) -> void | deallocate through the in scope allocator    |
-| print   | print(...) -> void   | print to stdout, handles all primitive types |
-| println | println(...) -> void | print to stdout with a newline               |
-| sizeof  | sizeof(T) -> int64   | size of a type in bytes at compile time      |
+| Builtin  | Signature             | Description                                  |
+| -------- | --------------------- | -------------------------------------------- |
+| alloc    | alloc(value?) -> \*T  | heap allocate through the in scope allocator |
+| free     | free(p: \*T) -> void  | deallocate through the in scope allocator    |
+| print    | print(...) -> void    | print to stdout, handles all primitive types |
+| println  | println(...) -> void  | print to stdout with a newline               |
+| printerr | printerr(...) -> void | println to stderr                            |
+| sizeof   | sizeof(T) -> int64    | size of a type in bytes at compile time      |
 
 `alloc` and `free` resolve to the in scope allocator. See [Memory Management](#memory-management).
 
@@ -740,3 +759,5 @@ interface Display {
     toString() -> string;
 }
 ```
+
+Passing a struct with no `Display` impl to a print builtin is a compile error, as is printing an enum, a slice, a tuple, or a pointer. Print never emits silence for a value it cannot render.

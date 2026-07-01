@@ -37,6 +37,11 @@ pub fn check(module: &Module) -> Vec<Diagnostic> {
         user_fns,
         errors: Vec::new(),
     };
+    // The parser flattens a `monad` block into plain functions, so the gate reads
+    // the module's record of them rather than the vanished syntax.
+    for (name, span) in &module.monads {
+        g.need_functional(&format!("the '{name}' monad block"), *span);
+    }
     for item in &module.items {
         match item {
             Item::Func(f) => g.block(&f.body),
@@ -289,6 +294,22 @@ mod tests {
         let e = errs(
             "@paradigm functional\n@paradigm procedural\n\
              func main() -> int32 {\n  mut i: int64 = 0\n  while i < 3 { i = i + 1 }\n  return 0\n}",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn monad_block_requires_functional() {
+        let e = errs(
+            "monad M {\n  func bind(x: int64, f: (int64) -> int64) -> int64 { return f(x) }\n  func unit(x: int64) -> int64 { return x }\n}\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("monad block requires the functional paradigm")), "{e:?}");
+    }
+
+    #[test]
+    fn monad_block_under_functional_is_ok() {
+        let e = errs(
+            "@paradigm functional\nmonad M {\n  func bind(x: int64, f: (int64) -> int64) -> int64 { return f(x) }\n  func unit(x: int64) -> int64 { return x }\n}\nfunc main() -> int32 { return 0 }",
         );
         assert!(e.is_empty(), "{e:?}");
     }

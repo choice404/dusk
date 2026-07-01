@@ -7,13 +7,34 @@
 #include <string.h>
 
 /* print writes the value with no newline, println appends one. The builtins
-   print and println in the language map to the matching pair per value type. */
+   print and println in the language map to the matching pair per value type. A
+   null string prints as empty rather than crashing, since the language's empty
+   error carries a null message pointer. */
 void cool_print_cstr(const char *s) {
-    fputs(s, stdout);
+    fputs(s ? s : "", stdout);
 }
 
 void cool_println_cstr(const char *s) {
-    puts(s);
+    puts(s ? s : "");
+}
+
+/* Stderr printers for the printerr builtin. None appends a newline; codegen
+   emits the newline as its own segment, so one set serves every call shape.
+   Each flushes stdout first, so buffered program output lands before the
+   message even when the program aborts right after printing it. */
+void cool_eprint_cstr(const char *s) {
+    fflush(stdout);
+    fputs(s ? s : "", stderr);
+}
+
+void cool_eprint_i64(int64_t v) {
+    fflush(stdout);
+    fprintf(stderr, "%" PRId64, v);
+}
+
+void cool_eprint_f64(double v) {
+    fflush(stdout);
+    fprintf(stderr, "%g", v);
 }
 
 void cool_print_i64(int64_t v) {

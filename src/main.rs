@@ -18,7 +18,7 @@ fn main() -> ExitCode {
         "parse" => cmd_parse(args.get(1)),
         "check" => cmd_check(args.get(1)),
         "build" => cmd_build(args.get(1)),
-        "run" => cmd_run(args.get(1)),
+        "run" => cmd_run(args.get(1), args.get(2..).unwrap_or(&[])),
         "version" | "--version" | "-V" => {
             println!("dusk {VERSION}");
             ExitCode::SUCCESS
@@ -120,10 +120,10 @@ fn cmd_parse(path: Option<&String>) -> ExitCode {
 
 /// Lexes, parses, and resolves names for a source file, reporting diagnostics.
 fn cmd_check(path: Option<&String>) -> ExitCode {
-    let Some((path, src)) = read_src(path, "check") else {
+    let Some((path, _)) = read_src(path, "check") else {
         return ExitCode::FAILURE;
     };
-    let (module, errs) = analyze(&path, &src);
+    let (module, errs) = analyze(&path);
     for e in &errs {
         eprintln!("{e}");
     }
@@ -136,8 +136,8 @@ fn cmd_check(path: Option<&String>) -> ExitCode {
 }
 
 /// Runs the front end. Prints diagnostics; returns the module only when clean.
-fn front_end(path: &str, src: &str) -> Option<parser::ast::Module> {
-    let (module, errs) = analyze(path, src);
+fn front_end(path: &str) -> Option<parser::ast::Module> {
+    let (module, errs) = analyze(path);
     for e in &errs {
         eprintln!("{e}");
     }
@@ -154,10 +154,10 @@ fn stem_of(path: &str) -> String {
 
 /// Compiles a source file to a native binary.
 fn cmd_build(path: Option<&String>) -> ExitCode {
-    let Some((path, src)) = read_src(path, "build") else {
+    let Some((path, _)) = read_src(path, "build") else {
         return ExitCode::FAILURE;
     };
-    let Some(module) = front_end(&path, &src) else {
+    let Some(module) = front_end(&path) else {
         return ExitCode::FAILURE;
     };
     let out = PathBuf::from("target").join("dusk-out");
@@ -173,12 +173,13 @@ fn cmd_build(path: Option<&String>) -> ExitCode {
     }
 }
 
-/// Compiles and runs a source file.
-fn cmd_run(path: Option<&String>) -> ExitCode {
-    let Some((path, src)) = read_src(path, "run") else {
+/// Compiles and runs a source file, forwarding any trailing arguments to the
+/// program, so an argc/argv main sees them.
+fn cmd_run(path: Option<&String>, prog_args: &[String]) -> ExitCode {
+    let Some((path, _)) = read_src(path, "run") else {
         return ExitCode::FAILURE;
     };
-    let Some(module) = front_end(&path, &src) else {
+    let Some(module) = front_end(&path) else {
         return ExitCode::FAILURE;
     };
     let out = PathBuf::from("target").join("dusk-out");
@@ -189,7 +190,7 @@ fn cmd_run(path: Option<&String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match driver::run(&art.bin) {
+    match driver::run_with(&art.bin, prog_args) {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
             eprintln!("[dusk] {e}");

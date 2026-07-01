@@ -15,12 +15,13 @@ pub mod loader;
 pub mod mono;
 pub mod parser;
 pub mod prescan;
+pub mod privatize;
 pub mod sema;
 
 /// Loads a program and its imports, gates paradigms per file, desugars, and runs
 /// semantic analysis. Returns the desugared module, ready to build, and any
 /// diagnostics already rendered with their file path.
-pub fn analyze(path: &str, _src: &str) -> (Option<parser::ast::Module>, Vec<String>) {
+pub fn analyze(path: &str) -> (Option<parser::ast::Module>, Vec<String>) {
     let prog = loader::load(path);
     if !prog.errors.is_empty() || prog.module.is_none() {
         return (None, prog.errors);

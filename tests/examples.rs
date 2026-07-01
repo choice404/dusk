@@ -47,8 +47,53 @@ fn for_loop_over_array() {
 
 #[test]
 fn main_argc_argv_builds_slice() {
-    // Run with no extra arguments, so argv holds just the program name.
+    // With no extra arguments argv holds just the program name. Both runs share
+    // one test, since each `dusk run` writes the same output binary path.
     assert_eq!(run("args.dusk"), "1\n");
+    // `dusk run file.dusk a b` hands the trailing arguments to the program, so
+    // argv counts the program name plus both of them.
+    let bin = env!("CARGO_BIN_EXE_dusk");
+    let path = format!("{}/examples/args.dusk", env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new(bin)
+        .args(["run", &path, "a", "b"])
+        .output()
+        .expect("spawn dusk");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "3\n");
+}
+
+/// Runs `dusk check` on an example that must be rejected, returning stderr.
+fn check_fails(example: &str) -> String {
+    let bin = env!("CARGO_BIN_EXE_dusk");
+    let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
+    let out = Command::new(bin)
+        .args(["check", &path])
+        .output()
+        .expect("spawn dusk");
+    assert!(!out.status.success(), "{example} must fail to check");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn bare_call_to_imported_private_name_is_rejected() {
+    let err = check_fails("privacy_bare.dusk");
+    assert!(err.contains("undefined name 'helper'"), "{err}");
+}
+
+#[test]
+fn out_of_range_slice_faults() {
+    let (out, err, ok) = run_raw("slicebound.dusk");
+    assert!(!ok, "an out of range slice must fault");
+    assert_eq!(out, "2\n", "the valid slice prints before the fault");
+    assert!(err.contains("index out of bounds"), "{err}");
+}
+
+#[test]
+fn vector_get_out_of_bounds_faults() {
+    let (out, err, ok) = run_raw("vecbound.dusk");
+    assert!(!ok, "vec_get past the length must fault");
+    assert_eq!(out, "20\n", "the valid get prints before the fault");
+    assert!(err.contains("vector index out of bounds"), "{err}");
 }
 
 #[test]
@@ -139,6 +184,11 @@ golden!(printing, "printing.dusk", "score: 42\nabc\nAda is 36\n{braces} and 7\n"
 golden!(strbuf, "strbuf.dusk", "dusk and dawn\n13\nhello, world\n");
 golden!(genref, "genref.dusk", "10\n15\n3\n4\n30\n");
 golden!(ownership, "ownership.dusk", "2\n2\n");
+golden!(allocbig, "allocbig.dusk", "1\n4\n7\n");
+golden!(display, "display.dusk", "point\npoint\n");
+golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
+golden!(emptyerr, "emptyerr.dusk", "\nafter\n");
+golden!(privacy, "privacy.dusk", "1\n2\n");
 
 /// Runs an example feeding `input` to its stdin, so a program that reads with
 /// `read_line` can be exercised deterministically from a pipe.

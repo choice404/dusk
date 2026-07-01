@@ -53,7 +53,13 @@ fn link(inputs: &[&Path], bin: &Path) -> Result<(), String> {
 
 /// Run a built binary, returning its exit code.
 pub fn run(bin: &Path) -> Result<i32, String> {
+    run_with(bin, &[])
+}
+
+/// Run a built binary with program arguments, so an argc/argv main sees them.
+pub fn run_with(bin: &Path, args: &[String]) -> Result<i32, String> {
     let status = Command::new(bin)
+        .args(args)
         .status()
         .map_err(|e| format!("run {}: {e}", bin.display()))?;
     Ok(status.code().unwrap_or(-1))

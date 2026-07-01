@@ -11,6 +11,7 @@ pub struct Module {
     globals: Vec<String>,
     funcs: Vec<String>,
     str_count: u32,
+    strings: std::collections::HashMap<String, String>,
     lambda_count: u32,
 }
 
@@ -24,6 +25,7 @@ impl Module {
             globals: Vec::new(),
             funcs: Vec::new(),
             str_count: 0,
+            strings: std::collections::HashMap::new(),
             lambda_count: 0,
         }
     }
@@ -41,20 +43,29 @@ impl Module {
     }
 
     /// Declare an external function. Pass the part after `declare`, e.g.
-    /// `"void @cool_println_cstr(ptr)"`.
+    /// `"void @cool_println_cstr(ptr)"`. A repeated declaration is dropped,
+    /// since LLVM rejects a redefinition even when the signatures agree.
     pub fn declare(&mut self, sig: &str) {
-        self.externs.push(format!("declare {sig}"));
+        let line = format!("declare {sig}");
+        if !self.externs.contains(&line) {
+            self.externs.push(line);
+        }
     }
 
     /// Intern a NUL-terminated C string constant; returns its global symbol
-    /// (e.g. `@.str.0`) for use as a `ptr` argument.
+    /// (e.g. `@.str.0`) for use as a `ptr` argument. Identical literals share
+    /// one global, so a repeated "\n" or format segment costs one constant.
     pub fn cstring(&mut self, text: &str) -> String {
+        if let Some(label) = self.strings.get(text) {
+            return label.clone();
+        }
         let label = format!("@.str.{}", self.str_count);
         self.str_count += 1;
         let (encoded, len) = encode_cstring(text);
         self.globals.push(format!(
             "{label} = private unnamed_addr constant [{len} x i8] c\"{encoded}\""
         ));
+        self.strings.insert(text.to_string(), label.clone());
         label
     }
 

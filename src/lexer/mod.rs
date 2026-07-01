@@ -429,9 +429,9 @@ mod tests {
     #[test]
     fn float_with_suffix() {
         assert_eq!(
-            kinds("3.14f32"),
+            kinds("2.5f32"),
             vec![
-                TokenKind::Float { val: 3.14, suffix: Some("f32".into()) },
+                TokenKind::Float { val: 2.5, suffix: Some("f32".into()) },
                 TokenKind::Eof,
             ]
         );

@@ -1,5 +1,15 @@
 // std.vector: a growable array, generic over its element type. Backed by a heap
 // buffer that doubles on demand. Pass the vector by pointer so growth persists.
+// Element access is bounds checked; the raw buffer never escapes.
+
+foreign "C" {
+    func abort() -> void
+}
+
+func vec_bounds_fault() -> void {
+    printerr("fatal: vector index out of bounds")
+    abort()
+}
 
 export struct Vector<T> {
     data: *raw T,
@@ -32,6 +42,12 @@ export func vec_push<T>(v: *Vector<T>, x: T) -> void {
 }
 
 export func vec_get<T>(v: *Vector<T>, i: int64) -> T {
+    if i < 0 {
+        vec_bounds_fault()
+    }
+    if i >= (*v).len {
+        vec_bounds_fault()
+    }
     return (*v).data[i]
 }
 

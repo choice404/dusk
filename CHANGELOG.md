@@ -1,0 +1,154 @@
+# Changelog
+
+Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
+
+## 0.2.6
+
+Hardens the whole 0.2.x line one level deeper. Where 0.2.5 closed exact reproductions, this release closes each rule's family, the range as well as the index, the binding site as well as the call site, the bare call as well as the qualified one, and lands the rules deferred along the way.
+
+Memory and bounds.
+
+- `alloc()` with no value sizes the block from the declared pointer annotation, so `p: *Big = alloc()` allocates all of `Big` instead of an 8 byte default that corrupted the heap. The unannotated form `x := alloc()` is a compile error.
+- Returning an array literal where a slice is expected is caught by the escape check, closing a dangling stack slice the range form already rejected.
+- A range slice validates `lo <= hi <= base.len` and traps on a miss, so a slice can no longer fabricate a length that launders out of bounds reads past the index check.
+- `FixedBuffer` and `Arena` check capacity and honor alignment, aborting on exhaustion instead of handing out memory past the buffer. `vec_get` is bounds checked. `parse_int_radix` rejects overflow instead of wrapping.
+
+Types.
+
+- Integer and float widths are tracked in the checker. `int32 + int64` is a compile error instead of a silent truncation, in arithmetic, comparison, assignment, argument passing, and returns.
+- A bare literal adapts to the width beside it, an unannotated literal binding hardens to the default width, and a literal that cannot fit its annotated or suffixed width is rejected.
+- Immutability covers projections. `xs[i] = v` and `s.f = v` need a `mut` root binding, while a store through a pointer dereference or a slice stays governed by the pointee.
+- A field store on an undereferenced pointer, which previously compiled and did nothing, is an error that names the `(*p).field` fix.
+
+Semantic analysis.
+
+- Binding or returning a struct where an interface is expected requires the impl, the same conformance rule call sites gained in 0.2.5, so a missing impl is a checker error instead of an undefined vtable in clang.
+- `match` requires an enum scrutinee. A non enum previously executed every arm in sequence.
+- A `defer` inside a conditional or loop is rejected, since registration is lexical and every return replays the list, which cannot honor a conditional registration.
+- The binding level must handle rule lands. A bound error must reach `exists`, `check`, or `ignore`, or be returned to the caller, and printing it does not count.
+- A non void function must return on every path, where falling off the end silently produced a zeroed value.
+- `main`'s signature is validated. The allocator form is rejected until its entry wrapper exists, so it cannot read garbage registers, and any other unsupported shape is named.
+
+Monomorphization.
+
+- A destructured binding takes its tuple element's type, so valid generic code over a destructure no longer dies with a type mismatch in clang.
+- A type parameter no call site pins down fails `dusk check` at the source line instead of silently defaulting to `int64` and reinterpreting values.
+- An impl block on a generic type is diagnosed instead of silently dropped, and a duplicate `impl I for T` is a checker error instead of a duplicate symbol at link.
+- Builtin results such as `read_file`'s `(string, error)` pair type their bindings for generic inference.
+
+Modules.
+
+- The loader renames each imported module's private top level items with a per file suffix before the merge and rewrites the module's own references to match. A bare call can no longer reach another file's private helper, and two modules may each keep a private `helper` without colliding. Exported names and foreign functions never change.
+
+Printing.
+
+- A struct prints through its `Display` impl's `toString`, and a struct without one is a compile error. Printing an enum, a slice, a tuple, or a pointer is an error instead of silence.
+- `printerr` lands as a stderr println, flushing stdout first so program output precedes the message even when the program aborts right after.
+- A string literal first argument is a format string at any arity, so `println("{}")` with no value is an error and `println("{{}}")` prints `{}` consistently.
+- `toString()` on the empty error is the empty string, and the runtime printers guard a null pointer, closing a crash in `puts`.
+- A bare `println()` prints a newline.
+
+Tooling and internals.
+
+- `dusk run` forwards trailing arguments to the program, so an argc and argv main sees them.
+- The `monad` block is gated to the functional paradigm, matching `do` notation.
+- Diagnostics for foreign blocks, impl completeness, and whole function errors carry real source spans instead of pointing at the file's first character.
+- Identical string literals intern to one IR global, nominal type lookups in codegen go through a map instead of scanning item lists, and clippy is clean across all targets.
+- The language reference documents every rule above. The suite grows to 195 unit and 49 golden tests.
+
+## 0.2.5
+
+Closes the gaps a specification review found, where a construct parsed and partly checked but leaned on permissive typing or late runtime behavior.
+
+- `free` of a managed pointer runs the generation check, so freeing a stale pointer to a reused block faults at the free instead of corrupting the live owner.
+- `for` loops lower to codegen over an array or a slice, where they were silently dropped.
+- A bare statement that drops a fallible call's error is rejected, the first enforcement of the must handle rule.
+- Reassigning an owning pointer is rejected as a leak, while a borrowing cursor still advances.
+- Array and slice indexing is bounds checked and traps out of range, negatives included.
+- `main(argc, argv)` gains a C ABI entry wrapper that builds the string slice, so `argv.len` matches argc.
+- Passing a struct where an interface is expected requires an impl with every method, and an incomplete impl is rejected, both in the checker.
+- Struct literals validate field names, duplicates, and completeness.
+- A qualified module call to a private name is rejected.
+- The language reference's string and error representations match the implementation.
+
+## 0.2.4
+
+The minimal foreign function interface, riding the raw pointer layer.
+
+- A `foreign "C"` block declares external functions with dusk types and no body. Each binds to a C symbol of the same name at link, and a call type checks and lowers like any other.
+- The boundary is the raw pointer layer only. Parameters and returns are scalars, `*raw T`, or `*void`. A managed `*T`, an aggregate by value, and an abi other than `"C"` are rejected.
+- libc is the reachable library, since the toolchain already links it.
+
+## 0.2.3
+
+Escaping value lifetimes, the last memory safety phase.
+
+- Returning a slice that views a frame local fixed array is a compile error, since the array is reclaimed with the frame. A heap backed slice or a slice parameter still returns fine.
+- Returning a closure that captures a frame local is a compile error, while a capture free closure is a plain function pointer and may be returned.
+- Pointer escapes were already covered at runtime by the generation check, since every pointer is heap allocated.
+
+## 0.2.2
+
+Single owner pointers, the static half of the ownership story.
+
+- The checker tracks each managed pointer binding as an owner or a borrow. A plain copy of an owner is rejected and points at `ref` to alias or `move` to transfer.
+- `move(x)` transfers ownership and invalidates the source, so a later use is rejected.
+- A `ref` binding is a non owning alias, and a pointer parameter borrows. Freeing or moving a borrow is rejected, since only the owner does either.
+- The raw layer, `*void` and `*raw T`, is exempt, and the runtime generation check backstops what the single block static pass cannot see.
+
+## 0.2.1
+
+Generational references, the runtime foundation of the memory safety line.
+
+- A managed `*T` is a fat pointer, the data pointer paired with a remembered generation. The default heap writes a live generation in a header before each block, and `free` bumps it and parks the block on a size matched free list.
+- Every managed dereference compares the remembered generation against the header and faults on a use after free, a double free, or a stale pointer to a reused block, in every build.
+- The thin layer lands alongside. `*raw T` and `*void` are one word pointers with no generation, carrying strings, slice data, receivers, and collection buffers, with `ptr_add` for byte arithmetic.
+- A generation of zero is the untracked sentinel, so a `using` allocator hands back unchecked memory and custom allocators keep working.
+
+## 0.2.0
+
+Mutable strings and concatenation.
+
+- `std.string` ships `StringBuilder`, a growable heap buffer that keeps a NUL after the last character so a string view costs nothing.
+- `concat` joins two strings into a fresh builder the caller owns, and the `cstr` builtin reinterprets a NUL terminated `*char` as a `string` at no cost.
+
+## 0.1.5
+
+Formatted printing.
+
+- `print` writes with no newline and `println` appends one, where both previously appended it.
+- `print` and `println` take a format string whose `{}` holes the value arguments fill in order, with `{{` and `}}` for a literal brace. The literal expands at compile time into typed prints, no runtime parser, no allocation, and a mismatched hole count is a compile error.
+
+## 0.1.4
+
+Console input and parsing.
+
+- `read_line` reads one line and `read_all` the whole stream, each a `(string, error)` pair.
+- `parse_int` and `parse_int_radix` parse signed integers, base 2 to 36, and `parse_float` parses a float through the runtime, each returning a value with an error.
+- `read_int` and `read_float` in `std.io` compose the readers with the parsers.
+
+## 0.1.3
+
+Completeness of the planned core.
+
+- Qualified call syntax. `std.io.print_line(x)` folds to the merged global, while method calls and enum constructors keep their meaning.
+- `std.map`, a string keyed `Map<V>` with open addressing, doubling, and a `Maybe<V>` get, written in dusk.
+- File I/O. `read_file` returns a `(string, error)` pair and `write_file` an `error`, both global builtins.
+
+## 0.1.2
+
+Methods and allocators.
+
+- Every method takes its receiver by pointer, so a method mutates the receiver in place and a stateful allocator's bump offset persists across calls.
+- The `using` `Allocator` interface works end to end, with `Heap`, `FixedBuffer`, `Arena`, and `Debug` in the stdlib, dispatched statically on a concrete type and through the vtable when erased.
+
+## 0.1.1
+
+Correctness and diagnostics.
+
+- `char` is the unsigned range and zero extends, errors as values lower end to end with `exists`, `toString`, `check`, and `ignore`, and `reduce` returns `(T, error)` and guards the empty slice.
+- Per file source tracking renders a merged diagnostic against the file its span falls in, an import's leaf segment is validated against the module's exports, and several monads coexist through `monad Name` blocks.
+
+## 0.1.0
+
+The core language, end to end. Paradigm directives gating procedural, functional, and oop features per file, structs, methods, enums with exhaustive `match`, interfaces with vtables, closures, monomorphized generics, functional builtins, `do` notation, errors as values under the must handle rule, explicit memory with `alloc`, `free`, and `defer`, a module system with a stdlib seed, and a golden test suite compiling and running every example.

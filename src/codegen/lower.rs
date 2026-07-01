@@ -29,6 +29,9 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("void @cool_println_f64(double)");
     m.declare("void @cool_print_cstr(ptr)");
     m.declare("void @cool_println_cstr(ptr)");
+    m.declare("void @cool_eprint_i64(i64)");
+    m.declare("void @cool_eprint_f64(double)");
+    m.declare("void @cool_eprint_cstr(ptr)");
     m.declare("ptr @cool_alloc(i64)");
     m.declare("void @cool_free(ptr)");
     m.declare("ptr @cool_gen_alloc(i64)");
@@ -287,32 +290,29 @@ struct Ctx {
     impls: Vec<ImplInfo>,
     fns: HashMap<String, (CTy, Vec<CTy>)>,
     methods: HashMap<String, (CTy, Vec<CTy>)>,
+    // Nominal kind by name, one map lookup per Named type instead of scanning
+    // three item lists on every type lowering.
+    noms: HashMap<String, Nom>,
 }
 
 impl Ctx {
     fn new(module: &ast::Module) -> Self {
-        let mut struct_names = Vec::new();
-        let mut enum_names = Vec::new();
-        let mut iface_names = Vec::new();
+        let mut noms: HashMap<String, Nom> = HashMap::new();
         for item in &module.items {
             match item {
-                Item::Struct(s) => struct_names.push(s.name.clone()),
-                Item::Enum(e) => enum_names.push(e.name.clone()),
-                Item::Interface(i) => iface_names.push(i.name.clone()),
+                Item::Struct(s) => {
+                    noms.insert(s.name.clone(), Nom::Struct);
+                }
+                Item::Enum(e) => {
+                    noms.insert(e.name.clone(), Nom::Enum);
+                }
+                Item::Interface(i) => {
+                    noms.insert(i.name.clone(), Nom::Iface);
+                }
                 _ => {}
             }
         }
-        let nom = |n: &str| {
-            if struct_names.iter().any(|s| s == n) {
-                Nom::Struct
-            } else if enum_names.iter().any(|s| s == n) {
-                Nom::Enum
-            } else if iface_names.iter().any(|s| s == n) {
-                Nom::Iface
-            } else {
-                Nom::None
-            }
-        };
+        let nom = |n: &str| noms.get(n).copied().unwrap_or(Nom::None);
         let mut structs = Vec::new();
         let mut enums = Vec::new();
         for item in &module.items {
@@ -414,19 +414,12 @@ impl Ctx {
             impls,
             fns,
             methods,
+            noms,
         }
     }
 
     fn nom(&self, name: &str) -> Nom {
-        if self.structs.iter().any(|(n, _)| n == name) {
-            Nom::Struct
-        } else if self.enums.iter().any(|e| e.name == name) {
-            Nom::Enum
-        } else if self.ifaces.iter().any(|i| i.name == name) {
-            Nom::Iface
-        } else {
-            Nom::None
-        }
+        self.noms.get(name).copied().unwrap_or(Nom::None)
     }
 
     fn iface(&self, name: &str) -> Option<&IfaceDef> {
@@ -560,7 +553,7 @@ fn align_up(n: u64, align: u64) -> u64 {
     if align <= 1 {
         n
     } else {
-        (n + align - 1) / align * align
+        n.div_ceil(align) * align
     }
 }
 
@@ -993,6 +986,15 @@ impl<'a> Fb<'a> {
             (ExprKind::Array(elems), Some(CTy::Slice(elem))) => {
                 let hint = (**elem).clone();
                 self.array_to_slice(elems, hint)
+            }
+            // `p: *T = alloc(...)` sizes the block from the declared pointee, per
+            // the spec, so `p: *Big = alloc()` allocates all of Big rather than
+            // the 8 byte default the argument free form would fall to.
+            (ExprKind::Call(f, cargs), Some(CTy::Ptr(inner)))
+                if matches!(&f.kind, ExprKind::Ident(n) if n == "alloc" && !self.ctx.fns.contains_key(n)) =>
+            {
+                let value = cargs.first().map(|a| self.gen_expr(a));
+                self.alloc_of((**inner).clone(), value)
             }
             _ => self.gen_expr(&l.value),
         };
@@ -1439,22 +1441,105 @@ impl<'a> Fb<'a> {
         Val::new(tty, agg)
     }
 
-    /// Builds a slice `{ ptr, len }` viewing `base[lo..hi]`.
+    /// Builds a slice `{ ptr, len }` viewing `base[lo..hi]`. The range is
+    /// validated: `lo <= hi` always, and `hi <= base.len` when the base carries a
+    /// length (an array or a slice), so a slice can never fabricate a length
+    /// that launders out of bounds reads past the index check. A raw pointer
+    /// base has no length and stays the programmer's responsibility.
     fn gen_slice(&mut self, base: &Expr, lo: &Expr, hi: &Expr) -> Val {
         let lov = self.gen_expr(lo);
         let lo_i = self.coerce(&lov.ty, &lov.op, &CTy::Int(64));
         let hiv = self.gen_expr(hi);
         let hi_i = self.coerce(&hiv.ty, &hiv.op, &CTy::Int(64));
-        let len = self.op2("sub", "i64", &hi_i, &lo_i);
-        let Some((elem, data)) = self.elem_addr(base, &lo_i) else {
+        let Some((data0, base_len, elem)) = self.slice_base(base) else {
             return Val::i0();
         };
+        // An unsigned lo <= hi compare also traps a negative bound, which wraps
+        // to a huge value; unsigned hi <= base.len then bounds the window.
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp ugt i64 {lo_i}, {hi_i}"));
+        let fault = self.new_label();
+        let ok = self.new_label();
+        self.cond_br(&bad, &fault, &ok);
+        self.place_label(&fault);
+        self.line("call void @cool_bounds_fault()");
+        self.br(&ok);
+        self.place_label(&ok);
+        if let Some(bl) = &base_len {
+            let over = self.fresh();
+            self.line(&format!("{over} = icmp ugt i64 {hi_i}, {bl}"));
+            let fault2 = self.new_label();
+            let ok2 = self.new_label();
+            self.cond_br(&over, &fault2, &ok2);
+            self.place_label(&fault2);
+            self.line("call void @cool_bounds_fault()");
+            self.br(&ok2);
+            self.place_label(&ok2);
+        }
+        let len = self.op2("sub", "i64", &hi_i, &lo_i);
+        let data = self.fresh();
+        self.line(&format!("{data} = getelementptr {}, ptr {data0}, i64 {lo_i}", elem.ll()));
         let sty = CTy::Slice(Box::new(elem));
         let a = self.fresh();
         self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {data}, 0"));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"));
         Val::new(sty, b)
+    }
+
+    /// Resolves a sliceable base to its element 0 pointer, its length when the
+    /// type carries one, and its element type.
+    fn slice_base(&mut self, base: &Expr) -> Option<(String, Option<String>, CTy)> {
+        if let Some((bty, bptr)) = self.gen_place(base) {
+            return match &bty {
+                CTy::Array(elem, n) => {
+                    let p = self.fresh();
+                    self.line(&format!("{p} = getelementptr {}, ptr {bptr}, i64 0, i64 0", bty.ll()));
+                    Some((p, Some(n.to_string()), (**elem).clone()))
+                }
+                CTy::Slice(elem) => {
+                    let fat = self.load(&bty, &bptr);
+                    let data = self.fresh();
+                    self.line(&format!("{data} = extractvalue {{ ptr, i64 }} {fat}, 0"));
+                    let len = self.fresh();
+                    self.line(&format!("{len} = extractvalue {{ ptr, i64 }} {fat}, 1"));
+                    Some((data, Some(len), (**elem).clone()))
+                }
+                CTy::RawPtr(elem) => {
+                    let pv = self.load(&bty, &bptr);
+                    Some((pv, None, (**elem).clone()))
+                }
+                CTy::Ptr(elem) => {
+                    let fat = self.load(&bty, &bptr);
+                    let pv = self.fat_checked(&fat);
+                    Some((pv, None, (**elem).clone()))
+                }
+                _ => None,
+            };
+        }
+        let bv = self.gen_expr(base);
+        match bv.ty.clone() {
+            CTy::Slice(elem) => {
+                let data = self.fresh();
+                self.line(&format!("{data} = extractvalue {{ ptr, i64 }} {}, 0", bv.op));
+                let len = self.fresh();
+                self.line(&format!("{len} = extractvalue {{ ptr, i64 }} {}, 1", bv.op));
+                Some((data, Some(len), *elem))
+            }
+            CTy::Array(elem, n) => {
+                let slot = self.alloca(&bv.ty);
+                self.line(&format!("store {} {}, ptr {slot}", bv.ty.ll(), bv.op));
+                let p = self.fresh();
+                self.line(&format!("{p} = getelementptr {}, ptr {slot}, i64 0, i64 0", bv.ty.ll()));
+                Some((p, Some(n.to_string()), *elem))
+            }
+            CTy::RawPtr(elem) => Some((bv.op, None, *elem)),
+            CTy::Ptr(elem) => {
+                let pv = self.fat_checked(&bv.op);
+                Some((pv, None, *elem))
+            }
+            _ => None,
+        }
     }
 
     /// Recognizes `Enum.Variant` as an enum constructor reference.
@@ -1712,8 +1797,9 @@ impl<'a> Fb<'a> {
                 return self.gen_user_call(name, args);
             }
             return match name.as_str() {
-                "print" => self.gen_print(args, false),
-                "println" => self.gen_print(args, true),
+                "print" => self.gen_print(args, false, false),
+                "println" => self.gen_print(args, true, false),
+                "printerr" => self.gen_print(args, true, true),
                 "alloc" => self.gen_alloc(args),
                 "free" => {
                     if let Some(a) = args.first() {
@@ -1870,7 +1956,17 @@ impl<'a> Fb<'a> {
                 self.line(&format!("{d} = icmp ne ptr {}, null", ev.op));
                 Some(Val::new(CTy::Bool, d))
             }
-            "toString" => Some(Val::new(CTy::RawPtr(Box::new(CTy::Char)), ev.op.clone())),
+            "toString" => {
+                // The empty error's message pointer is null; toString promises a
+                // string, so it hands back the empty string instead of a null
+                // that would crash the C printers.
+                let empty = self.m.cstring("");
+                let isnull = self.fresh();
+                self.line(&format!("{isnull} = icmp eq ptr {}, null", ev.op));
+                let s = self.fresh();
+                self.line(&format!("{s} = select i1 {isnull}, ptr {empty}, ptr {}", ev.op));
+                Some(Val::new(CTy::RawPtr(Box::new(CTy::Char)), s))
+            }
             "ignore" => Some(Val::new(CTy::Void, "")),
             "check" => {
                 let cv = self.gen_expr(args.first()?);
@@ -2386,26 +2482,72 @@ impl<'a> Fb<'a> {
         Val::new(tty, b)
     }
 
-    /// print and println. `print` writes the value with no newline, `println`
-    /// appends one. Each value type routes to its own runtime pair, a string or
-    /// error through the cstring printer, a float through the float printer, and
-    /// everything else widened to an int.
-    fn gen_print(&mut self, args: &[Expr], newline: bool) -> Val {
-        // With a value argument past the format string, this is a formatted call.
-        if args.len() >= 2 {
-            return self.gen_format_print(args, newline);
+    /// print, println, and printerr. `print` writes with no newline, `println`
+    /// appends one, and `printerr` is a println to stderr. A string literal
+    /// first argument is a format string at any arity, so brace escaping and
+    /// hole checking do not change shape when the value arguments disappear.
+    fn gen_print(&mut self, args: &[Expr], newline: bool, errout: bool) -> Val {
+        let fmt_lit = matches!(args.first().map(|a| &a.kind), Some(ExprKind::Str(_)));
+        if fmt_lit {
+            return self.gen_format_print(args, newline, errout);
         }
-        if let Some(a) = args.first() {
-            let v = self.gen_expr(a);
-            self.print_value(&v, newline);
+        match args.first() {
+            Some(a) => {
+                let v = self.gen_expr(a);
+                self.print_value(&v, newline, errout);
+            }
+            // A bare println() prints just the newline.
+            None if newline => {
+                let empty = self.m.cstring("");
+                let f = if errout { "cool_eprint_cstr" } else { "cool_println_cstr" };
+                self.line(&format!("call void @{f}(ptr {empty})"));
+                if errout {
+                    self.print_newline(true);
+                }
+            }
+            None => {}
         }
         Val::new(CTy::Void, "")
     }
 
+    fn print_newline(&mut self, errout: bool) {
+        let nl = self.m.cstring("\n");
+        let f = if errout { "cool_eprint_cstr" } else { "cool_print_cstr" };
+        self.line(&format!("call void @{f}(ptr {nl})"));
+    }
+
     /// Prints one value, routed to its runtime printer by type. `newline` picks
-    /// the `println` variant that appends a newline over the `print` variant that
-    /// does not. A non scalar value prints nothing, as before.
-    fn print_value(&mut self, v: &Val, newline: bool) {
+    /// the `println` variant, `errout` the stderr printers, which never append a
+    /// newline themselves so one code path serves print and println. A struct
+    /// prints through its Display impl's `toString`; sema rejects everything
+    /// else that has no printer.
+    fn print_value(&mut self, v: &Val, newline: bool, errout: bool) {
+        if errout {
+            match &v.ty {
+                CTy::RawPtr(_) | CTy::Error => {
+                    self.line(&format!("call void @cool_eprint_cstr(ptr {})", v.op))
+                }
+                CTy::F64 | CTy::F32 => {
+                    let d = self.coerce(&v.ty, &v.op, &CTy::F64);
+                    self.line(&format!("call void @cool_eprint_f64(double {d})"));
+                }
+                CTy::Struct(_) => {
+                    if let Some(s) = self.display_string(v) {
+                        self.line(&format!("call void @cool_eprint_cstr(ptr {s})"));
+                    }
+                }
+                CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void | CTy::Tuple(_)
+                | CTy::Unknown => {}
+                _ => {
+                    let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
+                    self.line(&format!("call void @cool_eprint_i64(i64 {d})"));
+                }
+            }
+            if newline {
+                self.print_newline(true);
+            }
+            return;
+        }
         let suffix = if newline { "ln" } else { "" };
         match &v.ty {
             CTy::RawPtr(_) | CTy::Error => {
@@ -2415,8 +2557,13 @@ impl<'a> Fb<'a> {
                 let d = self.coerce(&v.ty, &v.op, &CTy::F64);
                 self.line(&format!("call void @cool_print{suffix}_f64(double {d})"));
             }
-            CTy::Struct(_) | CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void
-            | CTy::Tuple(_) | CTy::Unknown => {}
+            CTy::Struct(_) => {
+                if let Some(s) = self.display_string(v) {
+                    self.line(&format!("call void @cool_print{suffix}_cstr(ptr {s})"));
+                }
+            }
+            CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void | CTy::Tuple(_)
+            | CTy::Unknown => {}
             _ => {
                 let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
                 self.line(&format!("call void @cool_print{suffix}_i64(i64 {d})"));
@@ -2424,34 +2571,52 @@ impl<'a> Fb<'a> {
         }
     }
 
+    /// Renders a struct value to a string through its `toString` method, the
+    /// Display protocol. Returns None when the type has no such method; sema has
+    /// already rejected that program, so this is only a belt over braces.
+    fn display_string(&mut self, v: &Val) -> Option<String> {
+        let CTy::Struct(t) = &v.ty else {
+            return None;
+        };
+        let key = format!("{t}.toString");
+        if !self.ctx.methods.contains_key(&key) {
+            return None;
+        }
+        let slot = self.alloca(&v.ty);
+        self.line(&format!("store {} {}, ptr {slot}", v.ty.ll(), v.op));
+        let d = self.fresh();
+        self.line(&format!("{d} = call ptr @{key}(ptr {slot})"));
+        Some(d)
+    }
+
     /// A formatted print. The format string is a literal, validated in sema, so
     /// it expands at compile time into the literal segments printed verbatim and
     /// the holes printed by value type, with one trailing newline for `println`.
     /// No runtime format parser and no allocation.
-    fn gen_format_print(&mut self, args: &[Expr], newline: bool) -> Val {
+    fn gen_format_print(&mut self, args: &[Expr], newline: bool, errout: bool) -> Val {
         let segs = match &args[0].kind {
             ExprKind::Str(s) => crate::fmt::parse(s).unwrap_or_default(),
             _ => Vec::new(),
         };
+        let lit_printer = if errout { "cool_eprint_cstr" } else { "cool_print_cstr" };
         let mut ai = 1;
         for seg in &segs {
             match seg {
                 crate::fmt::Seg::Lit(text) => {
                     let c = self.m.cstring(text);
-                    self.line(&format!("call void @cool_print_cstr(ptr {c})"));
+                    self.line(&format!("call void @{lit_printer}(ptr {c})"));
                 }
                 crate::fmt::Seg::Hole => {
                     if let Some(a) = args.get(ai) {
                         let v = self.gen_expr(a);
-                        self.print_value(&v, false);
+                        self.print_value(&v, false, errout);
                     }
                     ai += 1;
                 }
             }
         }
         if newline {
-            let nl = self.m.cstring("\n");
-            self.line(&format!("call void @cool_print_cstr(ptr {nl})"));
+            self.print_newline(errout);
         }
         Val::new(CTy::Void, "")
     }
@@ -2596,6 +2761,13 @@ impl<'a> Fb<'a> {
     fn gen_alloc(&mut self, args: &[Expr]) -> Val {
         let value = args.first().map(|a| self.gen_expr(a));
         let pointee = value.as_ref().map(|v| v.ty.clone()).unwrap_or(CTy::Int(64));
+        self.alloc_of(pointee, value)
+    }
+
+    /// Allocates one `pointee` on the heap, storing `value` into it when given.
+    /// The declared pointee sizes the block; a value of a narrower literal type
+    /// coerces into it, so the store never writes past the allocation.
+    fn alloc_of(&mut self, pointee: CTy, value: Option<Val>) -> Val {
         let align = self.ctx.size_align(&pointee).1;
         let szp = self.fresh();
         self.line(&format!("{szp} = getelementptr {}, ptr null, i64 1", pointee.ll()));
@@ -2616,7 +2788,8 @@ impl<'a> Fb<'a> {
             (self.gen_alloc_call(&sz, align), "0".to_string())
         };
         if let Some(v) = value {
-            self.line(&format!("store {} {}, ptr {p}", pointee.ll(), v.op));
+            let op = self.coerce(&v.ty, &v.op, &pointee);
+            self.line(&format!("store {} {op}, ptr {p}", pointee.ll()));
         }
         let fat = self.fat(&p, &gen);
         Val::new(CTy::Ptr(Box::new(pointee)), fat)

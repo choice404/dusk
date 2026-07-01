@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::diag::Span;
+use crate::diag::{Diagnostic, Span};
 use crate::parser::ast::{
     Bind, Block, Enum, Expr, ExprKind, Field, Func, Item, Let, Module, Param, Stmt, Struct, Type,
     Variant,
@@ -24,8 +24,19 @@ pub fn expand(module: &Module) -> Module {
     Module {
         paradigms: module.paradigms.clone(),
         imports: module.imports.clone(),
+        monads: module.monads.clone(),
         items,
     }
+}
+
+/// Runs the expansion for its diagnostics only: a type parameter no call site
+/// pins down, or an impl block on a generic type, which expansion would silently
+/// default or drop. Reported from sema so `dusk check` catches them at the
+/// source line instead of codegen emitting a wrong program.
+pub fn diagnose(module: &Module) -> Vec<Diagnostic> {
+    let mut m = Mono::new(module);
+    m.run();
+    m.diags
 }
 
 struct Mono<'a> {
@@ -37,6 +48,7 @@ struct Mono<'a> {
     requested: HashSet<String>,
     worklist: Vec<(String, Vec<Type>)>,
     out: Vec<Item>,
+    diags: Vec<Diagnostic>,
 }
 
 impl<'a> Mono<'a> {
@@ -71,6 +83,7 @@ impl<'a> Mono<'a> {
             requested: HashSet::new(),
             worklist: Vec::new(),
             out: Vec::new(),
+            diags: Vec::new(),
         }
     }
 
@@ -168,9 +181,6 @@ impl<'a> Mono<'a> {
     }
 
 
-    /// Replaces type parameters with their bindings without mangling.
-    // (free function `subst_apply` is used; this stays a thin wrapper site.)
-
     /// Mangles ground generic references and requests their instantiation.
     fn emit_ty(&mut self, ty: &Type) -> Type {
         match ty {
@@ -252,14 +262,41 @@ impl<'a> Mono<'a> {
                 self.out.push(Item::Impl(crate::parser::ast::Impl {
                     iface: im.iface.clone(),
                     ty: im.ty.clone(),
+                    span: im.span,
                     methods,
                 }));
+            }
+            // An impl on a generic type would be dropped silently and its method
+            // calls miscompiled, so it is a diagnostic until instantiation of
+            // impl blocks lands.
+            Item::Impl(im) => {
+                self.diags.push(Diagnostic::new(
+                    format!(
+                        "methods on the generic type '{}' are not supported yet; write free functions over it, the way std.vector does",
+                        im.ty
+                    ),
+                    im.span,
+                ));
             }
             Item::Interface(i) => self.out.push(Item::Interface(i.clone())),
             // A foreign block has no generics, so it passes through untouched. It
             // must be carried forward, since codegen reads it for the declares.
             Item::Foreign(fb) => self.out.push(Item::Foreign(fb.clone())),
             _ => {}
+        }
+    }
+
+    /// Reports type parameters an instantiation site could not pin down. The
+    /// expansion still defaults them to int64 so codegen can proceed, but the
+    /// program is wrong, so `dusk check` surfaces it here.
+    fn report_missing(&mut self, missing: &[String], what: &str, span: Span) {
+        for g in missing {
+            self.diags.push(Diagnostic::new(
+                format!(
+                    "cannot infer the type parameter '{g}' for '{what}'; add an annotation that pins it"
+                ),
+                span,
+            ));
         }
     }
 
@@ -282,6 +319,7 @@ impl<'a> Mono<'a> {
         Func {
             exported: f.exported,
             name,
+            span: f.span,
             generics: Vec::new(),
             params,
             ret,
@@ -309,14 +347,28 @@ impl<'a> Mono<'a> {
                 let vt = exp
                     .clone()
                     .or_else(|| self.static_ty(&l.value, subst, env));
+                // A destructuring bind takes its tuple's element types, one per
+                // name; recording the whole tuple against each name would make a
+                // later generic call unify against the tuple and instantiate the
+                // wrong monomorph.
+                let parts: Option<Vec<Type>> = match (&vt, l.binds.len()) {
+                    (Some(Type::Tuple(ts)), n) if n > 1 && ts.len() == n => Some(ts.clone()),
+                    _ => None,
+                };
                 let mut binds = Vec::with_capacity(l.binds.len());
-                for b in &l.binds {
+                for (i, b) in l.binds.iter().enumerate() {
                     let ty = b.ty.as_ref().map(|t| {
                         let a = subst_apply(t, subst);
                         self.emit_ty(&a)
                     });
-                    if let Some(t) = &vt {
-                        env.insert(b.name.clone(), t.clone());
+                    let bt = b
+                        .ty
+                        .as_ref()
+                        .map(|t| subst_apply(t, subst))
+                        .or_else(|| parts.as_ref().map(|p| p[i].clone()))
+                        .or_else(|| if l.binds.len() == 1 { vt.clone() } else { None });
+                    if let Some(t) = bt {
+                        env.insert(b.name.clone(), t);
                     }
                     binds.push(Bind {
                         name: b.name.clone(),
@@ -429,7 +481,7 @@ impl<'a> Mono<'a> {
         let kind = match &e.kind {
             ExprKind::Call(callee, args) => self.rw_call(callee, args, subst, env, expected),
             ExprKind::StructLit(name, fields) => {
-                self.rw_struct_lit(name, fields, subst, env, expected)
+                self.rw_struct_lit(name, fields, subst, env, expected, e.span)
             }
             ExprKind::Field(base, name) => {
                 if let ExprKind::Ident(g) = &base.kind {
@@ -528,7 +580,8 @@ impl<'a> Mono<'a> {
             if let Some(gf) = self.gfuncs.get(f).copied() {
                 let cargs: Vec<Expr> =
                     args.iter().map(|a| self.rw_expr(a, subst, env, None)).collect();
-                let targs = self.infer_fn_args(gf, args, subst, env, expected);
+                let (targs, missing) = self.infer_fn_args(gf, args, subst, env, expected);
+                self.report_missing(&missing, f, callee.span);
                 let mg = node(ExprKind::Ident(self.instantiate(f, &targs)), callee.span);
                 return ExprKind::Call(Box::new(mg), cargs);
             }
@@ -554,13 +607,15 @@ impl<'a> Mono<'a> {
         subst: &Subst,
         env: &Env,
         expected: Option<&Type>,
+        span: Span,
     ) -> ExprKind {
         let new_fields: Vec<(String, Expr)> = fields
             .iter()
             .map(|(n, v)| (n.clone(), self.rw_expr(v, subst, env, None)))
             .collect();
         if let Some(gs) = self.gstructs.get(name).copied() {
-            let targs = self.infer_struct_args(gs, fields, expected, subst, env);
+            let (targs, missing) = self.infer_struct_args(gs, fields, expected, subst, env);
+            self.report_missing(&missing, name, span);
             return ExprKind::StructLit(self.instantiate(name, &targs), new_fields);
         }
         ExprKind::StructLit(name.to_string(), new_fields)
@@ -574,7 +629,7 @@ impl<'a> Mono<'a> {
         subst: &Subst,
         env: &Env,
         expected: Option<&Type>,
-    ) -> Vec<Type> {
+    ) -> (Vec<Type>, Vec<String>) {
         let params: HashSet<String> = gf.generics.iter().cloned().collect();
         let mut inf = Subst::new();
         for (i, p) in gf.params.iter().enumerate() {
@@ -599,10 +654,10 @@ impl<'a> Mono<'a> {
         expected: Option<&Type>,
         subst: &Subst,
         env: &Env,
-    ) -> Vec<Type> {
+    ) -> (Vec<Type>, Vec<String>) {
         if let Some(Type::Named(en, eargs)) = expected {
             if en == &gs.name && !eargs.is_empty() {
-                return eargs.iter().map(|t| subst_apply(t, subst)).collect();
+                return (eargs.iter().map(|t| subst_apply(t, subst)).collect(), Vec::new());
             }
         }
         let params: HashSet<String> = gs.generics.iter().cloned().collect();
@@ -643,7 +698,7 @@ impl<'a> Mono<'a> {
                 }
             }
         }
-        solve(&ge.generics, &inf)
+        solve(&ge.generics, &inf).0
     }
 
     fn enum_has_variant(&self, g: &str, v: &str) -> bool {
@@ -700,7 +755,7 @@ impl<'a> Mono<'a> {
                             Some(r)
                         }
                     } else {
-                        self.fn_ret.get(f).cloned()
+                        self.fn_ret.get(f).cloned().or_else(|| builtin_ret(f))
                     }
                 }
                 ExprKind::Field(base, v) => {
@@ -732,7 +787,7 @@ impl<'a> Mono<'a> {
             }
             ExprKind::StructLit(name, fields) => {
                 if let Some(gs) = self.gstructs.get(name).copied() {
-                    let targs = self.infer_struct_args(gs, fields, None, subst, env);
+                    let (targs, _) = self.infer_struct_args(gs, fields, None, subst, env);
                     Some(Type::Named(name.clone(), targs))
                 } else {
                     Some(named(name))
@@ -740,6 +795,20 @@ impl<'a> Mono<'a> {
             }
             _ => None,
         }
+    }
+}
+
+/// Return types of the builtins that carry one, so a binding of a builtin result
+/// types its names for later generic inference instead of falling to unknown.
+fn builtin_ret(name: &str) -> Option<Type> {
+    let pair = |t: Type| Type::Tuple(vec![t, named("error")]);
+    match name {
+        "read_file" | "read_line" | "read_all" => Some(pair(named("string"))),
+        "parse_float" => Some(pair(named("float64"))),
+        "write_file" => Some(named("error")),
+        "cstr" => Some(named("string")),
+        "sizeof" => Some(named("int64")),
+        _ => None,
     }
 }
 
@@ -769,11 +838,22 @@ fn mentions(ty: &Type, names: &HashSet<String>) -> bool {
     }
 }
 
-fn solve(generics: &[String], inf: &Subst) -> Vec<Type> {
-    generics
+/// Resolves each type parameter from the inferred substitution. A parameter no
+/// site pinned defaults to int64 so expansion can proceed, and its name is
+/// returned so the caller can report it; a silent default converts an inference
+/// gap into a wrong program.
+fn solve(generics: &[String], inf: &Subst) -> (Vec<Type>, Vec<String>) {
+    let mut missing = Vec::new();
+    let out = generics
         .iter()
-        .map(|g| inf.get(g).cloned().unwrap_or_else(|| named("int64")))
-        .collect()
+        .map(|g| {
+            inf.get(g).cloned().unwrap_or_else(|| {
+                missing.push(g.clone());
+                named("int64")
+            })
+        })
+        .collect();
+    (out, missing)
 }
 
 fn subst_apply(ty: &Type, subst: &Subst) -> Type {
@@ -983,7 +1063,7 @@ mod tests {
                 for p in &f.params {
                     if let Type::Named(n, a) = &p.ty {
                         assert!(
-                            a.is_empty() == false || n != "T" && n != "A",
+                            !a.is_empty() || n != "T" && n != "A",
                             "LEAK: func {} param {} typed bare param {}",
                             f.name, p.name, n
                         );
@@ -1020,6 +1100,74 @@ mod tests {
         assert!(
             !n.iter().any(|x| x.contains("void")),
             "BOGUS void monomorph present: {n:?}"
+        );
+    }
+
+    #[test]
+    fn destructured_bindings_take_element_types() {
+        // `a, b := pair()` must record each name with its tuple element type, so
+        // a later generic call instantiates id$float64, not a tuple monomorph.
+        let n = names(
+            "func id<T>(x: T) -> T { return x }\n\
+             func pair() -> (float64, float64) { return (1.5, 2.5) }\n\
+             func main() -> int32 {\n  a, b := pair()\n  println(id(a))\n  println(b)\n  return 0\n}",
+        );
+        assert!(n.contains(&"id$float64".to_string()), "{n:?}");
+        assert!(
+            !n.iter().any(|x| x.starts_with("id$$")),
+            "no tuple typed monomorph may appear: {n:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_results_type_their_bindings() {
+        // read_file returns (string, error); the destructured data must drive
+        // generic inference as a string, not fall to the int64 default.
+        let n = names(
+            "func id<T>(x: T) -> T { return x }\n\
+             func main() -> int32 {\n  data, e := read_file(\"x\")\n  e.ignore()\n  println(id(data))\n  return 0\n}",
+        );
+        assert!(n.contains(&"id$string".to_string()), "{n:?}");
+    }
+
+    fn diags(src: &str) -> Vec<String> {
+        let (t, _) = lex(src);
+        let (m, e) = parse(t);
+        assert!(e.is_empty(), "parse errors: {e:?}");
+        diagnose(&m).into_iter().map(|d| d.msg).collect()
+    }
+
+    #[test]
+    fn uninferred_type_parameter_is_diagnosed() {
+        let d = diags(
+            "func pick<T>() -> T { return pick() }\n\
+             func main() -> int32 {\n  x := pick()\n  println(x)\n  return 0\n}",
+        );
+        assert!(
+            d.iter().any(|m| m.contains("cannot infer the type parameter 'T' for 'pick'")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn annotated_call_pins_the_parameter_and_is_clean() {
+        let d = diags(
+            "func pick<T>() -> T { return pick() }\n\
+             func main() -> int32 {\n  x: int64 = pick()\n  println(x)\n  return 0\n}",
+        );
+        assert!(!d.iter().any(|m| m.contains("cannot infer")), "{d:?}");
+    }
+
+    #[test]
+    fn impl_on_generic_type_is_diagnosed() {
+        let d = diags(
+            "struct Box<T> { v: T }\n\
+             impl Box { func get() -> int64 { return 0 } }\n\
+             func main() -> int32 { return 0 }",
+        );
+        assert!(
+            d.iter().any(|m| m.contains("methods on the generic type 'Box'")),
+            "{d:?}"
         );
     }
 

@@ -1,12 +1,29 @@
 // std.memory.arena: a bump allocator over one backing buffer. Allocations carve
 // forward from the buffer; individual frees are a no op, the whole arena is reset
 // or destroyed at once. Pass the arena by pointer so the bump offset persists.
-// Arena also implements Allocator, so it can be passed with `using`.
+// Arena also implements Allocator, so it can be passed with `using`. Exhausting
+// the buffer aborts rather than handing out memory past its end.
 
 @paradigm procedural
 @paradigm oop
 
 @import std.memory.allocator
+
+foreign "C" {
+    func abort() -> void
+}
+
+func align_up(n: int64, a: int64) -> int64 {
+    if a <= 1 {
+        return n
+    }
+    return (n + a - 1) / a * a
+}
+
+func arena_exhausted() -> void {
+    printerr("fatal: arena exhausted")
+    abort()
+}
 
 export struct Arena {
     base: *raw int8,
@@ -20,7 +37,10 @@ export func arena_new(cap: int64) -> Arena {
 }
 
 export func arena_alloc(a: *Arena, size: int64) -> *void {
-    off := (*a).used
+    off := align_up((*a).used, 8)
+    if off + size > (*a).cap {
+        arena_exhausted()
+    }
     p := ptr_add((*a).base, off)
     (*a).used = off + size
     return p
@@ -36,7 +56,10 @@ export func arena_destroy(a: *Arena) -> void {
 
 impl Allocator for Arena {
     func alloc(size: int64, align: int64) -> *void {
-        off := self.used
+        off := align_up(self.used, align)
+        if off + size > self.cap {
+            arena_exhausted()
+        }
         p := ptr_add(self.base, off)
         self.used = off + size
         return p

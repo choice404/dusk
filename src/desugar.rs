@@ -22,6 +22,7 @@ pub fn run(module: &Module) -> Module {
     Module {
         paradigms: module.paradigms.clone(),
         imports: module.imports.clone(),
+        monads: module.monads.clone(),
         items: module.items.iter().map(|it| d.item(it)).collect(),
     }
 }
@@ -60,6 +61,7 @@ impl Desugar<'_> {
             Item::Impl(im) => Item::Impl(Impl {
                 iface: im.iface.clone(),
                 ty: im.ty.clone(),
+                span: im.span,
                 methods: im.methods.iter().map(|m| self.func(m)).collect(),
             }),
             other => other.clone(),
@@ -70,6 +72,7 @@ impl Desugar<'_> {
         Func {
             exported: f.exported,
             name: f.name.clone(),
+            span: f.span,
             generics: f.generics.clone(),
             params: f.params.clone(),
             ret: f.ret.clone(),

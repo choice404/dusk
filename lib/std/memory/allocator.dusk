@@ -7,9 +7,29 @@
 @paradigm procedural
 @paradigm oop
 
+foreign "C" {
+    func abort() -> void
+}
+
 interface Allocator {
     alloc(size: int64, align: int64) -> *void
     free(p: *void) -> void
+}
+
+// Rounds an offset up to an alignment boundary, so a bump allocator hands back
+// pointers the requested type can actually sit at.
+func align_up(n: int64, a: int64) -> int64 {
+    if a <= 1 {
+        return n
+    }
+    return (n + a - 1) / a * a
+}
+
+// A bump allocator that runs out of buffer cannot hand back a valid pointer, and
+// the memory past its end belongs to someone else, so exhaustion is fatal.
+func buffer_exhausted() -> void {
+    printerr("fatal: fixed buffer exhausted")
+    abort()
 }
 
 // The libc backed heap allocator. This is the default when no allocator is in
@@ -32,7 +52,8 @@ export func heap() -> Heap {
 }
 
 // A bump allocator over a caller provided buffer. It touches no heap. Allocations
-// carve forward from the buffer and individual frees are a no op.
+// carve forward from the buffer, aligned to the request, and individual frees are
+// a no op. Exhausting the buffer aborts rather than handing out memory past it.
 export struct FixedBuffer {
     base: *raw int8,
     cap: int64,
@@ -41,7 +62,10 @@ export struct FixedBuffer {
 
 impl Allocator for FixedBuffer {
     func alloc(size: int64, align: int64) -> *void {
-        off := self.used
+        off := align_up(self.used, align)
+        if off + size > self.cap {
+            buffer_exhausted()
+        }
         p := ptr_add(self.base, off)
         self.used = off + size
         return p

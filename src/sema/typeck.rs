@@ -1,10 +1,13 @@
 //! Type checking. M4.
 //!
-//! Coarse types: integers collapse to one `Int` and floats to one `Float` for now;
-//! width checking lands later. Structs, enums, generics, methods, and imported types
-//! become `Unknown`, which is compatible with everything, so advanced code is accepted
-//! without false errors while real core type errors are still caught. The unused
-//! variable and must handle error rules are enforced by the resolver pass (M3).
+//! Integers and floats carry their bit width, with width 0 standing for a bare
+//! literal that adapts to the width around it, so `int32 + int64` is rejected
+//! while `x + 1` still works at any width. Generics, methods, and imported types
+//! become `Unknown`, which is compatible with everything, so advanced code is
+//! accepted without false errors while real core type errors are still caught.
+//! The unused variable rule and the bare identifier immutability rule live in the
+//! resolver pass (M3); the projection form of immutability, the must handle rule,
+//! and the ownership rules live here, where types are known.
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,10 +22,13 @@ pub fn check(module: &Module) -> Vec<Diagnostic> {
     tc.errors
 }
 
+/// A checked type. `Int(w)` and `Float(w)` carry the bit width; width 0 is a
+/// bare numeric literal, compatible with any width of its kind, so a literal
+/// adapts to its context and only two differently sized variables clash.
 #[derive(Clone, Debug, PartialEq)]
 enum Ty {
-    Int,
-    Float,
+    Int(u32),
+    Float(u32),
     Bool,
     Char,
     Str,
@@ -64,6 +70,18 @@ struct TypeChecker {
     raw_sigs: HashMap<String, Vec<Ty>>,
     scopes: Vec<HashMap<String, Ty>>,
     owns: Vec<HashMap<String, Own>>,
+    // Mutable binding names, tracked here so an element or field store can walk
+    // to its root binding and reject writing through an immutable one. The bare
+    // `x = v` form is the resolver's; this pass owns the projection forms.
+    muts: Vec<HashSet<String>>,
+    // Error typed bindings that have not been handled yet, reported when their
+    // scope pops. Handling is one of exists, check, or ignore on the binding, or
+    // returning it to the caller.
+    err_binds: Vec<HashMap<String, Span>>,
+    // How many conditional or loop bodies enclose the current statement. A defer
+    // inside one is rejected, since defers replay lexically at every return and
+    // a conditional registration cannot be honored.
+    branch_depth: u32,
     cur_generics: HashSet<String>,
     cur_ret: Ty,
     errors: Vec<Diagnostic>,
@@ -81,6 +99,9 @@ impl TypeChecker {
             raw_sigs: HashMap::new(),
             scopes: Vec::new(),
             owns: Vec::new(),
+            muts: Vec::new(),
+            err_binds: Vec::new(),
+            branch_depth: 0,
             cur_generics: HashSet::new(),
             cur_ret: Ty::Unit,
             errors: Vec::new(),
@@ -101,7 +122,12 @@ impl TypeChecker {
                 }
                 Item::Impl(im) => {
                     if let Some(iface) = &im.iface {
-                        self.impls.insert((iface.clone(), im.ty.clone()));
+                        if !self.impls.insert((iface.clone(), im.ty.clone())) {
+                            self.err(
+                                format!("duplicate 'impl {iface} for {}'; merge the two blocks", im.ty),
+                                im.span,
+                            );
+                        }
                     }
                 }
                 _ => {}
@@ -165,7 +191,12 @@ impl TypeChecker {
     fn run(&mut self, module: &Module) {
         for item in &module.items {
             match item {
-                Item::Func(f) => self.func(f, false),
+                Item::Func(f) => {
+                    if f.name == "main" {
+                        self.check_main_sig(f);
+                    }
+                    self.func(f, false);
+                }
                 Item::Impl(im) => {
                     self.check_impl_complete(im);
                     for m in &im.methods {
@@ -178,6 +209,26 @@ impl TypeChecker {
         }
     }
 
+    /// The only main signatures the C entry supports: no parameters, or exactly
+    /// `(argc: int32, argv: string[])`, which the wrapper bridges. Any other
+    /// shape would be emitted as the C `main` with the wrong parameters and read
+    /// garbage registers, so it is rejected here.
+    fn check_main_sig(&mut self, f: &Func) {
+        if f.params.is_empty() {
+            return;
+        }
+        let ok = f.params.len() == 2
+            && !f.params.iter().any(|p| p.using)
+            && self.lower(&f.params[0].ty) == Ty::Int(32)
+            && matches!(self.lower(&f.params[1].ty), Ty::Slice(ref e) if matches!(**e, Ty::Str));
+        if !ok {
+            self.err(
+                "main takes no parameters or (argc: int32, argv: string[]); the allocator form is not supported yet",
+                f.span,
+            );
+        }
+    }
+
     /// A foreign block ties external C symbols into the program. The abi must be
     /// "C", and every parameter and return type sits on the raw pointer layer, a
     /// scalar, a `*raw T`, or a `*void`. A managed `*T` carries a generation
@@ -187,21 +238,21 @@ impl TypeChecker {
         if fb.abi != "C" {
             self.err(
                 format!("unsupported foreign abi \"{}\", only \"C\" is supported", fb.abi),
-                Span::new(0, 0),
+                fb.span,
             );
         }
         let empty = HashSet::new();
         for ff in &fb.funcs {
             for p in &ff.params {
                 let ty = self.fix(lower(&p.ty, &empty));
-                self.check_foreign_ty(&ty, &ff.name);
+                self.check_foreign_ty(&ty, &ff.name, fb.span);
             }
             let ret = self.fix(lower(&ff.ret, &empty));
-            self.check_foreign_ty(&ret, &ff.name);
+            self.check_foreign_ty(&ret, &ff.name, fb.span);
         }
     }
 
-    fn check_foreign_ty(&mut self, ty: &Ty, fname: &str) {
+    fn check_foreign_ty(&mut self, ty: &Ty, fname: &str, span: Span) {
         if foreign_ty_ok(ty) {
             return;
         }
@@ -216,7 +267,7 @@ impl TypeChecker {
                  a foreign signature takes scalars and raw pointers, *raw T or *void"
             )
         };
-        self.err(msg, Span::new(0, 0));
+        self.err(msg, span);
     }
 
     /// Validates a struct literal against the struct's declared fields. Every
@@ -259,9 +310,13 @@ impl TypeChecker {
     fn func(&mut self, f: &Func, is_method: bool) {
         self.cur_generics = f.generics.iter().cloned().collect();
         self.cur_ret = lower(&f.ret, &self.cur_generics);
+        self.branch_depth = 0;
         self.push_scope();
         if is_method {
             self.declare("self", Ty::Unknown);
+            // A method takes its receiver by pointer, so writing through
+            // `self.field` mutates the caller's value by design.
+            self.declare_mut("self");
         }
         for p in &f.params {
             let ty = self.lower(&p.ty);
@@ -276,6 +331,14 @@ impl TypeChecker {
             self.stmt(s);
         }
         self.pop_scope();
+        // A non void function must return on every path; falling off the end
+        // would otherwise hand back a zeroed value with no diagnostic.
+        if !matches!(self.cur_ret, Ty::Unit) && !block_returns(&f.body) {
+            self.err(
+                format!("not all paths in '{}' return a value", f.name),
+                f.span,
+            );
+        }
     }
 
     fn lower(&self, t: &Type) -> Ty {
@@ -285,11 +348,66 @@ impl TypeChecker {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.owns.push(HashMap::new());
+        self.muts.push(HashSet::new());
+        self.err_binds.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.owns.pop();
+        self.muts.pop();
+        // Every error bound in this scope must have been handled by now. The
+        // handled ones were removed at their handling site; the rest report.
+        if let Some(pending) = self.err_binds.pop() {
+            let mut pending: Vec<(String, Span)> = pending.into_iter().collect();
+            pending.sort_by_key(|(_, s)| s.lo);
+            for (name, span) in pending {
+                self.err(
+                    format!(
+                        "the error '{name}' is never handled; inspect it with exists, handle it with check, or discard it with ignore"
+                    ),
+                    span,
+                );
+            }
+        }
+    }
+
+    /// Marks a binding as mutable in the current scope.
+    fn declare_mut(&mut self, name: &str) {
+        if let Some(scope) = self.muts.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    fn is_mutable(&self, name: &str) -> bool {
+        self.muts.iter().rev().any(|s| s.contains(name))
+    }
+
+    /// Registers an error typed binding as pending until a handling site clears it.
+    fn declare_err(&mut self, name: &str, span: Span) {
+        if let Some(scope) = self.err_binds.last_mut() {
+            scope.insert(name.to_string(), span);
+        }
+    }
+
+    /// Clears an error binding's pending state, from innermost scope outward.
+    fn mark_err_handled(&mut self, name: &str) {
+        for scope in self.err_binds.iter_mut().rev() {
+            if scope.remove(name).is_some() {
+                return;
+            }
+        }
+    }
+
+    /// Marks every error binding an expression mentions as handled. Used for
+    /// `return e` and `return (v, e)`, which hand the error to the caller.
+    fn mark_errs_in(&mut self, e: &Expr) {
+        let mut used = Vec::new();
+        let mut bound = HashSet::new();
+        collect_expr(e, &mut used, &mut bound);
+        for name in used {
+            self.mark_err_handled(&name);
+        }
     }
 
     fn declare(&mut self, name: &str, ty: Ty) {
@@ -356,6 +474,106 @@ impl TypeChecker {
         self.owns = saved;
     }
 
+    /// A block that hangs off a conditional or loop, tracked so a `defer` inside
+    /// one can be rejected.
+    fn branch_block(&mut self, b: &Block) {
+        self.branch_depth += 1;
+        self.block(b);
+        self.branch_depth -= 1;
+    }
+
+    /// Enforces immutability through projections: an element or field store whose
+    /// chain stays in value territory, arrays and struct fields, must root in a
+    /// mutable binding. A store through a pointer, a slice, or a string writes a
+    /// buffer the binding merely views, which the resolver's function scope rules
+    /// govern instead. The bare `x = v` form is the resolver's; this pass adds
+    /// the `xs[i] = v` and `s.f = v` forms it cannot see.
+    fn check_assign_target(&mut self, lhs: &Expr) {
+        if matches!(&lhs.kind, ExprKind::Ident(_)) {
+            return;
+        }
+        // A field store on a pointer never reaches memory today; the language
+        // requires an explicit dereference, so say so instead of dropping it.
+        if let ExprKind::Field(base, _) = &lhs.kind {
+            if matches!(self.chain_ty(base), Ty::Ptr(_) | Ty::RawPtr(_)) {
+                self.err(
+                    "a field store through a pointer needs an explicit dereference; write (*p).field",
+                    lhs.span,
+                );
+                return;
+            }
+        }
+        if let Some((root, span)) = self.value_chain_root(lhs) {
+            if root != "self" && !self.is_mutable(&root) {
+                self.err(
+                    format!("cannot assign through immutable '{root}'; declare it 'mut'"),
+                    span,
+                );
+            }
+        }
+    }
+
+    /// The root binding of an assignment chain that stays in value territory, or
+    /// None once the chain crosses a pointer, slice, or string indirection.
+    fn value_chain_root(&self, e: &Expr) -> Option<(String, Span)> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some((n.clone(), e.span)),
+            ExprKind::Field(base, _) => self.value_chain_root(base),
+            ExprKind::Index(base, _) => match self.chain_ty(base) {
+                Ty::Array(..) => self.value_chain_root(base),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// A side effect free type walk for assignment chains. Unlike `infer`, it
+    /// never emits diagnostics, so walking the same expression twice is safe.
+    fn chain_ty(&self, e: &Expr) -> Ty {
+        match &e.kind {
+            ExprKind::Ident(n) => self.lookup(n),
+            ExprKind::Field(base, fname) => match self.chain_ty(base) {
+                Ty::Named(s) => self
+                    .structs
+                    .get(&s)
+                    .and_then(|(_, fs)| fs.iter().find(|(n, _)| n == fname).map(|(_, t)| t.clone()))
+                    .unwrap_or(Ty::Unknown),
+                _ => Ty::Unknown,
+            },
+            ExprKind::Index(base, _) => elem_of(&self.chain_ty(base)),
+            ExprKind::Unary(UnOp::Deref, p) => match self.chain_ty(p) {
+                Ty::Ptr(inner) | Ty::RawPtr(inner) => *inner,
+                _ => Ty::Unknown,
+            },
+            _ => Ty::Unknown,
+        }
+    }
+
+    /// Rejects an integer literal that cannot fit the width it is bound to, as in
+    /// `x: int8 = 300`. Only a direct literal (or its negation) is checked; a
+    /// computed value is the programmer's to range.
+    fn check_int_fits(&mut self, e: &Expr, ty: &Ty) {
+        let Ty::Int(w @ (8 | 16 | 32)) = ty else {
+            return;
+        };
+        let (neg, v) = match &e.kind {
+            ExprKind::Int(v, None) => (false, *v),
+            ExprKind::Unary(UnOp::Neg, inner) => match &inner.kind {
+                ExprKind::Int(v, None) => (true, *v),
+                _ => return,
+            },
+            _ => return,
+        };
+        let val = if neg { -(v as i128) } else { v as i128 };
+        // Signedness is not tracked yet, so accept the union of the signed and
+        // unsigned ranges for the width; a value outside both cannot be right.
+        let lo = -(1i128 << (w - 1));
+        let hi = (1i128 << w) - 1;
+        if val < lo || val > hi {
+            self.err(format!("literal {val} does not fit in {w} bits"), e.span);
+        }
+    }
+
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let(l) => self.let_stmt(l),
@@ -365,6 +583,8 @@ impl TypeChecker {
                 if !compatible(&lt, &rt) {
                     self.err("assignment type mismatch", lhs.span);
                 }
+                self.check_int_fits(rhs, &lt);
+                self.check_assign_target(lhs);
                 if is_managed(&lt) {
                     // `q = p` aliases two owners exactly like the let form copy, so
                     // flag it the same. This takes priority, naming the precise
@@ -395,10 +615,20 @@ impl TypeChecker {
             }
             Stmt::Return(Some(e)) => {
                 let t = self.infer(e);
-                if !compatible(&self.cur_ret.clone(), &t) {
+                let ret = self.cur_ret.clone();
+                // Returning a concrete struct where an interface is declared is
+                // the boxing site; it needs an impl, checked precisely here, and
+                // the plain mismatch error would misfire on the valid case.
+                let iface_ret = matches!((&ret, &t), (Ty::Named(i), Ty::Named(_)) if self.ifaces.contains(i));
+                if iface_ret {
+                    self.check_conformance(&ret, &t, e.span);
+                } else if !compatible(&ret, &t) {
                     self.err("return type does not match the function's return type", e.span);
                 }
+                self.check_int_fits(e, &ret);
                 self.check_escape(e, &t);
+                // A returned error is the caller's to handle.
+                self.mark_errs_in(e);
             }
             Stmt::Return(None) => {
                 if !compatible(&self.cur_ret.clone(), &Ty::Unit) {
@@ -406,6 +636,12 @@ impl TypeChecker {
                 }
             }
             Stmt::Defer(e) => {
+                if self.branch_depth > 0 {
+                    self.err(
+                        "a defer inside a conditional or loop is not supported; register it at the top level of the function",
+                        e.span,
+                    );
+                }
                 self.infer(e);
             }
             Stmt::If(i) => {
@@ -413,9 +649,9 @@ impl TypeChecker {
                 if !compatible(&Ty::Bool, &c) {
                     self.err("if condition must be a bool", i.cond.span);
                 }
-                self.block(&i.then);
+                self.branch_block(&i.then);
                 if let Some(els) = &i.els {
-                    self.block(els);
+                    self.branch_block(els);
                 }
             }
             Stmt::While(w) => {
@@ -423,13 +659,13 @@ impl TypeChecker {
                 if !compatible(&Ty::Bool, &c) {
                     self.err("while condition must be a bool", w.cond.span);
                 }
-                self.block(&w.body);
+                self.branch_block(&w.body);
             }
             Stmt::For(f) => {
                 self.infer(&f.iter);
                 self.push_scope();
                 self.declare(&f.var, Ty::Unknown);
-                self.block(&f.body);
+                self.branch_block(&f.body);
                 self.pop_scope();
             }
             Stmt::Match(m) => self.walk_match(m),
@@ -450,20 +686,69 @@ impl TypeChecker {
     }
 
     fn let_stmt(&mut self, l: &Let) {
+        // `p: *T = alloc()` is the uninitialized allocation; its size comes from
+        // the annotation, so the form is only valid with a pointer annotation on
+        // a single binding. Intercepted before infer, whose alloc arm rejects
+        // every other zero argument alloc site.
+        if is_zero_arg_alloc(&l.value, &self.sigs) && l.binds.len() == 1 {
+            let b = &l.binds[0];
+            let ty = match &b.ty {
+                Some(t) => {
+                    let lt = self.lower(t);
+                    if !matches!(lt, Ty::Ptr(_)) {
+                        self.err(
+                            "alloc() with no value takes its size from a pointer annotation; write p: *T = alloc()",
+                            l.value.span,
+                        );
+                    }
+                    lt
+                }
+                None => {
+                    self.err(
+                        "alloc() with no value needs a pointer type annotation to size the allocation; write p: *T = alloc()",
+                        l.value.span,
+                    );
+                    Ty::Unknown
+                }
+            };
+            self.declare(&b.name, ty.clone());
+            if l.mutable {
+                self.declare_mut(&b.name);
+            }
+            if is_managed(&ty) {
+                self.declare_own(&b.name, Own::Owner);
+            }
+            return;
+        }
         let vt = self.infer(&l.value);
         if l.binds.len() == 1 {
             let b = &l.binds[0];
             let ty = match &b.ty {
                 Some(t) => {
                     let lt = self.lower(t);
+                    // The annotation with the interface name intact, so binding a
+                    // struct to an interface checks its impl instead of emitting
+                    // a reference to a vtable that does not exist.
+                    let raw = lower(t, &self.cur_generics);
+                    self.check_conformance(&raw, &vt, l.value.span);
                     if !compatible(&lt, &vt) {
                         self.err(format!("'{}' has a type annotation that does not match its value", b.name), l.value.span);
                     }
+                    self.check_int_fits(&l.value, &lt);
                     lt
                 }
-                None => vt.clone(),
+                // An unannotated binding of a bare literal takes the default
+                // width, int64 or float64, so the binding is concretely typed
+                // and cannot launder a width mismatch later.
+                None => harden(vt.clone()),
             };
             self.declare(&b.name, ty.clone());
+            if l.mutable {
+                self.declare_mut(&b.name);
+            }
+            if matches!(ty, Ty::Error) {
+                self.declare_err(&b.name, l.value.span);
+            }
             if is_managed(&ty) {
                 let own = self.binding_own(l, &vt);
                 self.declare_own(&b.name, own);
@@ -481,13 +766,19 @@ impl TypeChecker {
         for (b, pt) in l.binds.iter().zip(parts) {
             let ty = match &b.ty {
                 Some(t) => self.lower(t),
-                None => pt,
+                None => harden(pt),
             };
             // A destructured managed pointer is conservatively an owner, so it is
             // tracked and freeing it is not wrongly rejected. The static copy
             // check for the destructure itself falls to the runtime backstop.
             if is_managed(&ty) {
                 self.declare_own(&b.name, Own::Owner);
+            }
+            if l.mutable {
+                self.declare_mut(&b.name);
+            }
+            if matches!(ty, Ty::Error) {
+                self.declare_err(&b.name, l.value.span);
             }
             self.declare(&b.name, ty);
         }
@@ -545,6 +836,9 @@ impl TypeChecker {
                 ExprKind::Index(base, idx) if matches!(idx.kind, ExprKind::Range(..)) => {
                     matches!(self.infer(base), Ty::Array(..))
                 }
+                // An array literal materializes in this frame, so returning it
+                // as a slice views a dead frame no matter what its type says.
+                ExprKind::Array(_) => true,
                 _ => matches!(t, Ty::Array(..)),
             };
             if backs_local_array {
@@ -579,8 +873,14 @@ impl TypeChecker {
 
     fn infer(&mut self, e: &Expr) -> Ty {
         match &e.kind {
-            ExprKind::Int(..) => Ty::Int,
-            ExprKind::Float(..) => Ty::Float,
+            ExprKind::Int(v, suffix) => {
+                let w = int_suffix_width(suffix);
+                if w != 0 {
+                    self.check_int_fits_suffixed(*v, w, e.span);
+                }
+                Ty::Int(w)
+            }
+            ExprKind::Float(_, suffix) => Ty::Float(float_suffix_width(suffix)),
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Char(_) => Ty::Char,
             ExprKind::Str(_) => Ty::Str,
@@ -630,7 +930,7 @@ impl TypeChecker {
                 self.check_struct_lit(name, fields, e.span);
                 named_ty(name)
             }
-            ExprKind::Lambda(l) => self.infer_lambda(l),
+            ExprKind::Lambda(l) => self.infer_lambda(l, e.span),
             ExprKind::Match(m) => {
                 self.walk_match(m);
                 Ty::Unknown
@@ -641,7 +941,21 @@ impl TypeChecker {
                 }
                 Ty::Unknown
             }
-            ExprKind::SizeofType(_) => Ty::Int,
+            ExprKind::SizeofType(_) => Ty::Int(64),
+        }
+    }
+
+    /// Rejects a suffixed literal whose value cannot fit its own suffix, like
+    /// `300i8`, which would silently truncate in codegen.
+    fn check_int_fits_suffixed(&mut self, v: i64, w: u32, span: Span) {
+        if w >= 64 {
+            return;
+        }
+        let val = v as i128;
+        let lo = -(1i128 << (w - 1));
+        let hi = (1i128 << w) - 1;
+        if val < lo || val > hi {
+            self.err(format!("literal {val} does not fit in {w} bits"), span);
         }
     }
 
@@ -654,6 +968,13 @@ impl TypeChecker {
                 self.infer(a);
             }
             if is_error {
+                // exists, check, and ignore are the three ways to handle an
+                // error, so a bound error the call is invoked on is discharged.
+                if matches!(mname.as_str(), "exists" | "check" | "ignore") {
+                    if let ExprKind::Ident(bname) = &base.kind {
+                        self.mark_err_handled(bname);
+                    }
+                }
                 return match mname.as_str() {
                     "exists" => Ty::Bool,
                     "toString" => Ty::Str,
@@ -673,21 +994,34 @@ impl TypeChecker {
                     }
                     return ty;
                 }
-                // print and println take an optional format string. With a value
-                // argument the first argument is a literal whose holes the rest
-                // fill, checked here so codegen can expand it directly.
-                if (name == "print" || name == "println") && !args.is_empty() {
-                    for a in args {
-                        self.infer(a);
-                    }
-                    if args.len() >= 2 {
+                // print, println, and printerr take an optional format string. A
+                // string literal first argument is always a format string, so a
+                // stray hole or a doubled brace behaves the same at any arity,
+                // and every printed value must have a printable type.
+                if name == "print" || name == "println" || name == "printerr" {
+                    let tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+                    let fmt_lit = matches!(args.first().map(|a| &a.kind), Some(ExprKind::Str(_)));
+                    if fmt_lit {
                         self.check_format(args);
+                    }
+                    let value_start = if fmt_lit { 1 } else { 0 };
+                    for (a, t) in args.iter().zip(&tys).skip(value_start) {
+                        self.check_printable(t, a.span);
                     }
                     return Ty::Unit;
                 }
                 if name == "alloc" {
                     // alloc(v) yields a managed *T owner of the value's type, so
                     // the single owner pass engages even for the inferred form.
+                    // The zero argument form sizes from a pointer annotation and
+                    // is only valid where let_stmt intercepted it.
+                    if args.is_empty() {
+                        self.err(
+                            "alloc() with no value is only valid as p: *T = alloc(), where the annotation sizes the allocation",
+                            f.span,
+                        );
+                        return Ty::Ptr(Box::new(Ty::Unknown));
+                    }
                     let inner = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
                     return Ty::Ptr(Box::new(inner));
                 }
@@ -807,7 +1141,7 @@ impl TypeChecker {
             match im.methods.iter().find(|m| &m.name == mname) {
                 None => self.err(
                     format!("impl {iface} for {} is missing method '{mname}'", im.ty),
-                    Span::new(0, 0),
+                    im.span,
                 ),
                 Some(m) if m.params.len() != *arity => self.err(
                     format!(
@@ -815,7 +1149,7 @@ impl TypeChecker {
                         im.ty,
                         m.params.len()
                     ),
-                    Span::new(0, 0),
+                    m.span,
                 ),
                 Some(_) => {}
             }
@@ -848,9 +1182,46 @@ impl TypeChecker {
         }
     }
 
-    fn infer_lambda(&mut self, l: &Lambda) -> Ty {
+    /// Whether a value of this type can be printed. Scalars, strings, and errors
+    /// have printers; a struct prints through its Display impl's toString; and
+    /// everything else is rejected, since a silently empty print is the worst of
+    /// the options.
+    fn check_printable(&mut self, t: &Ty, span: Span) {
+        match t {
+            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str | Ty::Error | Ty::Unknown => {}
+            Ty::Named(n) => {
+                if self.structs.contains_key(n) {
+                    if !self.impls.contains(&("Display".to_string(), n.clone())) {
+                        self.err(
+                            format!("'{n}' has no Display impl; add 'impl Display for {n}' with 'toString() -> string' to print it"),
+                            span,
+                        );
+                    }
+                } else if self.enums.contains_key(n) {
+                    self.err(
+                        format!("cannot print the enum '{n}'; match on it and print its parts"),
+                        span,
+                    );
+                }
+                // An unknown named type, a generic or an import the checker does
+                // not track, stays permissive.
+            }
+            Ty::Unit => self.err("cannot print a void value", span),
+            Ty::Ptr(_) | Ty::RawPtr(_) => {
+                self.err("cannot print a pointer; dereference it or print its fields", span)
+            }
+            _ => self.err(
+                format!("cannot print {}; print its elements instead", ty_str(t)),
+                span,
+            ),
+        }
+    }
+
+    fn infer_lambda(&mut self, l: &Lambda, span: Span) -> Ty {
         let saved_ret = self.cur_ret.clone();
+        let saved_depth = self.branch_depth;
         self.cur_ret = self.lower(&l.ret);
+        self.branch_depth = 0;
         let params: Vec<Ty> = l.params.iter().map(|p| self.lower(&p.ty)).collect();
         self.push_scope();
         for (p, ty) in l.params.iter().zip(&params) {
@@ -861,12 +1232,17 @@ impl TypeChecker {
         }
         self.pop_scope();
         let ret = self.cur_ret.clone();
+        if !matches!(ret, Ty::Unit) && !block_returns(&l.body) {
+            self.err("not all paths in this lambda return a value", span);
+        }
         self.cur_ret = saved_ret;
+        self.branch_depth = saved_depth;
         Ty::Func(params, Box::new(ret))
     }
 
     fn walk_match(&mut self, m: &Match) {
         let st = self.infer(&m.scrut);
+        self.branch_depth += 1;
         for arm in &m.arms {
             self.push_scope();
             match &arm.pat {
@@ -883,10 +1259,26 @@ impl TypeChecker {
             }
             self.pop_scope();
         }
-        if let Ty::Named(ename) = &st {
-            if let Some(variants) = self.enums.get(ename).cloned() {
-                self.check_coverage(&variants, &m.arms, m.scrut.span);
+        self.branch_depth -= 1;
+        // match is defined over enum values. A known enum checks coverage; any
+        // other known type is rejected, since codegen has no dispatch for it. An
+        // Unknown, a generic or an unresolved import, stays permissive.
+        match &st {
+            Ty::Named(ename) => {
+                if let Some(variants) = self.enums.get(ename).cloned() {
+                    self.check_coverage(&variants, &m.arms, m.scrut.span);
+                } else if self.structs.contains_key(ename) || self.ifaces.contains(ename) {
+                    self.err(
+                        format!("match needs an enum value, and {} is not an enum", ty_str(&st)),
+                        m.scrut.span,
+                    );
+                }
             }
+            Ty::Unknown => {}
+            _ => self.err(
+                format!("match needs an enum value, not {}", ty_str(&st)),
+                m.scrut.span,
+            ),
         }
     }
 
@@ -930,7 +1322,7 @@ impl TypeChecker {
                 }
             },
             UnOp::Neg => {
-                if matches!(t, Ty::Int | Ty::Float | Ty::Unknown) {
+                if matches!(t, Ty::Int(_) | Ty::Float(_) | Ty::Unknown) {
                     t.clone()
                 } else {
                     self.err("unary minus needs a numeric operand", span);
@@ -956,11 +1348,30 @@ impl TypeChecker {
                 if unknown {
                     return if matches!(a, Ty::Unknown) { b.clone() } else { a.clone() };
                 }
-                if a == b && matches!(a, Ty::Int | Ty::Float) {
-                    a.clone()
-                } else {
-                    self.err("arithmetic needs two operands of the same numeric type", span);
-                    Ty::Unknown
+                match (a, b) {
+                    // Same kind: the widths must agree, with a bare literal
+                    // (width 0) adapting to the other side. Mixing widths would
+                    // silently truncate in codegen, so it is an error here.
+                    (Ty::Int(x), Ty::Int(y)) | (Ty::Float(x), Ty::Float(y)) => {
+                        if x == y || *x == 0 || *y == 0 {
+                            let w = (*x).max(*y);
+                            if matches!(a, Ty::Int(_)) { Ty::Int(w) } else { Ty::Float(w) }
+                        } else {
+                            self.err(
+                                format!(
+                                    "arithmetic mixes {} and {}; match the widths",
+                                    ty_str(a),
+                                    ty_str(b)
+                                ),
+                                span,
+                            );
+                            Ty::Unknown
+                        }
+                    }
+                    _ => {
+                        self.err("arithmetic needs two operands of the same numeric type", span);
+                        Ty::Unknown
+                    }
                 }
             }
             Eq | Ne | Lt | Le | Gt | Ge => {
@@ -970,7 +1381,7 @@ impl TypeChecker {
                 Ty::Bool
             }
             And | Or => {
-                if !unknown && !(matches!(a, Ty::Bool) && matches!(b, Ty::Bool)) {
+                if !(unknown || matches!(a, Ty::Bool) && matches!(b, Ty::Bool)) {
                     self.err("logical operators need bool operands", span);
                 }
                 Ty::Bool
@@ -987,6 +1398,38 @@ fn elem_of(t: &Ty) -> Ty {
     }
 }
 
+/// Whether an expression is a call to the `alloc` builtin with no arguments,
+/// the uninitialized allocation form. A user function named alloc shadows the
+/// builtin, so the signature table is consulted.
+fn is_zero_arg_alloc(e: &Expr, sigs: &HashMap<String, (Vec<Ty>, Ty)>) -> bool {
+    match &e.kind {
+        ExprKind::Call(f, args) if args.is_empty() => {
+            matches!(&f.kind, ExprKind::Ident(n) if n == "alloc" && !sigs.contains_key(n))
+        }
+        _ => false,
+    }
+}
+
+/// Whether every path through a block reaches a `return`. A block returns when
+/// any statement in it does: a plain return, an if whose branches both return,
+/// or a match whose arms all return (exhaustiveness is checked separately).
+/// Loops never count, since their bodies may run zero times.
+fn block_returns(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_returns)
+}
+
+fn stmt_returns(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return(_) => true,
+        Stmt::If(i) => match &i.els {
+            Some(els) => block_returns(&i.then) && block_returns(els),
+            None => false,
+        },
+        Stmt::Match(m) => !m.arms.is_empty() && m.arms.iter().all(|a| block_returns(&a.body)),
+        _ => false,
+    }
+}
+
 /// Whether a type is a managed pointer subject to the single owner rules. A
 /// `*void`, which is `Ty::Ptr(Unit)`, is the raw allocator currency and is
 /// exempt, as is every `*raw T`.
@@ -999,7 +1442,7 @@ fn is_managed(ty: &Ty) -> bool {
 /// return. A managed `*T` and an aggregate passed by value do not cross.
 fn foreign_ty_ok(ty: &Ty) -> bool {
     match ty {
-        Ty::Int | Ty::Float | Ty::Bool | Ty::Char | Ty::Unit => true,
+        Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Unit => true,
         Ty::RawPtr(_) => true,
         Ty::Ptr(inner) => matches!(**inner, Ty::Unit),
         _ => false,
@@ -1021,14 +1464,27 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         return true;
     }
     match (a, b) {
+        // A width of 0 is a bare literal, which adapts to any width of its kind.
+        // Two concrete widths must match, so an int32 never silently truncates
+        // an int64 or widens into one.
+        (Ty::Int(x), Ty::Int(y)) | (Ty::Float(x), Ty::Float(y)) => {
+            *x == 0 || *y == 0 || x == y
+        }
         (Ty::Array(x, _), Ty::Slice(y)) | (Ty::Slice(x), Ty::Array(y, _)) => compatible(x, y),
         (Ty::Slice(x), Ty::Slice(y)) => compatible(x, y),
         (Ty::Array(x, n), Ty::Array(y, m)) if n == m => compatible(x, y),
+        (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => {
+            xs.iter().zip(ys).all(|(x, y)| compatible(x, y))
+        }
+        (Ty::Func(xp, xr), Ty::Func(yp, yr)) if xp.len() == yp.len() => {
+            xp.iter().zip(yp).all(|(x, y)| compatible(x, y)) && compatible(xr, yr)
+        }
+        (Ty::RawPtr(x), Ty::RawPtr(y)) => compatible(x, y),
         (Ty::Ptr(x), Ty::Ptr(y)) => {
             matches!(**x, Ty::Unit) || matches!(**y, Ty::Unit) || compatible(x, y)
         }
         // A char is an ASCII byte, freely compared with and assigned to ints.
-        (Ty::Char, Ty::Int) | (Ty::Int, Ty::Char) => true,
+        (Ty::Char, Ty::Int(_)) | (Ty::Int(_), Ty::Char) => true,
         _ => false,
     }
 }
@@ -1055,10 +1511,45 @@ fn lower(t: &Type, generics: &HashSet<String>) -> Ty {
     }
 }
 
+/// Pins a bare literal's type to its default width, int64 or float64, when it
+/// lands in an unannotated binding, matching how codegen sizes the slot.
+fn harden(t: Ty) -> Ty {
+    match t {
+        Ty::Int(0) => Ty::Int(64),
+        Ty::Float(0) => Ty::Float(64),
+        Ty::Tuple(ts) => Ty::Tuple(ts.into_iter().map(harden).collect()),
+        other => other,
+    }
+}
+
+/// The width an integer literal suffix pins, or 0 for a bare adaptable literal.
+fn int_suffix_width(suffix: &Option<String>) -> u32 {
+    match suffix.as_deref() {
+        Some("i8") | Some("u8") => 8,
+        Some("i16") | Some("u16") => 16,
+        Some("i32") | Some("u32") => 32,
+        Some("i64") | Some("u64") => 64,
+        _ => 0,
+    }
+}
+
+/// The width a float literal suffix pins, or 0 for a bare adaptable literal.
+fn float_suffix_width(suffix: &Option<String>) -> u32 {
+    match suffix.as_deref() {
+        Some("f32") => 32,
+        Some("f64") => 64,
+        _ => 0,
+    }
+}
+
 fn named_ty(n: &str) -> Ty {
     match n {
-        "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64" => Ty::Int,
-        "float32" | "float64" => Ty::Float,
+        "int8" | "uint8" => Ty::Int(8),
+        "int16" | "uint16" => Ty::Int(16),
+        "int32" | "uint32" => Ty::Int(32),
+        "int64" | "uint64" => Ty::Int(64),
+        "float32" => Ty::Float(32),
+        "float64" => Ty::Float(64),
         "bool" => Ty::Bool,
         "char" => Ty::Char,
         "string" => Ty::Str,
@@ -1074,10 +1565,33 @@ fn named_ty(n: &str) -> Ty {
 fn builtin_ret(name: &str) -> Option<Ty> {
     match name {
         "read_file" | "read_line" | "read_all" => Some(Ty::Tuple(vec![Ty::Str, Ty::Error])),
-        "parse_float" => Some(Ty::Tuple(vec![Ty::Float, Ty::Error])),
+        "parse_float" => Some(Ty::Tuple(vec![Ty::Float(64), Ty::Error])),
         "write_file" => Some(Ty::Error),
         "cstr" => Some(Ty::Str),
         _ => None,
+    }
+}
+
+/// A short human name for a type in diagnostics.
+fn ty_str(t: &Ty) -> String {
+    match t {
+        Ty::Int(0) => "an integer literal".to_string(),
+        Ty::Int(w) => format!("int{w}"),
+        Ty::Float(0) => "a float literal".to_string(),
+        Ty::Float(w) => format!("float{w}"),
+        Ty::Bool => "bool".to_string(),
+        Ty::Char => "char".to_string(),
+        Ty::Str => "string".to_string(),
+        Ty::Unit => "void".to_string(),
+        Ty::Error => "error".to_string(),
+        Ty::Ptr(_) => "a managed pointer".to_string(),
+        Ty::RawPtr(_) => "a raw pointer".to_string(),
+        Ty::Slice(_) => "a slice".to_string(),
+        Ty::Array(..) => "an array".to_string(),
+        Ty::Tuple(_) => "a tuple".to_string(),
+        Ty::Named(n) => format!("'{n}'"),
+        Ty::Func(..) => "a function".to_string(),
+        Ty::Unknown => "an unknown type".to_string(),
     }
 }
 
@@ -1349,6 +1863,220 @@ mod tests {
             "func add(a: int64, b: int64) -> int64 { return a + b }\n\
              func f() -> int64 {\n  x := add(1, 2)\n  if x == 3 {\n    return x\n  }\n  return 0\n}",
         );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn mixed_integer_widths_are_rejected() {
+        let e = errs(
+            "func f() -> void {\n  a: int32 = 5\n  b: int64 = 9\n  c := a + b\n  println(c)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("mixes int32 and int64")), "{e:?}");
+    }
+
+    #[test]
+    fn literal_adapts_to_any_width() {
+        let e = errs(
+            "func f() -> int32 {\n  a: int32 = 5\n  b := a + 1\n  return b\n}",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn cross_width_assignment_is_rejected() {
+        let e = errs("func f(w: int64) -> void {\n  x: int8 = w\n  println(x)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("annotation that does not match")), "{e:?}");
+    }
+
+    #[test]
+    fn literal_too_wide_for_annotation_is_rejected() {
+        let e = errs("func f() -> void {\n  x: int8 = 300\n  println(x)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("does not fit in 8 bits")), "{e:?}");
+    }
+
+    #[test]
+    fn suffixed_literal_out_of_range_is_rejected() {
+        let e = errs("func f() -> void {\n  x := 300i8\n  println(x)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("does not fit in 8 bits")), "{e:?}");
+    }
+
+    #[test]
+    fn returning_an_array_literal_as_a_slice_is_rejected() {
+        let e = errs("func make() -> int64[] { return [1, 2, 3] }");
+        assert!(e.iter().any(|d| d.msg.contains("escapes its frame")), "{e:?}");
+    }
+
+    #[test]
+    fn unsized_alloc_needs_a_pointer_annotation() {
+        let e = errs("func f() -> void {\n  x := alloc()\n  free(x)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("pointer type annotation")), "{e:?}");
+    }
+
+    #[test]
+    fn unsized_alloc_with_pointer_annotation_is_ok() {
+        let e = errs("func f() -> void {\n  p: *int64 = alloc()\n  *p = 5\n  free(p)\n}");
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn element_store_into_immutable_array_is_rejected() {
+        let e = errs("func f() -> void {\n  xs: int64[3] = [1, 2, 3]\n  xs[0] = 99\n  println(xs[0])\n}");
+        assert!(e.iter().any(|d| d.msg.contains("assign through immutable 'xs'")), "{e:?}");
+    }
+
+    #[test]
+    fn field_store_into_immutable_struct_is_rejected() {
+        let e = errs(
+            "struct P { x: int64 }\nfunc f() -> void {\n  p := P { x: 1 }\n  p.x = 42\n  println(p.x)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("assign through immutable 'p'")), "{e:?}");
+    }
+
+    #[test]
+    fn element_store_into_mut_array_is_ok() {
+        let e = errs("func f() -> void {\n  mut xs: int64[3] = [1, 2, 3]\n  xs[0] = 99\n  println(xs[0])\n}");
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn store_through_a_pointer_deref_is_ok() {
+        // Mutation through a pointer writes the pointee, not the binding, so the
+        // binding's immutability does not apply.
+        let e = errs(
+            "struct P { x: int64 }\nfunc f(p: *P) -> void {\n  (*p).x = 42\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("immutable")), "{e:?}");
+    }
+
+    #[test]
+    fn field_store_through_pointer_needs_explicit_deref() {
+        let e = errs(
+            "struct P { x: int64 }\nfunc f(p: *P) -> void {\n  p.x = 42\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("explicit dereference")), "{e:?}");
+    }
+
+    #[test]
+    fn binding_a_struct_to_an_interface_needs_an_impl() {
+        let e = errs(
+            "interface I { get() -> int64 }\nstruct S { x: int64 }\nfunc f() -> void {\n  s := S { x: 7 }\n  i: I = s\n  println(i.get())\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("does not implement interface 'I'")), "{e:?}");
+    }
+
+    #[test]
+    fn binding_a_struct_to_an_interface_with_impl_is_ok() {
+        let e = errs(
+            "interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return self.x } }\nfunc f() -> void {\n  s := S { x: 7 }\n  i: I = s\n  println(i.get())\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("implement interface")), "{e:?}");
+    }
+
+    #[test]
+    fn returning_a_struct_as_an_interface_needs_an_impl() {
+        let e = errs(
+            "interface I { get() -> int64 }\nstruct S { x: int64 }\nfunc mk() -> I {\n  return S { x: 7 }\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("does not implement interface 'I'")), "{e:?}");
+    }
+
+    #[test]
+    fn match_over_a_non_enum_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  x := 5\n  match x {\n    a => println(1),\n    b => println(2),\n  }\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("match needs an enum value")), "{e:?}");
+    }
+
+    #[test]
+    fn defer_inside_a_conditional_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  if true {\n    defer println(1)\n  }\n  println(2)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("defer inside a conditional or loop")), "{e:?}");
+    }
+
+    #[test]
+    fn defer_at_function_top_level_is_ok() {
+        let e = errs("func f() -> void {\n  defer println(1)\n  println(2)\n}");
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn printing_a_bound_error_does_not_handle_it() {
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func f() -> void {\n  v, e := fail()\n  println(v)\n  println(e)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn exists_check_ignore_and_return_all_handle_an_error() {
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func a() -> void {\n  v, e := fail()\n  println(v)\n  if e.exists() {\n    return\n  }\n}\n\
+             func b() -> void {\n  v, e := fail()\n  println(v)\n  e.ignore()\n}\n\
+             func c() -> (int64, error) {\n  v, e := fail()\n  return (v, e)\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn printing_a_struct_without_display_is_rejected() {
+        let e = errs(
+            "struct P { x: int64 }\nfunc f() -> void {\n  p := P { x: 1 }\n  println(p)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("no Display impl")), "{e:?}");
+    }
+
+    #[test]
+    fn printing_a_struct_with_display_is_ok() {
+        let e = errs(
+            "@paradigm oop\n@paradigm procedural\ninterface Display { toString() -> string }\nstruct P { x: int64 }\nimpl Display for P { func toString() -> string { return \"P\" } }\nfunc f() -> void {\n  p := P { x: 1 }\n  println(p)\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("Display")), "{e:?}");
+    }
+
+    #[test]
+    fn single_argument_format_string_is_checked() {
+        let e = errs("func f() -> void {\n  println(\"{}\")\n}");
+        assert!(e.iter().any(|d| d.msg.contains("1 hole(s) but 0 argument(s)")), "{e:?}");
+    }
+
+    #[test]
+    fn missing_return_on_a_path_is_rejected() {
+        let e = errs("func f() -> int64 {\n  println(1)\n}");
+        assert!(e.iter().any(|d| d.msg.contains("not all paths in 'f' return")), "{e:?}");
+    }
+
+    #[test]
+    fn returns_in_both_branches_satisfy_missing_return() {
+        let e = errs(
+            "func f(c: bool) -> int64 {\n  if c {\n    return 1\n  } else {\n    return 2\n  }\n}",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn duplicate_impl_for_same_pair_is_rejected() {
+        let e = errs(
+            "interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return 1 } }\nimpl I for S { func get() -> int64 { return 2 } }",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("duplicate 'impl I for S'")), "{e:?}");
+    }
+
+    #[test]
+    fn allocator_main_form_is_rejected_for_now() {
+        let e = errs(
+            "func main(argc: int32, argv: string[], using a: int64) -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("allocator form is not supported yet")), "{e:?}");
+    }
+
+    #[test]
+    fn argc_argv_main_is_accepted() {
+        let e = errs("func main(argc: int32, argv: string[]) -> int32 { return argc }");
         assert!(e.is_empty(), "{e:?}");
     }
 }

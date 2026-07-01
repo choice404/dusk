@@ -8,6 +8,10 @@ use std::collections::HashSet;
 pub struct Module {
     pub paradigms: Vec<String>,
     pub imports: Vec<String>,
+    /// The `monad` blocks this file declared, each with the span of its keyword.
+    /// The parser flattens a monad block into plain functions, so the paradigm
+    /// gate reads this record instead of the vanished syntax.
+    pub monads: Vec<(String, Span)>,
     pub items: Vec<Item>,
 }
 
@@ -25,6 +29,8 @@ pub enum Item {
 pub struct Func {
     pub exported: bool,
     pub name: String,
+    /// The span of the function's name, for diagnostics about the whole function.
+    pub span: Span,
     pub generics: Vec<String>,
     pub params: Vec<Param>,
     pub ret: Type,
@@ -85,6 +91,8 @@ pub struct MethodSig {
 pub struct Impl {
     pub iface: Option<String>,
     pub ty: String,
+    /// The span of the `impl` keyword, for diagnostics about the whole block.
+    pub span: Span,
     pub methods: Vec<Func>,
 }
 
@@ -95,6 +103,8 @@ pub struct Impl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Foreign {
     pub abi: String,
+    /// The span of the `foreign` keyword, for diagnostics about the block.
+    pub span: Span,
     pub funcs: Vec<ForeignFunc>,
 }
 

@@ -57,14 +57,7 @@ fn cmd_build(path: Option<&String>, run: bool) -> ExitCode {
         eprintln!("dawn: {e}");
         return ExitCode::FAILURE;
     }
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("dawn: read {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let (module, errs) = analyze(path, &src);
+    let (module, errs) = analyze(path);
     for e in &errs {
         eprintln!("{e}");
     }

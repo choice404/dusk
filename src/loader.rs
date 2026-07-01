@@ -65,6 +65,7 @@ pub fn load(root_path: &str) -> Program {
     register(&mut files, &mut base, root_path, root_src, &mut root);
     let root_imports = root.imports.clone();
     let root_paradigms = root.paradigms.clone();
+    let root_monads = root.monads.clone();
     let mut work = vec![(root_imports.clone(), root_dir, root_path.to_string())];
     items.extend(root.items);
 
@@ -95,6 +96,11 @@ pub fn load(root_path: &str) -> Program {
             if visited.insert(cfile.clone()) {
                 if let Some((mut m, src)) = parse_file(&path, &mut errors) {
                     exports.insert(cfile.clone(), exported_names(&m));
+                    // Isolate this module's private names before the merge, so a
+                    // bare call from another file cannot reach them and two
+                    // modules' same named private helpers never collide.
+                    let suffix = crate::privatize::suffix_for(&path, files.len());
+                    crate::privatize::privatize(&mut m, &suffix);
                     work.push((m.imports.clone(), dir_of(&file), path.clone()));
                     register(&mut files, &mut base, &path, src, &mut m);
                     items.extend(m.items);
@@ -144,6 +150,7 @@ pub fn load(root_path: &str) -> Program {
         module: Some(Module {
             paradigms: root_paradigms,
             imports: root_imports,
+            monads: root_monads,
             items,
         }),
         errors,
