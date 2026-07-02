@@ -2,6 +2,34 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.3.0
+
+Threads, the first phase of the concurrency line. OS threads with zero new syntax, a thread safe runtime underneath them, and atomics so parallel programs can prove themselves deterministically.
+
+The thread primitive.
+
+- `spawn(f: () -> void) -> (thread, error)` starts an OS pthread running a lambda literal, and `join(t: thread) -> error` waits for it. Both are always available builtins, paradigm agnostic like `alloc` and the error machinery, and both failures ride the must handle rule.
+- `thread` is an opaque builtin type. The handle is a record in the generational heap and `join` retires it, so a double `join` faults through the same generation check a use after free hits.
+- The spawned lambda's captured environment is copied into a private heap block the runtime frees after the body returns, so a thread never reads another thread's stack. A nullary void lambda already compiles to the pthread start shape, so the trampoline is direct.
+- `spawn` requires the lambda literal at the call site, since only the literal knows the environment layout. Spawning a closure variable is a compile error naming the wrap in a literal fix.
+
+Safety across threads.
+
+- Captures cross by immutable copy, the rule lambdas always had. Capturing a slice, a closure, or an interface value is rejected wherever it sits, including buried in a struct or enum field, since each may view the spawning frame.
+- A captured managed pointer is a borrow inside the thread: reading through it works, freeing or moving it there is a compile error, and a moved away pointer keeps its moved state, so capturing it stays the error a plain lambda gets. An owner freeing while a thread still holds the borrow is caught by the generation check at the thread's next dereference.
+- The generational heap is thread safe: one mutex guards the free list and the debug tables, the generation word is bumped and read atomically on both sides of the check, and the dereference check stays armed on every thread.
+- join's generation check and the handle's retirement run in one heap critical section, so a double join faults deterministically even when two threads race on copies of the same handle. The spawn environment allocation aborts on exhaustion rather than writing captures through a null.
+- The language reference gains a Threads and the Memory Model section that states the data race stance honestly: races are undefined, sanctioned paths (spawn copies, atomics, join, and the coming channels and mutexes) provide the ordering they name, and the generation check degrades from a guarantee to a best effort backstop under a true race.
+
+Standard library and tooling.
+
+- `std.concurrent.atomic` ships `AtomicInt` with sequentially consistent `atomic_load`, `atomic_store`, `atomic_add`, and `atomic_cas` over a heap word, the sanctioned shared counter before mutexes land.
+- `std.concurrent.thread` ships `sleep_ms`.
+- The runtime grows `runtime/thread.c` with the spawn trampoline, join, sleep, and the atomic shims, and the driver links it with `-pthread` for older toolchains.
+- Examples and goldens cover spawn and join ordering, a two thread atomic counter, per iteration capture copies, a deterministic cross thread use after free fault, a double join fault, and the compile time rejections.
+
+Planned next in the line: channels in 0.3.1, mutex and condvar in 0.3.2, the timed channel operations and the thread pool the async release builds on in 0.3.3.
+
 ## 0.2.6
 
 Hardens the whole 0.2.x line one level deeper. Where 0.2.5 closed exact reproductions, this release closes each rule's family, the range as well as the index, the binding site as well as the call site, the bare call as well as the qualified one, and lands the rules deferred along the way.

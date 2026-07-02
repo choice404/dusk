@@ -808,6 +808,8 @@ fn builtin_ret(name: &str) -> Option<Type> {
         "write_file" => Some(named("error")),
         "cstr" => Some(named("string")),
         "sizeof" => Some(named("int64")),
+        "spawn" => Some(pair(named("thread"))),
+        "join" => Some(named("error")),
         _ => None,
     }
 }

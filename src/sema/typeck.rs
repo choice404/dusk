@@ -34,6 +34,7 @@ enum Ty {
     Str,
     Unit,
     Error,
+    Thread,
     Ptr(Box<Ty>),
     RawPtr(Box<Ty>),
     Slice(Box<Ty>),
@@ -68,6 +69,15 @@ struct TypeChecker {
     iface_methods: HashMap<String, Vec<(String, usize)>>,
     impls: HashSet<(String, String)>,
     raw_sigs: HashMap<String, Vec<Ty>>,
+    // Unfixed field types of every struct and enum, for the spawn capture walk,
+    // which must see a slice or an interface buried in a field where the fixed
+    // tables erase them.
+    embed_fields: HashMap<String, Vec<Ty>>,
+    // Bindings annotated with an interface type, per scope. Their checked type
+    // is Unknown after fix, so the spawn capture check reads this record to
+    // reject capturing an interface value, whose data pointer may sit in the
+    // spawning frame.
+    iface_binds: Vec<HashSet<String>>,
     scopes: Vec<HashMap<String, Ty>>,
     owns: Vec<HashMap<String, Own>>,
     // Mutable binding names, tracked here so an element or field store can walk
@@ -97,6 +107,8 @@ impl TypeChecker {
             iface_methods: HashMap::new(),
             impls: HashSet::new(),
             raw_sigs: HashMap::new(),
+            embed_fields: HashMap::new(),
+            iface_binds: Vec::new(),
             scopes: Vec::new(),
             owns: Vec::new(),
             muts: Vec::new(),
@@ -119,6 +131,13 @@ impl TypeChecker {
                 Item::Enum(e) => {
                     let variants = e.variants.iter().map(|v| v.name.clone()).collect();
                     self.enums.insert(e.name.clone(), variants);
+                    let gens: HashSet<String> = e.generics.iter().cloned().collect();
+                    let fields = e
+                        .variants
+                        .iter()
+                        .flat_map(|v| v.fields.iter().map(|f| lower(&f.ty, &gens)))
+                        .collect();
+                    self.embed_fields.insert(e.name.clone(), fields);
                 }
                 Item::Impl(im) => {
                     if let Some(iface) = &im.iface {
@@ -164,6 +183,8 @@ impl TypeChecker {
                         .map(|f| (f.name.clone(), self.fix(lower(&f.ty, &gens))))
                         .collect();
                     self.structs.insert(s.name.clone(), (is_gen, fields));
+                    let raw = s.fields.iter().map(|f| lower(&f.ty, &gens)).collect();
+                    self.embed_fields.insert(s.name.clone(), raw);
                 }
                 _ => {}
             }
@@ -325,6 +346,10 @@ impl TypeChecker {
             if is_managed(&ty) {
                 self.declare_own(&p.name, Own::Borrow);
             }
+            let raw = lower(&p.ty, &self.cur_generics);
+            if matches!(&raw, Ty::Named(n) if self.ifaces.contains(n)) {
+                self.declare_iface_bind(&p.name);
+            }
             self.declare(&p.name, ty);
         }
         for s in &f.body.stmts {
@@ -350,12 +375,14 @@ impl TypeChecker {
         self.owns.push(HashMap::new());
         self.muts.push(HashSet::new());
         self.err_binds.push(HashMap::new());
+        self.iface_binds.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.owns.pop();
         self.muts.pop();
+        self.iface_binds.pop();
         // Every error bound in this scope must have been handled by now. The
         // handled ones were removed at their handling site; the rest report.
         if let Some(pending) = self.err_binds.pop() {
@@ -381,6 +408,17 @@ impl TypeChecker {
 
     fn is_mutable(&self, name: &str) -> bool {
         self.muts.iter().rev().any(|s| s.contains(name))
+    }
+
+    /// Records a binding annotated with an interface type in the current scope.
+    fn declare_iface_bind(&mut self, name: &str) {
+        if let Some(scope) = self.iface_binds.last_mut() {
+            scope.insert(name.to_string());
+        }
+    }
+
+    fn is_iface_bind(&self, name: &str) -> bool {
+        self.iface_binds.iter().rev().any(|s| s.contains(name))
     }
 
     /// Registers an error typed binding as pending until a handling site clears it.
@@ -731,6 +769,9 @@ impl TypeChecker {
                     // a reference to a vtable that does not exist.
                     let raw = lower(t, &self.cur_generics);
                     self.check_conformance(&raw, &vt, l.value.span);
+                    if matches!(&raw, Ty::Named(n) if self.ifaces.contains(n)) {
+                        self.declare_iface_bind(&b.name);
+                    }
                     if !compatible(&lt, &vt) {
                         self.err(format!("'{}' has a type annotation that does not match its value", b.name), l.value.span);
                     }
@@ -861,6 +902,49 @@ impl TypeChecker {
         }
     }
 
+    /// Whether a value of this type may cross a `spawn` as a heap copied
+    /// capture. A slice, a closure, or an interface value may carry a pointer
+    /// into the spawning frame that the copy would dangle, so they are rejected
+    /// wherever they sit, including inside a struct or enum field. A pointer
+    /// field is fine: every pointer targets the heap, where the generation
+    /// check covers it. `seen` breaks recursive type cycles.
+    fn spawn_capturable(&self, t: &Ty, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Ty::Slice(_) | Ty::Func(..) => false,
+            Ty::Array(e, _) => self.spawn_capturable(e, seen),
+            Ty::Tuple(ts) => ts.iter().all(|x| self.spawn_capturable(x, seen)),
+            Ty::Named(n) => {
+                if self.ifaces.contains(n) {
+                    return false;
+                }
+                if !seen.insert(n.clone()) {
+                    return true;
+                }
+                match self.embed_fields.get(n).cloned() {
+                    Some(fs) => fs.iter().all(|f| self.spawn_capturable(f, seen)),
+                    None => true,
+                }
+            }
+            _ => true,
+        }
+    }
+
+    /// The names a lambda captures from enclosing scopes, in first use order,
+    /// for the spawn capture checks.
+    fn spawn_lambda_captures(&self, l: &Lambda) -> Vec<String> {
+        let mut used = Vec::new();
+        let mut bound: HashSet<String> = l.params.iter().map(|p| p.name.clone()).collect();
+        crate::parser::ast::collect_block(&l.body, &mut used, &mut bound);
+        let mut seen = HashSet::new();
+        used.into_iter()
+            .filter(|n| {
+                !bound.contains(n)
+                    && self.scopes.iter().any(|s| s.contains_key(n))
+                    && seen.insert(n.clone())
+            })
+            .collect()
+    }
+
     /// Whether a lambda reads any variable bound in an enclosing scope, which
     /// makes its environment a frame local that must not escape.
     fn lambda_captures_local(&self, l: &Lambda) -> bool {
@@ -930,7 +1014,7 @@ impl TypeChecker {
                 self.check_struct_lit(name, fields, e.span);
                 named_ty(name)
             }
-            ExprKind::Lambda(l) => self.infer_lambda(l, e.span),
+            ExprKind::Lambda(l) => self.infer_lambda(l, e.span, &[]),
             ExprKind::Match(m) => {
                 self.walk_match(m);
                 Ty::Unknown
@@ -1009,6 +1093,67 @@ impl TypeChecker {
                         self.check_printable(t, a.span);
                     }
                     return Ty::Unit;
+                }
+                if name == "spawn" {
+                    // spawn takes a lambda literal of type () -> void, because
+                    // only the literal site knows the environment layout that
+                    // codegen heap-copies for the new thread. A closure variable
+                    // is two opaque words with no size anywhere.
+                    if args.len() != 1 {
+                        self.err("spawn takes one argument, a lambda literal of type () -> void", f.span);
+                        for a in args {
+                            self.infer(a);
+                        }
+                        return Ty::Tuple(vec![Ty::Thread, Ty::Error]);
+                    }
+                    let ExprKind::Lambda(l) = &args[0].kind else {
+                        self.err(
+                            "spawn takes a lambda literal written at the call site; wrap a closure variable as lambda () -> void { g() }",
+                            args[0].span,
+                        );
+                        self.infer(&args[0]);
+                        return Ty::Tuple(vec![Ty::Thread, Ty::Error]);
+                    };
+                    if !l.params.is_empty() || !matches!(self.lower(&l.ret), Ty::Unit) {
+                        self.err(
+                            "a spawned lambda takes no parameters and returns void; pass data by capture and results through a channel",
+                            args[0].span,
+                        );
+                    }
+                    // Captures cross to the new thread as heap copies, so a
+                    // capture that may view the spawning frame, a slice, a
+                    // closure, or an interface value, even one buried in a
+                    // struct or enum field, is rejected. A captured managed
+                    // pointer becomes a borrow in the thread, so the thread can
+                    // read through it but never free or move it out from under
+                    // the owner, and a moved away pointer keeps its moved state
+                    // so capturing it stays the error a plain lambda gets.
+                    let caps = self.spawn_lambda_captures(l);
+                    let mut borrowed = Vec::new();
+                    for c in &caps {
+                        let t = self.lookup(c);
+                        let mut seen = HashSet::new();
+                        if !self.spawn_capturable(&t, &mut seen) || self.is_iface_bind(c) {
+                            self.err(
+                                format!(
+                                    "spawn cannot capture '{c}'; a slice, closure, or interface value may view the spawning frame, so move the data to the heap or send it through a channel"
+                                ),
+                                args[0].span,
+                            );
+                        }
+                        if is_managed(&t) && !matches!(self.own_of(c), Some(Own::Moved)) {
+                            borrowed.push(c.clone());
+                        }
+                    }
+                    self.infer_lambda(l, args[0].span, &borrowed);
+                    return Ty::Tuple(vec![Ty::Thread, Ty::Error]);
+                }
+                if name == "join" {
+                    let t = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                    if args.len() != 1 || !compatible(&Ty::Thread, &t) {
+                        self.err("join takes one thread handle", f.span);
+                    }
+                    return Ty::Error;
                 }
                 if name == "alloc" {
                     // alloc(v) yields a managed *T owner of the value's type, so
@@ -1207,6 +1352,7 @@ impl TypeChecker {
                 // not track, stays permissive.
             }
             Ty::Unit => self.err("cannot print a void value", span),
+            Ty::Thread => self.err("cannot print a thread handle; join it instead", span),
             Ty::Ptr(_) | Ty::RawPtr(_) => {
                 self.err("cannot print a pointer; dereference it or print its fields", span)
             }
@@ -1217,7 +1363,10 @@ impl TypeChecker {
         }
     }
 
-    fn infer_lambda(&mut self, l: &Lambda, span: Span) -> Ty {
+    /// Checks a lambda body. `borrowed` marks captured managed pointers as
+    /// borrows inside the body, used by `spawn` so a thread cannot free or move
+    /// a pointer its spawner still owns.
+    fn infer_lambda(&mut self, l: &Lambda, span: Span, borrowed: &[String]) -> Ty {
         let saved_ret = self.cur_ret.clone();
         let saved_depth = self.branch_depth;
         self.cur_ret = self.lower(&l.ret);
@@ -1226,6 +1375,9 @@ impl TypeChecker {
         self.push_scope();
         for (p, ty) in l.params.iter().zip(&params) {
             self.declare(&p.name, ty.clone());
+        }
+        for name in borrowed {
+            self.declare_own(name, Own::Borrow);
         }
         for s in &l.body.stmts {
             self.stmt(s);
@@ -1554,6 +1706,7 @@ fn named_ty(n: &str) -> Ty {
         "char" => Ty::Char,
         "string" => Ty::Str,
         "error" => Ty::Error,
+        "thread" => Ty::Thread,
         "void" => Ty::Unit,
         _ => Ty::Named(n.to_string()),
     }
@@ -1584,6 +1737,7 @@ fn ty_str(t: &Ty) -> String {
         Ty::Str => "string".to_string(),
         Ty::Unit => "void".to_string(),
         Ty::Error => "error".to_string(),
+        Ty::Thread => "a thread handle".to_string(),
         Ty::Ptr(_) => "a managed pointer".to_string(),
         Ty::RawPtr(_) => "a raw pointer".to_string(),
         Ty::Slice(_) => "a slice".to_string(),
@@ -2078,5 +2232,93 @@ mod tests {
     fn argc_argv_main_is_accepted() {
         let e = errs("func main(argc: int32, argv: string[]) -> int32 { return argc }");
         assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_and_join_type_check_clean() {
+        let e = errs(
+            "func f() -> void {\n  t, e := spawn(lambda () -> void {\n    println(1)\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_needs_a_lambda_literal() {
+        let e = errs(
+            "func f() -> void {\n  g := lambda () -> void { println(1) }\n  t, e := spawn(g)\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("lambda literal")), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_lambda_must_be_nullary_void() {
+        let e = errs(
+            "func f() -> void {\n  t, e := spawn(lambda (n: int64) -> void { println(n) })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("no parameters and returns void")), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_rejects_a_slice_capture() {
+        let e = errs(
+            "func f(xs: int64[]) -> void {\n  t, e := spawn(lambda () -> void {\n    println(xs[0])\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'xs'")), "{e:?}");
+    }
+
+    #[test]
+    fn spawned_thread_cannot_free_a_captured_pointer() {
+        let e = errs(
+            "func f() -> void {\n  p: *int64 = alloc(5)\n  t, e := spawn(lambda () -> void {\n    free(p)\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n  free(p)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("borrowed pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn a_dropped_join_error_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  t, e := spawn(lambda () -> void { println(1) })\n  e.ignore()\n  join(t)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("error result is ignored")), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_rejects_a_slice_smuggled_in_a_struct_field() {
+        let e = errs(
+            "struct Wrap { s: int64[] }\nfunc f(xs: int64[]) -> void {\n  w := Wrap { s: xs }\n  t, e := spawn(lambda () -> void {\n    println(w.s[0])\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'w'")), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_rejects_an_interface_value_capture() {
+        let e = errs(
+            "@paradigm oop\ninterface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return self.x } }\nfunc f() -> void {\n  s := S { x: 1 }\n  i: I = s\n  t, e := spawn(lambda () -> void {\n    println(i.get())\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'i'")), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_capturing_a_moved_pointer_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  p: *int64 = alloc(5)\n  q := move(p)\n  free(q)\n  t, e := spawn(lambda () -> void {\n    println(*p)\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("moved pointer")), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_capturing_a_plain_struct_is_ok() {
+        let e = errs(
+            "struct P { x: int64, y: int64 }\nfunc f() -> void {\n  p := P { x: 1, y: 2 }\n  t, e := spawn(lambda () -> void {\n    println(p.x)\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn printing_a_thread_handle_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  t, e := spawn(lambda () -> void { println(1) })\n  e.ignore()\n  println(t)\n  je := join(t)\n  je.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("thread handle")), "{e:?}");
     }
 }

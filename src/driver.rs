@@ -19,7 +19,10 @@ pub fn build_module(module: &Module, out_dir: &Path, stem: &str) -> Result<Build
     let bin = out_dir.join(stem);
     let ir = codegen::compile(module);
     std::fs::write(&ll, &ir).map_err(|e| format!("write {}: {e}", ll.display()))?;
-    link(&[ll.as_path(), runtime_source().as_path()], &bin)?;
+    let rt = runtime_sources();
+    let mut inputs: Vec<&Path> = vec![ll.as_path()];
+    inputs.extend(rt.iter().map(|p| p.as_path()));
+    link(&inputs, &bin)?;
     Ok(BuildArtifacts { ll, bin })
 }
 
@@ -32,16 +35,22 @@ pub fn build_demo(out_dir: &Path) -> Result<BuildArtifacts, String> {
     let ir = codegen::demo_module().render();
     std::fs::write(&ll, &ir).map_err(|e| format!("write {}: {e}", ll.display()))?;
 
-    link(&[ll.as_path(), runtime_source().as_path()], &bin)?;
+    let rt = runtime_sources();
+    let mut inputs: Vec<&Path> = vec![ll.as_path()];
+    inputs.extend(rt.iter().map(|p| p.as_path()));
+    link(&inputs, &bin)?;
     Ok(BuildArtifacts { ll, bin })
 }
 
-/// Invoke clang to assemble + link the given inputs (`.ll` and/or `.c`) into `bin`.
+/// Invoke clang to assemble + link the given inputs (`.ll` and/or `.c`) into
+/// `bin`. `-pthread` rides along for toolchains older than glibc 2.34, where
+/// pthreads is not yet folded into libc.
 fn link(inputs: &[&Path], bin: &Path) -> Result<(), String> {
     let mut cmd = Command::new("clang");
     for input in inputs {
         cmd.arg(input);
     }
+    cmd.arg("-pthread");
     cmd.arg("-o").arg(bin);
     let status = cmd.status().map_err(|e| format!("spawn clang: {e}"))?;
     if status.success() {
@@ -65,9 +74,8 @@ pub fn run_with(bin: &Path, args: &[String]) -> Result<i32, String> {
     Ok(status.code().unwrap_or(-1))
 }
 
-/// `runtime/runtime.c` sits at the crate root, regardless of the caller's CWD.
-fn runtime_source() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("runtime")
-        .join("runtime.c")
+/// The C runtime sources at the crate root, regardless of the caller's CWD.
+fn runtime_sources() -> Vec<PathBuf> {
+    let rt = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime");
+    vec![rt.join("runtime.c"), rt.join("thread.c")]
 }

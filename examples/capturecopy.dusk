@@ -1,0 +1,36 @@
+// Each loop iteration's spawn captures the loop scoped value by copy, so the
+// four threads add 0, 1, 2, and 3, never four copies of the final value. The
+// classic captured-loop-variable bug is inexpressible. Handles collect in a
+// Vector<thread> and every thread is joined before the total prints.
+@paradigm procedural
+@import std.concurrent.atomic
+@import std.vector
+
+func main() -> int32 {
+    c := atomic_new(0)
+    handles: *Vector<thread> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < 4 {
+        v := i
+        t, e := spawn(lambda () -> void {
+            atomic_add(c, v)
+        })
+        if e.exists() {
+            printerr(e)
+            return 1
+        }
+        vec_push(handles, t)
+        i = i + 1
+    }
+    mut k: int64 = 0
+    while k < vec_len(handles) {
+        je := join(vec_get(handles, k))
+        je.ignore()
+        k = k + 1
+    }
+    println(atomic_load(c))
+    atomic_free(c)
+    vec_free(handles)
+    free(handles)
+    return 0
+}

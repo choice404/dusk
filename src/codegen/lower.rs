@@ -42,6 +42,9 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("void @cool_debug_free(ptr)");
     m.declare("i64 @cool_debug_leaks()");
     m.declare("i64 @cool_debug_double_frees()");
+    m.declare("ptr @cool_thread_spawn(ptr, ptr)");
+    m.declare("i64 @cool_thread_join(ptr, i64)");
+    m.declare("ptr @cool_alloc_env(i64)");
     m.declare("ptr @cool_read_file(ptr)");
     m.declare("i64 @cool_write_file(ptr, ptr)");
     m.declare("ptr @cool_read_line()");
@@ -173,6 +176,7 @@ enum CTy {
     Iface(String),
     Closure(Vec<CTy>, Box<CTy>),
     Error,
+    Thread,
     Tuple(Vec<CTy>),
     Unknown,
 }
@@ -193,6 +197,9 @@ impl CTy {
             CTy::Struct(n) | CTy::Enum(n) => format!("%{n}"),
             CTy::Iface(_) | CTy::Closure(..) => "{ ptr, ptr }".to_string(),
             CTy::Error => "ptr".to_string(),
+            // A thread handle is a generational record pointer, the same fat
+            // shape as a managed pointer, so join runs the standard check.
+            CTy::Thread => "{ ptr, i64 }".to_string(),
             CTy::Tuple(ts) => {
                 let inner = ts.iter().map(|t| t.ll()).collect::<Vec<_>>().join(", ");
                 format!("{{ {inner} }}")
@@ -212,6 +219,7 @@ impl CTy {
                 | CTy::Slice(_)
                 | CTy::Array(..)
                 | CTy::Tuple(_)
+                | CTy::Thread
         )
     }
 
@@ -477,6 +485,7 @@ impl Ctx {
             CTy::Enum(name) => self.enum_size_align(name),
             CTy::Iface(_) | CTy::Closure(..) => (16, 8),
             CTy::Error => (8, 8),
+            CTy::Thread => (16, 8),
             CTy::Tuple(ts) => {
                 let mut size = 0u64;
                 let mut align = 1u64;
@@ -570,6 +579,7 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
             "float32" => CTy::F32,
             "string" => CTy::RawPtr(Box::new(CTy::Char)),
             "error" => CTy::Error,
+            "thread" => CTy::Thread,
             _ => match nom(n) {
                 Nom::Struct => CTy::Struct(n.clone()),
                 Nom::Enum => CTy::Enum(n.clone()),
@@ -800,8 +810,10 @@ impl<'a> Fb<'a> {
         self.place_label(&chk);
         let hp = self.fresh();
         self.line(&format!("{hp} = getelementptr i8, ptr {data}, i64 -8"));
+        // The header word is bumped atomically by free on any thread, so the
+        // check reads it atomically too, keeping the machinery race free.
         let cur = self.fresh();
-        self.line(&format!("{cur} = load i64, ptr {hp}"));
+        self.line(&format!("{cur} = load atomic i64, ptr {hp} seq_cst, align 8"));
         let bad = self.fresh();
         self.line(&format!("{bad} = icmp ne i64 {cur}, {gen}"));
         let fault = self.new_label();
@@ -1800,6 +1812,8 @@ impl<'a> Fb<'a> {
                 "print" => self.gen_print(args, false, false),
                 "println" => self.gen_print(args, true, false),
                 "printerr" => self.gen_print(args, true, true),
+                "spawn" => self.gen_spawn(args),
+                "join" => self.gen_join(args),
                 "alloc" => self.gen_alloc(args),
                 "free" => {
                     if let Some(a) = args.first() {
@@ -2149,6 +2163,113 @@ impl<'a> Fb<'a> {
         }
         let def = format!("{header}\n{}}}", fb.body);
         self.m.push_function(def);
+    }
+
+    /// spawn(lambda () -> void { ... }): emits the lambda function, copies its
+    /// captured environment into a C heap block, and hands both to the runtime,
+    /// which owns the environment from that instant and frees it after the body
+    /// returns. Produces a (thread, error) pair whose error fires when the OS
+    /// refuses the thread. Sema guarantees the argument is a nullary void
+    /// lambda literal, so its emitted form is already pthread start shaped.
+    fn gen_spawn(&mut self, args: &[Expr]) -> Val {
+        let tty = CTy::Tuple(vec![CTy::Thread, CTy::Error]);
+        let Some(ExprKind::Lambda(l)) = args.first().map(|a| &a.kind) else {
+            for a in args {
+                self.gen_expr(a);
+            }
+            return Val::new(tty, "zeroinitializer");
+        };
+        let caps = self.lambda_captures(l);
+        let params: Vec<(String, CTy)> = l
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), lower_ty(&p.ty, &|n| self.ctx.nom(n))))
+            .collect();
+        let ret = lower_ty(&l.ret, &|n| self.ctx.nom(n));
+        let id = self.m.fresh_lambda();
+        let fname = format!("@lambda.{id}");
+        let env_ty = format!(
+            "{{ {} }}",
+            caps.iter().map(|(_, t)| t.ll()).collect::<Vec<_>>().join(", ")
+        );
+        let env = if caps.is_empty() {
+            "null".to_string()
+        } else {
+            // The env lives on the C heap, not this frame, since the thread
+            // outlives the spawner's statement. The trampoline frees it.
+            let szp = self.fresh();
+            self.line(&format!("{szp} = getelementptr {env_ty}, ptr null, i64 1"));
+            let sz = self.fresh();
+            self.line(&format!("{sz} = ptrtoint ptr {szp} to i64"));
+            // cool_alloc_env aborts on exhaustion, so the capture stores below
+            // never write through a null.
+            let e = self.fresh();
+            self.line(&format!("{e} = call ptr @cool_alloc_env(i64 {sz})"));
+            for (i, (cname, cty)) in caps.iter().enumerate() {
+                let (lty, lptr) = self.locals.get(cname).cloned().unwrap();
+                let v = self.load(&lty, &lptr);
+                let slot = self.fresh();
+                self.line(&format!("{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"));
+                self.line(&format!("store {} {v}, ptr {slot}", cty.ll()));
+            }
+            e
+        };
+        self.emit_lambda_fn(&fname, &env_ty, &caps, &params, &ret, &l.body);
+        let rec = self.fresh();
+        self.line(&format!("{rec} = call ptr @cool_thread_spawn(ptr {fname}, ptr {env})"));
+        let hslot = self.alloca(&CTy::Thread);
+        let eslot = self.alloca_raw("ptr");
+        let isnull = self.fresh();
+        self.line(&format!("{isnull} = icmp eq ptr {rec}, null"));
+        let bad = self.new_label();
+        let ok = self.new_label();
+        let done = self.new_label();
+        self.cond_br(&isnull, &bad, &ok);
+        self.place_label(&ok);
+        let hp = self.fresh();
+        self.line(&format!("{hp} = getelementptr i8, ptr {rec}, i64 -8"));
+        let g = self.fresh();
+        self.line(&format!("{g} = load atomic i64, ptr {hp} seq_cst, align 8"));
+        let fat_ok = self.fat(&rec, &g);
+        self.line(&format!("store {{ ptr, i64 }} {fat_ok}, ptr {hslot}"));
+        self.line(&format!("store ptr null, ptr {eslot}"));
+        self.br(&done);
+        self.place_label(&bad);
+        let fat_bad = self.fat("null", "0");
+        self.line(&format!("store {{ ptr, i64 }} {fat_bad}, ptr {hslot}"));
+        let msg = self.m.cstring("cannot spawn thread");
+        self.line(&format!("store ptr {msg}, ptr {eslot}"));
+        self.br(&done);
+        self.place_label(&done);
+        let h = self.load(&CTy::Thread, &hslot);
+        let e = self.load(&CTy::Error, &eslot);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {} undef, {{ ptr, i64 }} {h}, 0", tty.ll()));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {} {a}, ptr {e}, 1", tty.ll()));
+        Val::new(tty, b)
+    }
+
+    /// join(t): the handle's data pointer and remembered generation both pass
+    /// to the runtime, which checks and retires in one heap critical section.
+    /// A double join faults there like a use after free, even when two threads
+    /// race on copies of the handle. The error fires on a join failure.
+    fn gen_join(&mut self, args: &[Expr]) -> Val {
+        let Some(a) = args.first() else {
+            return Val::new(CTy::Error, "null");
+        };
+        let v = self.gen_expr(a);
+        let data = self.fat_data(&v.op);
+        let gen = self.fresh();
+        self.line(&format!("{gen} = extractvalue {{ ptr, i64 }} {}, 1", v.op));
+        let rc = self.fresh();
+        self.line(&format!("{rc} = call i64 @cool_thread_join(ptr {data}, i64 {gen})"));
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp ne i64 {rc}, 0"));
+        let msg = self.m.cstring("cannot join thread");
+        let err = self.fresh();
+        self.line(&format!("{err} = select i1 {bad}, ptr {msg}, ptr null"));
+        Val::new(CTy::Error, err)
     }
 
     fn gen_closure_call(&mut self, cv: &Val, args: &[Expr]) -> Val {
@@ -2537,7 +2658,7 @@ impl<'a> Fb<'a> {
                     }
                 }
                 CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void | CTy::Tuple(_)
-                | CTy::Unknown => {}
+                | CTy::Thread | CTy::Unknown => {}
                 _ => {
                     let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
                     self.line(&format!("call void @cool_eprint_i64(i64 {d})"));
@@ -2563,7 +2684,7 @@ impl<'a> Fb<'a> {
                 }
             }
             CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void | CTy::Tuple(_)
-            | CTy::Unknown => {}
+            | CTy::Thread | CTy::Unknown => {}
             _ => {
                 let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
                 self.line(&format!("call void @cool_print{suffix}_i64(i64 {d})"));
@@ -2782,7 +2903,8 @@ impl<'a> Fb<'a> {
             self.line(&format!("{p} = call ptr @cool_gen_alloc(i64 {sz})"));
             let hp = self.fresh();
             self.line(&format!("{hp} = getelementptr i8, ptr {p}, i64 -8"));
-            let g = self.load(&CTy::Int(64), &hp);
+            let g = self.fresh();
+            self.line(&format!("{g} = load atomic i64, ptr {hp} seq_cst, align 8"));
             (p, g)
         } else {
             (self.gen_alloc_call(&sz, align), "0".to_string())

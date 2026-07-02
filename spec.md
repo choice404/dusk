@@ -17,7 +17,8 @@ This is the language reference for dusk. The sections below describe the 0.1.0 c
 7. [Object Oriented Concepts](#object-oriented-concepts)
 8. [Functional Concepts](#functional-concepts)
 9. [Error Handling](#error-handling)
-10. [Builtins](#builtins)
+10. [Threads and the Memory Model](#threads-and-the-memory-model)
+11. [Builtins](#builtins)
 
 ---
 
@@ -692,6 +693,40 @@ Unlike Go, there is no `_` suppression. `ignore()` replaces it. The difference i
 
 ---
 
+## Threads and the Memory Model
+
+Added in 0.3.0. A thread is an OS thread. `spawn` starts one and `join` waits for it, both always available builtins like `alloc` and `read_file`, gated behind no paradigm.
+
+```text
+t, e := spawn(lambda () -> void {
+    println("worker")
+})
+if e.exists() {
+    printerr(e)
+    return 1
+}
+je := join(t)
+je.ignore()
+```
+
+`spawn(f: () -> void) -> (thread, error)` takes a lambda literal written at the call site, of type `() -> void`. The error fires when the operating system refuses the thread, and the must handle rule makes the caller face it. A closure variable cannot be spawned, since only the literal site knows the environment layout the runtime copies; wrap the call in a literal instead.
+
+`join(t: thread) -> error` blocks until the body returns. `thread` is an opaque builtin type like `error`. The handle is a record in the generational heap and `join` retires it, so a second `join` of the same handle faults through the same check a use after free hits. Join what you spawn: a thread still running when `main` returns dies mid work.
+
+### What crosses a spawn
+
+A spawned lambda captures outer variables by immutable copy, like every lambda, and the copies live in a private heap block the runtime frees when the body returns. A thread therefore never reads another thread's stack and never mutates another thread's locals.
+
+Scalars, strings, fixed arrays, structs, enums, tuples, raw pointers, and handle structs such as `AtomicInt` cross freely as captures. Capturing a slice, a closure, or an interface value is a compile error, wherever it sits, including buried in a struct or enum field, since each may view the spawning frame. A captured managed `*T` becomes a borrow inside the thread: the thread reads through it, and freeing or moving the binding there is a compile error. The ownership pass tracks direct bindings only, so a pointer laundered through an aggregate falls to the runtime generation backstop, the division of labor the ownership rules already document.
+
+### The memory model
+
+dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, and `join` orders everything the thread did before everything the joiner does after. Channels and mutexes join this list as they land in the 0.3.x line. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one.
+
+The generational heap is thread safe, so `alloc` and `free` from any thread are defined, and the dereference check stays armed on every thread. In a program whose frees and uses are ordered by a sanctioned path, the check keeps its guarantee: a use after free, a double free, or a double `join` faults deterministically instead of corrupting memory. In a program that races, the check degrades to a best effort backstop. Checking and using are two steps, so a dereference racing the free of the same allocation can pass the check and then touch retired memory, and a fat pointer overwritten while another thread reads its sixteen bytes can tear into a mismatched pair. Freed blocks stay parked in the runtime's free list rather than returning to the operating system, which bounds the blast radius, but none of this makes a race defined.
+
+---
+
 ## Imports and Standard Library
 
 See [Source Files](#source-files-directives-imports-exports) for import syntax. Imports are separate from paradigm directives. Importing a module does not grant any paradigm.
@@ -728,6 +763,8 @@ Builtins are always available regardless of paradigm directives unless noted.
 | println  | println(...) -> void  | print to stdout with a newline               |
 | printerr | printerr(...) -> void | println to stderr                            |
 | sizeof   | sizeof(T) -> int64    | size of a type in bytes at compile time      |
+| spawn    | spawn(f: () -> void) -> (thread, error) | start an OS thread running a lambda literal |
+| join     | join(t: thread) -> error | wait for a thread; retires the handle     |
 
 `alloc` and `free` resolve to the in scope allocator. See [Memory Management](#memory-management).
 

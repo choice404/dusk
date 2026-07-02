@@ -1,10 +1,18 @@
 /* Runtime linked into every coolc binary. Names are prefixed cool_ to avoid
-   clashing with user symbols. */
+   clashing with user symbols. The heap is thread safe: one mutex guards the
+   generational free list and the debug tables, and the generation word is
+   accessed atomically on both sides of the dereference check, so the check
+   machinery itself is never a C level data race. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <string.h>
+#include <pthread.h>
+
+static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void cool_gen_fault(void);
 
 /* print writes the value with no newline, println appends one. The builtins
    print and println in the language map to the matching pair per value type. A
@@ -75,42 +83,53 @@ static int64_t cool_dbg_double = 0;
 
 void *cool_debug_alloc(int64_t n) {
     void *p = malloc(n);
+    pthread_mutex_lock(&cool_heap_lock);
     if (cool_dbg_count < COOL_DBG_MAX) {
         cool_dbg_ptr[cool_dbg_count] = p;
         cool_dbg_size[cool_dbg_count] = n;
         cool_dbg_freed[cool_dbg_count] = 0;
         cool_dbg_count++;
     }
+    pthread_mutex_unlock(&cool_heap_lock);
     return p;
 }
 
 void cool_debug_free(void *p) {
+    pthread_mutex_lock(&cool_heap_lock);
     for (int i = 0; i < cool_dbg_count; i++) {
         if (cool_dbg_ptr[i] == p) {
             if (cool_dbg_freed[i]) {
                 cool_dbg_double++;
+                pthread_mutex_unlock(&cool_heap_lock);
                 return;
             }
             cool_dbg_freed[i] = 1;
             memset(p, 0xDD, (size_t)cool_dbg_size[i]);
+            pthread_mutex_unlock(&cool_heap_lock);
             return;
         }
     }
     cool_dbg_double++;
+    pthread_mutex_unlock(&cool_heap_lock);
 }
 
 int64_t cool_debug_leaks(void) {
+    pthread_mutex_lock(&cool_heap_lock);
     int64_t n = 0;
     for (int i = 0; i < cool_dbg_count; i++) {
         if (!cool_dbg_freed[i]) {
             n++;
         }
     }
+    pthread_mutex_unlock(&cool_heap_lock);
     return n;
 }
 
 int64_t cool_debug_double_frees(void) {
-    return cool_dbg_double;
+    pthread_mutex_lock(&cool_heap_lock);
+    int64_t n = cool_dbg_double;
+    pthread_mutex_unlock(&cool_heap_lock);
+    return n;
 }
 
 /* Generational heap for managed pointers. Each managed allocation carries a 16
@@ -128,29 +147,30 @@ static int64_t cool_gen_free_sz[COOL_GEN_FREE_MAX];
 static int cool_gen_free_n = 0;
 
 void *cool_gen_alloc(int64_t size) {
+    pthread_mutex_lock(&cool_heap_lock);
     for (int i = 0; i < cool_gen_free_n; i++) {
         if (cool_gen_free_sz[i] == size) {
             void *p = cool_gen_free_ptr[i];
             cool_gen_free_n--;
             cool_gen_free_ptr[i] = cool_gen_free_ptr[cool_gen_free_n];
             cool_gen_free_sz[i] = cool_gen_free_sz[cool_gen_free_n];
+            pthread_mutex_unlock(&cool_heap_lock);
             return p;
         }
     }
+    pthread_mutex_unlock(&cool_heap_lock);
     char *base = malloc(COOL_GEN_HDR + (size_t)size);
     if (!base) {
         return NULL;
     }
     int64_t *hdr = (int64_t *)base;
     hdr[0] = size;
-    hdr[1] = 1;
+    __atomic_store_n(&hdr[1], 1, __ATOMIC_SEQ_CST);
     return base + COOL_GEN_HDR;
 }
 
-void cool_gen_free(void *p) {
-    if (!p) {
-        return;
-    }
+/* The retire path with the heap lock already held. */
+static void cool_gen_free_locked(void *p) {
     // Double free guard: a block already parked on the free list must not be
     // parked again, or a later allocation could hand the same address out twice.
     for (int i = 0; i < cool_gen_free_n; i++) {
@@ -160,14 +180,46 @@ void cool_gen_free(void *p) {
             abort();
         }
     }
+    // The generation bump is atomic because the dereference check reads the
+    // word without the heap lock, from any thread.
     int64_t *gen = (int64_t *)((char *)p - 8);
-    *gen += 1;
+    __atomic_fetch_add(gen, 1, __ATOMIC_SEQ_CST);
     int64_t *size = (int64_t *)((char *)p - COOL_GEN_HDR);
     if (cool_gen_free_n < COOL_GEN_FREE_MAX) {
         cool_gen_free_ptr[cool_gen_free_n] = p;
         cool_gen_free_sz[cool_gen_free_n] = *size;
         cool_gen_free_n++;
     }
+}
+
+void cool_gen_free(void *p) {
+    if (!p) {
+        return;
+    }
+    pthread_mutex_lock(&cool_heap_lock);
+    cool_gen_free_locked(p);
+    pthread_mutex_unlock(&cool_heap_lock);
+}
+
+/* Checks the remembered generation and retires the block in one critical
+   section, copying `n` payload bytes out first while the block is still live.
+   join uses this so two threads joining copies of one handle cannot both pass
+   the check and double retire: the loser sees the bumped generation under the
+   same lock and faults. A mismatch never returns. */
+int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n) {
+    if (!p) {
+        return 1;
+    }
+    pthread_mutex_lock(&cool_heap_lock);
+    int64_t *g = (int64_t *)((char *)p - 8);
+    if (gen != 0 && __atomic_load_n(g, __ATOMIC_SEQ_CST) != gen) {
+        pthread_mutex_unlock(&cool_heap_lock);
+        cool_gen_fault();
+    }
+    memcpy(out, p, (size_t)n);
+    cool_gen_free_locked(p);
+    pthread_mutex_unlock(&cool_heap_lock);
+    return 0;
 }
 
 void cool_gen_fault(void) {

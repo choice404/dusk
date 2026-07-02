@@ -1,0 +1,42 @@
+// std.concurrent.atomic: a sequentially consistent int64 atomic over a heap
+// word. The only sanctioned way to share a mutable counter between threads
+// before mutexes land. Handles copy freely; every copy names the same word.
+
+foreign "C" {
+    func cool_atomic_load(p: *raw int64) -> int64
+    func cool_atomic_store(p: *raw int64, v: int64) -> void
+    func cool_atomic_add(p: *raw int64, d: int64) -> int64
+    func cool_atomic_cas(p: *raw int64, expect: int64, desired: int64) -> int64
+}
+
+export struct AtomicInt {
+    p: *raw int64,
+}
+
+export func atomic_new(v: int64) -> AtomicInt {
+    b: *raw int64 = alloc_bytes(8)
+    b[0] = v
+    return AtomicInt { p: b }
+}
+
+export func atomic_load(a: AtomicInt) -> int64 {
+    return cool_atomic_load(a.p)
+}
+
+export func atomic_store(a: AtomicInt, v: int64) -> void {
+    cool_atomic_store(a.p, v)
+}
+
+// Adds d and returns the new value.
+export func atomic_add(a: AtomicInt, d: int64) -> int64 {
+    return cool_atomic_add(a.p, d)
+}
+
+// Compare and swap. True when the swap happened.
+export func atomic_cas(a: AtomicInt, expect: int64, desired: int64) -> bool {
+    return cool_atomic_cas(a.p, expect, desired) == 1
+}
+
+export func atomic_free(a: AtomicInt) -> void {
+    free(a.p)
+}

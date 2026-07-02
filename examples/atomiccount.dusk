@@ -1,0 +1,33 @@
+// Two threads hammer one atomic counter. The total is exact because every
+// add is sequentially consistent, which a plain shared int64 could not
+// promise. The AtomicInt handle is captured by copy; every copy names the
+// same heap word.
+@paradigm procedural
+@import std.concurrent.atomic
+
+func main() -> int32 {
+    c := atomic_new(0)
+    t1, e1 := spawn(lambda () -> void {
+        mut i: int64 = 0
+        while i < 10000 {
+            atomic_add(c, 1)
+            i = i + 1
+        }
+    })
+    e1.ignore()
+    t2, e2 := spawn(lambda () -> void {
+        mut i: int64 = 0
+        while i < 10000 {
+            atomic_add(c, 1)
+            i = i + 1
+        }
+    })
+    e2.ignore()
+    j1 := join(t1)
+    j1.ignore()
+    j2 := join(t2)
+    j2.ignore()
+    println(atomic_load(c))
+    atomic_free(c)
+    return 0
+}

@@ -1,0 +1,23 @@
+// A cross thread use after free, ordered by an atomic flag so the free always
+// lands before the dereference. The captured managed pointer is a borrow in
+// the thread; when the owner frees first, the thread's dereference faults
+// through the generation check instead of reading reused memory.
+@paradigm procedural
+@import std.concurrent.atomic
+
+func main() -> int32 {
+    p: *int64 = alloc(7)
+    flag := atomic_new(0)
+    t, e := spawn(lambda () -> void {
+        while atomic_load(flag) == 0 {
+        }
+        println(*p)
+    })
+    e.ignore()
+    println("freeing")
+    free(p)
+    atomic_store(flag, 1)
+    je := join(t)
+    je.ignore()
+    return 0
+}

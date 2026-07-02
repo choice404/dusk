@@ -89,6 +89,36 @@ fn out_of_range_slice_faults() {
 }
 
 #[test]
+fn double_join_faults() {
+    let (out, err, ok) = run_raw("doublejoin.dusk");
+    assert!(!ok, "a second join must fault");
+    assert_eq!(out, "once\n", "the first join completes before the fault");
+    assert!(err.contains("freed or stale pointer"), "{err}");
+}
+
+#[test]
+fn cross_thread_use_after_free_faults() {
+    // The free is ordered before the dereference by an atomic flag, so the
+    // generation fault is deterministic, not a lucky race.
+    let (out, err, ok) = run_raw("uafthread.dusk");
+    assert!(!ok, "the thread's dereference of the freed pointer must fault");
+    assert_eq!(out, "freeing\n");
+    assert!(err.contains("freed or stale pointer"), "{err}");
+}
+
+#[test]
+fn spawning_a_closure_variable_is_rejected() {
+    let err = check_fails("spawnvar.dusk");
+    assert!(err.contains("lambda literal"), "{err}");
+}
+
+#[test]
+fn spawning_with_a_slice_capture_is_rejected() {
+    let err = check_fails("spawncap.dusk");
+    assert!(err.contains("cannot capture"), "{err}");
+}
+
+#[test]
 fn vector_get_out_of_bounds_faults() {
     let (out, err, ok) = run_raw("vecbound.dusk");
     assert!(!ok, "vec_get past the length must fault");
@@ -185,6 +215,9 @@ golden!(strbuf, "strbuf.dusk", "dusk and dawn\n13\nhello, world\n");
 golden!(genref, "genref.dusk", "10\n15\n3\n4\n30\n");
 golden!(ownership, "ownership.dusk", "2\n2\n");
 golden!(allocbig, "allocbig.dusk", "1\n4\n7\n");
+golden!(spawnjoin, "spawnjoin.dusk", "worker\ndone\n");
+golden!(atomiccount, "atomiccount.dusk", "20000\n");
+golden!(capturecopy, "capturecopy.dusk", "6\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");
