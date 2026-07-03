@@ -4,6 +4,7 @@
    in the generational heap holding the pthread_t, so a stale handle faults
    through the same dereference check every managed pointer uses, and join
    retires it, making a double join a deterministic fault. */
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,7 +125,7 @@ typedef struct {
     int closed;
 } cool_chan;
 
-static void cool_chan_fatal(const char *msg) {
+static void cool_thread_fatal(const char *msg) {
     fflush(stdout);
     fputs(msg, stderr);
     abort();
@@ -135,21 +136,21 @@ static void cool_chan_fatal(const char *msg) {
    error path a fresh program could act on. */
 void *cool_chan_new(int64_t elem_size, int64_t cap) {
     if (elem_size < 1) {
-        cool_chan_fatal("fatal: channel element size must be at least 1\n");
+        cool_thread_fatal("fatal: channel element size must be at least 1\n");
     }
     if (cap < 1) {
-        cool_chan_fatal("fatal: channel capacity must be at least 1\n");
+        cool_thread_fatal("fatal: channel capacity must be at least 1\n");
     }
     if (cap > INT64_MAX / elem_size) {
-        cool_chan_fatal("fatal: out of memory\n");
+        cool_thread_fatal("fatal: out of memory\n");
     }
     cool_chan *c = malloc(sizeof(cool_chan));
     if (!c) {
-        cool_chan_fatal("fatal: out of memory\n");
+        cool_thread_fatal("fatal: out of memory\n");
     }
     c->buf = malloc((size_t)(cap * elem_size));
     if (!c->buf) {
-        cool_chan_fatal("fatal: out of memory\n");
+        cool_thread_fatal("fatal: out of memory\n");
     }
     c->elem_size = elem_size;
     c->cap = cap;
@@ -162,7 +163,7 @@ void *cool_chan_new(int64_t elem_size, int64_t cap) {
         || pthread_condattr_setclock(&ca, CLOCK_MONOTONIC) != 0
         || pthread_cond_init(&c->not_full, &ca) != 0
         || pthread_cond_init(&c->not_empty, &ca) != 0) {
-        cool_chan_fatal("fatal: channel init failed\n");
+        cool_thread_fatal("fatal: channel init failed\n");
     }
     pthread_condattr_destroy(&ca);
     return c;
@@ -226,6 +227,127 @@ void cool_chan_close(void *ch) {
     pthread_mutex_unlock(&c->mu);
 }
 
+/* Mutexes and condition variables, thin wrappers over pthread with the named
+   fault contract the rest of the runtime keeps. The mutex is the error
+   checking kind, so relocking by the holder and unlocking by a non holder,
+   both undefined in the default pthread flavor, abort with a message instead.
+   Condvars run on CLOCK_MONOTONIC like the channel's, ready for timed waits. */
+void *cool_mutex_new(void) {
+    pthread_mutex_t *m = malloc(sizeof(pthread_mutex_t));
+    if (!m) {
+        cool_thread_fatal("fatal: out of memory\n");
+    }
+    pthread_mutexattr_t ma;
+    if (pthread_mutexattr_init(&ma) != 0
+        || pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_ERRORCHECK) != 0
+        || pthread_mutex_init(m, &ma) != 0) {
+        cool_thread_fatal("fatal: mutex init failed\n");
+    }
+    pthread_mutexattr_destroy(&ma);
+    return m;
+}
+
+/* Each fault names the actual misuse. The error checking kind reports the
+   canonical codes for a relock and a foreign unlock; anything else, EINVAL
+   from a destroyed mutex above all, means the handle itself is dead, which is
+   the double free and use after free family, named as such. */
+void cool_mutex_lock(void *m) {
+    int rc = pthread_mutex_lock((pthread_mutex_t *)m);
+    if (rc == EDEADLK) {
+        cool_thread_fatal("fatal: mutex relocked by the thread that holds it\n");
+    }
+    if (rc != 0) {
+        cool_thread_fatal("fatal: lock of an invalid or freed mutex\n");
+    }
+}
+
+void cool_mutex_unlock(void *m) {
+    int rc = pthread_mutex_unlock((pthread_mutex_t *)m);
+    if (rc == EPERM) {
+        cool_thread_fatal("fatal: mutex unlocked by a thread that does not hold it\n");
+    }
+    if (rc != 0) {
+        cool_thread_fatal("fatal: unlock of an invalid or freed mutex\n");
+    }
+}
+
+/* Frees the mutex. A trylock probe catches a live holder, including this
+   thread, and aborts rather than destroying a lock someone sits inside. A
+   probe code outside busy and deadlock means the handle is already dead,
+   which is the double free, named as such. */
+void cool_mutex_free(void *m) {
+    pthread_mutex_t *mu = (pthread_mutex_t *)m;
+    int rc = pthread_mutex_trylock(mu);
+    if (rc == EBUSY || rc == EDEADLK) {
+        cool_thread_fatal("fatal: mutex freed while held\n");
+    }
+    if (rc != 0) {
+        cool_thread_fatal("fatal: free of an invalid or freed mutex\n");
+    }
+    pthread_mutex_unlock(mu);
+    pthread_mutex_destroy(mu);
+    free(mu);
+}
+
+/* The condvar record carries a waiter count beside the pthread object, so
+   freeing a condvar someone waits on faults by name, the channel's contract,
+   instead of hanging inside a destroy that quiesces forever. */
+typedef struct {
+    pthread_cond_t cv;
+    int64_t waiters;
+} cool_cond;
+
+void *cool_cond_new(void) {
+    cool_cond *c = malloc(sizeof(cool_cond));
+    if (!c) {
+        cool_thread_fatal("fatal: out of memory\n");
+    }
+    c->waiters = 0;
+    pthread_condattr_t ca;
+    if (pthread_condattr_init(&ca) != 0
+        || pthread_condattr_setclock(&ca, CLOCK_MONOTONIC) != 0
+        || pthread_cond_init(&c->cv, &ca) != 0) {
+        cool_thread_fatal("fatal: condvar init failed\n");
+    }
+    pthread_condattr_destroy(&ca);
+    return c;
+}
+
+/* Waits on the condvar, releasing and reacquiring the mutex around the sleep.
+   The caller must hold the mutex; a violation aborts by name. The waiter
+   count rises before the mutex is released inside the wait, so a thread that
+   acquires the mutex afterward observes the waiter. Wakeups can be spurious,
+   so callers loop on their predicate. */
+void cool_cond_wait(void *cv, void *m) {
+    cool_cond *c = (cool_cond *)cv;
+    __atomic_fetch_add(&c->waiters, 1, __ATOMIC_SEQ_CST);
+    int rc = pthread_cond_wait(&c->cv, (pthread_mutex_t *)m);
+    __atomic_fetch_sub(&c->waiters, 1, __ATOMIC_SEQ_CST);
+    if (rc != 0) {
+        cool_thread_fatal("fatal: condvar wait without holding the mutex\n");
+    }
+}
+
+void cool_cond_signal(void *cv) {
+    pthread_cond_signal(&((cool_cond *)cv)->cv);
+}
+
+void cool_cond_broadcast(void *cv) {
+    pthread_cond_broadcast(&((cool_cond *)cv)->cv);
+}
+
+/* Frees the condvar. Freeing while a thread waits on it is fatal, caught
+   best effort through the waiter count, since glibc's destroy would block
+   forever waiting for the waiter to leave and no signal is coming. */
+void cool_cond_free(void *cv) {
+    cool_cond *c = (cool_cond *)cv;
+    if (__atomic_load_n(&c->waiters, __ATOMIC_SEQ_CST) != 0) {
+        cool_thread_fatal("fatal: condvar freed while threads wait on it\n");
+    }
+    pthread_cond_destroy(&c->cv);
+    free(c);
+}
+
 /* Frees the channel. Freeing while a thread is blocked inside a send or recv
    is fatal, caught best effort under the monitor lock. The sanctioned order
    is close, then join every thread that touches the channel, then free. */
@@ -233,7 +355,7 @@ void cool_chan_free(void *ch) {
     cool_chan *c = (cool_chan *)ch;
     pthread_mutex_lock(&c->mu);
     if (c->waiters > 0) {
-        cool_chan_fatal("fatal: channel freed while threads wait on it\n");
+        cool_thread_fatal("fatal: channel freed while threads wait on it\n");
     }
     pthread_mutex_unlock(&c->mu);
     pthread_cond_destroy(&c->not_full);

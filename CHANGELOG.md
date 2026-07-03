@@ -2,6 +2,27 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.3.2
+
+Mutexes and condition variables, the third phase of the concurrency line. Shared mutable state gains its sanctioned shape, a raw buffer guarded by a lock, with every classic pthread misuse turned into a named fault. No compiler changes at all: the whole release is runtime shims, a standard library module, examples, and the reference.
+
+The primitives.
+
+- `std.concurrent.sync` ships `Mutex` and `Condvar` as one word handles over runtime shims, the channel's pattern. `lock` blocks until the mutex is free, `unlock` releases it, `cond_wait` releases the mutex around its sleep and reacquires it before returning, `cond_signal` wakes one waiter, `cond_broadcast` wakes all.
+- The mutex is the error checking pthread kind, so relocking a mutex the thread already holds and unlocking one it does not hold, both undefined in the default flavor, fault by name. The runtime adds what the kind cannot: a trylock probe makes freeing a held mutex fatal, and the fault paths branch on the actual error code, so operating on a mutex already freed reports an invalid mutex instead of blaming a holder that does not exist.
+- The condvar record carries a waiter count beside the pthread object, raised before the wait releases the mutex, so freeing a condition variable a thread waits on faults by name. The bare destroy would hang forever on glibc, quiescing for a waiter no signal will ever release, the worst failure shape in the toolbox.
+- Condition variables run on a CLOCK_MONOTONIC clock like the channel's, ready for the timed waits arriving in 0.3.3. Wakeups can be spurious, and the reference states the rule: a wait always sits in a loop that rechecks its predicate under the lock, and every concurrent wait on one condvar names the same mutex.
+- The blessed idiom inside a function body is `lock(m)` then `defer unlock(m)`, so every return path releases, verified working end to end.
+
+The memory model.
+
+- The mutex edge joins the sanctioned list: an `unlock` happens before the next `lock` of the same mutex. Hand built `*raw` sharing stays on the honor system unless a mutex guards every touch, and the reference now says exactly that.
+- Blocking waits still have no timeout until 0.3.3, so the reference names the deadlock hazard plainly.
+
+Examples and goldens: four threads driving one counter to exactly ten thousand under a mutex, a two account transfer loop whose invariant holds to the digit, a bounded buffer hand built from one mutex and two condition variables proving the primitives express what channels provide natively, a condition variable ping pong whose six lines alternate deterministically, and three named fault goldens, freeing a held mutex, unlocking an unheld one, and freeing a condition variable with a parked waiter, the last made deterministic by the waiter count rising before the wait releases the mutex.
+
+Planned next in the line: the timed and non blocking channel operations, the thread pool, and the async substrate rehearsal in 0.3.3.
+
 ## 0.3.1
 
 Channels, the second phase of the concurrency line. A bounded, thread safe queue moves values and ownership between threads, built as a standard library generic over a textbook monitor in the runtime, with no new syntax. One new rule guards the crossing: a channel element must be free of frame views, the same ban spawn captures enforce.

@@ -139,6 +139,30 @@ fn dereferencing_a_drained_recv_placeholder_faults_by_name() {
 }
 
 #[test]
+fn freeing_a_held_mutex_faults() {
+    let (out, err, ok) = run_raw("mutexheld.dusk");
+    assert!(!ok, "freeing a held mutex must fault");
+    assert_eq!(out, "locking\n", "the print before the free survives the abort");
+    assert!(err.contains("mutex freed while held"), "{err}");
+}
+
+#[test]
+fn unlocking_an_unheld_mutex_faults() {
+    let (out, err, ok) = run_raw("mutexunlock.dusk");
+    assert!(!ok, "unlocking an unheld mutex must fault");
+    assert_eq!(out, "unlocking\n", "the print before the unlock survives the abort");
+    assert!(err.contains("does not hold it"), "{err}");
+}
+
+#[test]
+fn freeing_a_condvar_with_a_waiter_faults() {
+    let (out, err, ok) = run_raw("condfree.dusk");
+    assert!(!ok, "freeing a condvar with a parked waiter must fault");
+    assert_eq!(out, "freeing\n", "the print before the free survives the abort");
+    assert!(err.contains("condvar freed while threads wait"), "{err}");
+}
+
+#[test]
 fn vector_get_out_of_bounds_faults() {
     let (out, err, ok) = run_raw("vecbound.dusk");
     assert!(!ok, "vec_get past the length must fault");
@@ -243,6 +267,10 @@ golden!(fanin, "fanin.dusk", "820\n");
 golden!(chanclose, "chanclose.dusk", "1\n2\n3\nclosed\n");
 golden!(chanblock, "chanblock.dusk", "5050\n");
 golden!(handoff, "handoff.dusk", "41\nhanded off\n");
+golden!(countermutex, "countermutex.dusk", "10000\n");
+golden!(bank, "bank.dusk", "60\n40\n100\n");
+golden!(bounded, "bounded.dusk", "1275\n");
+golden!(pingpong, "pingpong.dusk", "ping\npong\nping\npong\nping\npong\ndone\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");

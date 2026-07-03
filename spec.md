@@ -750,9 +750,43 @@ A moved send that the channel refuses loses the record. When `chan_send(c, move(
 
 Shutdown follows one order: close the channel, join every thread that touches it, then `chan_free` it. Freeing a channel while a thread is blocked inside a send or receive is fatal with a named message, caught best effort. Using a channel after `chan_free` is undefined, the raw layer's honor system, since the one word handle carries no generation.
 
+### Mutexes and Condition Variables
+
+Added in 0.3.2. `std.concurrent.sync` carries `Mutex` and `Condvar`, ordinary structs over runtime shims like the channel. The blessed shape for shared mutable state is a `*raw` buffer guarded by one mutex: lock, touch the buffer, unlock.
+
+```text
+@import std.concurrent.sync
+
+m := mutex_new()
+counter: *raw int64 = alloc_bytes(8)
+counter[0] = 0
+lock(m)
+counter[0] = counter[0] + 1
+unlock(m)
+mutex_free(m)
+free(counter)
+```
+
+`lock(m)` blocks until the mutex is free and `unlock(m)` releases it. An unlock happens before the lock that next acquires the same mutex, which is the ordering that makes the guarded memory safe to touch. Inside a function body the idiom is `lock(m)` followed by `defer unlock(m)`, so every return path releases. The handle is one word and copies freely, including into a spawned lambda's captures, and every copy names the same lock.
+
+The mutex is the error checking kind, so relocking a mutex the thread already holds and unlocking a mutex the thread does not hold, both undefined in the default pthread flavor, fault by name. The runtime adds the rest: a trylock probe makes freeing a held mutex fatal, an operation on a mutex already freed faults as an invalid mutex rather than a misleading holder message, and a waiter count makes freeing a condition variable a thread waits on fatal instead of the silent forever hang the bare destroy gives.
+
+`cond_wait(cv, m)` releases the mutex, sleeps until `cond_signal(cv)` wakes one waiter or `cond_broadcast(cv)` wakes all, and reacquires the mutex before returning. The caller must hold the mutex, every concurrent wait on one condition variable must name the same mutex, and wakeups can be spurious, so a wait always sits in a loop that rechecks its predicate under the lock.
+
+```text
+lock(m)
+while buf[5] == 0 {
+    cond_wait(notempty, m)
+}
+// consume under the lock, then
+unlock(m)
+```
+
+Free a condition variable only after every waiter has left it. Freeing one a thread still waits on is fatal by name. Blocking waits have no timeout until the timed operations land in 0.3.3, so a predicate nothing ever makes true is a deadlock.
+
 ### The memory model
 
-dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, and `join` orders everything the thread did before everything the joiner does after. Mutexes join this list in 0.3.2. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one.
+dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, an `unlock` happens before the next `lock` of the same mutex, and `join` orders everything the thread did before everything the joiner does after. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one, unless a mutex guards every touch.
 
 The generational heap is thread safe, so `alloc` and `free` from any thread are defined, and the dereference check stays armed on every thread. In a program whose frees and uses are ordered by a sanctioned path, the check keeps its guarantee: a use after free, a double free, or a double `join` faults deterministically instead of corrupting memory. In a program that races, the check degrades to a best effort backstop. Checking and using are two steps, so a dereference racing the free of the same allocation can pass the check and then touch retired memory, and a fat pointer overwritten while another thread reads its sixteen bytes can tear into a mismatched pair. Freed blocks stay parked in the runtime's free list rather than returning to the operating system, which bounds the blast radius, but none of this makes a race defined.
 
@@ -779,6 +813,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.string            | string manipulation utilities                         |
 | std.concurrent.atomic | sequentially consistent int64 atomics                 |
 | std.concurrent.channel | bounded thread safe queue between threads            |
+| std.concurrent.sync   | mutex and condition variable                          |
 | std.concurrent.thread | sleep_ms beside the spawn and join builtins           |
 
 ---

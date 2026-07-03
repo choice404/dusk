@@ -1,0 +1,80 @@
+// std.concurrent.sync: a mutex and a condition variable over pthread, the
+// sanctioned way to mutate shared memory between threads. The blessed shape
+// is a *raw buffer guarded by one Mutex: lock, touch the buffer, unlock, and
+// inside a function body prefer lock(m) followed by defer unlock(m). Handles
+// are one word and copy freely; every copy names the same lock. The mutex is
+// the error checking kind, so relocking by the holder, unlocking by a non
+// holder, and freeing a held mutex all fault by name instead of hanging or
+// corrupting.
+
+foreign "C" {
+    func cool_mutex_new() -> *void
+    func cool_mutex_lock(m: *void) -> void
+    func cool_mutex_unlock(m: *void) -> void
+    func cool_mutex_free(m: *void) -> void
+    func cool_cond_new() -> *void
+    func cool_cond_wait(cv: *void, m: *void) -> void
+    func cool_cond_signal(cv: *void) -> void
+    func cool_cond_broadcast(cv: *void) -> void
+    func cool_cond_free(cv: *void) -> void
+}
+
+export struct Mutex {
+    h: *void,
+}
+
+export struct Condvar {
+    h: *void,
+}
+
+// Creates a mutex. Exhaustion is fatal, the allocator's contract.
+export func mutex_new() -> Mutex {
+    return Mutex { h: cool_mutex_new() }
+}
+
+// Acquires the mutex, blocking until it is free. An unlock of this mutex
+// happens before the lock that next acquires it, which is the ordering that
+// makes the guarded memory safe to touch. Relocking while already holding it
+// is fatal by name.
+export func lock(m: Mutex) -> void {
+    cool_mutex_lock(m.h)
+}
+
+// Releases the mutex. Unlocking a mutex this thread does not hold is fatal
+// by name.
+export func unlock(m: Mutex) -> void {
+    cool_mutex_unlock(m.h)
+}
+
+// Frees the mutex. Freeing while any thread holds it is fatal.
+export func mutex_free(m: Mutex) -> void {
+    cool_mutex_free(m.h)
+}
+
+// Creates a condition variable. Exhaustion is fatal.
+export func cond_new() -> Condvar {
+    return Condvar { h: cool_cond_new() }
+}
+
+// Releases the mutex, sleeps until a signal or broadcast, and reacquires the
+// mutex before returning. The caller must hold the mutex. Wakeups can be
+// spurious, so always wait inside a loop that rechecks the predicate.
+export func cond_wait(cv: Condvar, m: Mutex) -> void {
+    cool_cond_wait(cv.h, m.h)
+}
+
+// Wakes one waiter, if any thread is waiting.
+export func cond_signal(cv: Condvar) -> void {
+    cool_cond_signal(cv.h)
+}
+
+// Wakes every waiter.
+export func cond_broadcast(cv: Condvar) -> void {
+    cool_cond_broadcast(cv.h)
+}
+
+// Frees the condition variable. Freeing while any thread waits on it is
+// fatal by name.
+export func cond_free(cv: Condvar) -> void {
+    cool_cond_free(cv.h)
+}

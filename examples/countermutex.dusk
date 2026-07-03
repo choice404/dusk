@@ -1,0 +1,44 @@
+// Four threads increment one shared word 2500 times each under a mutex. The
+// total is exactly 10000 because an unlock happens before the next lock, so
+// every increment reads the previous one's write. The raw buffer under a
+// Mutex is the blessed shape for shared mutable state.
+@paradigm procedural
+@import std.concurrent.sync
+@import std.vector
+
+func main() -> int32 {
+    m := mutex_new()
+    buf: *raw int64 = alloc_bytes(8)
+    buf[0] = 0
+    handles: *Vector<thread> = alloc(vec_new())
+    mut w: int64 = 0
+    while w < 4 {
+        t, e := spawn(lambda () -> void {
+            mut i: int64 = 0
+            while i < 2500 {
+                lock(m)
+                buf[0] = buf[0] + 1
+                unlock(m)
+                i = i + 1
+            }
+        })
+        if e.exists() {
+            printerr(e)
+            return 1
+        }
+        vec_push(handles, t)
+        w = w + 1
+    }
+    mut k: int64 = 0
+    while k < vec_len(handles) {
+        je := join(vec_get(handles, k))
+        je.ignore()
+        k = k + 1
+    }
+    println(buf[0])
+    mutex_free(m)
+    free(buf)
+    vec_free(handles)
+    free(handles)
+    return 0
+}

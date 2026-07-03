@@ -1,0 +1,58 @@
+// A bounded buffer hand built from a mutex and two condition variables,
+// proving the primitives express what channels provide natively. The shared
+// block holds a four slot ring, a head index, and a length, all guarded by
+// one mutex, and both waits loop on their predicate because wakeups can be
+// spurious. The producer pushes one through fifty and the consumer folds
+// them, so the sum is exact.
+@paradigm procedural
+@import std.concurrent.sync
+
+func main() -> int32 {
+    m := mutex_new()
+    notfull := cond_new()
+    notempty := cond_new()
+    // Slots 0 through 3 are the ring, slot 4 is the head, slot 5 the length.
+    buf: *raw int64 = alloc_bytes(48)
+    buf[4] = 0
+    buf[5] = 0
+    t, e := spawn(lambda () -> void {
+        mut i: int64 = 1
+        while i <= 50 {
+            lock(m)
+            while buf[5] == 4 {
+                cond_wait(notfull, m)
+            }
+            buf[(buf[4] + buf[5]) % 4] = i
+            buf[5] = buf[5] + 1
+            cond_signal(notempty)
+            unlock(m)
+            i = i + 1
+        }
+    })
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    mut sum: int64 = 0
+    mut got: int64 = 0
+    while got < 50 {
+        lock(m)
+        while buf[5] == 0 {
+            cond_wait(notempty, m)
+        }
+        sum = sum + buf[buf[4]]
+        buf[4] = (buf[4] + 1) % 4
+        buf[5] = buf[5] - 1
+        cond_signal(notfull)
+        unlock(m)
+        got = got + 1
+    }
+    println(sum)
+    je := join(t)
+    je.ignore()
+    mutex_free(m)
+    cond_free(notfull)
+    cond_free(notempty)
+    free(buf)
+    return 0
+}

@@ -1,0 +1,58 @@
+// A condition variable hands the turn back and forth between two threads.
+// The turn word says who may act, each thread waits in a loop until it is
+// theirs, and the broadcast wakes the other side, so the six lines alternate
+// deterministically no matter how the scheduler runs the threads.
+@paradigm procedural
+@import std.concurrent.sync
+
+func main() -> int32 {
+    m := mutex_new()
+    cv := cond_new()
+    turn: *raw int64 = alloc_bytes(8)
+    turn[0] = 0
+    ping, pe := spawn(lambda () -> void {
+        mut r: int64 = 0
+        while r < 3 {
+            lock(m)
+            while turn[0] != 0 {
+                cond_wait(cv, m)
+            }
+            println("ping")
+            turn[0] = 1
+            cond_broadcast(cv)
+            unlock(m)
+            r = r + 1
+        }
+    })
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    pong, qe := spawn(lambda () -> void {
+        mut r: int64 = 0
+        while r < 3 {
+            lock(m)
+            while turn[0] != 1 {
+                cond_wait(cv, m)
+            }
+            println("pong")
+            turn[0] = 0
+            cond_broadcast(cv)
+            unlock(m)
+            r = r + 1
+        }
+    })
+    if qe.exists() {
+        printerr(qe)
+        return 1
+    }
+    j1 := join(ping)
+    j1.ignore()
+    j2 := join(pong)
+    j2.ignore()
+    println("done")
+    mutex_free(m)
+    cond_free(cv)
+    free(turn)
+    return 0
+}

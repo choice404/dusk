@@ -1,0 +1,36 @@
+// Freeing a condition variable while a thread waits on it is fatal by name.
+// The worker's waiter count rises before the wait releases the mutex, so once
+// main reacquires the mutex the runtime is guaranteed to see the waiter and
+// the fault is deterministic, not a race. Without the guard this program
+// would hang forever inside the destroy.
+@paradigm procedural
+@import std.concurrent.sync
+@import std.concurrent.atomic
+@import std.concurrent.thread
+
+func main() -> int32 {
+    m := mutex_new()
+    cv := cond_new()
+    ready := atomic_new(0)
+    t, e := spawn(lambda () -> void {
+        lock(m)
+        atomic_store(ready, 1)
+        cond_wait(cv, m)
+        unlock(m)
+    })
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    while atomic_load(ready) == 0 {
+        sleep_ms(1)
+    }
+    lock(m)
+    unlock(m)
+    println("freeing")
+    cond_free(cv)
+    println("unreached")
+    je := join(t)
+    je.ignore()
+    return 0
+}
