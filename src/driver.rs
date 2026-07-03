@@ -74,8 +74,10 @@ pub fn run_with(bin: &Path, args: &[String]) -> Result<i32, String> {
     Ok(status.code().unwrap_or(-1))
 }
 
-/// The C runtime sources at the crate root, regardless of the caller's CWD.
+/// The C runtime sources the toolchain ships, found through the same
+/// resolution the standard library uses, so an installed compiler links the
+/// runtime beside itself and a checkout links the one at the crate root.
 fn runtime_sources() -> Vec<PathBuf> {
-    let rt = Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime");
+    let rt = crate::home::asset_dir("runtime");
     vec![rt.join("runtime.c"), rt.join("thread.c")]
 }

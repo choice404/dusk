@@ -9,6 +9,20 @@ Dawn is an accompanying package tool. A Dusk package is a git repository, inspir
 - Rust stable and Cargo.
 - clang and LLVM 22.x on your path. The textual IR targets one LLVM major version.
 
+## Install
+
+The language is pre 1.0 and every minor release changes it. Installing today means tracking a moving target, which the development packages make explicit.
+
+```sh
+# from crates.io
+cargo install dusk-lang
+
+# on Arch Linux, from the AUR, builds the latest main
+paru -S dusk-lang-git
+```
+
+Both install the `dusk` and `dawn` binaries. The compiler finds its standard library and C runtime beside itself, in the share directory for a packaged install or inside the cargo registry checkout for `cargo install`, and the `DUSK_HOME` environment variable overrides the search when you want a binary to use a different toolchain tree, such as a source checkout.
+
 ## Try it without building a binary
 
 `cargo run` compiles the toolchain on first use and runs it in one step, so you never manage a binary yourself. Pick the binary with `--bin`, then pass arguments after `--`.

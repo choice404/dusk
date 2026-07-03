@@ -46,7 +46,7 @@ pub fn render_diag(files: &[FileSrc], d: &Diagnostic) -> String {
 /// Loads the root file and everything it imports, transitively, merging items.
 pub fn load(root_path: &str) -> Program {
     let mut errors = Vec::new();
-    let stdlib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+    let stdlib = crate::home::asset_dir("lib");
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut items = Vec::new();
     let mut files: Vec<FileSrc> = Vec::new();
