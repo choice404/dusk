@@ -290,9 +290,12 @@ impl<'a> Mono<'a> {
     /// an element type that can view the sending frame, a slice, a closure, or
     /// an interface value, would dangle in the receiver. The instantiation is
     /// rejected here, where the concrete element type is first known, the same
-    /// ban spawn captures enforce at the capture site.
+    /// ban spawn captures enforce at the capture site. A future's element
+    /// crosses the same way through its completion slot, so the two minting
+    /// sites take the same ban; the consuming operations need none, since an
+    /// element that cannot be minted can never reach them.
     fn check_chan_element(&mut self, name: &str, targs: &[Type], span: Span) {
-        if !matches!(
+        let chan = matches!(
             name,
             "chan_new"
                 | "chan_send"
@@ -302,17 +305,20 @@ impl<'a> Mono<'a> {
                 | "chan_recv_timeout"
                 | "chan_close"
                 | "chan_free"
-        ) {
+        );
+        let future = matches!(name, "future_new" | "future_wrap");
+        if !chan && !future {
             return;
         }
         let Some(t) = targs.first() else { return };
         let mut seen = HashSet::new();
         if !self.chan_element_ok(t, &mut seen) {
-            self.diags.push(Diagnostic::new(
+            let msg = if chan {
                 "a channel element cannot contain a slice, closure, or interface value; a view of the sending thread's frame would dangle in the receiver; send heap owned data instead"
-                    .to_string(),
-                span,
-            ));
+            } else {
+                "a future element cannot contain a slice, closure, or interface value; a view of the completing thread's frame would dangle in the awaiter; send heap owned data instead"
+            };
+            self.diags.push(Diagnostic::new(msg.to_string(), span));
         }
     }
 
@@ -1281,6 +1287,24 @@ mod tests {
              func main() -> int32 {\n  r := chan_send(1, 42)\n  println(r)\n  return 0\n}",
         );
         assert!(!d.iter().any(|m| m.contains("channel element")), "{d:?}");
+    }
+
+    #[test]
+    fn future_element_with_a_frame_view_is_diagnosed() {
+        let d = diags(
+            "func future_new<T>() -> T { return future_new() }\n\
+             func main() -> int32 {\n  s: int64[] = future_new()\n  println(s[0])\n  return 0\n}",
+        );
+        assert!(d.iter().any(|m| m.contains("future element")), "{d:?}");
+    }
+
+    #[test]
+    fn future_element_of_plain_data_is_clean() {
+        let d = diags(
+            "func future_new<T>() -> T { return future_new() }\n\
+             func main() -> int32 {\n  n: int64 = future_new()\n  println(n)\n  return 0\n}",
+        );
+        assert!(!d.iter().any(|m| m.contains("future element")), "{d:?}");
     }
 
     #[test]

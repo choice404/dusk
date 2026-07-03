@@ -2,6 +2,29 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.4.0
+
+Futures and the event loop, the first phase of the async line. A one shot completion future replaces the hand rolled channel and counter of the 0.3.3 offload shape, the loop parks instead of polling, and an await that can never finish aborts by name instead of hanging. One compiler change only, the channel element ban extended to the future's minting sites; everything else is a runtime file, three standard library modules, examples, and the reference, riding the pool and monitor machinery the 0.3.x line built.
+
+The future.
+
+- `std.async.future` ships `Future<T>`, a one shot completion slot minted pending with `future_new`, the element type pinned by the binding annotation like `chan_new`. The handle is a plain pair of words and copies freely, every copy naming the same future, which is how a pool lambda captures it.
+- `complete(f, v, e)` stores the value and the error together, from any thread, and wakes the loop. The awaiter reads exactly the pair the completer supplied, so an offloaded body hands its own failure through unchanged and there is no rejection channel anywhere, the errors as values rule extended to completion. The second completion is refused with "future already completed" and its value is dropped, whether the loser lands before or after the awaiter consumes the future, so racing completers stay visible instead of silently last writer wins and never need to outrun the awaiter. The adversarial review forced that last clause: the first cut faulted a loser that arrived after the consume, which an interleaving probe caught in one run out of eight.
+- The channel element ban applies at `future_new` and `future_wrap`: an element containing a slice, closure, or interface value is rejected at compile time, since a view of the completing thread's frame would dangle in the awaiter. The one compiler change of the release, five lines in monomorphization beside the channel arm it mirrors.
+- The record lives in the generational heap and consuming it retires it, so a future is awaited once the way a thread is joined once, and the second consume faults with "use of a dead future", the double join machinery on a future.
+- `await` parks until completion, `await_timeout` parks at most the given milliseconds against the monotonic clock and leaves the future live on "await timed out", the recoverable escape hatch, and `try_poll` never parks, reporting "future is pending" until it consumes a ready future. `future_free` releases a future that will never be consumed.
+
+The loop.
+
+- The loop is a process singleton like the pool, started with `loop_init` in `std.async.loop` on the thread that consumes futures. Completion is legal from any thread; every other touch asserts the owner and faults by name off it, so the single threaded discipline is mechanical, not documentary.
+- `std.async.time` ships `sleep_async`, a future the loop's timer heap completes with 0 at its deadline. Timers fire while any await or poll runs, and two timers sharing a deadline complete in creation order, the heap keyed by deadline then sequence.
+- An await that provably cannot finish is a deadlock, not a hang: with no timer pending, no spawned thread alive, and no pool task in flight, nothing can complete the future, and the wait aborts with "the event loop is idle but work is still pending". The gauges drop only after their bodies finish and every drop wakes the loop, so the gate never fires against a completion still in flight.
+- The fault family is named end to end: consuming a dead future, touching the loop off its owner thread, touching it before `loop_init`, and the idle deadlock. The reference gains the futures section, the completion edge in the memory model, the two honest leak notes, and the cost paragraph.
+
+Examples and goldens: the offload flagship rewritten on futures, three awaited reads folding to the same sum with the tick loop and counter gone, a plain spawned thread as the completer, two completers racing to one exact number in every interleaving, three timers awaited out of creation order, a parse failure crossing a future intact, the refused second completion, the pending then consuming poll, the timed await against a future completed later, and five named fault goldens, the dead future, the off thread touch, the loop never started, and the idle deadlock proven both immediately and after the last completer exits.
+
+The 0.4.x line continues with the epoll reactor in 0.4.1 and the async and await keywords in 0.4.2.
+
 ## 0.3.3
 
 The thread pool and the async substrate, closing the 0.3.x concurrency line. The non blocking and timed channel operations land, a global worker pool runs fire and forget tasks behind a new `submit` builtin, and the flagship example rehearses the exact park, wake, and offload shape the 0.4.0 event loop lowers onto, proven in user code before the async design starts.

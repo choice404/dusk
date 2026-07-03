@@ -1,0 +1,25 @@
+// Three timers awaited out of creation order. A timer is a future the loop
+// completes with 0 at its deadline, so awaiting the two millisecond one
+// first parks main while the one millisecond timer fires in passing, and
+// the sum stays exact whatever the machine's timing does.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    t1 := sleep_async(2)
+    t2 := sleep_async(1)
+    t3 := sleep_async(3)
+    a, e1 := await(t1)
+    e1.ignore()
+    b, e2 := await(t2)
+    e2.ignore()
+    c, e3 := await(t3)
+    e3.ignore()
+    println(a + b + c + 42)
+    loop_free()
+    return 0
+}

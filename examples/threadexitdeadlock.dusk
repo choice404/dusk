@@ -1,0 +1,25 @@
+// The deadlock gate re-evaluates when a completer disappears. The spawned
+// thread keeps the await parked while it lives, since it could still
+// complete the future, and its exit wakes the loop, which now proves nothing
+// can finish the wait and aborts by name instead of parking forever.
+@paradigm procedural
+@import std.concurrent.thread
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    t, se := spawn(lambda () -> void {
+        sleep_ms(1)
+    })
+    se.ignore()
+    v, e := await(f)
+    e.ignore()
+    println(v)
+    je := join(t)
+    je.ignore()
+    println("unreached")
+    return 0
+}

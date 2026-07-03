@@ -1,0 +1,22 @@
+// Consuming a future twice faults. The first await retires the record in
+// the generational heap, so the second one mismatches its remembered
+// generation and aborts by name, the double join machinery on a future.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    c := complete(f, 1, error {})
+    c.ignore()
+    v, e := await(f)
+    e.ignore()
+    println(v)
+    w, e2 := await(f)
+    e2.ignore()
+    println(w)
+    println("unreached")
+    return 0
+}

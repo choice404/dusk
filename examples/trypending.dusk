@@ -1,0 +1,24 @@
+// try_poll never parks. While the future is pending it reports so with the
+// zero value and leaves the future live; once completed it consumes the
+// future exactly as await would.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    v, pe := try_poll(f)
+    if pe.exists() {
+        println(pe.toString())
+    }
+    println(v)
+    ce := complete(f, 9, error {})
+    ce.ignore()
+    w, we := try_poll(f)
+    we.ignore()
+    println(w)
+    loop_free()
+    return 0
+}

@@ -1,0 +1,29 @@
+// std.async.loop: the event loop's lifecycle. The loop is a process
+// singleton like the thread pool, owned by the thread that initialized it.
+// Futures are minted, awaited, polled, and freed on that thread only, while
+// completion is legal from any thread; touching the loop off its thread
+// faults by name. Initialize it before the first future, free it after the
+// last completer has finished, the close, join, free discipline.
+
+foreign "C" {
+    func cool_loop_init() -> int64
+    func cool_loop_free() -> void
+}
+
+// Starts the loop on the calling thread, which becomes its owner. The error
+// exists when the loop is already running or the operating system refuses
+// the resources.
+export func loop_init() -> error {
+    if cool_loop_init() == 1 {
+        return error { message: "the event loop could not start" }
+    }
+    return error {}
+}
+
+// Frees the loop. Pending timer futures leak their records, so consume or
+// free futures first and shut the pool down before this. After the free a
+// completer that fires anyway faults on the not running loop instead of
+// corrupting memory.
+export func loop_free() -> void {
+    cool_loop_free()
+}

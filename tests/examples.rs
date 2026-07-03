@@ -171,6 +171,42 @@ fn freeing_a_condvar_with_a_waiter_faults() {
 }
 
 #[test]
+fn awaiting_a_consumed_future_faults() {
+    let (out, err, ok) = run_raw("doubleawait.dusk");
+    assert!(!ok, "the second await of one future must fault");
+    assert_eq!(out, "1\n", "the first await's value prints before the fault");
+    assert!(err.contains("fatal: use of a dead future"), "{err}");
+}
+
+#[test]
+fn awaiting_off_the_loop_thread_faults() {
+    let (_, err, ok) = run_raw("offthreadawait.dusk");
+    assert!(!ok, "an await from a spawned thread must fault");
+    assert!(err.contains("fatal: the event loop was touched off its thread"), "{err}");
+}
+
+#[test]
+fn an_unfinishable_await_faults_instead_of_hanging() {
+    let (_, err, ok) = run_raw("idledeadlock.dusk");
+    assert!(!ok, "an await nothing can complete must fault");
+    assert!(err.contains("fatal: the event loop is idle but work is still pending"), "{err}");
+}
+
+#[test]
+fn a_completer_exiting_reawakens_the_deadlock_gate() {
+    let (_, err, ok) = run_raw("threadexitdeadlock.dusk");
+    assert!(!ok, "the await must fault once its last possible completer exits");
+    assert!(err.contains("fatal: the event loop is idle but work is still pending"), "{err}");
+}
+
+#[test]
+fn a_future_before_loop_init_faults() {
+    let (_, err, ok) = run_raw("noloop.dusk");
+    assert!(!ok, "minting a future before loop_init must fault");
+    assert!(err.contains("fatal: the event loop is not running"), "{err}");
+}
+
+#[test]
 fn vector_get_out_of_bounds_faults() {
     let (out, err, ok) = run_raw("vecbound.dusk");
     assert!(!ok, "vec_get past the length must fault");
@@ -285,6 +321,14 @@ golden!(submitshut, "submitshut.dusk", "refused before start\n7\nrefused after s
 golden!(trypoll, "trypoll.dusk", "full\n9\n");
 golden!(recvtimeout, "recvtimeout.dusk", "timed out\n0\n5\nclosed\n0\n");
 golden!(offload, "offload.dusk", "60\n");
+golden!(awaitoffload, "awaitoffload.dusk", "60\n");
+golden!(spawnfuture, "spawnfuture.dusk", "42\n");
+golden!(racingcomplete, "racingcomplete.dusk", "2\n");
+golden!(sleepsum, "sleepsum.dusk", "42\n");
+golden!(failfuture, "failfuture.dusk", "invalid digit for base\n0\n");
+golden!(doublecomplete, "doublecomplete.dusk", "future already completed\n4\n");
+golden!(trypending, "trypending.dusk", "future is pending\n0\n9\n");
+golden!(awaittimeout, "awaittimeout.dusk", "await timed out\n0\n8\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");

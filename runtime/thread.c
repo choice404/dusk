@@ -16,6 +16,23 @@
 extern void *cool_gen_alloc(int64_t size);
 extern void cool_gen_free(void *p);
 extern int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n);
+extern void cool_loop_kick(void);
+
+/* Gauges for the event loop's deadlock check: how many spawned threads are
+   alive and how many accepted pool tasks have not finished. Each count drops
+   only after its body has fully run, so a completion the body performed is
+   visible before the count reaches zero, and the drop kicks the loop so a
+   parked await re-evaluates whether anything can still complete its future. */
+static int64_t cool_live_threads_n = 0;
+static int64_t cool_pool_inflight_n = 0;
+
+int64_t cool_live_threads(void) {
+    return __atomic_load_n(&cool_live_threads_n, __ATOMIC_SEQ_CST);
+}
+
+int64_t cool_pool_inflight(void) {
+    return __atomic_load_n(&cool_pool_inflight_n, __ATOMIC_SEQ_CST);
+}
 
 typedef struct {
     void (*fn)(void *);
@@ -27,6 +44,8 @@ static void *cool_thread_tramp(void *arg) {
     free(arg);
     t.fn(t.env);
     free(t.env);
+    __atomic_fetch_sub(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
+    cool_loop_kick();
     return NULL;
 }
 
@@ -47,7 +66,11 @@ void *cool_thread_spawn(void *fn, void *env) {
         free(env);
         return NULL;
     }
+    // Raised before the create so the count can never dip below the number of
+    // running bodies; a refused create takes it right back.
+    __atomic_fetch_add(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
     if (pthread_create(rec, NULL, cool_thread_tramp, task) != 0) {
+        __atomic_fetch_sub(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
         free(task);
         free(env);
         cool_gen_free(rec);
@@ -504,6 +527,8 @@ static void *cool_pool_worker(void *arg) {
         t->fn(t->env);
         free(t->env);
         free(t);
+        __atomic_fetch_sub(&cool_pool_inflight_n, 1, __ATOMIC_SEQ_CST);
+        cool_loop_kick();
     }
 }
 
@@ -582,6 +607,7 @@ int64_t cool_pool_submit(void *fn, void *env) {
         p->head = t;
     }
     p->tail = t;
+    __atomic_fetch_add(&cool_pool_inflight_n, 1, __ATOMIC_SEQ_CST);
     pthread_cond_signal(&p->ready);
     pthread_mutex_unlock(&p->mu);
     return 0;

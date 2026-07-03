@@ -1,0 +1,120 @@
+// std.async.future: the one shot completion future over the event loop. A
+// future is minted pending on the loop thread, completed exactly once from
+// any thread, and consumed exactly once on the loop thread by await, a timed
+// await, or a ready try_poll. The record lives in the generational heap, so
+// consuming it retires it and a second consume faults by name, the double
+// join contract. The handle is a plain pair of words and copies freely;
+// every copy names the same future.
+
+foreign "C" {
+    func cool_future_new(elem_size: int64) -> *void
+    func cool_future_gen(f: *void) -> int64
+    func cool_future_complete(f: *void, gen: int64, elem: *void, err: *void) -> int64
+    func cool_future_try(f: *void, gen: int64, out: *void, err_out: *void) -> int64
+    func cool_future_wait(f: *void, gen: int64, out: *void, err_out: *void) -> void
+    func cool_future_await_ms(f: *void, gen: int64, ms: int64, out: *void, err_out: *void) -> int64
+    func cool_future_release(f: *void, gen: int64) -> void
+}
+
+export struct Future<T> {
+    h: *void,
+    gen: int64,
+}
+
+// Mints a pending future. The binding annotation pins the element type, as in
+// f: Future<int64> = future_new(). Loop thread only; exhaustion is fatal, the
+// allocator's contract. An element that could view a frame, a slice, a
+// closure, or an interface value, is rejected at compile time, the channel
+// element ban applied at the minting site.
+export func future_new<T>() -> Future<T> {
+    h := cool_future_new(sizeof(T))
+    return Future { h: h, gen: cool_future_gen(h) }
+}
+
+// Wraps a raw completion handle from the runtime into a typed future, the
+// power layer for stdlib modules that mint futures in C, like the timers.
+// The binding annotation pins the element type. The handle must be a live
+// future record; anything else is on the raw layer's honor system.
+export func future_wrap<T>(h: *void) -> Future<T> {
+    return Future { h: h, gen: cool_future_gen(h) }
+}
+
+// Completes the future with a value and an error, from any thread, waking
+// the loop. The awaiter receives exactly this pair, so an offloaded body
+// hands its own failure through unchanged. The returned error exists when
+// the future was already completed, whether or not the awaiter has consumed
+// it yet, so racing completers never need to outrun the awaiter; the losing
+// value is dropped. Passing an error here does not discharge it; the
+// completer still inspects or ignores its own binding.
+export func complete<T>(f: Future<T>, v: T, e: error) -> error {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    buf[0] = v
+    ebuf: *raw error = alloc_bytes(sizeof(int64))
+    ebuf[0] = e
+    rc := cool_future_complete(f.h, f.gen, buf, ebuf)
+    free(buf)
+    free(ebuf)
+    if rc == 1 {
+        return error { message: "future already completed" }
+    }
+    return error {}
+}
+
+// Waits until the future completes, then consumes it, returning the value
+// and error the completer supplied. Fires due timers while parked. When
+// nothing can complete the future, no timer pending, no spawned thread
+// alive, no pool task in flight, the wait is a deadlock and faults by name
+// instead of hanging. Loop thread only.
+export func await<T>(f: Future<T>) -> (T, error) {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    ebuf: *raw error = alloc_bytes(sizeof(int64))
+    cool_future_wait(f.h, f.gen, buf, ebuf)
+    v := buf[0]
+    err := ebuf[0]
+    free(buf)
+    free(ebuf)
+    return (v, err)
+}
+
+// Waits at most ms milliseconds against a monotonic clock. On completion the
+// future is consumed like await. On timeout the error says "await timed out",
+// the value is the zero pattern for T, and the future stays live, so the
+// caller can retry, poll, or free it. The recoverable escape hatch.
+export func await_timeout<T>(f: Future<T>, ms: int64) -> (T, error) {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    ebuf: *raw error = alloc_bytes(sizeof(int64))
+    rc := cool_future_await_ms(f.h, f.gen, ms, buf, ebuf)
+    v := buf[0]
+    err := ebuf[0]
+    free(buf)
+    free(ebuf)
+    if rc == 2 {
+        return (v, error { message: "await timed out" })
+    }
+    return (v, err)
+}
+
+// Polls without parking, after firing due timers. A ready future is consumed
+// exactly as await consumes it. While pending the error says "future is
+// pending", the value is the zero pattern for T, and the future stays live.
+export func try_poll<T>(f: Future<T>) -> (T, error) {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    ebuf: *raw error = alloc_bytes(sizeof(int64))
+    rc := cool_future_try(f.h, f.gen, buf, ebuf)
+    v := buf[0]
+    err := ebuf[0]
+    free(buf)
+    free(ebuf)
+    if rc == 2 {
+        return (v, error { message: "future is pending" })
+    }
+    return (v, err)
+}
+
+// Releases a future that will never be consumed, pending or completed. A
+// completion racing the release either wins first and is dropped with the
+// record or arrives after and is refused; neither corrupts. A consumed
+// future needs no free and freeing it faults, the double free family.
+export func future_free<T>(f: Future<T>) -> void {
+    cool_future_release(f.h, f.gen)
+}

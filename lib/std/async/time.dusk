@@ -1,0 +1,19 @@
+// std.async.time: timers over the event loop. A timer is an ordinary future
+// the loop's heap completes at its deadline, measured on the monotonic
+// clock, so awaiting one parks without holding a thread hostage the way
+// sleep_ms does. Timers sharing a deadline complete in creation order.
+
+@import std.async.future
+
+foreign "C" {
+    func cool_timer_new(ms: int64) -> *void
+}
+
+// Mints a future that completes with 0 after ms milliseconds. A non positive
+// wait completes on the next await or poll, where all timers fire. Loop
+// thread only. Await it, poll it, or race it against another future with
+// await_timeout.
+export func sleep_async(ms: int64) -> Future<int64> {
+    t: Future<int64> = future_wrap(cool_timer_new(ms))
+    return t
+}

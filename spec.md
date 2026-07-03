@@ -813,11 +813,49 @@ chan_free(done)
 
 Submission order is queue order, but tasks run on many workers at once, so nothing about completion order is promised. Queuing a task happens before its body runs, and everything a body did is visible to whoever receives its completion through a channel, the ordering the channel edge already provides. Shut the pool down before `main` returns for the same reason threads are joined: a worker mid task when the process exits dies mid write.
 
+### Futures and the Event Loop
+
+Added in 0.4.0, the first phase of the async line. A `Future<T>` from `std.async.future` is a one shot completion slot: minted pending, completed exactly once from any thread, and consumed exactly once by the thread that owns the event loop. The loop is a process singleton like the pool, started by `loop_init() -> error` in `std.async.loop` on the thread that will consume futures, and freed by `loop_free()` after the last completer has finished. Unlike the pool, a freed loop may be initialized again, on any thread, which then becomes the owner; futures from the earlier loop stay consumable, but their pending timers are gone. Everything except completion is a loop touch and faults by name off the owner thread.
+
+```text
+@import std.concurrent.pool
+@import std.async.future
+@import std.async.loop
+
+le := loop_init()
+le.ignore()
+pe := pool_start(2)
+pe.ignore()
+f: Future<int64> = future_new()
+se := submit(lambda () -> void {
+    n, ne := compute()
+    ne.ignore()
+    ce := complete(f, n, ne)
+    ce.ignore()
+})
+se.ignore()
+v, e := await(f)
+e.ignore()
+println(v)
+pool_shutdown()
+loop_free()
+```
+
+`future_new() -> Future<T>` mints a pending future, the element type pinned by the binding annotation like `chan_new` and `alloc`. The channel element ban applies at the minting site: an element type containing a slice, a closure, or an interface value is rejected at compile time, since a view of the completing thread's frame would dangle in the awaiter. The handle is a plain pair of words and copies freely; every copy names the same future, which is how a pool lambda captures it. `complete(f, v, e) -> error` stores the value and the error together from any thread and wakes the loop, so an offloaded body hands its own failure through unchanged and the awaiter reads exactly the pair the completer supplied. The second completion is refused with `future already completed` and its value is dropped, whether the loser arrives before or after the awaiter consumes the future, so racing completers never need to outrun the awaiter. Passing an error into `complete` does not discharge it; the completer still inspects or ignores its own binding.
+
+Consuming reads the pair and retires the record in the generational heap, so a future is awaited once the way a thread is joined once, and the second consume faults with `use of a dead future`. `await(f) -> (T, error)` parks until completion. `await_timeout(f, ms) -> (T, error)` parks at most ms milliseconds against the monotonic clock and comes back with `await timed out`, the zero value, and the future still live, the recoverable escape hatch. `try_poll(f) -> (T, error)` never parks, reporting `future is pending` while unresolved and consuming the future once it is ready. `future_free(f)` releases a future that will never be consumed; do not free one a completer may still touch, the channel free discipline.
+
+`sleep_async(ms) -> Future<int64>` in `std.async.time` mints a future the loop's timer heap completes with 0 at its deadline. Timers fire while any await or poll runs, deadlines measure on the monotonic clock, and two timers sharing a deadline complete in creation order, so awaiting a long timer lets shorter ones fire in passing.
+
+An await that provably cannot finish is a deadlock, not a hang. When no timer is pending, no spawned thread is alive, and no pool task is in flight, nothing in the process can complete the future, and the wait aborts with `the event loop is idle but work is still pending`. The gauges drop only after their bodies finish, and every drop wakes the loop, so the gate never fires against a completion still in flight; a live thread parked forever still parks the await, since the loop cannot prove it will never complete. The fault family, each named: consuming a dead future, touching the loop off its owner thread, touching it before `loop_init`, and the idle deadlock.
+
+Two honest leaks, stated like the channel's refused moved send: a future never consumed leaks its record, and a pending timer still queued at `loop_free` leaks its record. Both are rule breaking shutdowns paid in leaked records, never corruption. The costs are not hidden either: a future is one generational record, a completion and a consume each stage the element and the error through scratch allocations exactly as a channel operation does, and an await is a park on the loop's monitor, not a spin.
+
 ### The memory model
 
-dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, an `unlock` happens before the next `lock` of the same mutex, and `join` orders everything the thread did before everything the joiner does after. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one, unless a mutex guards every touch.
+dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, a `complete` happens before the `await`, timed await, or poll that consumes the future it completed, an `unlock` happens before the next `lock` of the same mutex, and `join` orders everything the thread did before everything the joiner does after. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one, unless a mutex guards every touch.
 
-The generational heap is thread safe, so `alloc` and `free` from any thread are defined, and the dereference check stays armed on every thread. In a program whose frees and uses are ordered by a sanctioned path, the check keeps its guarantee: a use after free, a double free, or a double `join` faults deterministically instead of corrupting memory. In a program that races, the check degrades to a best effort backstop. Checking and using are two steps, so a dereference racing the free of the same allocation can pass the check and then touch retired memory, and a fat pointer overwritten while another thread reads its sixteen bytes can tear into a mismatched pair. Freed blocks stay parked in the runtime's free list rather than returning to the operating system, which bounds the blast radius, but none of this makes a race defined.
+The generational heap is thread safe, so `alloc` and `free` from any thread are defined, and the dereference check stays armed on every thread. In a program whose frees and uses are ordered by a sanctioned path, the check keeps its guarantee: a use after free, a double free, or a double `join` faults deterministically instead of corrupting memory. In a program that races, the check degrades to a best effort backstop. Checking and using are two steps, so a dereference racing the free of the same allocation can pass the check and then touch retired memory, and a fat pointer overwritten while another thread reads its sixteen bytes can tear into a mismatched pair. Freed blocks stay parked in the runtime's free list rather than returning to the operating system, which bounds the blast radius, but none of this makes a race defined. Code confined to the event loop's thread gets the stronger story for free: one thread orders every free against every use, so the check there is the deterministic single threaded guarantee, never the degraded mode.
 
 ---
 
@@ -845,6 +883,9 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.concurrent.pool   | the global thread pool behind the submit builtin      |
 | std.concurrent.sync   | mutex and condition variable                          |
 | std.concurrent.thread | sleep_ms beside the spawn and join builtins           |
+| std.async.future      | one shot futures: mint, complete, await, poll         |
+| std.async.loop        | the event loop's lifecycle                            |
+| std.async.time        | timers as futures the loop completes                  |
 
 ---
 

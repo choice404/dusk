@@ -1,0 +1,22 @@
+// The loop belongs to the thread that initialized it. Completing a future
+// is legal from anywhere, but awaiting one is a loop touch, so a spawned
+// thread that tries faults by name instead of racing the owner's parking.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    t, se := spawn(lambda () -> void {
+        v, e := await(f)
+        e.ignore()
+        println(v)
+    })
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    println("unreached")
+    return 0
+}

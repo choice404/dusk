@@ -1,0 +1,25 @@
+// A plain spawned thread is a completer too, not just the pool. The future
+// handle crosses as two captured words, the completion wakes the parked
+// await from the other thread, and the join afterward keeps the shutdown
+// discipline.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    t, se := spawn(lambda () -> void {
+        ce := complete(f, 21, error {})
+        ce.ignore()
+    })
+    se.ignore()
+    v, e := await(f)
+    e.ignore()
+    je := join(t)
+    je.ignore()
+    println(v * 2)
+    loop_free()
+    return 0
+}

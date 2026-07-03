@@ -1,0 +1,45 @@
+// Racing completers are safe in every interleaving. Exactly one completion
+// wins, and a loser is refused whether it arrives before or after the
+// awaiter consumes the future, so the winner's value plus the refusal count
+// is the same number on every run.
+@paradigm procedural
+@import std.concurrent.atomic
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    refusals := atomic_new(0)
+    t1, s1 := spawn(lambda () -> void {
+        ce := complete(f, 1, error {})
+        if ce.exists() {
+            r := atomic_add(refusals, 1)
+            if r > 2 {
+                println(r)
+            }
+        }
+    })
+    s1.ignore()
+    t2, s2 := spawn(lambda () -> void {
+        ce := complete(f, 1, error {})
+        if ce.exists() {
+            r := atomic_add(refusals, 1)
+            if r > 2 {
+                println(r)
+            }
+        }
+    })
+    s2.ignore()
+    v, e := await(f)
+    e.ignore()
+    j1 := join(t1)
+    j1.ignore()
+    j2 := join(t2)
+    j2.ignore()
+    println(v + atomic_load(refusals))
+    atomic_free(refusals)
+    loop_free()
+    return 0
+}

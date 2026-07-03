@@ -1,0 +1,24 @@
+// A future completes exactly once. The second complete is refused with an
+// error value, the losing value is dropped, and the awaiter sees the first
+// completion, so racing completers stay visible instead of silently last
+// writer wins.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    c1 := complete(f, 4, error {})
+    c1.ignore()
+    c2 := complete(f, 5, error {})
+    if c2.exists() {
+        println(c2.toString())
+    }
+    v, e := await(f)
+    e.ignore()
+    println(v)
+    loop_free()
+    return 0
+}

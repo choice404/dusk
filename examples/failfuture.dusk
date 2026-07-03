@@ -1,0 +1,32 @@
+// A failed offload surfaces its own error at the await. The pool body
+// parses a string that is not a number and completes the future with the
+// zero value and the parse error, so the awaiter reads exactly the failure
+// the blocking call produced, no rejection channel anywhere.
+@paradigm procedural
+@import std.concurrent.pool
+@import std.string
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    pe := pool_start(1)
+    pe.ignore()
+    f: Future<int64> = future_new()
+    s := submit(lambda () -> void {
+        n, ne := parse_int("xy")
+        ne.ignore()
+        ce := complete(f, n, ne)
+        ce.ignore()
+    })
+    s.ignore()
+    v, e := await(f)
+    if e.exists() {
+        println(e.toString())
+    }
+    println(v)
+    pool_shutdown()
+    loop_free()
+    return 0
+}

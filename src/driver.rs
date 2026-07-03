@@ -79,5 +79,5 @@ pub fn run_with(bin: &Path, args: &[String]) -> Result<i32, String> {
 /// runtime beside itself and a checkout links the one at the crate root.
 fn runtime_sources() -> Vec<PathBuf> {
     let rt = crate::home::asset_dir("runtime");
-    vec![rt.join("runtime.c"), rt.join("thread.c")]
+    vec![rt.join("runtime.c"), rt.join("thread.c"), rt.join("async.c")]
 }

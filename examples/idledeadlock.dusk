@@ -1,0 +1,18 @@
+// An await that provably cannot finish is a deadlock, not a hang. With no
+// timer pending, no spawned thread alive, and no pool task in flight,
+// nothing in the process can ever complete this future, so the loop aborts
+// by name instead of parking forever.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    v, e := await(f)
+    e.ignore()
+    println(v)
+    println("unreached")
+    return 0
+}
