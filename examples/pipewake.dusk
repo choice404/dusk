@@ -1,0 +1,61 @@
+// A readiness watch armed on an empty pipe parks the await; a spawned
+// thread sleeps briefly, then writes, waking main through the reactor. The
+// thread exit gauge dropping first must not let the deadlock gate fire
+// while the reactor still holds the armed gauge for this watch.
+@paradigm procedural
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+@import std.concurrent.thread
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+
+    p, pe := pipe_new()
+    pe.ignore()
+
+    w := readable(p.r)
+
+    wfd := p.w
+    t, te := spawn(lambda () -> void {
+        sleep_ms(10)
+        wbuf: *raw int64 = alloc_bytes(sizeof(int64))
+        wbuf[0] = 7
+        n, we := write_nb(wfd, wbuf, sizeof(int64))
+        we.ignore()
+        if n != sizeof(int64) {
+            return
+        }
+        free(wbuf)
+    })
+    te.ignore()
+
+    println("armed")
+
+    m, me := await(w)
+    me.ignore()
+    println(m)
+
+    buf: *raw int64 = alloc_bytes(sizeof(int64))
+    v, ve := read_nb(p.r, buf, sizeof(int64))
+    ve.ignore()
+    if v != sizeof(int64) {
+        return 1
+    }
+    println(buf[0])
+    free(buf)
+
+    je := join(t)
+    je.ignore()
+
+    ce := fd_close(p.r)
+    ce.ignore()
+    cwe := fd_close(p.w)
+    cwe.ignore()
+    reactor_stop()
+    loop_free()
+    return 0
+}

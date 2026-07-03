@@ -1,0 +1,24 @@
+// Arming a watch on an invalid file descriptor is a fault, not an error
+// value: the readable/writable signatures carry no error channel. The
+// unreachable await still counts as a use for the checker.
+@paradigm procedural
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+
+    println("arming")
+    w := readable(-1)
+    v, ve := await(w)
+    ve.ignore()
+    println(v)
+
+    reactor_stop()
+    loop_free()
+    return 0
+}

@@ -207,6 +207,33 @@ fn a_future_before_loop_init_faults() {
 }
 
 #[test]
+fn a_reactor_stopped_with_an_armed_watch_faults() {
+    let (out, err, ok) = run_raw("watchleak.dusk");
+    assert!(!ok, "stopping the reactor with a watch still armed must fault");
+    assert_eq!(out, "await timed out\n0\n", "the timeout prints before the fault");
+    assert!(err.contains("fatal: the reactor stopped while a watch is still armed"), "{err}");
+}
+
+#[test]
+fn a_second_watch_on_an_armed_fd_faults() {
+    let (out, err, ok) = run_raw("doublewatch.dusk");
+    assert!(!ok, "a second watch on an already armed fd must fault");
+    assert_eq!(out, "future is pending\n0\n", "the pending poll prints before the fault");
+    assert!(err.contains("fatal: the file descriptor already has an armed watch"), "{err}");
+}
+
+#[test]
+fn a_watch_on_an_invalid_fd_faults() {
+    let (out, err, ok) = run_raw("badfdwatch.dusk");
+    assert!(!ok, "arming a watch on an invalid fd must fault");
+    assert_eq!(out, "arming\n", "the print before the arm survives the fault");
+    assert!(
+        err.contains("fatal: a readiness watch was armed on an invalid file descriptor"),
+        "{err}"
+    );
+}
+
+#[test]
 fn vector_get_out_of_bounds_faults() {
     let (out, err, ok) = run_raw("vecbound.dusk");
     assert!(!ok, "vec_get past the length must fault");
@@ -329,6 +356,13 @@ golden!(failfuture, "failfuture.dusk", "invalid digit for base\n0\n");
 golden!(doublecomplete, "doublecomplete.dusk", "future already completed\n4\n");
 golden!(trypending, "trypending.dusk", "future is pending\n0\n9\n");
 golden!(awaittimeout, "awaittimeout.dusk", "await timed out\n0\n8\n");
+golden!(reactorlife, "reactorlife.dusk", "ok\n");
+golden!(wouldblock, "wouldblock.dusk", "would block\n0\n7\n0\n");
+golden!(readywait, "readywait.dusk", "1\n7\n");
+golden!(pipewake, "pipewake.dusk", "armed\n1\n7\n");
+golden!(timerinterleave, "timerinterleave.dusk", "0\n1\n0\n");
+golden!(reactorsum, "reactorsum.dusk", "10\n");
+golden!(writewatch, "writewatch.dusk", "2\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");

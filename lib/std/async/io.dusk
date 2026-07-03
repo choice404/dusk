@@ -1,0 +1,135 @@
+// std.async.io: readiness futures over the reactor, and the non blocking byte
+// surface for the file descriptors they watch. The reactor is one C thread
+// that turns fd readiness into one shot readiness futures on the event loop.
+// Arming a watch (readable / writable) raises a gauge into the deadlock gate,
+// so an await whose only possible completer is an epoll watch parks instead
+// of false faulting. Pipes are the deterministic test rig. The sanctioned
+// order is loop_init, reactor_start, all watches fired, reactor_stop,
+// loop_free; the reactor is restartable after stop.
+
+@import std.async.future
+
+foreign "C" {
+    func cool_reactor_start() -> int64
+    func cool_reactor_stop() -> void
+    func cool_fd_ready(fd: int64, for_write: int64) -> *void
+    func cool_fd_nonblock(fd: int64) -> int64
+    func cool_pipe2(out2: *void) -> int64
+    func cool_read_nb(fd: int64, buf: *void, n: int64) -> int64
+    func cool_write_nb(fd: int64, buf: *void, n: int64) -> int64
+    func cool_fd_close(fd: int64) -> int64
+}
+
+export struct Pipe {
+    r: int64,
+    w: int64,
+}
+
+// Starts the reactor thread. A fresh epoll fd and eventfd each start, so a
+// stopped reactor restarts clean. A double start, or an OS refusal setting up
+// epoll, is an error rather than a fault, the loop_init shape.
+export func reactor_start() -> error {
+    rc := cool_reactor_start()
+    if rc == 1 {
+        return error { message: "the reactor could not start" }
+    }
+    return error {}
+}
+
+// Stops the reactor: signals the thread, which drains events already ready,
+// then joins. Stopping with a watch still armed is a fault on the C side, a
+// parked awaiter would otherwise be stranded, so fire or free every watch
+// before stopping.
+export func reactor_stop() -> void {
+    cool_reactor_stop()
+}
+
+// Arms a one shot readiness watch on fd and returns a future that completes
+// with the readiness mask: 1 readable, 2 writable, 4 hangup, 8 error, ORed
+// together. One armed watch per fd, full stop: a read watch and a write watch
+// on the SAME fd collide, so arm one at a time; a second watch on an fd that
+// already has one is a fault. The watch is one shot, it fires exactly once and
+// the reactor then drops it. Awaiting or freeing the future is the ordinary
+// double consume contract; note future_free does NOT disarm the watch, so a
+// freed watch stays counted until it later fires and completes its dead record
+// (refused). The mask element is a plain int64, clean under the future element
+// ban by construction.
+export func readable(fd: int64) -> Future<int64> {
+    f: Future<int64> = future_wrap(cool_fd_ready(fd, 0))
+    return f
+}
+
+// Arms a one shot writability watch on fd. See readable for the mask bits and
+// the one-watch-per-fd, one-shot, and future_free rules.
+export func writable(fd: int64) -> Future<int64> {
+    f: Future<int64> = future_wrap(cool_fd_ready(fd, 1))
+    return f
+}
+
+// Sets fd non blocking (O_NONBLOCK). An OS refusal is an error value, since
+// this call carries an error channel.
+export func fd_nonblock(fd: int64) -> error {
+    rc := cool_fd_nonblock(fd)
+    if rc == 1 {
+        return error { message: "the file descriptor could not be set non-blocking" }
+    }
+    return error {}
+}
+
+// Creates a pipe. The fds are close on exec and blocking by default; call
+// fd_nonblock on an end before arming a watch on it. The two fds are staged
+// through a scratch buffer widened to int64, the channel element idiom. On an
+// OS refusal returns (Pipe with both ends -1, error).
+export func pipe_new() -> (Pipe, error) {
+    out2: *raw int64 = alloc_bytes(2 * sizeof(int64))
+    rc := cool_pipe2(out2)
+    if rc == 1 {
+        free(out2)
+        return (Pipe { r: -1, w: -1 }, error { message: "the pipe could not be created" })
+    }
+    rfd := out2[0]
+    wfd := out2[1]
+    free(out2)
+    return (Pipe { r: rfd, w: wfd }, error {})
+}
+
+// Closes fd. An OS refusal other than EINTR is an error value.
+export func fd_close(fd: int64) -> error {
+    rc := cool_fd_close(fd)
+    if rc == 1 {
+        return error { message: "the file descriptor could not be closed" }
+    }
+    return error {}
+}
+
+// Reads up to cap bytes into buf without blocking. Returns the count read; a
+// count of 0 with no error is end of stream, every writer closed. The reactor
+// shim returns -1 for "would block", the canonical recoverable string, and -2
+// for a hard read failure. Stage buf through alloc_bytes, the channel element
+// idiom.
+export func read_nb(fd: int64, buf: *void, cap: int64) -> (int64, error) {
+    rc := cool_read_nb(fd, buf, cap)
+    if rc == -1 {
+        return (0, error { message: "would block" })
+    }
+    if rc == -2 {
+        return (0, error { message: "the read failed" })
+    }
+    return (rc, error {})
+}
+
+// Writes up to n bytes from buf without blocking. Returns the count written;
+// -1 is "would block", -2 is a hard write failure. SIGPIPE honesty note:
+// writing to a pipe whose read end is closed delivers SIGPIPE and kills the
+// process; signal hardening lands in a later phase, so do not write to a
+// reader less pipe.
+export func write_nb(fd: int64, buf: *void, n: int64) -> (int64, error) {
+    rc := cool_write_nb(fd, buf, n)
+    if rc == -1 {
+        return (0, error { message: "would block" })
+    }
+    if rc == -2 {
+        return (0, error { message: "the write failed" })
+    }
+    return (rc, error {})
+}

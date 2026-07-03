@@ -1,0 +1,47 @@
+// The non blocking byte surface over a pipe. An empty nonblocking read end
+// reports "would block"; a small write never fills the pipe; the value
+// round trips whole; and closing the write end turns the next read into end
+// of stream, a count of zero with no error.
+@paradigm procedural
+@import std.async.io
+
+func main() -> int32 {
+    p, pe := pipe_new()
+    pe.ignore()
+    ne := fd_nonblock(p.r)
+    ne.ignore()
+
+    buf: *raw int64 = alloc_bytes(sizeof(int64))
+
+    v0, e0 := read_nb(p.r, buf, sizeof(int64))
+    if e0.exists() {
+        println(e0.toString())
+    }
+    println(v0)
+
+    buf[0] = 7
+    n1, we := write_nb(p.w, buf, sizeof(int64))
+    we.ignore()
+    if n1 != sizeof(int64) {
+        return 1
+    }
+
+    n2, e1 := read_nb(p.r, buf, sizeof(int64))
+    e1.ignore()
+    if n2 != sizeof(int64) {
+        return 1
+    }
+    println(buf[0])
+
+    ce := fd_close(p.w)
+    ce.ignore()
+
+    v2, e2 := read_nb(p.r, buf, sizeof(int64))
+    e2.ignore()
+    println(v2)
+
+    free(buf)
+    cre := fd_close(p.r)
+    cre.ignore()
+    return 0
+}

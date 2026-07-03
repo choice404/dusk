@@ -1,0 +1,165 @@
+// Four pool workers each write their number into their own pipe; four
+// watches are armed after the tasks are submitted, so some arm on an
+// already-ready fd and some arm ahead of the write, and both settle through
+// the same reactor. Awaits funnel to one exact sum regardless of which
+// worker fires first.
+@paradigm procedural
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+@import std.concurrent.pool
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    pe := pool_start(2)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+
+    p1, pe1 := pipe_new()
+    pe1.ignore()
+    p2, pe2 := pipe_new()
+    pe2.ignore()
+    p3, pe3 := pipe_new()
+    pe3.ignore()
+    p4, pe4 := pipe_new()
+    pe4.ignore()
+
+    wfd1 := p1.w
+    s1 := submit(lambda () -> void {
+        b: *raw int64 = alloc_bytes(sizeof(int64))
+        b[0] = 1
+        n, we := write_nb(wfd1, b, sizeof(int64))
+        we.ignore()
+        if n != sizeof(int64) {
+            return
+        }
+        free(b)
+    })
+    s1.ignore()
+
+    wfd2 := p2.w
+    s2 := submit(lambda () -> void {
+        b: *raw int64 = alloc_bytes(sizeof(int64))
+        b[0] = 2
+        n, we := write_nb(wfd2, b, sizeof(int64))
+        we.ignore()
+        if n != sizeof(int64) {
+            return
+        }
+        free(b)
+    })
+    s2.ignore()
+
+    wfd3 := p3.w
+    s3 := submit(lambda () -> void {
+        b: *raw int64 = alloc_bytes(sizeof(int64))
+        b[0] = 3
+        n, we := write_nb(wfd3, b, sizeof(int64))
+        we.ignore()
+        if n != sizeof(int64) {
+            return
+        }
+        free(b)
+    })
+    s3.ignore()
+
+    wfd4 := p4.w
+    s4 := submit(lambda () -> void {
+        b: *raw int64 = alloc_bytes(sizeof(int64))
+        b[0] = 4
+        n, we := write_nb(wfd4, b, sizeof(int64))
+        we.ignore()
+        if n != sizeof(int64) {
+            return
+        }
+        free(b)
+    })
+    s4.ignore()
+
+    w1 := readable(p1.r)
+    w2 := readable(p2.r)
+    w3 := readable(p3.r)
+    w4 := readable(p4.r)
+
+    buf: *raw int64 = alloc_bytes(sizeof(int64))
+    mut sum: int64 = 0
+
+    m1, m1e := await(w1)
+    m1e.ignore()
+    if m1 != 1 {
+        return 1
+    }
+    v1, v1e := read_nb(p1.r, buf, sizeof(int64))
+    v1e.ignore()
+    if v1 != sizeof(int64) {
+        return 1
+    }
+    sum = sum + buf[0]
+
+    m2, m2e := await(w2)
+    m2e.ignore()
+    if m2 != 1 {
+        return 1
+    }
+    v2, v2e := read_nb(p2.r, buf, sizeof(int64))
+    v2e.ignore()
+    if v2 != sizeof(int64) {
+        return 1
+    }
+    sum = sum + buf[0]
+
+    m3, m3e := await(w3)
+    m3e.ignore()
+    if m3 != 1 {
+        return 1
+    }
+    v3, v3e := read_nb(p3.r, buf, sizeof(int64))
+    v3e.ignore()
+    if v3 != sizeof(int64) {
+        return 1
+    }
+    sum = sum + buf[0]
+
+    m4, m4e := await(w4)
+    m4e.ignore()
+    if m4 != 1 {
+        return 1
+    }
+    v4, v4e := read_nb(p4.r, buf, sizeof(int64))
+    v4e.ignore()
+    if v4 != sizeof(int64) {
+        return 1
+    }
+    sum = sum + buf[0]
+
+    free(buf)
+    println(sum)
+
+    pool_shutdown()
+
+    ce1 := fd_close(p1.r)
+    ce1.ignore()
+    cwe1 := fd_close(p1.w)
+    cwe1.ignore()
+    ce2 := fd_close(p2.r)
+    ce2.ignore()
+    cwe2 := fd_close(p2.w)
+    cwe2.ignore()
+    ce3 := fd_close(p3.r)
+    ce3.ignore()
+    cwe3 := fd_close(p3.w)
+    cwe3.ignore()
+    ce4 := fd_close(p4.r)
+    ce4.ignore()
+    cwe4 := fd_close(p4.w)
+    cwe4.ignore()
+
+    reactor_stop()
+    loop_free()
+    return 0
+}

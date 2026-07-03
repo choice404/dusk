@@ -1,0 +1,62 @@
+// Timers and a readiness watch share one loop. The pipe is already readable
+// before the watch is armed. Awaiting the two millisecond timer first lets
+// the one millisecond timer and the readiness watch complete in passing;
+// awaits still return in program order with exact values, whatever the
+// machine's timing does.
+@paradigm procedural
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+
+    p, pe := pipe_new()
+    pe.ignore()
+
+    buf: *raw int64 = alloc_bytes(sizeof(int64))
+    buf[0] = 9
+    n, we := write_nb(p.w, buf, sizeof(int64))
+    we.ignore()
+    if n != sizeof(int64) {
+        return 1
+    }
+
+    w := readable(p.r)
+    t1 := sleep_async(1)
+    t2 := sleep_async(2)
+
+    b, be := await(t2)
+    be.ignore()
+    println(b)
+
+    m, me := await(w)
+    me.ignore()
+    println(m)
+
+    a, ae := await(t1)
+    ae.ignore()
+    println(a)
+
+    v, ve := read_nb(p.r, buf, sizeof(int64))
+    ve.ignore()
+    if v != sizeof(int64) {
+        return 1
+    }
+    if buf[0] != 9 {
+        return 1
+    }
+    free(buf)
+
+    ce := fd_close(p.r)
+    ce.ignore()
+    cwe := fd_close(p.w)
+    cwe.ignore()
+    reactor_stop()
+    loop_free()
+    return 0
+}

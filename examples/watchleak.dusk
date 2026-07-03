@@ -1,0 +1,29 @@
+// A watch armed on a pipe nobody ever writes times out under await_timeout,
+// which leaves the future live and the watch still armed. Stopping the
+// reactor with that watch still armed is named: it would otherwise strand
+// the parked awaiter forever, or silently drop the gauge and lie later.
+@paradigm procedural
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+
+    p, pe := pipe_new()
+    pe.ignore()
+
+    w := readable(p.r)
+    v, te := await_timeout(w, 5)
+    if te.exists() {
+        println(te.toString())
+    }
+    println(v)
+
+    reactor_stop()
+    loop_free()
+    return 0
+}

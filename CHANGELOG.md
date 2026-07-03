@@ -2,6 +2,44 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.4.1
+
+The reactor, the second phase of the async line. File descriptor readiness becomes a one shot future on the event loop, one C thread that turns `epoll` readiness into a completion behind a new `std.async.io`, with pipes as the deterministic rig every golden runs it through. Zero compiler changes and one Rust line, the new runtime file joining the link; everything else is the runtime file, one standard library module, and the reference.
+
+The reactor thread and its lifecycle.
+
+- `reactor_start() -> error` starts the thread; the error fires on a double start, an operating system refusal setting up its epoll descriptor and its stop sentinel, or a start landing while a concurrent stop is still in flight. `reactor_stop() -> void` flips the reactor stopped, signals the thread through an eventfd, waits for it to finish delivering everything already ready, then joins.
+- The reactor is restartable: a fresh epoll descriptor and eventfd on every start, mirroring the loop it serves, since none of its state survives a stop. The sanctioned order is `loop_init`, `reactor_start`, every watch armed and fired, `reactor_stop`, `loop_free`.
+- The reactor thread never raises the live thread gauge; it is spawned with a bare `pthread_create`, not the tracked spawn path, or the deadlock gate could never fire while the reactor idles. Its own mutex guards only lifecycle fields and is never held at the same time as the loop's, the lock ordering rule stated in the runtime file's header comment.
+
+The watches and the gauge.
+
+- `readable(fd) -> Future<int64>` and `writable(fd) -> Future<int64>` in `std.async.io` arm a one shot watch and return a future completed with the readiness mask, 1 readable, 2 writable, 4 hangup, 8 error, ORed together. The watch fires exactly once by construction and the reactor drops it the instant it fires.
+- Only one armed watch is allowed per file descriptor at a time; a second watch on an fd that already carries one faults rather than errors, since the signatures carry no error channel. `future_free` does not disarm a watch: a freed future's watch stays armed until it later fires against a dead record and loses like any other refused completer.
+- Arming a watch raises a third gauge into the deadlock gate beside the live thread count and the pool's in flight count: an armed watch is a possible completer, so an otherwise idle await keeps parking instead of aborting. The gauge is raised before the watch is registered and dropped strictly after its completion is visible under the loop's lock, so the idle fatal can never fire against a completion still in flight, and every drop still kicks the loop even when the completion it followed was refused.
+
+The byte surface.
+
+- `pipe_new() -> (Pipe, error)` makes a close on exec, blocking by default pipe; `fd_nonblock(fd) -> error` sets a descriptor non blocking; `fd_close(fd) -> error` closes one. `read_nb` and `write_nb` move bytes through a caller staged buffer, the channel element idiom, and never block.
+- Both refuse with "would block" when the operating system has nothing to give or take, the one canonical recoverable string in both directions. A `read_nb` returning a count of zero with no error is end of stream, every writer closed.
+- Writing to a pipe whose read end is closed delivers SIGPIPE and kills the process. Signal hardening is deferred to a later phase; the honesty note lands in the reference and no golden writes to a pipe with no reader.
+
+The fault family.
+
+- Five new fatals, each named: "the reactor is not running" arming before a start or after a stop, "the file descriptor already has an armed watch" for a second watch on an armed fd, "a readiness watch was armed on an invalid file descriptor" for a closed or nonexistent fd, "a regular file cannot report readiness" for a descriptor epoll cannot poll, and "the reactor stopped while a watch is still armed", the watchleak rule: stopping with a watch not yet fired would otherwise strand a parked awaiter forever or drop the gauge and lie to the deadlock gate later, so the violation gets a name instead. Two narrower fatals guard the reactor's own internals, "the reactor could not wait for readiness" and "the reactor could not be signalled to stop", and watch record exhaustion reuses "out of memory".
+
+Hardening the adversarial soundness review forced.
+
+- Consuming or releasing a future now retires its record before the loop mutex unlocks, not after, closing a window where a completion racing the retire could write its element into a block already handed back to a new allocation. The generation bump and the completer's own gen and state checks now run under the same lock, so a completion that already passed those checks has written before the retire can free the block, and one that has not yet checked finds the bumped generation and is refused.
+- The reactor keys each armed watch in a registry from fd to its current watch record, guarded by the reactor mutex, and deletes the kernel registration only when the firing watch still owns the entry. Without it, a close while armed misuse could let the fd number be reused and armed again before the stale watch's event was handled, and the stale fire's `EPOLL_CTL_DEL` would tear down the innocent successor's registration by fd number alone and hang its awaiter; an arm on a reused fd now overwrites the registry entry, so a stale fire finds it already gone and skips the delete.
+- Reactor lifecycle races get the pool's discipline: a `reactor_stop` racing a concurrent one waits on a condition variable until the winner finishes draining, joining, and closing, so every caller returns holding the same stop guarantee instead of one racing ahead of the teardown. A `reactor_start` landing while a stop is still in flight is refused rather than building a fresh epoll and thread the resuming stop would then close out from under it.
+
+Examples and goldens: seven clean, the reactor's lifecycle standing alone with no loop, the non blocking byte surface round tripping a value through a pipe end to end including EOF, a readiness watch completing a parked await with no other completer in the picture, a spawned thread waking a parked await through the reactor with the thread exit gauge dropping first, timers and a readiness watch sharing one loop with awaits returning in exact program order, four pool workers writing through four watches funnelling to one exact sum, and a writability watch completing on an already writable pipe end with mask 2; three fault, stopping the reactor with a watch still armed, a second watch colliding on one fd, and a watch armed on an invalid fd. All named `reactorlife`, `wouldblock`, `readywait`, `pipewake`, `timerinterleave`, `reactorsum`, `writewatch`, `watchleak`, `doublewatch`, and `badfdwatch`.
+
+The release also lands a documented local ThreadSanitizer recipe, `docs/tsan.md`: rebuild a golden's emitted IR alongside the four runtime files under `clang -fsanitize=thread`, then run it in a loop. It was run against `reactorsum`, `pipewake`, and `racingcomplete` before this release, the arm and fire path, a cross thread wake racing the reactor's own gauge drop, and the racing completer path the reactor's fire step reuses.
+
+The 0.4.x line continues with the async and await keywords in 0.4.2.
+
 ## 0.4.0
 
 Futures and the event loop, the first phase of the async line. A one shot completion future replaces the hand rolled channel and counter of the 0.3.3 offload shape, the loop parks instead of polling, and an await that can never finish aborts by name instead of hanging. One compiler change only, the channel element ban extended to the future's minting sites; everything else is a runtime file, three standard library modules, examples, and the reference, riding the pool and monitor machinery the 0.3.x line built.

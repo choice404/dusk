@@ -6,7 +6,8 @@
    join machinery. Completion is legal from any thread and wakes the loop;
    everything else asserts the owner thread and faults by name off it. An
    await that provably cannot finish, no timer pending, no spawned thread
-   alive, no pool task in flight, aborts as a deadlock instead of hanging. */
+   alive, no pool task in flight, no armed readiness watch, aborts as a
+   deadlock instead of hanging. */
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,6 +19,7 @@ extern void *cool_gen_alloc(int64_t size);
 extern int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n);
 extern int64_t cool_live_threads(void);
 extern int64_t cool_pool_inflight(void);
+extern int64_t cool_reactor_armed(void);
 
 static void cool_async_fatal(const char *msg) {
     fflush(stdout);
@@ -298,16 +300,24 @@ int64_t cool_future_complete(void *f, int64_t gen, void *elem, void *err_stage) 
 }
 
 /* Copies the element and error out and retires the record, with the loop
-   lock already held. The retire runs the same checked path join uses, so the
-   generation bump and the copy stay one critical section on the heap side. */
+   lock already held and kept until the retire completes, then unlocks. The
+   generation bump runs under the same loop lock a completer takes for its gen
+   and state checks, so a completion that already passed those checks has
+   written before the retire can free the block, and one that has not yet
+   checked finds the bumped generation and is refused; the retire can never
+   race a write into the freed record. The heap lock nests inside the loop
+   lock here and nowhere takes them in the reverse order: complete never
+   touches the heap, and future_new and timer_new allocate outside the loop
+   lock. */
 static void cool_future_take(cool_loop *l, void *f, int64_t gen, void *out, void *err_out) {
     cool_future *fut = (cool_future *)f;
     memcpy(out, fut->elem, (size_t)fut->elem_size);
     *(void **)err_out = fut->err;
     cool_timers_purge(l, f);
-    pthread_mutex_unlock(&l->mu);
     int64_t dummy = 0;
-    if (cool_gen_retire_checked(f, gen, &dummy, 0)) {
+    int64_t bad = cool_gen_retire_checked(f, gen, &dummy, 0);
+    pthread_mutex_unlock(&l->mu);
+    if (bad) {
         cool_async_fatal("fatal: use of a dead future\n");
     }
 }
@@ -351,9 +361,10 @@ static struct timespec cool_abs_deadline(int64_t ms) {
 
 /* Parks until the future completes, firing timers as their deadlines pass.
    When nothing can complete it, no timer pending, no spawned thread alive,
-   no pool task in flight, the wait is a deadlock and aborts by name; the
-   gauges only drop after their bodies finish, and a drop kicks the loop, so
-   the gate never fires against a completion still in flight. */
+   no pool task in flight, no armed readiness watch, the wait is a deadlock
+   and aborts by name; the gauges only drop after their bodies finish, and a
+   drop kicks the loop, so the gate never fires against a completion still in
+   flight. */
 void cool_future_wait(void *f, int64_t gen, void *out, void *err_out) {
     cool_loop_assert_owner();
     cool_loop *l = &cool_the_loop;
@@ -367,7 +378,7 @@ void cool_future_wait(void *f, int64_t gen, void *out, void *err_out) {
             return;
         }
         if (l->tlen == 0) {
-            if (cool_live_threads() == 0 && cool_pool_inflight() == 0) {
+            if (cool_live_threads() == 0 && cool_pool_inflight() == 0 && cool_reactor_armed() == 0) {
                 cool_async_fatal("fatal: the event loop is idle but work is still pending\n");
             }
             pthread_cond_wait(&l->wake, &l->mu);
@@ -414,19 +425,21 @@ int64_t cool_future_await_ms(void *f, int64_t gen, int64_t ms, void *out, void *
     }
 }
 
-/* Releases a future that will never be consumed, pending or completed. A
-   completion racing the release either lands first and is dropped with the
-   record or arrives after and is refused by its generation check; neither
-   corrupts. */
+/* Releases a future that will never be consumed, pending or completed. The
+   retire runs under the loop lock, the same lock a completer takes for its
+   gen and state checks, so a completion racing the release either lands first
+   and is dropped with the record or arrives after the generation bump and is
+   refused; neither writes into a freed block. */
 void cool_future_release(void *f, int64_t gen) {
     cool_loop_assert_owner();
     cool_loop *l = &cool_the_loop;
     pthread_mutex_lock(&l->mu);
     cool_future_check(f, gen);
     cool_timers_purge(l, f);
-    pthread_mutex_unlock(&l->mu);
     int64_t dummy = 0;
-    if (cool_gen_retire_checked(f, gen, &dummy, 0)) {
+    int64_t bad = cool_gen_retire_checked(f, gen, &dummy, 0);
+    pthread_mutex_unlock(&l->mu);
+    if (bad) {
         cool_async_fatal("fatal: use of a dead future\n");
     }
 }

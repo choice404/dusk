@@ -1,0 +1,32 @@
+// A writability watch completes a parked await with no timer and no other
+// thread in the picture; only the armed gauge keeps the deadlock gate open.
+// A fresh pipe's write end is immediately writable with an empty buffer, so
+// this exercises the level triggered, one shot arm-on-an-already-ready-fd
+// case for EPOLLOUT, the writable() half of readable()'s coverage.
+@paradigm procedural
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+
+    p, pe := pipe_new()
+    pe.ignore()
+
+    w := writable(p.w)
+    m, me := await(w)
+    me.ignore()
+    println(m)
+
+    ce := fd_close(p.r)
+    ce.ignore()
+    cwe := fd_close(p.w)
+    cwe.ignore()
+    reactor_stop()
+    loop_free()
+    return 0
+}

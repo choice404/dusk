@@ -317,3 +317,62 @@ enum Either<L, R> {
 e: Either<int64, int64> = Either.Left(-5)
 println(left_or(e, 0))   // -5
 ```
+
+## std.async.io
+
+The readiness reactor and the non blocking byte surface it watches. The reactor is one C thread that turns file descriptor readiness into a one shot `Future<int64>` on the event loop; it runs no user code and touches no user memory. Pipes are the deterministic rig to exercise it. Start the loop, then the reactor, before arming any watch, and stop the reactor before freeing the loop.
+
+| Function                                                     | Description                                            |
+| -------------------------------------------------------------| ------------------------------------------------------|
+| `reactor_start() -> error`                                   | Start the reactor thread; errors on a double start, an OS refusal, or a start while a stop is still in flight. |
+| `reactor_stop() -> void`                                     | Stop the thread; faults if a watch is still armed. Restartable after. |
+| `readable(fd: int64) -> Future<int64>`                       | Arm a one shot watch for readability; completes with the readiness mask. |
+| `writable(fd: int64) -> Future<int64>`                       | Arm a one shot watch for writability; same mask and rules as `readable`. |
+| `pipe_new() -> (Pipe, error)`                                 | Create a close on exec, blocking by default pipe.      |
+| `fd_nonblock(fd: int64) -> error`                             | Set a descriptor non blocking.                         |
+| `fd_close(fd: int64) -> error`                                | Close a descriptor.                                    |
+| `read_nb(fd: int64, buf: *void, cap: int64) -> (int64, error)` | Non blocking read into a staged buffer; "would block" or a count, 0 is end of stream. |
+| `write_nb(fd: int64, buf: *void, n: int64) -> (int64, error)`  | Non blocking write from a staged buffer; "would block" or a count. |
+
+```text
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+
+le := loop_init()
+le.ignore()
+se := reactor_start()
+se.ignore()
+
+p, pe := pipe_new()
+pe.ignore()
+ne := fd_nonblock(p.r)
+ne.ignore()
+
+w := readable(p.r)
+
+buf: *raw int64 = alloc_bytes(sizeof(int64))
+buf[0] = 7
+n, we := write_nb(p.w, buf, sizeof(int64))
+we.ignore()
+println(n)           // 8, bytes written
+
+m, me := await(w)
+me.ignore()
+println(m)           // 1, readable
+
+v, ve := read_nb(p.r, buf, sizeof(int64))
+ve.ignore()
+println(v)           // 8, bytes read
+println(buf[0])       // 7
+
+free(buf)
+ce := fd_close(p.r)
+ce.ignore()
+cwe := fd_close(p.w)
+cwe.ignore()
+reactor_stop()
+loop_free()
+```
+
+The readiness mask is 1 for readable, 2 for writable, 4 for hangup, and 8 for error, ORed together. Only one watch may be armed on a file descriptor at a time; a second watch on an already armed fd is a fault. `future_free` on a readiness future does not disarm its watch. Stage `read_nb` and `write_nb` buffers through `alloc_bytes`, the same idiom `Pipe`'s own two fds use internally. Writing to a pipe whose read end is closed delivers `SIGPIPE` and kills the process; do not write to a pipe with no reader.

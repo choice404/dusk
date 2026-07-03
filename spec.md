@@ -851,6 +851,41 @@ An await that provably cannot finish is a deadlock, not a hang. When no timer is
 
 Two honest leaks, stated like the channel's refused moved send: a future never consumed leaks its record, and a pending timer still queued at `loop_free` leaks its record. Both are rule breaking shutdowns paid in leaked records, never corruption. The costs are not hidden either: a future is one generational record, a completion and a consume each stage the element and the error through scratch allocations exactly as a channel operation does, and an await is a park on the loop's monitor, not a spin.
 
+### The Reactor and Readiness Futures
+
+Added in 0.4.1, the second phase of the async line. The reactor is one C thread that turns file descriptor readiness into one shot readiness futures on the event loop, behind `std.async.io`. It runs no user code and touches no user memory: it trades only in file descriptors, its own watch records, and the future and loop entry points every other completer already shares. Zero compiler changes; the release is a runtime file, a standard library module, and the one link line that pulls the file in.
+
+```text
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+
+le := loop_init()
+le.ignore()
+se := reactor_start()
+se.ignore()
+p, pe := pipe_new()
+pe.ignore()
+w := readable(p.r)
+m, me := await(w)
+me.ignore()
+println(m)
+reactor_stop()
+loop_free()
+```
+
+`reactor_start() -> error` starts the thread. Its error fires on a double start, an operating system refusal setting up the epoll and event descriptors, or a start landing while a concurrent stop is still in flight, each `the reactor could not start`, the `loop_init` shape. `reactor_stop() -> void` flips the reactor to stopped, signals the thread, which finishes delivering everything already ready before it exits, then joins; a stop racing a concurrent stop waits for the winner to finish instead of returning early. A stopped reactor restarts clean, a fresh epoll descriptor and event descriptor on each start, mirroring the loop it serves; it has no hard dependency on the loop at start time. The sanctioned order is `loop_init`, then `reactor_start`, every watch armed and fired, `reactor_stop`, then `loop_free`.
+
+`readable(fd: int64) -> Future<int64>` and `writable(fd: int64) -> Future<int64>` in `std.async.io` arm a one shot watch on a file descriptor and return a future that completes with the readiness mask: 1 for readable, 2 for writable, 4 for hangup, 8 for error, ORed together into one `int64`. The watch fires exactly once by construction, and the reactor drops it the moment it fires. Only one armed watch is allowed per file descriptor at a time; arming a second watch on an fd that already carries one is a fault, not an error, since the signature carries no error channel. `future_free` on a readiness future does not disarm the watch: a freed future's watch stays armed until it later fires, at which point the completion lands on a dead record and is discarded like any other losing completer.
+
+An armed watch is a possible completer, so arming one raises a gauge into the deadlock gate the same way a live thread or an in flight pool task already does: while any watch is armed, an otherwise idle await keeps parking instead of aborting, and the count drops only after the completion it produced is visible under the loop's lock, so the idle fatal never fires against a completion still in flight.
+
+The non blocking byte surface sits beside the watches. `pipe_new() -> (Pipe, error)` makes a close on exec, blocking by default pipe with `r` and `w` fields, refusing with `the pipe could not be created`; call `fd_nonblock(fd: int64) -> error` on an end before arming a watch on it, refusing with `the file descriptor could not be set non-blocking`. `read_nb(fd, buf, cap) -> (int64, error)` and `write_nb(fd, buf, n) -> (int64, error)` move bytes through a caller staged buffer, the channel element idiom, and never block: each refuses with `would block` when the operating system has nothing to give or take, the one canonical recoverable string in both directions, or with `the read failed` and `the write failed` on a harder refusal. A `read_nb` returning a count of zero with no error is end of stream, every writer closed. Writing to a pipe whose read end is closed delivers `SIGPIPE` and kills the process; that hardening has not landed yet, so no sanctioned program writes to a pipe with no reader. `fd_close(fd: int64) -> error` closes a descriptor, refusing with `the file descriptor could not be closed`.
+
+The fault family, each named: arming a watch while the reactor is not running or after it has stopped, `the reactor is not running`; a second watch on an fd that already has one, `the file descriptor already has an armed watch`; a watch armed on a closed or nonexistent descriptor, `a readiness watch was armed on an invalid file descriptor`; a watch armed on a regular file, which epoll cannot poll, `a regular file cannot report readiness`; stopping the reactor while a watch is still armed, `the reactor stopped while a watch is still armed`, since the alternative is either a parked awaiter stranded forever or a dropped gauge lying to the deadlock gate later; the reactor's own wait failing for a reason other than a signal interruption, `the reactor could not wait for readiness`; the eventfd write that signals a stop persistently failing, `the reactor could not be signalled to stop`; and watch record exhaustion, `out of memory`, the same message every allocation failure already uses.
+
+Bytes written to a pipe before the readiness event that reports it are visible to the read that follows the `await`: the kernel's own pipe ordering composes with the complete happens before consume edge the memory model already gives every future, so the two together order the whole path from write to read.
+
 ### The memory model
 
 dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, a `complete` happens before the `await`, timed await, or poll that consumes the future it completed, an `unlock` happens before the next `lock` of the same mutex, and `join` orders everything the thread did before everything the joiner does after. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one, unless a mutex guards every touch.
@@ -886,6 +921,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.async.future      | one shot futures: mint, complete, await, poll         |
 | std.async.loop        | the event loop's lifecycle                            |
 | std.async.time        | timers as futures the loop completes                  |
+| std.async.io          | the readiness reactor, pipes, and non blocking read/write |
 
 ---
 

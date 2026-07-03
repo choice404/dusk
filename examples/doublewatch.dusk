@@ -1,0 +1,34 @@
+// One armed watch per fd. Polling the first watch while it is still pending
+// leaves it live and armed; arming a second watch on the same fd before the
+// first ever fires collides and faults by name. The second binding is never
+// reached, but its await still counts as a use for the checker.
+@paradigm procedural
+@import std.async.io
+@import std.async.future
+@import std.async.loop
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+
+    p, ppe := pipe_new()
+    ppe.ignore()
+
+    w1 := readable(p.r)
+    v, tpe := try_poll(w1)
+    if tpe.exists() {
+        println(tpe.toString())
+    }
+    println(v)
+
+    w2 := readable(p.r)
+    x, xe := await(w2)
+    xe.ignore()
+    println(x)
+
+    reactor_stop()
+    loop_free()
+    return 0
+}
