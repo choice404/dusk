@@ -1,0 +1,26 @@
+// Compile fail: the sender's name dies at the move. Touching p after
+// chan_send(hand, move(p)) is the single owner rule catching a cross thread
+// double use before it can race.
+@paradigm procedural
+@import std.concurrent.channel
+
+func main() -> int32 {
+    hand: Channel<*int64> = chan_new(1)
+    t, e := spawn(lambda () -> void {
+        q, re := chan_recv(hand)
+        re.ignore()
+        free(q)
+    })
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    p: *int64 = alloc(40)
+    se := chan_send(hand, move(p))
+    se.ignore()
+    println(*p)
+    je := join(t)
+    je.ignore()
+    chan_free(hand)
+    return 0
+}

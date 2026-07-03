@@ -1,0 +1,36 @@
+// The consumer's idiom: receive until the error exists. A close does not
+// discard what was already sent, so the three buffered values arrive in
+// order before the drained error breaks the loop.
+@paradigm procedural
+@import std.concurrent.channel
+
+func main() -> int32 {
+    c: Channel<int64> = chan_new(8)
+    t, e := spawn(lambda () -> void {
+        mut i: int64 = 1
+        while i <= 3 {
+            se := chan_send(c, i)
+            se.ignore()
+            i = i + 1
+        }
+        chan_close(c)
+    })
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    mut going := true
+    while going {
+        v, re := chan_recv(c)
+        if re.exists() {
+            going = false
+        } else {
+            println(v)
+        }
+    }
+    println("closed")
+    je := join(t)
+    je.ignore()
+    chan_free(c)
+    return 0
+}

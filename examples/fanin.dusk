@@ -1,0 +1,51 @@
+// Fan in: four workers each sum their own slice of 1 through 40 and send one
+// partial down a shared channel. Main folds exactly four receives, so the
+// total is the arithmetic answer no matter which worker lands first. The
+// channel handle is captured by copy and every copy names the same channel.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.vector
+
+func main() -> int32 {
+    parts: Channel<int64> = chan_new(4)
+    handles: *Vector<thread> = alloc(vec_new())
+    mut w: int64 = 0
+    while w < 4 {
+        lo := w * 10 + 1
+        t, e := spawn(lambda () -> void {
+            mut sum: int64 = 0
+            mut i := lo
+            while i < lo + 10 {
+                sum = sum + i
+                i = i + 1
+            }
+            se := chan_send(parts, sum)
+            se.ignore()
+        })
+        if e.exists() {
+            printerr(e)
+            return 1
+        }
+        vec_push(handles, t)
+        w = w + 1
+    }
+    mut total: int64 = 0
+    mut got: int64 = 0
+    while got < 4 {
+        v, e := chan_recv(parts)
+        e.ignore()
+        total = total + v
+        got = got + 1
+    }
+    println(total)
+    mut k: int64 = 0
+    while k < vec_len(handles) {
+        je := join(vec_get(handles, k))
+        je.ignore()
+        k = k + 1
+    }
+    chan_free(parts)
+    vec_free(handles)
+    free(handles)
+    return 0
+}

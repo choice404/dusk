@@ -1,0 +1,29 @@
+// Ownership crosses a thread boundary through a channel: main allocates,
+// sends with move, and the worker receives a fresh owner that dereferences
+// and frees it. The move invalidates the sender's name at compile time, so
+// exactly one thread owns the record at every instant. join orders the
+// worker's print before main's.
+@paradigm procedural
+@import std.concurrent.channel
+
+func main() -> int32 {
+    hand: Channel<*int64> = chan_new(1)
+    t, e := spawn(lambda () -> void {
+        q, re := chan_recv(hand)
+        re.ignore()
+        println(*q + 1)
+        free(q)
+    })
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    p: *int64 = alloc(40)
+    se := chan_send(hand, move(p))
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    println("handed off")
+    chan_free(hand)
+    return 0
+}

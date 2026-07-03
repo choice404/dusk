@@ -119,6 +119,26 @@ fn spawning_with_a_slice_capture_is_rejected() {
 }
 
 #[test]
+fn using_a_pointer_after_sending_it_moved_is_rejected() {
+    let err = check_fails("handoffuse.dusk");
+    assert!(err.contains("moved pointer"), "{err}");
+}
+
+#[test]
+fn sending_a_slice_through_a_channel_is_rejected() {
+    let err = check_fails("chanview.dusk");
+    assert!(err.contains("channel element"), "{err}");
+}
+
+#[test]
+fn dereferencing_a_drained_recv_placeholder_faults_by_name() {
+    let (out, err, ok) = run_raw("chandrain.dusk");
+    assert!(!ok, "the null placeholder dereference must fault");
+    assert_eq!(out, "1\n", "the drained error is visible before the fault");
+    assert!(err.contains("dereference of a null pointer"), "{err}");
+}
+
+#[test]
 fn vector_get_out_of_bounds_faults() {
     let (out, err, ok) = run_raw("vecbound.dusk");
     assert!(!ok, "vec_get past the length must fault");
@@ -218,6 +238,11 @@ golden!(allocbig, "allocbig.dusk", "1\n4\n7\n");
 golden!(spawnjoin, "spawnjoin.dusk", "worker\ndone\n");
 golden!(atomiccount, "atomiccount.dusk", "20000\n");
 golden!(capturecopy, "capturecopy.dusk", "6\n");
+golden!(pipeline, "pipeline.dusk", "110\n");
+golden!(fanin, "fanin.dusk", "820\n");
+golden!(chanclose, "chanclose.dusk", "1\n2\n3\nclosed\n");
+golden!(chanblock, "chanblock.dusk", "5050\n");
+golden!(handoff, "handoff.dusk", "41\nhanded off\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");

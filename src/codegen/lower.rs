@@ -37,6 +37,7 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("ptr @cool_gen_alloc(i64)");
     m.declare("void @cool_gen_free(ptr)");
     m.declare("void @cool_gen_fault()");
+    m.declare("void @cool_null_fault()");
     m.declare("void @cool_bounds_fault()");
     m.declare("ptr @cool_debug_alloc(i64)");
     m.declare("void @cool_debug_free(ptr)");
@@ -806,7 +807,19 @@ impl<'a> Fb<'a> {
         let skip = self.new_label();
         let z = self.fresh();
         self.line(&format!("{z} = icmp eq i64 {gen}, 0"));
-        self.cond_br(&z, &skip, &chk);
+        // The untracked generation zero path skips the header check, but a
+        // zeroed fat pair, the drained channel's placeholder for one, is null
+        // there, so it is tested and faults by name instead of a raw signal.
+        let nullchk = self.new_label();
+        self.cond_br(&z, &nullchk, &chk);
+        self.place_label(&nullchk);
+        let isnull = self.fresh();
+        self.line(&format!("{isnull} = icmp eq ptr {data}, null"));
+        let nfault = self.new_label();
+        self.cond_br(&isnull, &nfault, &skip);
+        self.place_label(&nfault);
+        self.line("call void @cool_null_fault()");
+        self.br(&skip);
         self.place_label(&chk);
         let hp = self.fresh();
         self.line(&format!("{hp} = getelementptr i8, ptr {data}, i64 -8"));

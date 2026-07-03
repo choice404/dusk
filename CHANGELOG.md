@@ -2,6 +2,31 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.3.1
+
+Channels, the second phase of the concurrency line. A bounded, thread safe queue moves values and ownership between threads, built as a standard library generic over a textbook monitor in the runtime, with no new syntax. One new rule guards the crossing: a channel element must be free of frame views, the same ban spawn captures enforce.
+
+The channel.
+
+- `std.concurrent.channel` ships `Channel<T>` with free functions in the `Vector` pattern. `chan_new(cap)` builds a bounded queue whose element type the binding annotation pins, the sizing rule `alloc` already uses, so a bare `jobs := chan_new(8)` is a compile error. `chan_send` blocks while the channel is full, `chan_recv` blocks while it is empty, `chan_close` idempotently wakes every blocked party and discards nothing buffered, and `chan_free` releases the monitor.
+- `chan_send`'s error exists when the channel is closed. `chan_recv`'s error exists once the channel is closed and drained, so a loop breaking on `e.exists()` consumes everything senders delivered. The value beside that error is the zero pattern for `T` and means nothing.
+- The runtime monitor is one mutex, two condition variables on a CLOCK_MONOTONIC clock so the timed receive planned for 0.3.3 cannot be confused by a wall clock step, a ring buffer, a closed flag, and a count of blocked waiters. Construction aborts on a capacity below one or exhaustion, the allocator's contract, since a channel that cannot exist has no error path a fresh program could act on.
+- Freeing a channel while a thread is blocked inside a send or receive is fatal with a named message, caught best effort under the monitor lock. The sanctioned shutdown order is close, then join, then free, and the language reference documents it.
+
+Ownership and types.
+
+- Ownership crosses threads by moving a managed pointer through a channel: `chan_send(c, move(p))` kills the sender's name through the ordinary argument position move, and the receiver binds a fresh owner through the ordinary call returns ownership rule. The compile fail twin proves the sender cannot touch the record again.
+- A channel element containing a slice, a closure, or an interface value, wherever it sits, including buried in struct or enum fields, is a compile error at the instantiation, since each may view the sending frame and the ring would deliver a dangling view to another thread. The walk is the mono side twin of the spawn capture check.
+- A `*raw T` now passes anywhere `*void` is expected, the direction the channel's element staging needs. Codegen always lowered `*void` to the same bare word, so the gap was the checker's alone. The reverse direction stays rejected, because a `*void` that could become a typed `*raw T` would let a managed pointer launder through `*void` into a dereferenceable alias the generation check cannot see.
+- Dereferencing a null managed pointer now faults by name instead of dying by raw signal: the untracked generation zero path tests for null and calls the new null fault, which flushes stdout first like every fault. The drained receive's zero pattern for a pointer element is exactly this null, so the natural consumer mistake gets a named message.
+- A moved send refused by a closed channel loses its record, and managed pointers still buffered at `chan_free` leak as raw bytes. Both are documented in the reference and the module, neither is corruption, and neither happens in the sanctioned close, join, free order where senders finish first.
+- The memory model gains the channel edge: a `chan_recv` happens after the `chan_send` that delivered its value.
+- The foreign function section now states that a symbol resolves against anything the binary links, libc and the dusk runtime today, the loosening the concurrent modules already rely on.
+
+Examples and goldens: a three stage pipeline folding to one sum, a four worker fan in, the receive until closed idiom, one hundred sends through a capacity one channel to force the blocking path, the ownership handoff plus its compile fail twin, the rejected slice element buried in a struct field, and the named null fault on a drained receive's placeholder.
+
+Planned next in the line: mutex and condvar in 0.3.2, the timed and non blocking channel operations and the thread pool in 0.3.3.
+
 ## 0.3.0
 
 Threads, the first phase of the concurrency line. OS threads with zero new syntax, a thread safe runtime underneath them, and atomics so parallel programs can prove themselves deterministically.

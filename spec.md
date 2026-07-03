@@ -265,7 +265,7 @@ After `free(p)`, the binding `p` is consumed. Using it again is a compile error 
 
 ### Foreign Functions
 
-Added in 0.2.4. A `foreign` block declares functions that live in an external C library, so dusk code can call into libc and other C code. The functions have no body. Each binds to a C symbol of the same name at link.
+Added in 0.2.4. A `foreign` block declares functions that live outside dusk, so dusk code can call into C. The functions have no body. Each binds at link to a C symbol of the same name in anything the binary links, which is libc and the dusk runtime today. The standard library uses this to bind the runtime's `cool_*` shims.
 
 ```text
 foreign "C" {
@@ -274,10 +274,10 @@ foreign "C" {
 }
 ```
 
-The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function.
+The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function. A `*raw T` passes anywhere `*void` is expected, both are the same bare word. The reverse binding is rejected, since a `*void` that could become a typed `*raw T` would let a managed pointer launder through `*void` into a dereferenceable alias the generation check cannot see. A managed `*T` that round trips through `*void` back to a managed annotation comes back untracked, with no generation for the check to read, so everything through it afterward is the raw layer's honor system. Keep managed pointers on the managed layer.
 
 - Only the `"C"` calling convention is supported.
-- A struct passed by value across the boundary, a variadic foreign function, and a library other than libc are deferred to a later interop release.
+- A struct passed by value across the boundary, a variadic foreign function, and linking a third party library are deferred to a later interop release.
 
 ### Sum Types (Enums)
 
@@ -719,9 +719,40 @@ A spawned lambda captures outer variables by immutable copy, like every lambda, 
 
 Scalars, strings, fixed arrays, structs, enums, tuples, raw pointers, and handle structs such as `AtomicInt` cross freely as captures. Capturing a slice, a closure, or an interface value is a compile error, wherever it sits, including buried in a struct or enum field, since each may view the spawning frame. A captured managed `*T` becomes a borrow inside the thread: the thread reads through it, and freeing or moving the binding there is a compile error. The ownership pass tracks direct bindings only, so a pointer laundered through an aggregate falls to the runtime generation backstop, the division of labor the ownership rules already document.
 
+### Channels
+
+Added in 0.3.1. A channel is a bounded, thread safe queue in `std.concurrent.channel`, an ordinary generic struct over runtime shims, not a compiler type. `Channel<T>` holds at most the capacity given at construction, always at least one.
+
+```text
+@import std.concurrent.channel
+
+jobs: Channel<int64> = chan_new(8)
+e := chan_send(jobs, 42)
+e.ignore()
+v, re := chan_recv(jobs)
+re.ignore()
+println(v)
+chan_close(jobs)
+chan_free(jobs)
+```
+
+`chan_new<T>(cap: int64) -> Channel<T>` sizes the element from the binding annotation, the same rule `alloc` uses, so a bare `jobs := chan_new(8)` cannot pin `T` and is a compile error. A capacity below one or exhausted memory is fatal rather than an error, the allocator's contract.
+
+`chan_send(c, x) -> error` copies the value in and blocks while the channel is full. Its error exists when the channel is closed, whether it was closed before the call or while the sender waited. `chan_recv(c) -> (T, error)` copies the oldest value out and blocks while the channel is empty. Its error exists only once the channel is closed and drained, so a loop breaking on `e.exists()` consumes everything that was sent. The value beside that error is the zero pattern for `T` and means nothing. When `T` is a managed pointer that zero is null, and dereferencing it faults by name as a null dereference. `chan_close(c)` is idempotent, wakes every blocked sender and receiver, and discards nothing already buffered.
+
+A channel element must be safe to carry to another thread, the same rule spawn captures follow: an element type containing a slice, a closure, or an interface value, wherever it sits, is a compile error at the instantiation, since each may view the sending frame and the ring would deliver a dangling view. Send heap owned data instead.
+
+The handle is one word and copies freely, including into a spawned lambda's captures, and every copy names the same channel. It is deliberately exempt from the single owner rule because it is not a managed pointer: a channel is a sharing point, and aliasing it is its purpose.
+
+Ownership crosses a thread boundary by moving a managed pointer through a channel. `chan_send(c, move(p))` kills the sender's name at compile time through the ordinary argument position move, and the receiver's `q, e := chan_recv(c)` binds a fresh owner through the ordinary call returns ownership rule. Sending without `move` leaves the sender holding a live name, so the sender and receiver then share the record with no order between them. The generation check backstops a free racing a use, best effort as the memory model section says.
+
+A moved send that the channel refuses loses the record. When `chan_send(c, move(p))` returns the closed error, the value never entered the ring, the sender's name is already dead, and no name anywhere reaches the allocation again, so it leaks. The same applies to managed pointers still buffered when `chan_free` runs, since the ring holds raw bytes and frees none of them. Neither is corruption, and neither happens in the sanctioned protocol where senders finish before the close, but a design that closes under active movers pays in leaked records, not faults.
+
+Shutdown follows one order: close the channel, join every thread that touches it, then `chan_free` it. Freeing a channel while a thread is blocked inside a send or receive is fatal with a named message, caught best effort. Using a channel after `chan_free` is undefined, the raw layer's honor system, since the one word handle carries no generation.
+
 ### The memory model
 
-dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, and `join` orders everything the thread did before everything the joiner does after. Channels and mutexes join this list as they land in the 0.3.x line. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one.
+dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, and `join` orders everything the thread did before everything the joiner does after. Mutexes join this list in 0.3.2. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one.
 
 The generational heap is thread safe, so `alloc` and `free` from any thread are defined, and the dereference check stays armed on every thread. In a program whose frees and uses are ordered by a sanctioned path, the check keeps its guarantee: a use after free, a double free, or a double `join` faults deterministically instead of corrupting memory. In a program that races, the check degrades to a best effort backstop. Checking and using are two steps, so a dereference racing the free of the same allocation can pass the check and then touch retired memory, and a fat pointer overwritten while another thread reads its sixteen bytes can tear into a mismatched pair. Freed blocks stay parked in the runtime's free list rather than returning to the operating system, which bounds the blast radius, but none of this makes a race defined.
 
@@ -731,7 +762,7 @@ The generational heap is thread safe, so `alloc` and `free` from any thread are 
 
 See [Source Files](#source-files-directives-imports-exports) for import syntax. Imports are separate from paradigm directives. Importing a module does not grant any paradigm.
 
-### Standard Library, Planned Modules
+### Standard Library Modules, Shipped and Planned
 
 | Module                | Description                                           |
 | --------------------- | ----------------------------------------------------- |
@@ -746,6 +777,9 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.vector            | dynamic array                                         |
 | std.map               | hash map                                              |
 | std.string            | string manipulation utilities                         |
+| std.concurrent.atomic | sequentially consistent int64 atomics                 |
+| std.concurrent.channel | bounded thread safe queue between threads            |
+| std.concurrent.thread | sleep_ms beside the spawn and join builtins           |
 
 ---
 

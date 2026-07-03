@@ -90,13 +90,15 @@ The `dawn` binary has four commands. They are `get`, `build`, `run`, and `versio
 
 See [CHANGELOG.md](CHANGELOG.md) for the release by release history.
 
-0.3.0. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
+0.3.1. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
 
 Releases 0.2.0 through 0.2.6 add memory safety. Strings have a growable `StringBuilder` with concatenation, the pointer layer splits into a managed `*T` and a raw `*raw T`, and the default heap is generational. Every managed pointer carries a generation that is checked at each dereference, so a use after free, a double free, or a stale pointer to a reused block faults instead of corrupting memory. A managed pointer is single owner, with `ref` for a non owning alias and `move` to transfer, and a return that lets a frame local escape is a compile error for the clear cases. A `foreign "C"` block then calls into libc across the raw pointer boundary, the first slice of the interop work.
 
 The checker holds the line the spec draws. Integer and float widths never mix silently, immutability covers element and field stores, every array index and range slice is bounds checked, an allocation is sized by its declared type, a bound error must be handled, printing dispatches through `Display` or fails to compile, and a private name never leaves its file.
 
-Release 0.3.0 adds threads, the first phase of concurrency. `spawn` starts an OS thread running a lambda whose captures copy into a private heap environment, `join` waits and retires the handle so a double join faults like a use after free, the generational heap is thread safe with the dereference check armed on every thread, and `std.concurrent.atomic` carries the sequentially consistent counter. Channels arrive in 0.3.1, mutexes and condition variables in 0.3.2, and the thread pool that async builds on in 0.3.3.
+Release 0.3.0 adds threads, the first phase of concurrency. `spawn` starts an OS thread running a lambda whose captures copy into a private heap environment, `join` waits and retires the handle so a double join faults like a use after free, the generational heap is thread safe with the dereference check armed on every thread, and `std.concurrent.atomic` carries the sequentially consistent counter.
+
+Release 0.3.1 adds channels. `std.concurrent.channel` carries a bounded, thread safe queue: `chan_send` blocks while the channel is full, `chan_recv` blocks while it is empty and errors once the channel is closed and drained, and `chan_send(c, move(p))` hands ownership of a heap record to the receiving thread with the sender's name dead at compile time. Mutexes and condition variables arrive in 0.3.2, and the thread pool that async builds on in 0.3.3.
 
 ## License
 

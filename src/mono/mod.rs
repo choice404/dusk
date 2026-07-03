@@ -286,6 +286,79 @@ impl<'a> Mono<'a> {
         }
     }
 
+    /// A channel element crosses a thread boundary by copy through the ring, so
+    /// an element type that can view the sending frame, a slice, a closure, or
+    /// an interface value, would dangle in the receiver. The instantiation is
+    /// rejected here, where the concrete element type is first known, the same
+    /// ban spawn captures enforce at the capture site.
+    fn check_chan_element(&mut self, name: &str, targs: &[Type], span: Span) {
+        if !matches!(
+            name,
+            "chan_new" | "chan_send" | "chan_recv" | "chan_close" | "chan_free"
+        ) {
+            return;
+        }
+        let Some(t) = targs.first() else { return };
+        let mut seen = HashSet::new();
+        if !self.chan_element_ok(t, &mut seen) {
+            self.diags.push(Diagnostic::new(
+                "a channel element cannot contain a slice, closure, or interface value; a view of the sending thread's frame would dangle in the receiver; send heap owned data instead"
+                    .to_string(),
+                span,
+            ));
+        }
+    }
+
+    /// Walks a concrete element type for anything that may view a frame,
+    /// recursing through struct and enum fields with a cycle guard, the mono
+    /// side twin of the checker's spawn capture walk.
+    fn chan_element_ok(&self, t: &Type, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Type::Slice(_) | Type::Func(..) => false,
+            Type::Array(b, _) => self.chan_element_ok(b, seen),
+            Type::Tuple(ts) => ts.iter().all(|x| self.chan_element_ok(x, seen)),
+            Type::Named(n, targs) => {
+                if !targs.iter().all(|x| self.chan_element_ok(x, seen)) {
+                    return false;
+                }
+                if !seen.insert(mangle(n, targs)) {
+                    return true;
+                }
+                if let Some(s) = self.gstructs.get(n.as_str()).copied() {
+                    let subst = bind(&s.generics, targs);
+                    return s
+                        .fields
+                        .iter()
+                        .all(|fl| self.chan_element_ok(&subst_apply(&fl.ty, &subst), seen));
+                }
+                if let Some(e) = self.genums.get(n.as_str()).copied() {
+                    let subst = bind(&e.generics, targs);
+                    return e.variants.iter().all(|v| {
+                        v.fields
+                            .iter()
+                            .all(|fl| self.chan_element_ok(&subst_apply(&fl.ty, &subst), seen))
+                    });
+                }
+                for item in self.items {
+                    match item {
+                        Item::Struct(s) if s.name == *n => {
+                            return s.fields.iter().all(|fl| self.chan_element_ok(&fl.ty, seen));
+                        }
+                        Item::Enum(e) if e.name == *n => {
+                            return e.variants.iter().all(|v| {
+                                v.fields.iter().all(|fl| self.chan_element_ok(&fl.ty, seen))
+                            });
+                        }
+                        Item::Interface(i) if i.name == *n => return false,
+                        _ => {}
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
     /// Reports type parameters an instantiation site could not pin down. The
     /// expansion still defaults them to int64 so codegen can proceed, but the
     /// program is wrong, so `dusk check` surfaces it here.
@@ -582,6 +655,7 @@ impl<'a> Mono<'a> {
                     args.iter().map(|a| self.rw_expr(a, subst, env, None)).collect();
                 let (targs, missing) = self.infer_fn_args(gf, args, subst, env, expected);
                 self.report_missing(&missing, f, callee.span);
+                self.check_chan_element(f, &targs, callee.span);
                 let mg = node(ExprKind::Ident(self.instantiate(f, &targs)), callee.span);
                 return ExprKind::Call(Box::new(mg), cargs);
             }
@@ -1171,6 +1245,34 @@ mod tests {
             d.iter().any(|m| m.contains("methods on the generic type 'Box'")),
             "{d:?}"
         );
+    }
+
+    #[test]
+    fn channel_element_with_a_frame_view_is_diagnosed() {
+        let d = diags(
+            "func chan_send<T>(c: int64, x: T) -> int64 { return c }\n\
+             func main() -> int32 {\n  xs: int64[3] = [1, 2, 3]\n  s: int64[] = xs[0..2]\n  r := chan_send(1, s)\n  println(r)\n  return 0\n}",
+        );
+        assert!(d.iter().any(|m| m.contains("channel element")), "{d:?}");
+    }
+
+    #[test]
+    fn channel_element_with_a_buried_slice_is_diagnosed() {
+        let d = diags(
+            "struct Wrap { s: int64[] }\n\
+             func chan_new<T>(cap: int64) -> T { return chan_new(cap) }\n\
+             func main() -> int32 {\n  w: Wrap = chan_new(1)\n  println(w.s[0])\n  return 0\n}",
+        );
+        assert!(d.iter().any(|m| m.contains("channel element")), "{d:?}");
+    }
+
+    #[test]
+    fn channel_element_of_plain_data_is_clean() {
+        let d = diags(
+            "func chan_send<T>(c: int64, x: T) -> int64 { return c }\n\
+             func main() -> int32 {\n  r := chan_send(1, 42)\n  println(r)\n  return 0\n}",
+        );
+        assert!(!d.iter().any(|m| m.contains("channel element")), "{d:?}");
     }
 
     #[test]

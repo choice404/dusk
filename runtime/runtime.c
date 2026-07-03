@@ -228,6 +228,15 @@ void cool_gen_fault(void) {
     abort();
 }
 
+/* Reports a dereference of a null managed pointer. The untracked generation
+   zero path skips the header check, so codegen tests for null there and calls
+   this, keeping the named fault contract instead of dying by raw signal. */
+void cool_null_fault(void) {
+    fflush(stdout);
+    fputs("fatal: dereference of a null pointer\n", stderr);
+    abort();
+}
+
 /* Reports an array or slice index outside its bounds. Codegen emits a check
    before each array or slice index and calls this on a miss, so an out of range
    access traps instead of reading or writing past the end. */

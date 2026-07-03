@@ -1,0 +1,35 @@
+// A capacity one channel forces the producer and consumer into strict
+// alternation: every send blocks until the previous value is taken. One
+// hundred sends complete without loss, so the fold is exact and the blocking
+// path, not just the fast path, is what this exercises.
+@paradigm procedural
+@import std.concurrent.channel
+
+func main() -> int32 {
+    c: Channel<int64> = chan_new(1)
+    t, e := spawn(lambda () -> void {
+        mut i: int64 = 1
+        while i <= 100 {
+            se := chan_send(c, i)
+            se.ignore()
+            i = i + 1
+        }
+    })
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    mut sum: int64 = 0
+    mut got: int64 = 0
+    while got < 100 {
+        v, re := chan_recv(c)
+        re.ignore()
+        sum = sum + v
+        got = got + 1
+    }
+    println(sum)
+    je := join(t)
+    je.ignore()
+    chan_free(c)
+    return 0
+}

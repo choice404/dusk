@@ -1635,6 +1635,13 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Ptr(x), Ty::Ptr(y)) => {
             matches!(**x, Ty::Unit) || matches!(**y, Ty::Unit) || compatible(x, y)
         }
+        // *void is the erased currency of the allocator and FFI layer, a thin
+        // untracked pointer, so any *raw T passes where *void is expected;
+        // codegen already lowers *void to the same bare word. The reverse
+        // direction stays an error: a *void that could become a typed *raw
+        // would let a managed pointer launder through *void into a
+        // dereferenceable alias the generation check cannot see.
+        (Ty::Ptr(u), Ty::RawPtr(_)) => matches!(**u, Ty::Unit),
         // A char is an ASCII byte, freely compared with and assigned to ints.
         (Ty::Char, Ty::Int(_)) | (Ty::Int(_), Ty::Char) => true,
         _ => false,
@@ -2320,5 +2327,40 @@ mod tests {
             "func f() -> void {\n  t, e := spawn(lambda () -> void { println(1) })\n  e.ignore()\n  println(t)\n  je := join(t)\n  je.ignore()\n}",
         );
         assert!(e.iter().any(|d| d.msg.contains("thread handle")), "{e:?}");
+    }
+
+    #[test]
+    fn raw_pointer_passes_where_void_pointer_is_expected() {
+        let e = errs(
+            "func take(p: *void) -> void { }\nfunc f() -> void {\n  b: *raw int8 = alloc_bytes(8)\n  take(b)\n  free(b)\n}",
+        );
+        assert!(e.is_empty(), "*raw int8 should pass as *void: {e:?}");
+    }
+
+    #[test]
+    fn void_pointer_is_rejected_where_raw_pointer_is_expected() {
+        // The reverse direction would let a managed pointer launder through
+        // *void into a typed raw alias the generation check cannot see, so a
+        // *void value binds a *void annotation only.
+        let e = errs(
+            "foreign \"C\" { func memset(dst: *raw int8, c: int32, n: int64) -> *void }\nfunc take(p: *raw int8) -> void { }\nfunc f() -> void {\n  b: *raw int8 = alloc_bytes(8)\n  v := memset(b, 0, 8)\n  take(v)\n  free(b)\n}",
+        );
+        assert!(!e.is_empty(), "*void must not pass as *raw int8");
+    }
+
+    #[test]
+    fn managed_pointer_cannot_launder_to_raw_through_void() {
+        let e = errs(
+            "func f() -> void {\n  p: *int64 = alloc(41)\n  v: *void = p\n  r: *raw int64 = v\n  free(p)\n}",
+        );
+        assert!(!e.is_empty(), "*void must not become a typed raw alias");
+    }
+
+    #[test]
+    fn raw_pointer_still_rejected_for_a_managed_pointer() {
+        let e = errs(
+            "func take(p: *int64) -> void { }\nfunc f() -> void {\n  b: *raw int64 = alloc_bytes(8)\n  take(b)\n  free(b)\n}",
+        );
+        assert!(!e.is_empty(), "*raw int64 must not pass as managed *int64");
     }
 }

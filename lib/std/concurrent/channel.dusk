@@ -1,0 +1,69 @@
+// std.concurrent.channel: a bounded, thread safe queue for handing values
+// between threads. A send blocks while the channel is full, a recv blocks
+// while it is empty, and closing wakes everyone. The handle is one word and
+// copies freely; every copy names the same channel. The sanctioned shutdown
+// order is close, then join every thread that touches the channel, then free.
+
+foreign "C" {
+    func cool_chan_new(elem_size: int64, cap: int64) -> *void
+    func cool_chan_send(ch: *void, elem: *void) -> int64
+    func cool_chan_recv(ch: *void, out: *void) -> int64
+    func cool_chan_close(ch: *void) -> void
+    func cool_chan_free(ch: *void) -> void
+}
+
+export struct Channel<T> {
+    h: *void,
+}
+
+// Creates a channel holding at most cap elements. The binding annotation pins
+// the element type, as in jobs: Channel<int64> = chan_new(8). A capacity
+// below one or exhausted memory is fatal, the allocator's contract.
+export func chan_new<T>(cap: int64) -> Channel<T> {
+    return Channel { h: cool_chan_new(sizeof(T), cap) }
+}
+
+// Sends x, blocking while the channel is full. The value crosses by copy, so
+// hand over a managed pointer with chan_send(c, move(p)) and let the receiver
+// own it. The error exists when the channel is closed; a moved value refused
+// that way never entered the ring and its record leaks, so finish sending
+// before anyone closes. An element that could view this frame, a slice, a
+// closure, or an interface value, is rejected at compile time.
+export func chan_send<T>(c: Channel<T>, x: T) -> error {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    buf[0] = x
+    rc := cool_chan_send(c.h, buf)
+    free(buf)
+    if rc == 1 {
+        return error { message: "send on a closed channel" }
+    }
+    return error {}
+}
+
+// Receives the oldest value, blocking while the channel is empty. The error
+// exists once the channel is closed and drained, so a loop breaking on
+// e.exists() consumes everything senders managed to deliver.
+export func chan_recv<T>(c: Channel<T>) -> (T, error) {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    rc := cool_chan_recv(c.h, buf)
+    v := buf[0]
+    free(buf)
+    if rc == 1 {
+        return (v, error { message: "receive on a closed, drained channel" })
+    }
+    return (v, error {})
+}
+
+// Closes the channel and wakes every blocked sender and receiver. Idempotent.
+// Values already buffered stay receivable after the close.
+export func chan_close<T>(c: Channel<T>) -> void {
+    cool_chan_close(c.h)
+}
+
+// Frees the channel. Freeing while a thread is blocked inside a send or recv
+// is fatal. Close, join, then free. Managed pointers still buffered here are
+// dropped as raw bytes and leak, so drain before freeing when elements own
+// heap records.
+export func chan_free<T>(c: Channel<T>) -> void {
+    cool_chan_free(c.h)
+}

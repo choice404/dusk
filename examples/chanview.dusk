@@ -1,0 +1,19 @@
+// Compile fail: a channel element cannot contain a slice, wherever it sits.
+// A slice views the frame that built it, and the ring would carry that view
+// to another thread after the frame died, the same reason spawn rejects a
+// slice capture. This program does not compile.
+@paradigm procedural
+@import std.concurrent.channel
+
+struct Batch {
+    rows: int64[],
+}
+
+func main() -> int32 {
+    xs: int64[3] = [1, 2, 3]
+    c: Channel<Batch> = chan_new(1)
+    e := chan_send(c, Batch { rows: xs[0..2] })
+    e.ignore()
+    chan_free(c)
+    return 0
+}

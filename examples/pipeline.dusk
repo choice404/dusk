@@ -1,0 +1,54 @@
+// A three stage pipeline: a producer feeds numbers into one channel, a
+// transformer doubles them into a second, and main folds the results. Each
+// stage closes its output channel when its input drains, so the shutdown
+// ripples down the pipe and the sum is exact no matter how the threads
+// interleave.
+@paradigm procedural
+@import std.concurrent.channel
+
+func main() -> int32 {
+    nums: Channel<int64> = chan_new(4)
+    doubled: Channel<int64> = chan_new(4)
+    prod, pe := spawn(lambda () -> void {
+        mut i: int64 = 1
+        while i <= 10 {
+            e := chan_send(nums, i)
+            e.ignore()
+            i = i + 1
+        }
+        chan_close(nums)
+    })
+    pe.ignore()
+    xform, xe := spawn(lambda () -> void {
+        mut going := true
+        while going {
+            v, e := chan_recv(nums)
+            if e.exists() {
+                going = false
+            } else {
+                se := chan_send(doubled, v * 2)
+                se.ignore()
+            }
+        }
+        chan_close(doubled)
+    })
+    xe.ignore()
+    mut sum: int64 = 0
+    mut going := true
+    while going {
+        v, e := chan_recv(doubled)
+        if e.exists() {
+            going = false
+        } else {
+            sum = sum + v
+        }
+    }
+    println(sum)
+    j1 := join(prod)
+    j1.ignore()
+    j2 := join(xform)
+    j2.ignore()
+    chan_free(nums)
+    chan_free(doubled)
+    return 0
+}
