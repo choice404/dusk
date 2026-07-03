@@ -104,7 +104,7 @@ The `dawn` binary has four commands. They are `get`, `build`, `run`, and `versio
 
 See [CHANGELOG.md](CHANGELOG.md) for the release by release history.
 
-0.3.2. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
+0.3.3. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
 
 Releases 0.2.0 through 0.2.6 add memory safety. Strings have a growable `StringBuilder` with concatenation, the pointer layer splits into a managed `*T` and a raw `*raw T`, and the default heap is generational. Every managed pointer carries a generation that is checked at each dereference, so a use after free, a double free, or a stale pointer to a reused block faults instead of corrupting memory. A managed pointer is single owner, with `ref` for a non owning alias and `move` to transfer, and a return that lets a frame local escape is a compile error for the clear cases. A `foreign "C"` block then calls into libc across the raw pointer boundary, the first slice of the interop work.
 
@@ -114,7 +114,9 @@ Release 0.3.0 adds threads, the first phase of concurrency. `spawn` starts an OS
 
 Release 0.3.1 adds channels. `std.concurrent.channel` carries a bounded, thread safe queue: `chan_send` blocks while the channel is full, `chan_recv` blocks while it is empty and errors once the channel is closed and drained, and `chan_send(c, move(p))` hands ownership of a heap record to the receiving thread with the sender's name dead at compile time.
 
-Release 0.3.2 adds mutexes and condition variables. `std.concurrent.sync` guards shared memory with `lock`, `unlock`, and the `defer unlock(m)` idiom, `cond_wait` sleeps until a signal with the predicate rechecked in a loop, and every classic pthread misuse, relocking, unlocking without holding, freeing a held mutex, faults by name. The thread pool that async builds on arrives in 0.3.3.
+Release 0.3.2 adds mutexes and condition variables. `std.concurrent.sync` guards shared memory with `lock`, `unlock`, and the `defer unlock(m)` idiom, `cond_wait` sleeps until a signal with the predicate rechecked in a loop, and every classic pthread misuse, relocking, unlocking without holding, freeing a held mutex, faults by name.
+
+Release 0.3.3 completes the concurrency line with the thread pool and the async substrate. The `submit` builtin queues fire and forget tasks on a global worker pool without ever blocking the submitter, `chan_try_send`, `chan_try_recv`, and `chan_recv_timeout` refuse or time out instead of parking forever, and the offload example rehearses the park, wake, and offload loop the 0.4.x async releases build on.
 
 ## License
 

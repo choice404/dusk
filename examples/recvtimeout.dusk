@@ -1,0 +1,28 @@
+// A timed receive parks at most the given milliseconds against a monotonic
+// clock. Empty and quiet, it reports the timeout. Holding a value, it
+// delivers immediately. Closed and drained, it reports the close, so the
+// three outcomes a tick loop must tell apart each read differently.
+@paradigm procedural
+@import std.concurrent.channel
+
+func main() -> int32 {
+    c: Channel<int64> = chan_new(2)
+    v1, e1 := chan_recv_timeout(c, 20)
+    if e1.exists() {
+        println("timed out")
+    }
+    println(v1)
+    se := chan_send(c, 5)
+    se.ignore()
+    v2, e2 := chan_recv_timeout(c, 20)
+    e2.ignore()
+    println(v2)
+    chan_close(c)
+    v3, e3 := chan_recv_timeout(c, 20)
+    if e3.exists() {
+        println("closed")
+    }
+    println(v3)
+    chan_free(c)
+    return 0
+}

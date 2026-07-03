@@ -748,6 +748,8 @@ Ownership crosses a thread boundary by moving a managed pointer through a channe
 
 A moved send that the channel refuses loses the record. When `chan_send(c, move(p))` returns the closed error, the value never entered the ring, the sender's name is already dead, and no name anywhere reaches the allocation again, so it leaks. The same applies to managed pointers still buffered when `chan_free` runs, since the ring holds raw bytes and frees none of them. Neither is corruption, and neither happens in the sanctioned protocol where senders finish before the close, but a design that closes under active movers pays in leaked records, not faults.
 
+Added in 0.3.3, three operations refuse instead of parking. `chan_try_send(c, x) -> error` reports "channel is full" without waiting for room, `chan_try_recv(c) -> (T, error)` reports "channel is empty" without waiting for a value, and `chan_recv_timeout(c, ms) -> (T, error)` parks at most `ms` milliseconds against a monotonic clock and reports "receive timed out", so a wall clock step cannot stretch or shrink the wait. Each still reports the closed message its blocking twin uses, and the value beside any of these errors is the zero pattern for `T`. A tick loop parks on `chan_recv_timeout`, does a round of work, and loops back in, which is the event loop shape the async release builds on.
+
 Shutdown follows one order: close the channel, join every thread that touches it, then `chan_free` it. Freeing a channel while a thread is blocked inside a send or receive is fatal with a named message, caught best effort. Using a channel after `chan_free` is undefined, the raw layer's honor system, since the one word handle carries no generation.
 
 ### Mutexes and Condition Variables
@@ -782,7 +784,34 @@ while buf[5] == 0 {
 unlock(m)
 ```
 
-Free a condition variable only after every waiter has left it. Freeing one a thread still waits on is fatal by name. Blocking waits have no timeout until the timed operations land in 0.3.3, so a predicate nothing ever makes true is a deadlock.
+Free a condition variable only after every waiter has left it. Freeing one a thread still waits on is fatal by name. A condition variable wait has no timeout, so a predicate nothing ever makes true is a deadlock. A channel receive is the wait that can time out, through `chan_recv_timeout`.
+
+### The Thread Pool
+
+Added in 0.3.3. The pool is a process singleton of OS threads that runs fire and forget tasks, the substrate the async release schedules onto. `submit` is an always available builtin like `spawn` and shares its whole argument rule: one lambda literal of type `() -> void`, captures copied to a private heap block, the same slice, closure, and interface capture ban, and a captured managed pointer borrowed, not owned. It returns only an error, because the pool owns the task and results flow through a channel.
+
+```text
+@import std.concurrent.channel
+@import std.concurrent.pool
+
+pe := pool_start(ncpu())
+pe.ignore()
+done: Channel<int64> = chan_new(8)
+se := submit(lambda () -> void {
+    we := chan_send(done, 42)
+    we.ignore()
+})
+se.ignore()
+v, re := chan_recv(done)
+re.ignore()
+println(v)
+pool_shutdown()
+chan_free(done)
+```
+
+`pool_start(workers) -> error` in `std.concurrent.pool` starts the singleton with a fixed worker count, `ncpu() -> int64` being the natural count. The error exists when the count is below one, the pool is already running, it was already shut down, or the operating system refuses a worker thread. A refused start leaves the pool startable again, but a successful start is the only one the process gets, and after a shutdown the pool stays down. A `submit` never blocks the submitter, whatever the queue holds, and its error exists only when the pool is not running, in which case the task body never runs. `pool_shutdown()` stops new submissions, runs everything already queued to completion, joins the workers, and is idempotent. When two threads race into it, the loser waits for the winner, so every caller returns holding the drain guarantee. A task still running at shutdown finishes normally, and a submission it makes after the flag flips is refused like any other, but a pool task calling `pool_shutdown` itself is fatal by name, since the worker would otherwise join itself or wait forever on its own completion.
+
+Submission order is queue order, but tasks run on many workers at once, so nothing about completion order is promised. Queuing a task happens before its body runs, and everything a body did is visible to whoever receives its completion through a channel, the ordering the channel edge already provides. Shut the pool down before `main` returns for the same reason threads are joined: a worker mid task when the process exits dies mid write.
 
 ### The memory model
 
@@ -813,6 +842,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.string            | string manipulation utilities                         |
 | std.concurrent.atomic | sequentially consistent int64 atomics                 |
 | std.concurrent.channel | bounded thread safe queue between threads            |
+| std.concurrent.pool   | the global thread pool behind the submit builtin      |
 | std.concurrent.sync   | mutex and condition variable                          |
 | std.concurrent.thread | sleep_ms beside the spawn and join builtins           |
 
@@ -834,6 +864,7 @@ Builtins are always available regardless of paradigm directives unless noted.
 | sizeof   | sizeof(T) -> int64    | size of a type in bytes at compile time      |
 | spawn    | spawn(f: () -> void) -> (thread, error) | start an OS thread running a lambda literal |
 | join     | join(t: thread) -> error | wait for a thread; retires the handle     |
+| submit   | submit(f: () -> void) -> error | queue a lambda literal on the global thread pool |
 
 `alloc` and `free` resolve to the in scope allocator. See [Memory Management](#memory-management).
 

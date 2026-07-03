@@ -1,0 +1,19 @@
+// A pool task cannot shut the pool down: the worker running it would have to
+// join its own thread, which POSIX leaves undefined, or wait forever on its
+// own completion. The runtime catches it by name. Main's own shutdown drains
+// the queue, which runs the task, which faults, so the order is fixed.
+@paradigm procedural
+@import std.concurrent.pool
+
+func main() -> int32 {
+    pe := pool_start(1)
+    pe.ignore()
+    println("submitting")
+    se := submit(lambda () -> void {
+        pool_shutdown()
+    })
+    se.ignore()
+    pool_shutdown()
+    println("unreached")
+    return 0
+}

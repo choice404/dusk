@@ -8,6 +8,9 @@ foreign "C" {
     func cool_chan_new(elem_size: int64, cap: int64) -> *void
     func cool_chan_send(ch: *void, elem: *void) -> int64
     func cool_chan_recv(ch: *void, out: *void) -> int64
+    func cool_chan_try_send(ch: *void, elem: *void) -> int64
+    func cool_chan_try_recv(ch: *void, out: *void) -> int64
+    func cool_chan_recv_timeout(ch: *void, out: *void, ms: int64) -> int64
     func cool_chan_close(ch: *void) -> void
     func cool_chan_free(ch: *void) -> void
 }
@@ -50,6 +53,59 @@ export func chan_recv<T>(c: Channel<T>) -> (T, error) {
     free(buf)
     if rc == 1 {
         return (v, error { message: "receive on a closed, drained channel" })
+    }
+    return (v, error {})
+}
+
+// Sends x only if the channel has room right now, never blocking. The error
+// says "send on a closed channel" or "channel is full", so the two refusals
+// read differently. A moved value refused either way leaks its record, the
+// chan_send contract.
+export func chan_try_send<T>(c: Channel<T>, x: T) -> error {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    buf[0] = x
+    rc := cool_chan_try_send(c.h, buf)
+    free(buf)
+    if rc == 1 {
+        return error { message: "send on a closed channel" }
+    }
+    if rc == 2 {
+        return error { message: "channel is full" }
+    }
+    return error {}
+}
+
+// Receives only if a value is ready right now, never blocking. The error
+// says "receive on a closed, drained channel" or "channel is empty", and the
+// value beside either error is the zero pattern for T.
+export func chan_try_recv<T>(c: Channel<T>) -> (T, error) {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    rc := cool_chan_try_recv(c.h, buf)
+    v := buf[0]
+    free(buf)
+    if rc == 1 {
+        return (v, error { message: "receive on a closed, drained channel" })
+    }
+    if rc == 2 {
+        return (v, error { message: "channel is empty" })
+    }
+    return (v, error {})
+}
+
+// Receives, blocking at most ms milliseconds against a monotonic clock. The
+// error says "receive on a closed, drained channel" or "receive timed out",
+// and the value beside either error is the zero pattern for T. A timeout of
+// zero polls once and gives blocked senders no chance to arrive.
+export func chan_recv_timeout<T>(c: Channel<T>, ms: int64) -> (T, error) {
+    buf: *raw T = alloc_bytes(sizeof(T))
+    rc := cool_chan_recv_timeout(c.h, buf, ms)
+    v := buf[0]
+    free(buf)
+    if rc == 1 {
+        return (v, error { message: "receive on a closed, drained channel" })
+    }
+    if rc == 2 {
+        return (v, error { message: "receive timed out" })
     }
     return (v, error {})
 }

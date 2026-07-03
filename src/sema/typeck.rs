@@ -902,6 +902,64 @@ impl TypeChecker {
         }
     }
 
+    /// The argument rule `spawn` and `submit` share: exactly one argument, a
+    /// lambda literal, nullary and void, because only the literal site knows
+    /// the environment layout that codegen heap copies for the task. Captures
+    /// cross as heap copies, so a capture that may view this frame, a slice, a
+    /// closure, or an interface value, even buried in a struct or enum field,
+    /// is rejected. A captured managed pointer becomes a borrow inside the
+    /// task, so the body can read through it but never free or move it, and a
+    /// moved away pointer keeps its moved state so capturing it stays the
+    /// error a plain lambda gets.
+    fn check_task_lambda(&mut self, name: &str, args: &[Expr], span: Span) {
+        if args.len() != 1 {
+            self.err(
+                format!("{name} takes one argument, a lambda literal of type () -> void"),
+                span,
+            );
+            for a in args {
+                self.infer(a);
+            }
+            return;
+        }
+        let ExprKind::Lambda(l) = &args[0].kind else {
+            self.err(
+                format!(
+                    "{name} takes a lambda literal written at the call site; wrap a closure variable as lambda () -> void {{ g() }}"
+                ),
+                args[0].span,
+            );
+            self.infer(&args[0]);
+            return;
+        };
+        if !l.params.is_empty() || !matches!(self.lower(&l.ret), Ty::Unit) {
+            self.err(
+                format!(
+                    "a lambda passed to {name} takes no parameters and returns void; pass data by capture and results through a channel"
+                ),
+                args[0].span,
+            );
+        }
+        let caps = self.spawn_lambda_captures(l);
+        let mut borrowed = Vec::new();
+        for c in &caps {
+            let t = self.lookup(c);
+            let mut seen = HashSet::new();
+            if !self.spawn_capturable(&t, &mut seen) || self.is_iface_bind(c) {
+                self.err(
+                    format!(
+                        "{name} cannot capture '{c}'; a slice, closure, or interface value may view the spawning frame, so move the data to the heap or send it through a channel"
+                    ),
+                    args[0].span,
+                );
+            }
+            if is_managed(&t) && !matches!(self.own_of(c), Some(Own::Moved)) {
+                borrowed.push(c.clone());
+            }
+        }
+        self.infer_lambda(l, args[0].span, &borrowed);
+    }
+
     /// Whether a value of this type may cross a `spawn` as a heap copied
     /// capture. A slice, a closure, or an interface value may carry a pointer
     /// into the spawning frame that the copy would dangle, so they are rejected
@@ -1095,58 +1153,16 @@ impl TypeChecker {
                     return Ty::Unit;
                 }
                 if name == "spawn" {
-                    // spawn takes a lambda literal of type () -> void, because
-                    // only the literal site knows the environment layout that
-                    // codegen heap-copies for the new thread. A closure variable
-                    // is two opaque words with no size anywhere.
-                    if args.len() != 1 {
-                        self.err("spawn takes one argument, a lambda literal of type () -> void", f.span);
-                        for a in args {
-                            self.infer(a);
-                        }
-                        return Ty::Tuple(vec![Ty::Thread, Ty::Error]);
-                    }
-                    let ExprKind::Lambda(l) = &args[0].kind else {
-                        self.err(
-                            "spawn takes a lambda literal written at the call site; wrap a closure variable as lambda () -> void { g() }",
-                            args[0].span,
-                        );
-                        self.infer(&args[0]);
-                        return Ty::Tuple(vec![Ty::Thread, Ty::Error]);
-                    };
-                    if !l.params.is_empty() || !matches!(self.lower(&l.ret), Ty::Unit) {
-                        self.err(
-                            "a spawned lambda takes no parameters and returns void; pass data by capture and results through a channel",
-                            args[0].span,
-                        );
-                    }
-                    // Captures cross to the new thread as heap copies, so a
-                    // capture that may view the spawning frame, a slice, a
-                    // closure, or an interface value, even one buried in a
-                    // struct or enum field, is rejected. A captured managed
-                    // pointer becomes a borrow in the thread, so the thread can
-                    // read through it but never free or move it out from under
-                    // the owner, and a moved away pointer keeps its moved state
-                    // so capturing it stays the error a plain lambda gets.
-                    let caps = self.spawn_lambda_captures(l);
-                    let mut borrowed = Vec::new();
-                    for c in &caps {
-                        let t = self.lookup(c);
-                        let mut seen = HashSet::new();
-                        if !self.spawn_capturable(&t, &mut seen) || self.is_iface_bind(c) {
-                            self.err(
-                                format!(
-                                    "spawn cannot capture '{c}'; a slice, closure, or interface value may view the spawning frame, so move the data to the heap or send it through a channel"
-                                ),
-                                args[0].span,
-                            );
-                        }
-                        if is_managed(&t) && !matches!(self.own_of(c), Some(Own::Moved)) {
-                            borrowed.push(c.clone());
-                        }
-                    }
-                    self.infer_lambda(l, args[0].span, &borrowed);
+                    self.check_task_lambda("spawn", args, f.span);
                     return Ty::Tuple(vec![Ty::Thread, Ty::Error]);
+                }
+                if name == "submit" {
+                    // A pool task is a thread body that runs later, so submit
+                    // shares spawn's whole argument rule. It returns only an
+                    // error: the pool owns the task and results flow through a
+                    // channel, never a handle.
+                    self.check_task_lambda("submit", args, f.span);
+                    return Ty::Error;
                 }
                 if name == "join" {
                     let t = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
@@ -2327,6 +2343,38 @@ mod tests {
             "func f() -> void {\n  t, e := spawn(lambda () -> void { println(1) })\n  e.ignore()\n  println(t)\n  je := join(t)\n  je.ignore()\n}",
         );
         assert!(e.iter().any(|d| d.msg.contains("thread handle")), "{e:?}");
+    }
+
+    #[test]
+    fn submit_of_a_closure_variable_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  g := lambda () -> void { println(1) }\n  e := submit(g)\n  e.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("lambda literal")), "{e:?}");
+    }
+
+    #[test]
+    fn submit_with_a_slice_capture_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  xs: int64[3] = [1, 2, 3]\n  s: int64[] = xs[0..2]\n  e := submit(lambda () -> void {\n    println(s[0])\n  })\n  e.ignore()\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("cannot capture")), "{e:?}");
+    }
+
+    #[test]
+    fn submit_of_a_plain_task_is_ok() {
+        let e = errs(
+            "func f() -> void {\n  n := 5\n  e := submit(lambda () -> void {\n    println(n)\n  })\n  e.ignore()\n}",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn submit_freeing_a_captured_pointer_is_rejected() {
+        let e = errs(
+            "func f() -> void {\n  p: *int64 = alloc(5)\n  e := submit(lambda () -> void {\n    free(p)\n  })\n  e.ignore()\n  free(p)\n}",
+        );
+        assert!(!e.is_empty(), "a task must not free its borrow");
     }
 
     #[test]

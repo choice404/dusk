@@ -1,0 +1,28 @@
+// Ten thousand submissions against a shared atomic counter. Main never waits
+// on the tasks directly: pool_shutdown drains everything already queued
+// before joining the workers, so the count is exact when it prints. This is
+// the queue under real pressure and the drain guarantee in one number.
+@paradigm procedural
+@import std.concurrent.atomic
+@import std.concurrent.pool
+
+func main() -> int32 {
+    pe := pool_start(4)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    c := atomic_new(0)
+    mut i: int64 = 0
+    while i < 10000 {
+        se := submit(lambda () -> void {
+            atomic_add(c, 1)
+        })
+        se.ignore()
+        i = i + 1
+    }
+    pool_shutdown()
+    println(atomic_load(c))
+    atomic_free(c)
+    return 0
+}

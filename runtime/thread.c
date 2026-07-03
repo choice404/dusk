@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 extern void *cool_gen_alloc(int64_t size);
 extern void cool_gen_free(void *p);
@@ -111,7 +112,7 @@ int64_t cool_atomic_cas(int64_t *p, int64_t expect, int64_t desired) {
 /* Bounded channels as the textbook monitor: one mutex, two condition
    variables, a ring of cap * elem_size bytes, a closed flag, and a count of
    threads blocked inside a wait. The condvars run on CLOCK_MONOTONIC so the
-   timed receive planned for 0.3.3 cannot be confused by a wall clock step. */
+   timed receive cannot be confused by a wall clock step. */
 typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t not_full;
@@ -202,6 +203,88 @@ int64_t cool_chan_recv(void *ch, void *out) {
         c->waiters++;
         pthread_cond_wait(&c->not_empty, &c->mu);
         c->waiters--;
+    }
+    if (c->len == 0) {
+        memset(out, 0, (size_t)c->elem_size);
+        pthread_mutex_unlock(&c->mu);
+        return 1;
+    }
+    memcpy(out, c->buf + c->head * c->elem_size, (size_t)c->elem_size);
+    c->head = (c->head + 1) % c->cap;
+    c->len--;
+    pthread_cond_signal(&c->not_full);
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+}
+
+/* Non blocking send. Returns 0 on success, 1 when the channel is closed, and
+   2 when the ring is full, without ever sleeping. */
+int64_t cool_chan_try_send(void *ch, void *elem) {
+    cool_chan *c = (cool_chan *)ch;
+    pthread_mutex_lock(&c->mu);
+    if (c->closed) {
+        pthread_mutex_unlock(&c->mu);
+        return 1;
+    }
+    if (c->len == c->cap) {
+        pthread_mutex_unlock(&c->mu);
+        return 2;
+    }
+    int64_t slot = (c->head + c->len) % c->cap;
+    memcpy(c->buf + slot * c->elem_size, elem, (size_t)c->elem_size);
+    c->len++;
+    pthread_cond_signal(&c->not_empty);
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+}
+
+/* Non blocking receive. Returns 0 on success, 1 when the channel is closed
+   and drained, and 2 when it is merely empty, zeroing the out buffer on both
+   non success paths so the caller never reads stale bytes. */
+int64_t cool_chan_try_recv(void *ch, void *out) {
+    cool_chan *c = (cool_chan *)ch;
+    pthread_mutex_lock(&c->mu);
+    if (c->len == 0) {
+        int64_t rc = c->closed ? 1 : 2;
+        memset(out, 0, (size_t)c->elem_size);
+        pthread_mutex_unlock(&c->mu);
+        return rc;
+    }
+    memcpy(out, c->buf + c->head * c->elem_size, (size_t)c->elem_size);
+    c->head = (c->head + 1) % c->cap;
+    c->len--;
+    pthread_cond_signal(&c->not_full);
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+}
+
+/* Receive with a deadline. Blocks up to ms milliseconds against the same
+   monotonic clock the condvars were created on, so a wall clock step cannot
+   stretch or shrink the wait. Returns 0 on success, 1 when closed and
+   drained, 2 on timeout, zeroing the out buffer on both failure paths. */
+int64_t cool_chan_recv_timeout(void *ch, void *out, int64_t ms) {
+    cool_chan *c = (cool_chan *)ch;
+    if (ms < 0) {
+        ms = 0;
+    }
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += ms / 1000;
+    deadline.tv_nsec += (ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&c->mu);
+    while (c->len == 0 && !c->closed) {
+        c->waiters++;
+        int rc = pthread_cond_timedwait(&c->not_empty, &c->mu, &deadline);
+        c->waiters--;
+        if (rc == ETIMEDOUT && c->len == 0 && !c->closed) {
+            memset(out, 0, (size_t)c->elem_size);
+            pthread_mutex_unlock(&c->mu);
+            return 2;
+        }
     }
     if (c->len == 0) {
         memset(out, 0, (size_t)c->elem_size);
@@ -363,4 +446,190 @@ void cool_chan_free(void *ch) {
     pthread_mutex_destroy(&c->mu);
     free(c->buf);
     free(c);
+}
+
+/* The global thread pool, a process singleton with a fixed worker count and
+   an unbounded FIFO queue, so a submission never blocks the submitter. The
+   0.4.0 event loop depends on that never blocking contract for its offload
+   path. The pool starts once per process; after a shutdown it stays down. */
+typedef struct cool_pool_task {
+    void (*fn)(void *);
+    void *env;
+    struct cool_pool_task *next;
+} cool_pool_task;
+
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t ready;
+    cool_pool_task *head;
+    cool_pool_task *tail;
+    pthread_t *workers;
+    int64_t nworkers;
+    int running;
+    int shutting;
+    int done;
+} cool_pool;
+
+static cool_pool cool_the_pool = {
+    PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
+    NULL, NULL, NULL, 0, 0, 0, 0,
+};
+
+/* Set on every pool worker, so a task that calls pool_shutdown is caught by
+   name instead of joining its own thread, which POSIX leaves undefined. */
+static __thread int cool_on_pool_worker = 0;
+
+/* Workers pull tasks in submission order and exit once a shutdown is flagged
+   and the queue has drained, so every accepted task runs exactly once. The
+   environment block is freed after the body returns, the spawn contract. */
+static void *cool_pool_worker(void *arg) {
+    (void)arg;
+    cool_pool *p = &cool_the_pool;
+    cool_on_pool_worker = 1;
+    for (;;) {
+        pthread_mutex_lock(&p->mu);
+        while (!p->head && !p->shutting) {
+            pthread_cond_wait(&p->ready, &p->mu);
+        }
+        cool_pool_task *t = p->head;
+        if (!t) {
+            pthread_mutex_unlock(&p->mu);
+            return NULL;
+        }
+        p->head = t->next;
+        if (!p->head) {
+            p->tail = NULL;
+        }
+        pthread_mutex_unlock(&p->mu);
+        t->fn(t->env);
+        free(t->env);
+        free(t);
+    }
+}
+
+/* Starts the singleton with a fixed worker count. Returns 0 on success and 1
+   when the count is below one, the pool is already running, the pool was
+   already shut down, or a worker thread cannot start, in which case any
+   workers that did start are shut down again before returning. */
+int64_t cool_pool_start(int64_t workers) {
+    cool_pool *p = &cool_the_pool;
+    if (workers < 1) {
+        return 1;
+    }
+    pthread_mutex_lock(&p->mu);
+    if (p->running || p->shutting) {
+        pthread_mutex_unlock(&p->mu);
+        return 1;
+    }
+    p->workers = malloc((size_t)workers * sizeof(pthread_t));
+    if (!p->workers) {
+        pthread_mutex_unlock(&p->mu);
+        return 1;
+    }
+    p->nworkers = 0;
+    p->running = 1;
+    for (int64_t i = 0; i < workers; i++) {
+        if (pthread_create(&p->workers[i], NULL, cool_pool_worker, NULL) != 0) {
+            // Unwind to pristine: stop the workers that did start, then clear
+            // the shutting flag, so a transient thread limit does not poison
+            // the pool for the rest of the process and a retry can start it.
+            p->running = 0;
+            p->shutting = 1;
+            pthread_cond_broadcast(&p->ready);
+            int64_t started = p->nworkers;
+            pthread_t *ws = p->workers;
+            p->workers = NULL;
+            pthread_mutex_unlock(&p->mu);
+            for (int64_t j = 0; j < started; j++) {
+                pthread_join(ws[j], NULL);
+            }
+            free(ws);
+            pthread_mutex_lock(&p->mu);
+            p->shutting = 0;
+            p->nworkers = 0;
+            pthread_cond_broadcast(&p->ready);
+            pthread_mutex_unlock(&p->mu);
+            return 1;
+        }
+        p->nworkers++;
+    }
+    pthread_mutex_unlock(&p->mu);
+    return 0;
+}
+
+/* Queues fn(env) on the pool without blocking. Returns 0 when accepted and 1
+   when the pool is not running, before a start or after a shutdown, in which
+   case env is freed here because no worker will ever run the body. Queue
+   node exhaustion aborts like every allocation the runtime owns. */
+int64_t cool_pool_submit(void *fn, void *env) {
+    cool_pool *p = &cool_the_pool;
+    pthread_mutex_lock(&p->mu);
+    if (!p->running) {
+        pthread_mutex_unlock(&p->mu);
+        free(env);
+        return 1;
+    }
+    cool_pool_task *t = malloc(sizeof(cool_pool_task));
+    if (!t) {
+        cool_thread_fatal("fatal: out of memory\n");
+    }
+    t->fn = (void (*)(void *))fn;
+    t->env = env;
+    t->next = NULL;
+    if (p->tail) {
+        p->tail->next = t;
+    } else {
+        p->head = t;
+    }
+    p->tail = t;
+    pthread_cond_signal(&p->ready);
+    pthread_mutex_unlock(&p->mu);
+    return 0;
+}
+
+/* Stops accepting submissions, lets the workers drain everything already
+   queued, and joins them. Idempotent, and a no op before the pool starts.
+   A task still running when shutdown is called finishes normally, and a
+   submit it makes after the flag flips is refused like any other. When two
+   threads race here, the loser waits until the winner's drain and join
+   complete, so every caller returns with the guarantee, not just the winner.
+   Calling this from inside a pool task is fatal by name: the worker would
+   join itself, which POSIX leaves undefined, or wait on its own completion. */
+void cool_pool_shutdown(void) {
+    cool_pool *p = &cool_the_pool;
+    if (cool_on_pool_worker) {
+        cool_thread_fatal("fatal: the thread pool cannot shut down from inside a pool task\n");
+    }
+    pthread_mutex_lock(&p->mu);
+    if (!p->running) {
+        while (p->shutting && !p->done) {
+            pthread_cond_wait(&p->ready, &p->mu);
+        }
+        pthread_mutex_unlock(&p->mu);
+        return;
+    }
+    p->running = 0;
+    p->shutting = 1;
+    pthread_cond_broadcast(&p->ready);
+    int64_t n = p->nworkers;
+    pthread_t *ws = p->workers;
+    p->workers = NULL;
+    pthread_mutex_unlock(&p->mu);
+    for (int64_t i = 0; i < n; i++) {
+        pthread_join(ws[i], NULL);
+    }
+    free(ws);
+    pthread_mutex_lock(&p->mu);
+    p->done = 1;
+    pthread_cond_broadcast(&p->ready);
+    pthread_mutex_unlock(&p->mu);
+}
+
+/* The number of processors currently online, at least one. */
+int64_t cool_ncpu(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) {
+        return 1;
+    }
+    return (int64_t)n;
 }

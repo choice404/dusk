@@ -1,0 +1,36 @@
+// std.concurrent.pool: the global thread pool behind the submit builtin. The
+// pool is a process singleton with a fixed worker count and an unbounded
+// queue, so a submission never blocks the submitter. Start it once, submit
+// work with the submit builtin, and shut it down before main returns; the
+// shutdown drains everything already queued. After a shutdown the pool stays
+// down for the rest of the process.
+
+foreign "C" {
+    func cool_pool_start(workers: int64) -> int64
+    func cool_pool_shutdown() -> void
+    func cool_ncpu() -> int64
+}
+
+// Starts the pool with the given number of workers. The error exists when
+// the count is below one, the pool is already running, it was already shut
+// down, or the operating system refuses a worker thread. A refused start
+// leaves the pool pristine, so a later attempt can succeed.
+export func pool_start(workers: int64) -> error {
+    if cool_pool_start(workers) == 1 {
+        return error { message: "the thread pool could not start" }
+    }
+    return error {}
+}
+
+// Stops accepting submissions, runs everything already queued, and joins the
+// workers. Idempotent, and a no op before the pool starts. When callers
+// race, every one of them returns only after the drain completes. Calling
+// this from inside a pool task is fatal by name.
+export func pool_shutdown() -> void {
+    cool_pool_shutdown()
+}
+
+// The number of processors online, at least one, the natural worker count.
+export func ncpu() -> int64 {
+    return cool_ncpu()
+}

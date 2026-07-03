@@ -294,7 +294,14 @@ impl<'a> Mono<'a> {
     fn check_chan_element(&mut self, name: &str, targs: &[Type], span: Span) {
         if !matches!(
             name,
-            "chan_new" | "chan_send" | "chan_recv" | "chan_close" | "chan_free"
+            "chan_new"
+                | "chan_send"
+                | "chan_recv"
+                | "chan_try_send"
+                | "chan_try_recv"
+                | "chan_recv_timeout"
+                | "chan_close"
+                | "chan_free"
         ) {
             return;
         }
@@ -884,6 +891,7 @@ fn builtin_ret(name: &str) -> Option<Type> {
         "sizeof" => Some(named("int64")),
         "spawn" => Some(pair(named("thread"))),
         "join" => Some(named("error")),
+        "submit" => Some(named("error")),
         _ => None,
     }
 }

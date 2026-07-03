@@ -45,6 +45,7 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("i64 @cool_debug_double_frees()");
     m.declare("ptr @cool_thread_spawn(ptr, ptr)");
     m.declare("i64 @cool_thread_join(ptr, i64)");
+    m.declare("i64 @cool_pool_submit(ptr, ptr)");
     m.declare("ptr @cool_alloc_env(i64)");
     m.declare("ptr @cool_read_file(ptr)");
     m.declare("i64 @cool_write_file(ptr, ptr)");
@@ -1827,6 +1828,7 @@ impl<'a> Fb<'a> {
                 "printerr" => self.gen_print(args, true, true),
                 "spawn" => self.gen_spawn(args),
                 "join" => self.gen_join(args),
+                "submit" => self.gen_submit(args),
                 "alloc" => self.gen_alloc(args),
                 "free" => {
                     if let Some(a) = args.first() {
@@ -2184,14 +2186,12 @@ impl<'a> Fb<'a> {
     /// returns. Produces a (thread, error) pair whose error fires when the OS
     /// refuses the thread. Sema guarantees the argument is a nullary void
     /// lambda literal, so its emitted form is already pthread start shaped.
-    fn gen_spawn(&mut self, args: &[Expr]) -> Val {
-        let tty = CTy::Tuple(vec![CTy::Thread, CTy::Error]);
-        let Some(ExprKind::Lambda(l)) = args.first().map(|a| &a.kind) else {
-            for a in args {
-                self.gen_expr(a);
-            }
-            return Val::new(tty, "zeroinitializer");
-        };
+    /// Emits a task lambda's function and its heap copied environment, the
+    /// machinery spawn and submit share. The env lives on the C heap, not
+    /// this frame, since the task outlives the caller's statement, and the
+    /// runtime frees it after the body returns. Returns the function name and
+    /// the env pointer operand.
+    fn gen_task_env(&mut self, l: &Lambda) -> (String, String) {
         let caps = self.lambda_captures(l);
         let params: Vec<(String, CTy)> = l
             .params
@@ -2208,8 +2208,6 @@ impl<'a> Fb<'a> {
         let env = if caps.is_empty() {
             "null".to_string()
         } else {
-            // The env lives on the C heap, not this frame, since the thread
-            // outlives the spawner's statement. The trampoline frees it.
             let szp = self.fresh();
             self.line(&format!("{szp} = getelementptr {env_ty}, ptr null, i64 1"));
             let sz = self.fresh();
@@ -2228,6 +2226,23 @@ impl<'a> Fb<'a> {
             e
         };
         self.emit_lambda_fn(&fname, &env_ty, &caps, &params, &ret, &l.body);
+        (fname, env)
+    }
+
+    /// spawn(lambda): starts an OS thread over the shared task env handoff.
+    /// The runtime returns the handle record or NULL, and the NULL branch
+    /// becomes the error half of the (thread, error) pair, so a refused spawn
+    /// reads like any other error and the handle half is the null sentinel.
+    fn gen_spawn(&mut self, args: &[Expr]) -> Val {
+        let tty = CTy::Tuple(vec![CTy::Thread, CTy::Error]);
+        let Some(ExprKind::Lambda(l)) = args.first().map(|a| &a.kind) else {
+            for a in args {
+                self.gen_expr(a);
+            }
+            return Val::new(tty, "zeroinitializer");
+        };
+        let l = l.clone();
+        let (fname, env) = self.gen_task_env(&l);
         let rec = self.fresh();
         self.line(&format!("{rec} = call ptr @cool_thread_spawn(ptr {fname}, ptr {env})"));
         let hslot = self.alloca(&CTy::Thread);
@@ -2261,6 +2276,29 @@ impl<'a> Fb<'a> {
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {} {a}, ptr {e}, 1", tty.ll()));
         Val::new(tty, b)
+    }
+
+    /// submit(lambda): queues the task on the global pool through the spawn
+    /// env handoff, verbatim. The pool frees the env after the body runs, or
+    /// immediately when the submission is refused because the pool is not
+    /// running, so no path leaks it. The error fires on a refusal.
+    fn gen_submit(&mut self, args: &[Expr]) -> Val {
+        let Some(ExprKind::Lambda(l)) = args.first().map(|a| &a.kind) else {
+            for a in args {
+                self.gen_expr(a);
+            }
+            return Val::new(CTy::Error, "null");
+        };
+        let l = l.clone();
+        let (fname, env) = self.gen_task_env(&l);
+        let rc = self.fresh();
+        self.line(&format!("{rc} = call i64 @cool_pool_submit(ptr {fname}, ptr {env})"));
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp ne i64 {rc}, 0"));
+        let msg = self.m.cstring("the thread pool is not running");
+        let err = self.fresh();
+        self.line(&format!("{err} = select i1 {bad}, ptr {msg}, ptr null"));
+        Val::new(CTy::Error, err)
     }
 
     /// join(t): the handle's data pointer and remembered generation both pass

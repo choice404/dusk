@@ -1,0 +1,36 @@
+// The pool refuses work outside its lifetime. A submit before pool_start and
+// a submit after pool_shutdown both return the error, and the task body never
+// runs, so nothing here races. The middle submission proves the running pool
+// accepts and completes work between the two refusals.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.concurrent.pool
+
+func main() -> int32 {
+    e1 := submit(lambda () -> void {
+        println("never runs")
+    })
+    if e1.exists() {
+        println("refused before start")
+    }
+    pe := pool_start(1)
+    pe.ignore()
+    c: Channel<int64> = chan_new(1)
+    e2 := submit(lambda () -> void {
+        we := chan_send(c, 7)
+        we.ignore()
+    })
+    e2.ignore()
+    v, re := chan_recv(c)
+    re.ignore()
+    println(v)
+    pool_shutdown()
+    e3 := submit(lambda () -> void {
+        println("never runs either")
+    })
+    if e3.exists() {
+        println("refused after shutdown")
+    }
+    chan_free(c)
+    return 0
+}

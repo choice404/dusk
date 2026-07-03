@@ -1,0 +1,72 @@
+// The 0.4.0 event loop shape, rehearsed in user code: a main loop that parks
+// on a timed receive as its tick, blocking file reads offloaded to the pool,
+// and completions drained from a channel. Main stays responsive at every
+// tick while the workers block in read_file, and the fold is exact once all
+// three completions arrive.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.concurrent.pool
+@import std.string
+
+func main() -> int32 {
+    w1 := write_file("/tmp/dusk_offload_a.tmp", "14")
+    w1.ignore()
+    w2 := write_file("/tmp/dusk_offload_b.tmp", "27")
+    w2.ignore()
+    w3 := write_file("/tmp/dusk_offload_c.tmp", "19")
+    w3.ignore()
+    pe := pool_start(2)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    done: Channel<int64> = chan_new(4)
+    s1 := submit(lambda () -> void {
+        text, re := read_file("/tmp/dusk_offload_a.tmp")
+        re.ignore()
+        n, pe2 := parse_int(text)
+        pe2.ignore()
+        free(text)
+        we := chan_send(done, n)
+        we.ignore()
+    })
+    s1.ignore()
+    s2 := submit(lambda () -> void {
+        text, re := read_file("/tmp/dusk_offload_b.tmp")
+        re.ignore()
+        n, pe2 := parse_int(text)
+        pe2.ignore()
+        free(text)
+        we := chan_send(done, n)
+        we.ignore()
+    })
+    s2.ignore()
+    s3 := submit(lambda () -> void {
+        text, re := read_file("/tmp/dusk_offload_c.tmp")
+        re.ignore()
+        n, pe2 := parse_int(text)
+        pe2.ignore()
+        free(text)
+        we := chan_send(done, n)
+        we.ignore()
+    })
+    s3.ignore()
+    mut sum: int64 = 0
+    mut got: int64 = 0
+    while got < 3 {
+        // The tick: park at most five milliseconds, then do a round of other
+        // work between arrivals. Here the other work is nothing, so a quiet
+        // tick loops straight back into the park.
+        v, e := chan_recv_timeout(done, 5)
+        if e.exists() {
+            // A quiet tick. The event loop would run timers here.
+        } else {
+            sum = sum + v
+            got = got + 1
+        }
+    }
+    println(sum)
+    pool_shutdown()
+    chan_free(done)
+    return 0
+}

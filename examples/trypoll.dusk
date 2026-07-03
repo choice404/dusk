@@ -1,0 +1,42 @@
+// The non blocking operations refuse instead of sleeping. A try_send into a
+// full ring reports full without waiting for room, and a try_recv poll loop
+// spins until the slow producer delivers, sleeping between polls, the shape a
+// tick loop uses when it cannot afford to park.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.concurrent.thread
+
+func main() -> int32 {
+    full: Channel<int64> = chan_new(1)
+    f1 := chan_try_send(full, 1)
+    f1.ignore()
+    f2 := chan_try_send(full, 2)
+    if f2.exists() {
+        println("full")
+    }
+    slow: Channel<int64> = chan_new(1)
+    t, e := spawn(lambda () -> void {
+        sleep_ms(5)
+        we := chan_send(slow, 9)
+        we.ignore()
+    })
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    mut going := true
+    while going {
+        v, re := chan_try_recv(slow)
+        if re.exists() {
+            sleep_ms(1)
+        } else {
+            println(v)
+            going = false
+        }
+    }
+    je := join(t)
+    je.ignore()
+    chan_free(full)
+    chan_free(slow)
+    return 0
+}

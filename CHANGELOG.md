@@ -2,6 +2,28 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.3.3
+
+The thread pool and the async substrate, closing the 0.3.x concurrency line. The non blocking and timed channel operations land, a global worker pool runs fire and forget tasks behind a new `submit` builtin, and the flagship example rehearses the exact park, wake, and offload shape the 0.4.0 event loop lowers onto, proven in user code before the async design starts.
+
+The operations that refuse instead of parking.
+
+- `chan_try_send` reports "channel is full" without waiting for room, `chan_try_recv` reports "channel is empty" without waiting for a value, and both still report the closed message their blocking twins use. The runtime side never sleeps: one lock, one check, one copy.
+- `chan_recv_timeout(c, ms)` parks at most ms milliseconds against the monotonic clock the condvars were built on in 0.3.1, so a wall clock step cannot stretch or shrink the wait. Its error distinguishes "receive timed out" from the closed message, and the loop rechecks the ring after every wakeup, so a spurious wake cannot fabricate a timeout while a value sits ready.
+- The value beside any refusing error is the zero pattern for `T`, the drained receive's contract.
+
+The pool and the submit builtin.
+
+- The pool is a process singleton in the runtime, a fixed worker count over an unbounded FIFO queue, deliberately below the language: a dusk level channel of closures would copy environments that point at the sender's stack, so the sound task queue sits in C. It starts once per process and stays down after a shutdown.
+- `submit` is an always available builtin sharing spawn's whole argument rule, the lambda literal, the nullary void shape, the view free capture ban, and the borrowed captured pointers, through the same checker path and the same codegen env handoff. It returns only an error: the pool owns the task and results flow through a channel.
+- A submission never blocks the submitter, the contract the 0.4.0 event loop needs for its offload path. The error exists only when the pool is not running, and on that path the runtime frees the environment itself, so a refused task leaks nothing.
+- `pool_start(workers)`, `pool_shutdown()`, and `ncpu()` live in the new `std.concurrent.pool`. The shutdown stops new submissions, drains everything already queued, and joins the workers, so a fold over ten thousand submitted increments prints the exact count with no wait loop in sight.
+- The shutdown guarantee holds for every caller, not just one: when two threads race into `pool_shutdown`, the loser waits until the winner's drain and join complete instead of returning early with tasks still queued. A pool task calling `pool_shutdown` itself is fatal by name, since the worker would otherwise join its own thread, undefined in POSIX, or wait forever on its own completion. A start the operating system refuses unwinds to pristine, so a transient thread limit does not poison the pool for the rest of the process.
+
+Examples and goldens: one hundred tasks on four workers folding to the arithmetic sum, the ten thousand submission stress proving the drain, both refusal windows around the pool's lifetime, a try_recv polling loop against a slow producer, the three outcomes of a timed receive, and the offload flagship, a main loop ticking on `chan_recv_timeout` while pool workers run blocking file reads and completions drain through a channel.
+
+The 0.3.x concurrency line is complete: threads and atomics in 0.3.0, channels in 0.3.1, mutexes and condition variables in 0.3.2, and the pool substrate here. Next is the 0.4.x async line on top of it.
+
 ## 0.3.2
 
 Mutexes and condition variables, the third phase of the concurrency line. Shared mutable state gains its sanctioned shape, a raw buffer guarded by a lock, with every classic pthread misuse turned into a named fault. No compiler changes at all: the whole release is runtime shims, a standard library module, examples, and the reference.

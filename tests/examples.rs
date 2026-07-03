@@ -155,6 +155,14 @@ fn unlocking_an_unheld_mutex_faults() {
 }
 
 #[test]
+fn pool_shutdown_from_a_pool_task_faults() {
+    let (out, err, ok) = run_raw("poolself.dusk");
+    assert!(!ok, "a pool task shutting the pool down must fault");
+    assert_eq!(out, "submitting\n", "the print before the drain survives the abort");
+    assert!(err.contains("cannot shut down from inside a pool task"), "{err}");
+}
+
+#[test]
 fn freeing_a_condvar_with_a_waiter_faults() {
     let (out, err, ok) = run_raw("condfree.dusk");
     assert!(!ok, "freeing a condvar with a parked waiter must fault");
@@ -271,6 +279,12 @@ golden!(countermutex, "countermutex.dusk", "10000\n");
 golden!(bank, "bank.dusk", "60\n40\n100\n");
 golden!(bounded, "bounded.dusk", "1275\n");
 golden!(pingpong, "pingpong.dusk", "ping\npong\nping\npong\nping\npong\ndone\n");
+golden!(poolsum, "poolsum.dusk", "5050\n");
+golden!(poolstress, "poolstress.dusk", "10000\n");
+golden!(submitshut, "submitshut.dusk", "refused before start\n7\nrefused after shutdown\n");
+golden!(trypoll, "trypoll.dusk", "full\n9\n");
+golden!(recvtimeout, "recvtimeout.dusk", "timed out\n0\n5\nclosed\n0\n");
+golden!(offload, "offload.dusk", "60\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");

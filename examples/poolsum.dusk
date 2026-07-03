@@ -1,0 +1,38 @@
+// One hundred tasks on four pool workers, each sending its number through a
+// channel main folds. The sum is the arithmetic answer no matter which worker
+// runs which task, and the shutdown drains before the frees. This is the
+// submit builtin's basic shape: capture in, channel out.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.concurrent.pool
+
+func main() -> int32 {
+    pe := pool_start(4)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    results: Channel<int64> = chan_new(16)
+    mut i: int64 = 1
+    while i <= 100 {
+        n := i
+        se := submit(lambda () -> void {
+            we := chan_send(results, n)
+            we.ignore()
+        })
+        se.ignore()
+        i = i + 1
+    }
+    mut sum: int64 = 0
+    mut got: int64 = 0
+    while got < 100 {
+        v, re := chan_recv(results)
+        re.ignore()
+        sum = sum + v
+        got = got + 1
+    }
+    println(sum)
+    pool_shutdown()
+    chan_free(results)
+    return 0
+}
