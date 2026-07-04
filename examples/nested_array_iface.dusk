@@ -1,0 +1,30 @@
+// A nested array whose innermost element type is an interface: an
+// array-of-array-of-interface. Each innermost struct boxes into its fat pointer
+// and the aggregate types match through both array levels, so per-element
+// dispatch works. Before the (Array, Array) coerce recursion this was a clang
+// reject.
+@paradigm oop
+@paradigm procedural
+
+interface Sized {
+    size() -> int64
+}
+
+struct Box {
+    v: int64,
+}
+
+impl Sized for Box {
+    func size() -> int64 {
+        return self.v
+    }
+}
+
+func main() -> int32 {
+    arr: (Sized[2])[2] = [[Box { v: 1 }, Box { v: 2 }], [Box { v: 3 }, Box { v: 4 }]]
+    println(arr[0][0].size())
+    println(arr[0][1].size())
+    println(arr[1][0].size())
+    println(arr[1][1].size())
+    return 0
+}

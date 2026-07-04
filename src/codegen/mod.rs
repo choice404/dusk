@@ -1,5 +1,7 @@
 //! Code generation: AST and typed IR to textual LLVM IR.
 
+pub mod async_fn;
+pub mod frame;
 pub mod llvm;
 pub mod lower;
 

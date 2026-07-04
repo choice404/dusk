@@ -44,13 +44,15 @@ pub fn build_demo(out_dir: &Path) -> Result<BuildArtifacts, String> {
 
 /// Invoke clang to assemble + link the given inputs (`.ll` and/or `.c`) into
 /// `bin`. `-pthread` rides along for toolchains older than glibc 2.34, where
-/// pthreads is not yet folded into libc.
+/// pthreads is not yet folded into libc. `-lm` links the math library, which the
+/// float `**` operator needs since it lowers to the `pow` intrinsic.
 fn link(inputs: &[&Path], bin: &Path) -> Result<(), String> {
     let mut cmd = Command::new("clang");
     for input in inputs {
         cmd.arg(input);
     }
     cmd.arg("-pthread");
+    cmd.arg("-lm");
     cmd.arg("-o").arg(bin);
     let status = cmd.status().map_err(|e| format!("spawn clang: {e}"))?;
     if status.success() {

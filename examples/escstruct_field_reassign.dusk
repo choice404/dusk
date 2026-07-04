@@ -1,0 +1,17 @@
+// A struct field reassigned to a frame-local view. s starts clean, holding a
+// param slice, then a field store puts a local array slice into it; the store
+// raises the struct binding's escape flag, so returning s is rejected.
+@paradigm procedural
+struct Batch { rows: int64[] }
+func mk(xs: int64[]) -> Batch {
+    mut s := Batch { rows: xs }
+    a: int64[3] = [7, 8, 9]
+    s.rows = a[0..2]
+    return s
+}
+func main() -> int32 {
+    data: int64[3] = [1, 2, 3]
+    b := mk(data[0..3])
+    println(b.rows[0])
+    return 0
+}

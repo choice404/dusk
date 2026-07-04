@@ -1,0 +1,29 @@
+// An array whose element type is a slice of an interface. Each inner array
+// literal builds at the interface element width { ptr, vtable } (16 bytes), then
+// views as a slice, so the slice strides over storage that actually holds fat
+// pointers. Before the (Slice, Array) element-type fix the backing was sized for
+// the raw struct and a dispatch strode off the end into a silent SEGV.
+@paradigm oop
+@paradigm procedural
+
+interface Sized {
+    size() -> int64
+}
+
+struct Box {
+    v: int64,
+}
+
+impl Sized for Box {
+    func size() -> int64 {
+        return self.v
+    }
+}
+
+func main() -> int32 {
+    arr: (Sized[])[2] = [[Box { v: 1 }, Box { v: 2 }], [Box { v: 3 }]]
+    println(arr[0][0].size())
+    println(arr[0][1].size())
+    println(arr[1][0].size())
+    return 0
+}

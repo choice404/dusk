@@ -57,6 +57,10 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos + 1).copied()
     }
 
+    fn peek3(&self) -> Option<u8> {
+        self.src.get(self.pos + 2).copied()
+    }
+
     fn bump(&mut self) -> Option<u8> {
         let c = self.peek();
         if c.is_some() {
@@ -270,24 +274,59 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Munches an operator or punctuation token. Each lead char consumes the
+    /// longest matching form: three char forms (`..=`, `<<=`, `>>=`) first, then
+    /// two char, then a single char falls to `one`. The greedy `>>` join is split
+    /// back into two `>` by the parser at nested generic closes, and `**` is split
+    /// at unary position, so `Wrap<Box<int64>>` and `**pp` still parse.
     fn symbol(&mut self, start: usize, c: u8) {
         if c >= 0x80 {
             let ch = self.bump_scalar();
             self.error(format!("unexpected character '{ch}'"), start);
             return;
         }
-        let kind = match (c, self.peek2()) {
-            (b':', Some(b'=')) => self.two(TokenKind::ColonEq),
-            (b'-', Some(b'>')) => self.two(TokenKind::Arrow),
-            (b'=', Some(b'>')) => self.two(TokenKind::FatArrow),
-            (b'<', Some(b'-')) => self.two(TokenKind::LArrow),
-            (b'.', Some(b'.')) => self.two(TokenKind::DotDot),
-            (b'=', Some(b'=')) => self.two(TokenKind::EqEq),
-            (b'!', Some(b'=')) => self.two(TokenKind::Ne),
-            (b'<', Some(b'=')) => self.two(TokenKind::Le),
-            (b'>', Some(b'=')) => self.two(TokenKind::Ge),
-            (b'&', Some(b'&')) => self.two(TokenKind::AndAnd),
-            (b'|', Some(b'|')) => self.two(TokenKind::OrOr),
+        let n = self.peek2();
+        let n3 = self.peek3();
+        let kind = match c {
+            b':' if n == Some(b'=') => self.two(TokenKind::ColonEq),
+            b'=' if n == Some(b'>') => self.two(TokenKind::FatArrow),
+            b'=' if n == Some(b'=') => self.two(TokenKind::EqEq),
+            b'!' if n == Some(b'=') => self.two(TokenKind::Ne),
+
+            b'.' if n == Some(b'.') && n3 == Some(b'=') => self.three(TokenKind::DotDotEq),
+            b'.' if n == Some(b'.') => self.two(TokenKind::DotDot),
+
+            b'<' if n == Some(b'<') && n3 == Some(b'=') => self.three(TokenKind::ShlEq),
+            b'<' if n == Some(b'<') => self.two(TokenKind::Shl),
+            b'<' if n == Some(b'=') => self.two(TokenKind::Le),
+            b'<' if n == Some(b'-') => self.two(TokenKind::LArrow),
+
+            b'>' if n == Some(b'>') && n3 == Some(b'=') => self.three(TokenKind::ShrEq),
+            b'>' if n == Some(b'>') => self.two(TokenKind::Shr),
+            b'>' if n == Some(b'=') => self.two(TokenKind::Ge),
+
+            b'&' if n == Some(b'&') => self.two(TokenKind::AndAnd),
+            b'&' if n == Some(b'=') => self.two(TokenKind::AmpEq),
+
+            b'|' if n == Some(b'|') => self.two(TokenKind::OrOr),
+            b'|' if n == Some(b'>') => self.two(TokenKind::PipeGt),
+            b'|' if n == Some(b'=') => self.two(TokenKind::PipeEq),
+
+            b'^' if n == Some(b'=') => self.two(TokenKind::CaretEq),
+
+            b'+' if n == Some(b'+') => self.two(TokenKind::PlusPlus),
+            b'+' if n == Some(b'=') => self.two(TokenKind::PlusEq),
+
+            b'-' if n == Some(b'>') => self.two(TokenKind::Arrow),
+            b'-' if n == Some(b'-') => self.two(TokenKind::MinusMinus),
+            b'-' if n == Some(b'=') => self.two(TokenKind::MinusEq),
+
+            b'*' if n == Some(b'*') => self.two(TokenKind::StarStar),
+            b'*' if n == Some(b'=') => self.two(TokenKind::StarEq),
+
+            b'/' if n == Some(b'=') => self.two(TokenKind::SlashEq),
+            b'%' if n == Some(b'=') => self.two(TokenKind::PercentEq),
+
             _ => match self.one(c) {
                 Some(kind) => kind,
                 None => {
@@ -305,6 +344,11 @@ impl<'a> Lexer<'a> {
         kind
     }
 
+    fn three(&mut self, kind: TokenKind) -> TokenKind {
+        self.pos += 3;
+        kind
+    }
+
     fn one(&mut self, c: u8) -> Option<TokenKind> {
         let kind = match c {
             b'=' => TokenKind::Assign,
@@ -316,6 +360,10 @@ impl<'a> Lexer<'a> {
             b'<' => TokenKind::Lt,
             b'>' => TokenKind::Gt,
             b'!' => TokenKind::Bang,
+            b'&' => TokenKind::Amp,
+            b'|' => TokenKind::Pipe,
+            b'^' => TokenKind::Caret,
+            b'~' => TokenKind::Tilde,
             b':' => TokenKind::Colon,
             b';' => TokenKind::Semi,
             b',' => TokenKind::Comma,
@@ -407,6 +455,101 @@ mod tests {
                 TokenKind::Ge,
                 TokenKind::AndAnd,
                 TokenKind::OrOr,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn bitwise_shift_and_compound_operators() {
+        assert_eq!(
+            kinds("& | ^ ~ << >> ** |> ..= ++ --"),
+            vec![
+                TokenKind::Amp,
+                TokenKind::Pipe,
+                TokenKind::Caret,
+                TokenKind::Tilde,
+                TokenKind::Shl,
+                TokenKind::Shr,
+                TokenKind::StarStar,
+                TokenKind::PipeGt,
+                TokenKind::DotDotEq,
+                TokenKind::PlusPlus,
+                TokenKind::MinusMinus,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn compound_assign_operators() {
+        assert_eq!(
+            kinds("+= -= *= /= %= &= |= ^= <<= >>="),
+            vec![
+                TokenKind::PlusEq,
+                TokenKind::MinusEq,
+                TokenKind::StarEq,
+                TokenKind::SlashEq,
+                TokenKind::PercentEq,
+                TokenKind::AmpEq,
+                TokenKind::PipeEq,
+                TokenKind::CaretEq,
+                TokenKind::ShlEq,
+                TokenKind::ShrEq,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn inclusive_range_beats_exclusive_and_dot() {
+        // `..=` is longer than `..`, and a bare `.` after two dots stays a dot,
+        // so `...` lexes as `..` then `.` (spread is excluded, not a token).
+        assert_eq!(
+            kinds("1..=3 0..2 a...b"),
+            vec![
+                TokenKind::Int { val: 1, suffix: None },
+                TokenKind::DotDotEq,
+                TokenKind::Int { val: 3, suffix: None },
+                TokenKind::Int { val: 0, suffix: None },
+                TokenKind::DotDot,
+                TokenKind::Int { val: 2, suffix: None },
+                TokenKind::Ident("a".into()),
+                TokenKind::DotDot,
+                TokenKind::Dot,
+                TokenKind::Ident("b".into()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn double_minus_lexes_as_decrement() {
+        // `x--y` now lexes `--` between the identifiers, a documented change from
+        // the old `x - (-y)` reading. Spaces are required to subtract a negation.
+        assert_eq!(
+            kinds("x--y"),
+            vec![
+                TokenKind::Ident("x".into()),
+                TokenKind::MinusMinus,
+                TokenKind::Ident("y".into()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn shift_and_greater_disambiguate_greedily() {
+        // The lexer joins `>>` greedily; the parser splits it back at a type
+        // close. In expression position `a >> b` is a single shift token.
+        assert_eq!(
+            kinds("a >> b >= c"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Shr,
+                TokenKind::Ident("b".into()),
+                TokenKind::Ge,
+                TokenKind::Ident("c".into()),
                 TokenKind::Eof,
             ]
         );

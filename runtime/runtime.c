@@ -246,6 +246,40 @@ void cool_bounds_fault(void) {
     abort();
 }
 
+/* Reports a shift amount at or above the operand width. LLVM shifts are poison
+   at such an amount, so codegen guards every dynamic shift and calls this on a
+   miss, trapping loudly rather than silently masking to a wrong value. */
+void cool_shift_fault(void) {
+    fflush(stdout);
+    fputs("fatal: shift amount out of range\n", stderr);
+    abort();
+}
+
+/* Integer exponent by repeated squaring, entirely in uint64_t so the wrap is
+   defined and matches the bare `mul` codegen emits. The result starts at 1, so
+   `0 ** 0` is 1, the Rust pow convention. A negative exponent is meaningless for
+   an integer result and faults by name rather than returning a wrong value. */
+int64_t cool_pow_i64(int64_t base, int64_t exp) {
+    if (exp < 0) {
+        fflush(stdout);
+        fputs("fatal: negative exponent in integer '**'\n", stderr);
+        abort();
+    }
+    uint64_t result = 1;
+    uint64_t b = (uint64_t)base;
+    uint64_t e = (uint64_t)exp;
+    while (e > 0) {
+        if (e & 1) {
+            result *= b;
+        }
+        e >>= 1;
+        if (e > 0) {
+            b *= b;
+        }
+    }
+    return (int64_t)result;
+}
+
 /* Copies a NUL terminated buffer into a generationally allocated buffer and
    frees the temporary, so a string handed back to the language can be freed with
    the same generational heap as every other allocation. Returns NULL, after

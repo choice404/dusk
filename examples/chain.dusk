@@ -1,0 +1,30 @@
+// A chain of task awaits: amain awaits mid, mid returns the await of leaf.
+// leaf completes with (21, ok); mid forwards it whole through `return await`;
+// amain destructures the tuple and prints twice the value. Three tasks are in
+// flight at once, each future taken exactly once when its task returns.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func leaf() -> (int64, error) {
+    return (21, error {})
+}
+
+async func mid() -> (int64, error) {
+    return await leaf()
+}
+
+async func amain() -> int32 {
+    v, e := await mid()
+    e.ignore()
+    println(v * 2)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

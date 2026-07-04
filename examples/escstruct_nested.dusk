@@ -1,0 +1,15 @@
+// A nested struct whose inner struct field's slice views a frame-local array.
+// The escape walk descends through the nested struct field, so a frame-local
+// view buried a struct deep is still caught.
+@paradigm procedural
+struct Inner { rows: int64[] }
+struct Outer { inner: Inner }
+func mk() -> Outer {
+    a: int64[3] = [1, 2, 3]
+    return Outer { inner: Inner { rows: a[0..2] } }
+}
+func main() -> int32 {
+    o := mk()
+    println(o.inner.rows[0])
+    return 0
+}

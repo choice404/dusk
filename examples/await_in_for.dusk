@@ -1,0 +1,29 @@
+// An await inside a for over a NAMED fixed array. B0 spilled the data pointer,
+// length, and index to frame slots and reloads them per block, so the loop
+// body re-entered after a resume reads live values.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func val(n: int64) -> int64 {
+    return n
+}
+
+async func amain() -> int32 {
+    xs: int64[3] = [10, 20, 30]
+    mut s := 0
+    for x in xs {
+        v := await val(x)
+        s = s + v
+    }
+    println(s)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

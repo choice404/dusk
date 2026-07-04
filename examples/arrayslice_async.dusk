@@ -1,0 +1,25 @@
+// An array-literal-to-slice coercion across an await. The slice's backing is a
+// frame slot living the whole task, so the read after the suspension is valid.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func val(n: int64) -> int64 {
+    return n
+}
+
+async func amain() -> int32 {
+    s: int64[] = [10, 20, 30]
+    x := await val(1)
+    r := s[1] + x
+    println(r)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

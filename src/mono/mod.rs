@@ -16,6 +16,9 @@ use crate::parser::ast::{
 
 type Subst = HashMap<String, Type>;
 type Env = HashMap<String, Type>;
+/// An async function's signature lifted for the frame-view checks: its named
+/// parameters, its return type, and its span.
+type AsyncSig = (Vec<(String, Type)>, Type, Span);
 
 /// Expands all generics in a module into concrete monomorphic items.
 pub fn expand(module: &Module) -> Module {
@@ -92,6 +95,9 @@ impl<'a> Mono<'a> {
         for item in items {
             self.rewrite_item(item);
         }
+        // An async call mints a Future<R> the source never spells, so force one
+        // per async function before draining the worklist.
+        self.force_future_instances();
         while let Some((name, args)) = self.worklist.pop() {
             self.expand_instance(&name, &args);
         }
@@ -177,6 +183,10 @@ impl<'a> Mono<'a> {
 
     fn emit_field_ty(&mut self, ty: &Type, subst: &Subst) -> Type {
         let applied = subst_apply(ty, subst);
+        // A struct or enum field that names a Future with a frame-viewing element
+        // is a spell site too; fields carry no span, so the diagnostic points at
+        // the file rather than a column.
+        self.check_future_spell(&applied, Span::new(0, 0));
         self.emit_ty(&applied)
     }
 
@@ -311,8 +321,7 @@ impl<'a> Mono<'a> {
             return;
         }
         let Some(t) = targs.first() else { return };
-        let mut seen = HashSet::new();
-        if !self.chan_element_ok(t, &mut seen) {
+        if !self.chan_element_ok(t, &HashSet::new()) {
             let msg = if chan {
                 "a channel element cannot contain a slice, closure, or interface value; a view of the sending thread's frame would dangle in the receiver; send heap owned data instead"
             } else {
@@ -322,44 +331,65 @@ impl<'a> Mono<'a> {
         }
     }
 
-    /// Walks a concrete element type for anything that may view a frame,
-    /// recursing through struct and enum fields with a cycle guard, the mono
-    /// side twin of the checker's spawn capture walk.
-    fn chan_element_ok(&self, t: &Type, seen: &mut HashSet<String>) -> bool {
+    /// Whether a channel element may cross a thread boundary by copy: it must not
+    /// view the sending frame. The future-carrying flag is off, since a channel
+    /// element is not itself a future.
+    fn chan_element_ok(&self, t: &Type, path: &HashSet<String>) -> bool {
+        self.crossable(t, false, path)
+    }
+
+    /// Whether a value of this concrete type may cross a boundary that outlives
+    /// the frame it was built in: an async call, an await result, a spawn/submit
+    /// capture, or a channel send. A slice, closure, or interface value can view
+    /// that frame; with `ban_future` a future is refused too, since a future is
+    /// event-loop-thread property. The walk substitutes concrete type arguments
+    /// into generic struct and enum fields, so a burial behind a type parameter,
+    /// which the checker's erased walk cannot see, is caught here.
+    ///
+    /// `path` is the set of struct and enum names on the branch from the root to
+    /// the current node. A name already on the path is a recursive reference and
+    /// is assumed to cross, which terminates even a polymorphic recursion whose
+    /// mangled name grows without bound. Each descent gets its own path copy, so a
+    /// sibling instantiation of the same generic with a different, non-crossable
+    /// argument is judged on its own and never masked by a crossable sibling.
+    fn crossable(&self, t: &Type, ban_future: bool, path: &HashSet<String>) -> bool {
         match t {
             Type::Slice(_) | Type::Func(..) => false,
-            Type::Array(b, _) => self.chan_element_ok(b, seen),
-            Type::Tuple(ts) => ts.iter().all(|x| self.chan_element_ok(x, seen)),
+            Type::Named(n, _) if ban_future && n == "Future" => false,
+            Type::Array(b, _) => self.crossable(b, ban_future, path),
+            Type::Tuple(ts) => ts.iter().all(|x| self.crossable(x, ban_future, path)),
             Type::Named(n, targs) => {
-                if !targs.iter().all(|x| self.chan_element_ok(x, seen)) {
-                    return false;
-                }
-                if !seen.insert(mangle(n, targs)) {
+                if path.contains(n) {
                     return true;
+                }
+                let mut child = path.clone();
+                child.insert(n.clone());
+                if !targs.iter().all(|x| self.crossable(x, ban_future, &child)) {
+                    return false;
                 }
                 if let Some(s) = self.gstructs.get(n.as_str()).copied() {
                     let subst = bind(&s.generics, targs);
                     return s
                         .fields
                         .iter()
-                        .all(|fl| self.chan_element_ok(&subst_apply(&fl.ty, &subst), seen));
+                        .all(|fl| self.crossable(&subst_apply(&fl.ty, &subst), ban_future, &child));
                 }
                 if let Some(e) = self.genums.get(n.as_str()).copied() {
                     let subst = bind(&e.generics, targs);
                     return e.variants.iter().all(|v| {
                         v.fields
                             .iter()
-                            .all(|fl| self.chan_element_ok(&subst_apply(&fl.ty, &subst), seen))
+                            .all(|fl| self.crossable(&subst_apply(&fl.ty, &subst), ban_future, &child))
                     });
                 }
                 for item in self.items {
                     match item {
                         Item::Struct(s) if s.name == *n => {
-                            return s.fields.iter().all(|fl| self.chan_element_ok(&fl.ty, seen));
+                            return s.fields.iter().all(|fl| self.crossable(&fl.ty, ban_future, &child));
                         }
                         Item::Enum(e) if e.name == *n => {
                             return e.variants.iter().all(|v| {
-                                v.fields.iter().all(|fl| self.chan_element_ok(&fl.ty, seen))
+                                v.fields.iter().all(|fl| self.crossable(&fl.ty, ban_future, &child))
                             });
                         }
                         Item::Interface(i) if i.name == *n => return false,
@@ -369,6 +399,76 @@ impl<'a> Mono<'a> {
                 true
             }
             _ => true,
+        }
+    }
+
+    /// Reports a future spelled with an element that could view a frame, wherever
+    /// its type appears: a binding annotation, a parameter, a field, or a return.
+    /// future_new and future_wrap already guard the mint site, but a hand-built or
+    /// relabeled `Future{}` struct infers as an unknown element and slips past the
+    /// mint guard, so every place a `Future<T>` type is named is checked too.
+    fn check_future_spell(&mut self, t: &Type, span: Span) {
+        match t {
+            Type::Named(n, targs) if n == "Future" && targs.len() == 1 => {
+                if !self.crossable(&targs[0], false, &HashSet::new()) {
+                    self.diags.push(Diagnostic::new(
+                        "a future element cannot contain a slice, closure, or interface value; a view of the completing thread's frame would dangle in the awaiter; send heap owned data instead",
+                        span,
+                    ));
+                }
+                self.check_future_spell(&targs[0], span);
+            }
+            Type::Named(_, targs) => {
+                for a in targs {
+                    self.check_future_spell(a, span);
+                }
+            }
+            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => {
+                self.check_future_spell(b, span)
+            }
+            Type::Tuple(xs) => {
+                for x in xs {
+                    self.check_future_spell(x, span);
+                }
+            }
+            Type::Func(ps, r) => {
+                for p in ps {
+                    self.check_future_spell(p, span);
+                }
+                self.check_future_spell(r, span);
+            }
+            Type::Unit => {}
+        }
+    }
+
+    /// Rejects a spawn or submit lambda capture whose type views the spawning
+    /// frame, seeing through generic type arguments the checker's erased walk
+    /// misses. The checker already rejects every direct capture, so this only
+    /// catches a burial behind a type parameter, which reaches here because such
+    /// a program is otherwise clean.
+    fn check_task_captures(
+        &mut self,
+        name: &str,
+        l: &crate::parser::ast::Lambda,
+        env: &Env,
+        span: Span,
+    ) {
+        let mut used = Vec::new();
+        let mut bound: HashSet<String> = l.params.iter().map(|p| p.name.clone()).collect();
+        crate::parser::ast::collect_block(&l.body, &mut used, &mut bound);
+        let mut done = HashSet::new();
+        for c in used {
+            if bound.contains(&c) || !done.insert(c.clone()) {
+                continue;
+            }
+            if let Some(t) = env.get(&c) {
+                if !self.crossable(t, true, &HashSet::new()) {
+                    self.diags.push(Diagnostic::new(
+                        format!("{name} cannot capture '{c}': it holds a slice, closure, interface value, or future that would view the spawning frame"),
+                        span,
+                    ));
+                }
+            }
         }
     }
 
@@ -392,6 +492,10 @@ impl<'a> Mono<'a> {
         let mut params = Vec::with_capacity(f.params.len());
         for p in &f.params {
             let applied = subst_apply(&p.ty, subst);
+            // A Future named in a parameter or return with a frame-viewing
+            // element is rejected, so a bad element cannot enter through a
+            // signature that names the concrete Future<T>.
+            self.check_future_spell(&applied, f.span);
             env.insert(p.name.clone(), applied.clone());
             params.push(Param {
                 using: p.using,
@@ -400,10 +504,12 @@ impl<'a> Mono<'a> {
             });
         }
         let ret_applied = subst_apply(&f.ret, subst);
+        self.check_future_spell(&ret_applied, f.span);
         let ret = self.emit_ty(&ret_applied);
         let body = self.rw_block(&f.body, subst, &mut env, &ret_applied);
         Func {
             exported: f.exported,
+            is_async: f.is_async,
             name,
             span: f.span,
             generics: Vec::new(),
@@ -429,6 +535,15 @@ impl<'a> Mono<'a> {
                     .first()
                     .and_then(|b| b.ty.as_ref())
                     .map(|t| subst_apply(t, subst));
+                // A Future spelled on a binding annotation with a frame-viewing
+                // element is rejected, closing the relabeled-future hole a mint
+                // guard cannot see.
+                for b in &l.binds {
+                    if let Some(t) = &b.ty {
+                        let a = subst_apply(t, subst);
+                        self.check_future_spell(&a, l.value.span);
+                    }
+                }
                 let value = self.rw_expr(&l.value, subst, env, exp.as_ref());
                 let vt = exp
                     .clone()
@@ -470,6 +585,11 @@ impl<'a> Mono<'a> {
                 })
             }
             Stmt::Assign(lhs, rhs) => Stmt::Assign(
+                self.rw_expr(lhs, subst, env, None),
+                self.rw_expr(rhs, subst, env, None),
+            ),
+            Stmt::AssignOp(op, lhs, rhs) => Stmt::AssignOp(
+                *op,
                 self.rw_expr(lhs, subst, env, None),
                 self.rw_expr(rhs, subst, env, None),
             ),
@@ -591,9 +711,10 @@ impl<'a> Mono<'a> {
                 Box::new(self.rw_expr(a, subst, env, None)),
                 Box::new(self.rw_expr(b, subst, env, None)),
             ),
-            ExprKind::Range(a, b) => ExprKind::Range(
+            ExprKind::Range(a, b, incl) => ExprKind::Range(
                 Box::new(self.rw_expr(a, subst, env, None)),
                 Box::new(self.rw_expr(b, subst, env, None)),
+                *incl,
             ),
             ExprKind::Tuple(xs) => {
                 ExprKind::Tuple(xs.iter().map(|x| self.rw_expr(x, subst, env, None)).collect())
@@ -626,6 +747,20 @@ impl<'a> Mono<'a> {
                 let _ = expected;
                 ExprKind::Match(Box::new(self.rw_match(m, subst, env, &Type::Unit)))
             }
+            ExprKind::Await(op, _) => {
+                // Fill the element type the codegen state machine sizes the
+                // awaited slot from. It is left None by the parser and typeck; the
+                // concrete operand type is first known here.
+                let rop = self.rw_expr(op, subst, env, None);
+                let el = self.await_element_ty(op, subst, env).map(|t| self.emit_ty(&t));
+                if el.is_none() {
+                    self.diags.push(Diagnostic::new(
+                        "the element type of this await could not be inferred; bind the future with an annotation first",
+                        e.span,
+                    ));
+                }
+                ExprKind::Await(Box::new(rop), el)
+            }
             other => other.clone(),
         };
         node(kind, e.span)
@@ -639,6 +774,16 @@ impl<'a> Mono<'a> {
         env: &Env,
         expected: Option<&Type>,
     ) -> ExprKind {
+        // A spawn or submit capture is checked here, where env carries un-mangled
+        // types, so a frame-viewing value buried behind a generic type parameter
+        // is caught even though the checker's erased walk let it through.
+        if let ExprKind::Ident(name) = &callee.kind {
+            if (name == "spawn" || name == "submit") && args.len() == 1 {
+                if let ExprKind::Lambda(l) = &args[0].kind {
+                    self.check_task_captures(name, l, env, callee.span);
+                }
+            }
+        }
         if let ExprKind::Field(base, v) = &callee.kind {
             if let ExprKind::Ident(g) = &base.kind {
                 if self.genums.contains_key(g) && self.enum_has_variant(g, v) {
@@ -806,7 +951,9 @@ impl<'a> Mono<'a> {
             ExprKind::Ident(n) => env.get(n).cloned(),
             ExprKind::Unary(op, x) => match op {
                 crate::parser::ast::UnOp::Not => Some(named("bool")),
-                crate::parser::ast::UnOp::Neg => self.static_ty(x, subst, env),
+                crate::parser::ast::UnOp::Neg | crate::parser::ast::UnOp::BitNot => {
+                    self.static_ty(x, subst, env)
+                }
                 crate::parser::ast::UnOp::Deref => match self.static_ty(x, subst, env)? {
                     Type::Ptr(b) => Some(*b),
                     _ => None,
@@ -881,6 +1028,75 @@ impl<'a> Mono<'a> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// The concrete element type of an awaited operand. A direct async call
+    /// reports its declared return, which is exactly the element the task future
+    /// carries; a value of type `Future<t>`, from a leaf future binding or a
+    /// future-returning call, yields `t`. When the operand's type cannot be
+    /// resolved statically the caller reports it and asks for an annotation.
+    fn await_element_ty(&self, op: &Expr, subst: &Subst, env: &Env) -> Option<Type> {
+        let t = self.static_ty(op, subst, env)?;
+        match t {
+            Type::Named(n, targs) if n == "Future" && targs.len() == 1 => {
+                Some(subst_apply(&targs[0], subst))
+            }
+            other => Some(other),
+        }
+    }
+
+    /// Forces one Future instantiation per async function, so the struct codegen
+    /// packs an async call's result into exists even when no source line names
+    /// `Future<R>`. Reuses the future element ban as a backstop, and requires the
+    /// Future struct to be in scope, since an async call cannot lower without it.
+    fn force_future_instances(&mut self) {
+        // Async funcs are non-generic, so their param and return types are already
+        // un-mangled with type arguments intact, exactly what the frame-view walk
+        // needs to see through a generic burial.
+        let asyncs: Vec<AsyncSig> = self
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Func(f) if f.is_async => Some((
+                    f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
+                    f.ret.clone(),
+                    f.span,
+                )),
+                _ => None,
+            })
+            .collect();
+        if asyncs.is_empty() {
+            return;
+        }
+        if !self.gstructs.contains_key("Future") {
+            self.diags.push(Diagnostic::new(
+                "calling an async func needs Future from std.async.future; add @import std.async.future",
+                asyncs[0].2,
+            ));
+            return;
+        }
+        for (params, ret, span) in asyncs {
+            // No parameter may view the caller's frame or carry a future, seen
+            // through generic type arguments the erased checker walk misses. The
+            // checker already rejects the direct cases, so this only fires on a
+            // burial in an otherwise clean program.
+            for (pname, pty) in &params {
+                if !self.crossable(pty, true, &HashSet::new()) {
+                    self.diags.push(Diagnostic::new(
+                        format!("an async func cannot take '{pname}': it holds a slice, closure, interface value, or future that would view the caller's frame, which the task outlives"),
+                        span,
+                    ));
+                }
+            }
+            if !self.crossable(&ret, true, &HashSet::new()) {
+                self.diags.push(Diagnostic::new(
+                    "an async func cannot return a slice, closure, interface value, or future that would outlive the task frame it views",
+                    span,
+                ));
+            }
+            let r = self.emit_ty(&ret);
+            self.enqueue("Future", &[r]);
         }
     }
 }
@@ -1010,7 +1226,9 @@ fn int_lit_ty(suffix: &Option<String>) -> &'static str {
     }
 }
 
-fn mangle(name: &str, args: &[Type]) -> String {
+/// The mangled name of an instantiation, `name$arg$arg`. Exposed so codegen can
+/// compute the identical `Future$...` name an async call's result packs into.
+pub(crate) fn mangle(name: &str, args: &[Type]) -> String {
     if args.is_empty() {
         return name.to_string();
     }
@@ -1021,8 +1239,9 @@ fn mangle(name: &str, args: &[Type]) -> String {
 /// Flattens a type to an injective token-safe string. Nested generic
 /// references carry an arity prefix so siblings and nesting never alias
 /// (`A$B$1$C$D` and `A$B$C$1$D` stay distinct), and non nominal constructors
-/// use a leading `$` marker that no source identifier can begin with.
-fn flat(ty: &Type) -> String {
+/// use a leading `$` marker that no source identifier can begin with. Exposed
+/// alongside `mangle` so codegen mangles a future element identically.
+pub(crate) fn flat(ty: &Type) -> String {
     match ty {
         Type::Named(n, args) if args.is_empty() => n.clone(),
         Type::Named(n, args) => {
@@ -1305,6 +1524,236 @@ mod tests {
              func main() -> int32 {\n  n: int64 = future_new()\n  println(n)\n  return 0\n}",
         );
         assert!(!d.iter().any(|m| m.contains("future element")), "{d:?}");
+    }
+
+    // A minimal Future struct so the forced instantiation finds its definition,
+    // standing in for the stdlib import in these unit tests.
+    const FUTURE_DECL: &str = "struct Future<T> { h: *void, gen: int64 }\n";
+
+    /// The element-type annotation the monomorphizer filled on the first await
+    /// found while walking the module, and whether any await was found at all.
+    fn first_await_ty(src: &str) -> (bool, Option<Type>) {
+        let (t, _) = lex(src);
+        let (m, e) = parse(t);
+        assert!(e.is_empty(), "parse errors: {e:?}");
+        let out = expand(&m);
+        fn walk_block(b: &Block) -> Option<(bool, Option<Type>)> {
+            b.stmts.iter().find_map(walk_stmt)
+        }
+        fn walk_stmt(s: &Stmt) -> Option<(bool, Option<Type>)> {
+            match s {
+                Stmt::Let(l) => walk_expr(&l.value),
+                Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Defer(e) => walk_expr(e),
+                Stmt::If(i) => walk_block(&i.then).or_else(|| i.els.as_ref().and_then(walk_block)),
+                Stmt::While(w) => walk_block(&w.body),
+                Stmt::For(f) => walk_block(&f.body),
+                Stmt::Match(m) => m.arms.iter().find_map(|a| walk_block(&a.body)),
+                _ => None,
+            }
+        }
+        fn walk_expr(e: &Expr) -> Option<(bool, Option<Type>)> {
+            if let ExprKind::Await(_, ty) = &e.kind {
+                return Some((true, ty.clone()));
+            }
+            None
+        }
+        for it in &out.items {
+            if let Item::Func(f) = it {
+                if let Some(r) = walk_block(&f.body) {
+                    return r;
+                }
+            }
+        }
+        (false, None)
+    }
+
+    #[test]
+    fn await_of_an_async_call_fills_the_declared_return() {
+        let (found, ty) = first_await_ty(&format!(
+            "{FUTURE_DECL}async func val(x: int64) -> int64 {{ return x }}\n\
+             async func amain() -> int64 {{\n  a := await val(3)\n  return a\n}}"
+        ));
+        assert!(found, "an await must be present");
+        assert_eq!(ty, Some(named("int64")), "element is the async func's declared return");
+    }
+
+    #[test]
+    fn await_of_an_annotated_future_binding_fills_the_element() {
+        let (found, ty) = first_await_ty(&format!(
+            "{FUTURE_DECL}func fnew() -> Future<int64> {{ return Future {{ h: fnew_h(), gen: 0 }} }}\n\
+             async func amain() -> int64 {{\n  fa: Future<int64> = fnew()\n  a := await fa\n  return a\n}}"
+        ));
+        assert!(found);
+        assert_eq!(ty, Some(named("int64")), "element unwraps the annotated Future<int64>");
+    }
+
+    #[test]
+    fn await_of_an_async_tuple_call_fills_the_tuple_element() {
+        let (found, ty) = first_await_ty(&format!(
+            "{FUTURE_DECL}async func leaf() -> (int64, error) {{ return (1, error {{}}) }}\n\
+             async func amain() -> int64 {{\n  v, e := await leaf()\n  e.ignore()\n  return v\n}}"
+        ));
+        assert!(found);
+        assert_eq!(
+            ty,
+            Some(Type::Tuple(vec![named("int64"), named("error")])),
+            "element is the whole declared tuple return"
+        );
+    }
+
+    #[test]
+    fn await_with_an_unresolvable_operand_is_diagnosed() {
+        let d = diags(&format!(
+            "{FUTURE_DECL}func fwrap<T>(h: *void) -> Future<T> {{ return Future {{ h: h, gen: 0 }} }}\n\
+             async func amain() -> int64 {{\n  a := await fwrap(nullh())\n  return a\n}}"
+        ));
+        assert!(
+            d.iter().any(|m| m.contains("the element type of this await could not be inferred")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn async_without_a_future_struct_is_diagnosed() {
+        let d = diags(
+            "async func amain() -> int64 {\n  return 1\n}\n\
+             func main() -> int32 {\n  r := async_run(amain())\n  println(r)\n  return 0\n}",
+        );
+        assert!(
+            d.iter().any(|m| m.contains("calling an async func needs Future from std.async.future")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn async_param_generic_burial_rejects() {
+        // A slice buried behind a generic type parameter must reject, though the
+        // checker's erased walk cannot see it.
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct Box<T> {{ x: T }}\n\
+             async func g(b: Box<int64[]>) -> int64 {{ return 1 }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(
+            d.iter().any(|m| m.contains("an async func cannot take 'b'") && m.contains("view the caller's frame")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn async_param_generic_future_burial_rejects() {
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct Box<T> {{ x: T }}\n\
+             async func g(b: Box<Future<int64>>) -> int64 {{ return 1 }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(d.iter().any(|m| m.contains("an async func cannot take 'b'")), "{d:?}");
+    }
+
+    #[test]
+    fn async_return_generic_burial_rejects() {
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct Box<T> {{ x: T }}\n\
+             async func g() -> Box<int64[]> {{ return Box {{ x: [] }} }}\n\
+             func main() -> int32 {{ r := async_run(g())\n  println(1)\n  return 0 }}"
+        ));
+        assert!(d.iter().any(|m| m.contains("an async func cannot return")), "{d:?}");
+    }
+
+    #[test]
+    fn spawn_capture_generic_burial_rejects() {
+        let d = diags(
+            "struct Box<T> { x: T }\n\
+             func main() -> int32 {\n  b: Box<int64[]> = Box { x: [1, 2] }\n  t, e := spawn(lambda () -> void {\n    println(b.x.len)\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n  return 0\n}",
+        );
+        assert!(d.iter().any(|m| m.contains("spawn cannot capture 'b'")), "{d:?}");
+    }
+
+    #[test]
+    fn submit_capture_generic_burial_rejects() {
+        let d = diags(
+            "struct Box<T> { x: T }\n\
+             func main() -> int32 {\n  b: Box<int64[]> = Box { x: [1, 2] }\n  s := submit(lambda () -> void {\n    println(b.x.len)\n  })\n  s.ignore()\n  return 0\n}",
+        );
+        assert!(d.iter().any(|m| m.contains("submit cannot capture 'b'")), "{d:?}");
+    }
+
+    #[test]
+    fn relabeled_future_slice_annotation_rejects() {
+        // A hand-built Future struct relabeled to a slice element must reject at
+        // the annotation, since it infers as an unknown element past the mint guard.
+        let d = diags(&format!(
+            "{FUTURE_DECL}func main() -> int32 {{\n  fs: Future<int64[]> = Future {{ h: hh(), gen: 0 }}\n  return 0\n}}"
+        ));
+        assert!(d.iter().any(|m| m.contains("a future element cannot contain a slice")), "{d:?}");
+    }
+
+    #[test]
+    fn scalar_generic_element_async_param_accepts() {
+        // The false-positive guard: a scalar element behind a generic must pass.
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct Box<T> {{ x: T }}\n\
+             async func g(b: Box<int64>) -> int64 {{ return b.x }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(
+            !d.iter().any(|m| m.contains("an async func cannot take")),
+            "a scalar generic element must be accepted: {d:?}"
+        );
+    }
+
+    #[test]
+    fn polymorphic_recursive_async_param_terminates() {
+        // A non-regular recursive type grows its mangled name at every level, so a
+        // mangle-keyed cycle guard never repeats and loops forever. The path-keyed
+        // guard terminates; the test completing at all proves it. L<int64> holds
+        // only nested L's and an int64, no frame view, so the param is accepted.
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct L<T> {{ next: L<L<T>>, val: T }}\n\
+             async func g(x: L<int64>) -> void {{ return }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(!d.iter().any(|m| m.contains("an async func cannot take 'x'")), "{d:?}");
+    }
+
+    #[test]
+    fn polymorphic_recursive_channel_element_terminates() {
+        // The channel side of crossable takes the same non-regular recursion; the
+        // test completing proves chan_element_ok terminates too. L<int64> is
+        // crossable, so no future-element error is expected.
+        let d = diags(
+            "struct L<T> { next: L<L<T>>, val: T }\n\
+             func future_new<T>() -> T { return future_new() }\n\
+             func main() -> int32 {\n  n: L<int64> = future_new()\n  println(n.val)\n  return 0\n}",
+        );
+        assert!(!d.iter().any(|m| m.contains("future element")), "{d:?}");
+    }
+
+    #[test]
+    fn sibling_generic_with_a_bad_arg_is_not_masked() {
+        // Path-keyed descent judges each sibling instantiation of a generic on its
+        // own, so a crossable Box<int64> does not mask a non-crossable Box<int64[]>.
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct Box<T> {{ x: T }}\n\
+             struct Pair<A, B> {{ a: A, b: B }}\n\
+             async func g(p: Pair<Box<int64>, Box<int64[]>>) -> void {{ return }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+    }
+
+    #[test]
+    fn async_func_forces_its_future_instance() {
+        let n = names(&format!(
+            "{FUTURE_DECL}async func amain() -> int64 {{\n  return 1\n}}\n\
+             func main() -> int32 {{\n  r := async_run(amain())\n  println(r)\n  return 0\n}}"
+        ));
+        assert!(n.contains(&"Future$int64".to_string()), "the Future<int64> instance must be forced: {n:?}");
     }
 
     #[test]

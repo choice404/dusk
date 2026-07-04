@@ -1,0 +1,41 @@
+// The array-of-slice-of-interface build across an await: the inner arrays box at
+// the interface width and view as slices whose backings are per-execution arena
+// blocks, all surviving the suspension. Dispatch after the await reads the right
+// vtable. 2 + 0.
+@paradigm oop
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+interface Sized {
+    size() -> int64
+}
+
+struct Box {
+    v: int64,
+}
+
+impl Sized for Box {
+    func size() -> int64 {
+        return self.v
+    }
+}
+
+async func val(n: int64) -> int64 {
+    return n
+}
+
+async func amain() -> int32 {
+    arr: (Sized[])[2] = [[Box { v: 1 }, Box { v: 2 }], [Box { v: 3 }]]
+    x := await val(0)
+    println(arr[0][1].size() + x)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

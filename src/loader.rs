@@ -238,6 +238,10 @@ fn shift_stmt(s: &mut Stmt, base: u32) {
             shift_expr(a, base);
             shift_expr(b, base);
         }
+        Stmt::AssignOp(_, a, b) => {
+            shift_expr(a, base);
+            shift_expr(b, base);
+        }
         Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => shift_expr(e, base),
         Stmt::Return(None) => {}
         Stmt::If(i) => {
@@ -271,7 +275,7 @@ fn shift_expr(e: &mut Expr, base: u32) {
     e.span.hi += base;
     match &mut e.kind {
         ExprKind::Unary(_, x) => shift_expr(x, base),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b, _) => {
             shift_expr(a, base);
             shift_expr(b, base);
         }
@@ -294,6 +298,7 @@ fn shift_expr(e: &mut Expr, base: u32) {
         }
         ExprKind::Lambda(l) => shift_block(&mut l.body, base),
         ExprKind::Match(m) => shift_match(m, base),
+        ExprKind::Await(op, _) => shift_expr(op, base),
         ExprKind::Do(_, binds) => {
             for b in binds {
                 shift_expr(&mut b.expr, base);
@@ -372,6 +377,10 @@ fn fold_stmt(s: &mut Stmt, ctx: &mut FoldCtx) {
             fold_expr(a, ctx);
             fold_expr(b, ctx);
         }
+        Stmt::AssignOp(_, a, b) => {
+            fold_expr(a, ctx);
+            fold_expr(b, ctx);
+        }
         Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => fold_expr(e, ctx),
         Stmt::Return(None) => {}
         Stmt::If(i) => {
@@ -433,7 +442,7 @@ fn fold_expr(e: &mut Expr, ctx: &mut FoldCtx) {
             }
         }
         ExprKind::Unary(_, x) => fold_expr(x, ctx),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b, _) => {
             fold_expr(a, ctx);
             fold_expr(b, ctx);
         }
@@ -450,6 +459,7 @@ fn fold_expr(e: &mut Expr, ctx: &mut FoldCtx) {
         }
         ExprKind::Lambda(l) => fold_block(&mut l.body, ctx),
         ExprKind::Match(m) => fold_match(m, ctx),
+        ExprKind::Await(op, _) => fold_expr(op, ctx),
         ExprKind::Do(_, binds) => {
             for b in binds {
                 fold_expr(&mut b.expr, ctx);

@@ -1,0 +1,23 @@
+// A conditional reassignment of an enum binding to a frame-local payload. x
+// starts clean, holding a param slice payload, then an if arm reassigns it to a
+// local-array payload; the may-join keeps x flagged past the branch, so the
+// return is rejected.
+@paradigm procedural
+enum E { V(rows: int64[]), N }
+func mk(xs: int64[], c: bool) -> E {
+    mut x := E.V(xs)
+    a: int64[3] = [1, 2, 3]
+    if c {
+        x = E.V(a[0..2])
+    }
+    return x
+}
+func main() -> int32 {
+    d: int64[3] = [1, 2, 3]
+    e := mk(d[0..3], true)
+    match e {
+        V(r) => { println(r[0]) }
+        N => { println(0) }
+    }
+    return 0
+}

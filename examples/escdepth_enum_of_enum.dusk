@@ -1,0 +1,22 @@
+// An enum payload whose TYPE is another enum wrapping a frame-local view. The
+// walk descends payload into payload, so a slice two enums deep is caught.
+@paradigm procedural
+enum Inner { V(rows: int64[]), N }
+enum Outer { W(inner: Inner), Z }
+func mk() -> Outer {
+    a: int64[3] = [1, 2, 3]
+    return Outer.W(Inner.V(a[0..2]))
+}
+func main() -> int32 {
+    o := mk()
+    match o {
+        W(inr) => {
+            match inr {
+                V(r) => { println(r[0]) }
+                N => { println(0) }
+            }
+        }
+        Z => { println(0) }
+    }
+    return 0
+}

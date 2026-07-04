@@ -39,6 +39,10 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("void @cool_gen_fault()");
     m.declare("void @cool_null_fault()");
     m.declare("void @cool_bounds_fault()");
+    m.declare("void @cool_shift_fault()");
+    m.declare("i64 @cool_pow_i64(i64, i64)");
+    m.declare("double @llvm.pow.f64(double, double)");
+    m.declare("float @llvm.pow.f32(float, float)");
     m.declare("ptr @cool_debug_alloc(i64)");
     m.declare("void @cool_debug_free(ptr)");
     m.declare("i64 @cool_debug_leaks()");
@@ -47,6 +51,15 @@ pub fn compile(module: &ast::Module) -> String {
     m.declare("i64 @cool_thread_join(ptr, i64)");
     m.declare("i64 @cool_pool_submit(ptr, ptr)");
     m.declare("ptr @cool_alloc_env(i64)");
+    m.declare("ptr @cool_task_new(ptr, i64, i64)");
+    m.declare("ptr @cool_task_frame(ptr)");
+    m.declare("void @cool_task_start(ptr)");
+    m.declare("void @cool_task_await(ptr, ptr, i64)");
+    m.declare("void @cool_task_return(ptr, ptr, i64)");
+    m.declare("ptr @cool_task_env_alloc(ptr, i64)");
+    m.declare("void @cool_future_take(ptr, i64, ptr, ptr)");
+    m.declare("void @cool_loop_run(ptr, i64, ptr, i64)");
+    m.declare("void @cool_task_state_fault()");
     m.declare("ptr @cool_read_file(ptr)");
     m.declare("i64 @cool_write_file(ptr, ptr)");
     m.declare("ptr @cool_read_line()");
@@ -84,6 +97,13 @@ pub fn compile(module: &ast::Module) -> String {
             // since the runtime calls `main(int, char**)`. Emit the user body under
             // an internal name and a C ABI `@main` wrapper that wraps argc and argv
             // into the dusk string slice.
+            // An async func lowers to one poll function over a heap frame plus a
+            // framesize constant, never a plain C-ABI define; calling it mints a
+            // task instead of jumping in.
+            Item::Func(f) if f.is_async => {
+                let def = crate::codegen::async_fn::gen_async_func(&mut m, &ctx, f);
+                m.push_function(def);
+            }
             Item::Func(f) if f.name == "main" && main_is_argc_argv(&ctx, f) => {
                 let mut renamed = f.clone();
                 renamed.name = "dusk__main".to_string();
@@ -162,7 +182,7 @@ fn emit_thunk(m: &mut Module, ty: &str, meth: &IMethod, name: &str) {
 }
 
 #[derive(Clone, PartialEq)]
-enum CTy {
+pub(crate) enum CTy {
     Int(u32),
     Char,
     F64,
@@ -184,7 +204,7 @@ enum CTy {
 }
 
 impl CTy {
-    fn ll(&self) -> String {
+    pub(crate) fn ll(&self) -> String {
         match self {
             CTy::Int(n) => format!("i{n}"),
             CTy::Char => "i8".to_string(),
@@ -293,7 +313,16 @@ struct EnumDef {
     variants: Vec<VariantDef>,
 }
 
-struct Ctx {
+/// An async function's lowered signature, shared by its poll emission and every
+/// call site: the parameter types (so both compute the same frame prefix), the
+/// declared return type, and the post-mono `Future$...` struct a call packs.
+pub(crate) struct AsyncInfo {
+    pub(crate) params: Vec<CTy>,
+    pub(crate) ret: CTy,
+    pub(crate) fut_struct: String,
+}
+
+pub(crate) struct Ctx {
     structs: Vec<(String, Vec<(String, CTy)>)>,
     enums: Vec<EnumDef>,
     ifaces: Vec<IfaceDef>,
@@ -303,6 +332,9 @@ struct Ctx {
     // Nominal kind by name, one map lookup per Named type instead of scanning
     // three item lists on every type lowering.
     noms: HashMap<String, Nom>,
+    // Async functions by name. A call of one of these mints a task and returns a
+    // future rather than lowering as an ordinary call.
+    pub(crate) async_fns: HashMap<String, AsyncInfo>,
 }
 
 impl Ctx {
@@ -417,6 +449,27 @@ impl Ctx {
                 _ => {}
             }
         }
+        let mut async_fns = HashMap::new();
+        for item in &module.items {
+            if let Item::Func(f) = item {
+                if f.is_async {
+                    let ret = lower_ty(&f.ret, &nom);
+                    let params = f.params.iter().map(|p| lower_ty(&p.ty, &nom)).collect();
+                    // The future a call packs is the post-mono Future instance for
+                    // this return type; mono force-instantiated it, so codegen
+                    // mangles the identical name it emitted.
+                    let fut_struct = crate::mono::mangle("Future", std::slice::from_ref(&f.ret));
+                    async_fns.insert(
+                        f.name.clone(),
+                        AsyncInfo {
+                            params,
+                            ret,
+                            fut_struct,
+                        },
+                    );
+                }
+            }
+        }
         Ctx {
             structs,
             enums,
@@ -425,6 +478,7 @@ impl Ctx {
             fns,
             methods,
             noms,
+            async_fns,
         }
     }
 
@@ -466,7 +520,7 @@ impl Ctx {
     }
 
     /// Size and alignment in bytes of a lowered type.
-    fn size_align(&self, ty: &CTy) -> (u64, u64) {
+    pub(crate) fn size_align(&self, ty: &CTy) -> (u64, u64) {
         match ty {
             CTy::Bool => (1, 1),
             CTy::Char => (1, 1),
@@ -557,6 +611,15 @@ fn tag_bits(count: usize) -> u32 {
         16
     } else {
         32
+    }
+}
+
+/// A user-facing name for a lowered type, for a diagnostic message. A nominal
+/// type reads as its source name; anything else falls back to its LLVM form.
+fn ty_name(t: &CTy) -> String {
+    match t {
+        CTy::Iface(n) | CTy::Struct(n) | CTy::Enum(n) => n.clone(),
+        _ => t.ll(),
     }
 }
 
@@ -695,21 +758,26 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
     format!("{header}\n{}}}", fb.body)
 }
 
-struct Fb<'a> {
-    m: &'a mut Module,
-    ctx: &'a Ctx,
-    ret: CTy,
-    body: String,
+pub(crate) struct Fb<'a> {
+    pub(crate) m: &'a mut Module,
+    pub(crate) ctx: &'a Ctx,
+    pub(crate) ret: CTy,
+    pub(crate) body: String,
     tmp: u32,
     label: u32,
-    locals: HashMap<String, (CTy, String)>,
+    pub(crate) locals: HashMap<String, (CTy, String)>,
     defers: Vec<Expr>,
-    terminated: bool,
+    pub(crate) terminated: bool,
     allocator: Option<(String, CTy)>,
+    // In async mode this holds the task frame: alloca and alloca_raw route every
+    // slot through it and return an entry-block GEP name rather than emitting an
+    // alloca line, so no local's storage pointer is born mid-body where a resume
+    // edge could bypass it. Sync functions leave it None and allocate inline.
+    pub(crate) frame: Option<crate::codegen::frame::FrameCtx>,
 }
 
 impl<'a> Fb<'a> {
-    fn new(m: &'a mut Module, ctx: &'a Ctx, ret: CTy) -> Self {
+    pub(crate) fn new(m: &'a mut Module, ctx: &'a Ctx, ret: CTy) -> Self {
         Fb {
             m,
             ctx,
@@ -721,10 +789,11 @@ impl<'a> Fb<'a> {
             defers: Vec::new(),
             terminated: false,
             allocator: None,
+            frame: None,
         }
     }
 
-    fn fresh(&mut self) -> String {
+    pub(crate) fn fresh(&mut self) -> String {
         let t = format!("%t{}", self.tmp);
         self.tmp += 1;
         t
@@ -737,21 +806,49 @@ impl<'a> Fb<'a> {
     }
 
     fn line(&mut self, s: &str) {
+        // An alloca line must never reach an async frame body: every slot there
+        // is a frame GEP born in the prepended entry block, so a stray inline
+        // alloca would be storage the resume switch bypasses.
+        debug_assert!(
+            self.frame.is_none() || !s.trim_start().contains("= alloca "),
+            "an inline alloca leaked into an async frame body: {s}"
+        );
         self.body.push_str("  ");
         self.body.push_str(s);
         self.body.push('\n');
     }
 
-    fn place_label(&mut self, l: &str) {
+    pub(crate) fn place_label(&mut self, l: &str) {
         self.body.push_str(l);
         self.body.push_str(":\n");
         self.terminated = false;
     }
 
     fn alloca(&mut self, ty: &CTy) -> String {
+        if self.frame.is_some() {
+            let sa = self.ctx.size_align(ty);
+            return self.frame_slot(ty.ll(), sa);
+        }
         let d = self.fresh();
         self.line(&format!("{d} = alloca {}", ty.ll()));
         d
+    }
+
+    /// Appends a frame slot in async mode and returns the SSA name its entry
+    /// block GEP will define. The name is minted from the poll's counter so it
+    /// is unique against every body temporary; the GEP itself is emitted later,
+    /// when the entry block is synthesized and prepended.
+    fn frame_slot(&mut self, llty: String, (size, align): (u64, u64)) -> String {
+        let name = self.fresh();
+        let frame = self.frame.as_mut().expect("frame_slot outside async mode");
+        frame.slots.push(crate::codegen::frame::Slot {
+            name: name.clone(),
+            llty,
+            size,
+            align,
+            off: 0,
+        });
+        name
     }
 
     fn load(&mut self, ty: &CTy, ptr: &str) -> String {
@@ -899,6 +996,16 @@ impl<'a> Fb<'a> {
             self.line(&format!("{d} = fptosi {} {op} to {}", from.ll(), to.ll()));
             return d;
         }
+        // A float widens or narrows between f32 and f64. Both are float here and
+        // unequal (equal returned above), so f32->f64 is fpext and f64->f32 is
+        // fptrunc. Without this a float32 reaches a `double` sink (the f64 print
+        // and stderr printers) still typed `float`, which clang rejects at link.
+        if from.is_float() && to.is_float() {
+            let cast = if matches!(from, CTy::F64) { "fptrunc" } else { "fpext" };
+            let d = self.fresh();
+            self.line(&format!("{d} = {cast} {} {op} to {}", from.ll(), to.ll()));
+            return d;
+        }
         // A managed pointer narrows to a raw pointer by dropping its generation,
         // for returning or passing a *T where the raw *void layer is expected.
         if matches!(from, CTy::Ptr(_)) && matches!(to, CTy::RawPtr(_)) {
@@ -907,6 +1014,63 @@ impl<'a> Fb<'a> {
         // A raw pointer widens to a managed pointer as untracked, generation 0.
         if matches!(from, CTy::RawPtr(_)) && matches!(to, CTy::Ptr(_)) {
             return self.fat(op, "0");
+        }
+        // Two tuples of equal arity but differing members are rebuilt member by
+        // member: extract each, adapt it to the target member type, and reinsert
+        // into the target aggregate, so the value's type tag matches the store or
+        // return type. Each member routes through `adapt`, not raw `coerce`, so a
+        // struct member boxes to an interface and an array member views as a
+        // slice (both fat conversions live in adapt); a narrow integer literal
+        // truncates to its declared width; a member already equal (a managed
+        // pointer's fat { ptr, i64 }, an error word) copies unchanged. Nested
+        // tuples recurse through this same arm. An identical tuple never reaches
+        // here, since the `from == to` check above short-circuits it.
+        if let (CTy::Tuple(fs), CTy::Tuple(ts)) = (from, to) {
+            if fs.len() == ts.len() {
+                let (fs, ts) = (fs.clone(), ts.clone());
+                let mut agg = "undef".to_string();
+                for (i, (ft, tt)) in fs.iter().zip(ts.iter()).enumerate() {
+                    let m = self.fresh();
+                    self.line(&format!("{m} = extractvalue {} {op}, {i}", from.ll()));
+                    let cm = self.adapt(Val::new(ft.clone(), m), tt).op;
+                    let d = self.fresh();
+                    self.line(&format!(
+                        "{d} = insertvalue {} {agg}, {} {cm}, {i}",
+                        to.ll(),
+                        tt.ll()
+                    ));
+                    agg = d;
+                }
+                return agg;
+            }
+        }
+        // Two arrays of equal length but differing element types are rebuilt
+        // element by element, exactly like the tuple arm: extract each, adapt it
+        // to the target element type (boxing a struct to an interface, viewing an
+        // inner array as a slice, recursing through further nesting), and reinsert
+        // into the target array. Without this, an array of a fat element type
+        // keeps the source element's layout (a raw struct where the target wants
+        // a fat pointer), which either mismatches at clang or, when the two share
+        // an LLVM type, strides off the end at runtime. An identical array never
+        // reaches here, since the `from == to` check above short-circuits it.
+        if let (CTy::Array(fe, fc), CTy::Array(te, tc)) = (from, to) {
+            if fc == tc {
+                let (fe, te, n) = ((**fe).clone(), (**te).clone(), *fc);
+                let mut agg = "undef".to_string();
+                for i in 0..n {
+                    let m = self.fresh();
+                    self.line(&format!("{m} = extractvalue {} {op}, {i}", from.ll()));
+                    let cm = self.adapt(Val::new(fe.clone(), m), &te).op;
+                    let d = self.fresh();
+                    self.line(&format!(
+                        "{d} = insertvalue {} {agg}, {} {cm}, {i}",
+                        to.ll(),
+                        te.ll()
+                    ));
+                    agg = d;
+                }
+                return agg;
+            }
         }
         op.to_string()
     }
@@ -918,17 +1082,76 @@ impl<'a> Fb<'a> {
             let (iface, ty) = (i.clone(), t.clone());
             return self.box_iface(&v, &iface, &ty);
         }
-        if let (CTy::Slice(_), CTy::Array(_, n)) = (target, &v.ty) {
-            let n = *n as usize;
-            return self.slice_from_array(v, n);
+        if let (CTy::Slice(target_elem), CTy::Array(src_elem, n)) = (target, &v.ty) {
+            let count = *n as usize;
+            let target_elem = (**target_elem).clone();
+            let src_elem = (**src_elem).clone();
+            // When the array's element type differs from the slice's declared
+            // element (an Array(Box) viewed as a Slice(Sized)), rebuild the array
+            // at the target element type first, so the backing is [n x <slice
+            // elem>] (the wide fat element) rather than [n x <source elem>]. The
+            // slice then strides over storage that actually holds fat elements;
+            // deriving the backing from the source element would size it for the
+            // narrow struct and walk off the end.
+            let arr = if src_elem == target_elem {
+                v
+            } else {
+                let target_arr = CTy::Array(Box::new(target_elem), *n);
+                self.adapt(v, &target_arr)
+            };
+            return self.slice_from_array(arr, count);
+        }
+        // Slice covariance backstop. A same-type slice (or one whose element is
+        // the Unknown placeholder) reinterprets its fat pointer safely and falls
+        // through unchanged. But a slice VALUE of a concrete element targeting a
+        // slice of an interface cannot be reinterpreted: each element would need
+        // reboxing into { data, vtable }, and a whole-slice cast leaves concrete
+        // payloads read as fat pairs, dispatching through garbage into a SEGV.
+        // dusk rejects this covariance; reboxing would also silently copy (the new
+        // slice would not alias the source), a semantics the reject decision
+        // rules out. So this is a hard, loud build error rather than silent IR:
+        // if a typeck sink misses the reject, the class still cannot miscompile.
+        // The array-literal case is the (Slice, Array) arm above and still boxes
+        // per element; only a differing-element slice VALUE reaches here.
+        if let (CTy::Slice(target_elem), CTy::Slice(src_elem)) = (target, &v.ty) {
+            let same = src_elem == target_elem
+                || matches!(**src_elem, CTy::Unknown)
+                || matches!(**target_elem, CTy::Unknown);
+            if !same && matches!(**target_elem, CTy::Iface(_)) {
+                panic!(
+                    "slice covariance from a slice of '{}' to a slice of interface '{}' is not supported; it cannot be reinterpreted without reboxing",
+                    ty_name(src_elem),
+                    ty_name(target_elem)
+                );
+            }
         }
         let op = self.coerce(&v.ty, &v.op, target);
         Val::new(target.clone(), op)
     }
 
+    /// Storage for a fat value's backing: an inline frame slot in sync mode, a
+    /// per-execution task-arena block in async mode. A boxed interface's data
+    /// pointer and a slice's data pointer can outlive the loop iteration that
+    /// created them, stored into an array or collection that lives on within the
+    /// same task; a single reused frame slot would then alias every iteration's
+    /// copy onto one backing. So in async mode the backing is a fresh
+    /// cool_task_env_alloc block (freed at cool_task_return), the same treatment
+    /// a closure environment gets. Sync inline alloca is already per-execution.
+    fn backing_slot(&mut self, ty: &CTy) -> String {
+        if self.frame.is_some() {
+            let (size, _) = self.ctx.size_align(ty);
+            let p = self.fresh();
+            self.line(&format!(
+                "{p} = call ptr @cool_task_env_alloc(ptr %frame, i64 {size})"
+            ));
+            return p;
+        }
+        self.alloca(ty)
+    }
+
     /// Boxes a struct value as an interface fat pointer `{ data, vtable }`.
     fn box_iface(&mut self, v: &Val, iface: &str, ty: &str) -> Val {
-        let slot = self.alloca(&v.ty);
+        let slot = self.backing_slot(&v.ty);
         self.line(&format!("store {} {}, ptr {slot}", v.ty.ll(), v.op));
         let a = self.fresh();
         self.line(&format!("{a} = insertvalue {{ ptr, ptr }} undef, ptr {slot}, 0"));
@@ -946,7 +1169,169 @@ impl<'a> Fb<'a> {
         }
     }
 
-    fn gen_block(&mut self, stmts: &[Stmt]) {
+    /// The async return path: evaluate and adapt the value, replay defers at true
+    /// completion, store the value into the frame result slot, hand it to
+    /// cool_task_return, and return void from the poll. A bare return, a void
+    /// return, and falling off the end all complete with size 0, copying nothing.
+    pub(crate) fn gen_async_return(&mut self, e: Option<&Expr>) {
+        match e {
+            Some(e) => {
+                let v = self.gen_expr(e);
+                self.gen_async_return_val(v);
+            }
+            None => self.gen_async_return_unit(),
+        }
+    }
+
+    /// Completes the task with an already-evaluated value. Shared by `return e`
+    /// and `return await f` (which loads the taken element and returns it).
+    fn gen_async_return_val(&mut self, v: Val) {
+        let ret = self.ret.clone();
+        let av = self.adapt(v, &ret);
+        self.emit_defers();
+        let (res, ret_size) = {
+            let f = self.frame.as_ref().expect("async return outside async mode");
+            (f.res.clone(), f.ret_size)
+        };
+        let mut size = 0u64;
+        if !matches!(ret, CTy::Void) {
+            self.line(&format!("store {} {}, ptr {res}", ret.ll(), av.op));
+            size = ret_size;
+        }
+        self.line(&format!(
+            "call void @cool_task_return(ptr %frame, ptr {res}, i64 {size})"
+        ));
+        self.line("ret void");
+        self.terminated = true;
+    }
+
+    /// Completes the task with no value (bare return, void return, fall-off-end).
+    fn gen_async_return_unit(&mut self) {
+        self.emit_defers();
+        let res = self.frame.as_ref().expect("async return outside async mode").res.clone();
+        self.line(&format!("call void @cool_task_return(ptr %frame, ptr {res}, i64 0)"));
+        self.line("ret void");
+        self.terminated = true;
+    }
+
+    /// The await suspend/resume protocol at one site. Evaluates the operand to a
+    /// fat future value, stores its words to the shared pending slots and the
+    /// state index, suspends with cool_task_await, and returns void from the
+    /// poll. At the resume label the future words are reloaded from the pending
+    /// slots and cool_future_take consumes the future into per-site element and
+    /// error slots (both frame slots born in the entry block). Returns those two
+    /// slot pointers and the element type, for the caller to destructure.
+    ///
+    /// Store order is pending words (offsets 8 and 16) then the state word
+    /// (offset 0) then the await call then ret void; nothing read after the
+    /// resume label is an SSA temporary defined before the ret, so no value
+    /// crosses the resume edge. The await always yields one scheduler turn even
+    /// on a ready future; that is cool_task_await's job, not the codegen's.
+    fn gen_await_take(&mut self, op: &Expr, el: Option<&Type>) -> (String, String, CTy) {
+        let el_ty = el.expect("an await site must carry its element type from mono");
+        let el_cty = lower_ty(el_ty, &|n| self.ctx.nom(n));
+        let futval = self.gen_expr(op);
+        let d = self.fresh();
+        self.line(&format!("{d} = extractvalue {} {}, 0", futval.ty.ll(), futval.op));
+        let g = self.fresh();
+        self.line(&format!("{g} = extractvalue {} {}, 1", futval.ty.ll(), futval.op));
+        let (k, pend_d, pend_g) = {
+            let f = self.frame.as_mut().expect("await outside async mode");
+            f.await_count += 1;
+            (f.await_count, f.pend_d.clone(), f.pend_g.clone())
+        };
+        self.line(&format!("store ptr {d}, ptr {pend_d}"));
+        self.line(&format!("store i64 {g}, ptr {pend_g}"));
+        self.line(&format!("store i64 {k}, ptr %frame"));
+        self.line(&format!("call void @cool_task_await(ptr %frame, ptr {d}, i64 {g})"));
+        self.line("ret void");
+        self.terminated = true;
+        let resume = format!("resume.{k}");
+        self.frame
+            .as_mut()
+            .expect("await outside async mode")
+            .resume_cases
+            .push((k as u64, resume.clone()));
+        self.place_label(&resume);
+        let d2 = self.load(&CTy::RawPtr(Box::new(CTy::Void)), &pend_d);
+        let g2 = self.load(&CTy::Int(64), &pend_g);
+        // A void element still needs a word to absorb the runtime's minimum
+        // one-byte copy, so a zero-size element routes to a scratch word slot.
+        let el_slot = if self.ctx.size_align(&el_cty).0 == 0 {
+            self.alloca_raw("i64")
+        } else {
+            self.alloca(&el_cty)
+        };
+        let err_slot = self.alloca_raw("ptr");
+        self.line(&format!(
+            "call void @cool_future_take(ptr {d2}, i64 {g2}, ptr {el_slot}, ptr {err_slot})"
+        ));
+        (el_slot, err_slot, el_cty)
+    }
+
+    /// `x := await f`, `x, e := await f`, or `x, y := await f` (tuple element).
+    /// The shape follows section 5: a single bind takes the whole element; a
+    /// tuple element with matching arity destructures member-wise (err discarded,
+    /// task NULL or leaf's own error inside the tuple); otherwise two binds take
+    /// the element and the error word.
+    fn gen_await_let(&mut self, l: &Let, op: &Expr, el: Option<&Type>) {
+        let (el_slot, err_slot, el_cty) = self.gen_await_take(op, el);
+        let binds = &l.binds;
+        if binds.len() == 1 {
+            let ev = self.load(&el_cty, &el_slot);
+            self.bind_await(&binds[0], Val::new(el_cty, ev));
+        } else if let CTy::Tuple(ts) = el_cty.clone() {
+            if ts.len() == binds.len() {
+                let ev = self.load(&el_cty, &el_slot);
+                for (i, bind) in binds.iter().enumerate() {
+                    let m = self.fresh();
+                    self.line(&format!("{m} = extractvalue {} {ev}, {i}", el_cty.ll()));
+                    self.bind_await(bind, Val::new(ts[i].clone(), m));
+                }
+                return;
+            }
+            // A tuple element with a two-bind element+error shape falls through.
+            let ev = self.load(&el_cty, &el_slot);
+            self.bind_await(&binds[0], Val::new(el_cty, ev));
+            let errv = self.load(&CTy::Error, &err_slot);
+            self.bind_await(&binds[1], Val::new(CTy::Error, errv));
+        } else {
+            let ev = self.load(&el_cty, &el_slot);
+            self.bind_await(&binds[0], Val::new(el_cty, ev));
+            let errv = self.load(&CTy::Error, &err_slot);
+            self.bind_await(&binds[1], Val::new(CTy::Error, errv));
+        }
+    }
+
+    /// Binds one awaited value into a fresh frame slot, honoring an annotation.
+    fn bind_await(&mut self, bind: &ast::Bind, v: Val) {
+        let declared = bind
+            .ty
+            .as_ref()
+            .map(|t| lower_ty(t, &|n| self.ctx.nom(n)))
+            .unwrap_or_else(|| v.ty.clone());
+        let av = self.adapt(v, &declared);
+        let dst = self.alloca(&declared);
+        self.line(&format!("store {} {}, ptr {dst}", declared.ll(), av.op));
+        self.locals.insert(bind.name.clone(), (declared, dst));
+    }
+
+    /// `return await f`: the element is the whole declared return, so take it and
+    /// replay the async return path (defers run at true completion, then
+    /// cool_task_return). The error word is discarded; a task future's is NULL
+    /// and a leaf tuple return carries its error inside the tuple.
+    fn gen_await_return(&mut self, op: &Expr, el: Option<&Type>) {
+        let (el_slot, _err_slot, el_cty) = self.gen_await_take(op, el);
+        let ev = self.load(&el_cty, &el_slot);
+        self.gen_async_return_val(Val::new(el_cty, ev));
+    }
+
+    /// `await f` void form: take and discard both the element and the error.
+    fn gen_await_void(&mut self, op: &Expr, el: Option<&Type>) {
+        self.gen_await_take(op, el);
+    }
+
+    pub(crate) fn gen_block(&mut self, stmts: &[Stmt]) {
         for s in stmts {
             if self.terminated {
                 break;
@@ -957,17 +1342,48 @@ impl<'a> Fb<'a> {
 
     fn gen_stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let(l) => self.gen_let(l),
+            Stmt::Let(l) => {
+                if let ExprKind::Await(op, el) = &l.value.kind {
+                    self.gen_await_let(l, op, el.as_ref());
+                } else {
+                    self.gen_let(l);
+                }
+            }
             Stmt::Assign(lhs, rhs) => {
                 if let Some((ty, ptr)) = self.gen_place(lhs) {
                     let v = self.gen_expr(rhs);
-                    let op = self.coerce(&v.ty, &v.op, &ty);
+                    // adapt, not coerce: `s.f = someStruct` where f is an
+                    // interface boxes, and `arr[i] = [..]` views an array literal
+                    // as a slice; the fat conversions live in adapt.
+                    let op = self.adapt(v, &ty).op;
                     self.line(&format!("store {} {op}, ptr {ptr}", ty.ll()));
                 } else {
                     self.gen_expr(rhs);
                 }
             }
+            Stmt::AssignOp(op, lhs, rhs) => {
+                // The place address is computed once, so its index side effects,
+                // bounds checks, and generation checks all run exactly once. The
+                // current value is loaded, combined with the right operand, and
+                // stored back through the same pointer.
+                if let Some((ty, ptr)) = self.gen_place(lhs) {
+                    let cur = self.load(&ty, &ptr);
+                    let v = self.gen_binop_vals(*op, Val::new(ty.clone(), cur), rhs);
+                    let out = self.coerce(&v.ty, &v.op, &ty);
+                    self.line(&format!("store {} {out}, ptr {ptr}", ty.ll()));
+                } else {
+                    self.gen_expr(rhs);
+                }
+            }
             Stmt::Return(Some(e)) => {
+                if let ExprKind::Await(op, el) = &e.kind {
+                    self.gen_await_return(op, el.as_ref());
+                    return;
+                }
+                if self.frame.is_some() {
+                    self.gen_async_return(Some(e));
+                    return;
+                }
                 let v = self.gen_expr(e);
                 let ret = self.ret.clone();
                 let av = self.adapt(v, &ret);
@@ -980,6 +1396,10 @@ impl<'a> Fb<'a> {
                 self.terminated = true;
             }
             Stmt::Return(None) => {
+                if self.frame.is_some() {
+                    self.gen_async_return(None);
+                    return;
+                }
                 self.emit_defers();
                 self.default_ret();
             }
@@ -987,7 +1407,11 @@ impl<'a> Fb<'a> {
             Stmt::If(i) => self.gen_if(i),
             Stmt::While(w) => self.gen_while(w),
             Stmt::Expr(e) => {
-                self.gen_expr(e);
+                if let ExprKind::Await(op, el) = &e.kind {
+                    self.gen_await_void(op, el.as_ref());
+                } else {
+                    self.gen_expr(e);
+                }
             }
             Stmt::Match(m) => self.gen_match(&m.scrut, &m.arms, None),
             Stmt::For(f) => self.gen_for(f),
@@ -1117,6 +1541,15 @@ impl<'a> Fb<'a> {
     /// a fresh slot the body reads. Mirrors the `foreach` builtin's loop shape.
     fn gen_for(&mut self, f: &For) {
         let (data, len, elem) = self.for_source(&f.iter);
+        // The data pointer and length are born in the preheader but read from
+        // the loop header and body. Spill both into slots and reload them per
+        // block so no SSA value crosses a label boundary: a resume edge that
+        // jumps straight into the body must never depend on a preheader temp.
+        let data_slot = self.alloca_raw("ptr");
+        self.line(&format!("store ptr {data}, ptr {data_slot}"));
+        let len_slot = self.alloca_raw("i64");
+        self.line(&format!("store i64 {len}, ptr {len_slot}"));
+        let ptr_ty = CTy::RawPtr(Box::new(CTy::Void));
         let slot = self.alloca(&elem);
         self.locals.insert(f.var.clone(), (elem.clone(), slot.clone()));
         let i = self.alloca_raw("i64");
@@ -1127,17 +1560,23 @@ impl<'a> Fb<'a> {
         self.br(&cond);
         self.place_label(&cond);
         let iv = self.load(&CTy::Int(64), &i);
+        let lenv = self.load(&CTy::Int(64), &len_slot);
         let c = self.fresh();
-        self.line(&format!("{c} = icmp slt i64 {iv}, {len}"));
+        self.line(&format!("{c} = icmp slt i64 {iv}, {lenv}"));
         self.cond_br(&c, &body, &end);
         self.place_label(&body);
+        let ivb = self.load(&CTy::Int(64), &i);
+        let datav = self.load(&ptr_ty, &data_slot);
         let ep = self.fresh();
-        self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        self.line(&format!("{ep} = getelementptr {}, ptr {datav}, i64 {ivb}", elem.ll()));
         let ev = self.load(&elem, &ep);
         self.line(&format!("store {} {ev}, ptr {slot}", elem.ll()));
         self.gen_block(&f.body.stmts);
         if !self.terminated {
-            let ni = self.op2("add", "i64", &iv, "1");
+            // Reload the index after the body: the body may span a resume edge,
+            // so the value loaded at the top of the block cannot be reused here.
+            let iv2 = self.load(&CTy::Int(64), &i);
+            let ni = self.op2("add", "i64", &iv2, "1");
             self.line(&format!("store i64 {ni}, ptr {i}"));
             self.br(&cond);
         }
@@ -1284,8 +1723,8 @@ impl<'a> Fb<'a> {
                 self.gen_load(e)
             }
             ExprKind::Index(base, idx) => {
-                if let ExprKind::Range(lo, hi) = &idx.kind {
-                    self.gen_slice(base, lo, hi)
+                if let ExprKind::Range(lo, hi, inclusive) = &idx.kind {
+                    self.gen_slice(base, lo, hi, *inclusive)
                 } else {
                     self.gen_load(e)
                 }
@@ -1338,6 +1777,13 @@ impl<'a> Fb<'a> {
                     self.line(&format!("{d} = extractvalue {{ ptr, i64 }} {}, {idx}", bv.op));
                     return Val::new(fty, d);
                 }
+                // A fixed array carries its length in its type, so `.len` is the
+                // compile-time constant `n` as an int64, matching a slice's `.len`
+                // width. sema rejects every other field on an array. The base value
+                // is still materialized above so any side effect in it runs.
+                CTy::Array(_, n) if field == "len" => {
+                    return Val::new(CTy::Int(64), n.to_string());
+                }
                 _ => {}
             }
         }
@@ -1361,17 +1807,40 @@ impl<'a> Fb<'a> {
                 let r = self.op2("xor", "i1", &v.op, "1");
                 Val::new(CTy::Bool, r)
             }
+            UnOp::BitNot => {
+                let r = self.op2("xor", &v.ty.ll(), &v.op, "-1");
+                Val::new(v.ty, r)
+            }
             UnOp::Deref => v,
         }
     }
 
     fn gen_binary(&mut self, op: BinOp, a: &Expr, b: &Expr) -> Val {
         let av = self.gen_expr(a);
-        let bv = self.gen_expr(b);
-        let bo = self.coerce(&bv.ty, &bv.op, &av.ty);
-        let is_float = av.ty.is_float();
-        let ty = av.ty.clone();
+        self.gen_binop_vals(op, av, b)
+    }
+
+    /// Lowers a binary operation given a pre-evaluated left value and the right
+    /// operand as an expression. Compound assignment reuses this after loading a
+    /// place once, and passing the right operand as an expression keeps the shift
+    /// guard able to see a literal amount for elision.
+    fn gen_binop_vals(&mut self, op: BinOp, av: Val, b: &Expr) -> Val {
         use BinOp::*;
+        let bv = self.gen_expr(b);
+        let ty = av.ty.clone();
+        // Integer `**` widens both operands to i64, calls the runtime helper, and
+        // truncates back. Truncation commutes with modular multiplication, so this
+        // is exact for the wrapping semantics the bare `mul` already has.
+        if matches!(op, Pow) && !ty.is_float() {
+            let a64 = self.coerce(&av.ty, &av.op, &CTy::Int(64));
+            let e64 = self.coerce(&bv.ty, &bv.op, &CTy::Int(64));
+            let d = self.fresh();
+            self.line(&format!("{d} = call i64 @cool_pow_i64(i64 {a64}, i64 {e64})"));
+            let back = self.coerce(&CTy::Int(64), &d, &ty);
+            return Val::new(ty, back);
+        }
+        let bo = self.coerce(&bv.ty, &bv.op, &av.ty);
+        let is_float = ty.is_float();
         match op {
             Add | Sub | Mul | Div | Mod => {
                 let opc = arith_opcode(op, is_float);
@@ -1392,7 +1861,63 @@ impl<'a> Fb<'a> {
                 let r = self.op2("or", "i1", &av.op, &bo);
                 Val::new(CTy::Bool, r)
             }
+            BitAnd => {
+                let r = self.op2("and", &ty.ll(), &av.op, &bo);
+                Val::new(ty, r)
+            }
+            BitOr => {
+                let r = self.op2("or", &ty.ll(), &av.op, &bo);
+                Val::new(ty, r)
+            }
+            BitXor => {
+                let r = self.op2("xor", &ty.ll(), &av.op, &bo);
+                Val::new(ty, r)
+            }
+            Shl => self.gen_shift("shl", &av.op, b, &bo, ty),
+            Shr => self.gen_shift("ashr", &av.op, b, &bo, ty),
+            // Float `**` lowers to the LLVM pow intrinsic for the operand width.
+            Pow => {
+                let tyll = ty.ll();
+                let intr = if matches!(ty, CTy::F32) {
+                    "llvm.pow.f32"
+                } else {
+                    "llvm.pow.f64"
+                };
+                let d = self.fresh();
+                self.line(&format!("{d} = call {tyll} @{intr}({tyll} {}, {tyll} {bo})", av.op));
+                Val::new(ty, d)
+            }
         }
+    }
+
+    /// Lowers a shift. LLVM `shl`/`ashr` are poison at an amount at or above the
+    /// width, so a dynamic amount is guarded by a named runtime fault before the
+    /// shift, shaped exactly like `bounds_check`. The guard is elided only when
+    /// the amount is a literal already proven in range. `>>` is `ashr` for every
+    /// integer because signedness is not tracked; it fills with the sign bit.
+    fn gen_shift(&mut self, opcode: &str, a: &str, b: &Expr, bo: &str, ty: CTy) -> Val {
+        if !shift_amount_safe(b, &ty) {
+            self.shift_check(bo, &ty);
+        }
+        let r = self.op2(opcode, &ty.ll(), a, bo);
+        Val::new(ty, r)
+    }
+
+    /// Emits the dynamic shift guard: fault when the amount is at or above the
+    /// operand width. The compare runs in the operand's own width, so an int8
+    /// shift checks against 8 in i8.
+    fn shift_check(&mut self, amount: &str, ty: &CTy) {
+        let w = ty.int_bits().unwrap_or(64);
+        let tyll = ty.ll();
+        let bad = self.fresh();
+        self.line(&format!("{bad} = icmp uge {tyll} {amount}, {w}"));
+        let fault = self.new_label();
+        let ok = self.new_label();
+        self.cond_br(&bad, &fault, &ok);
+        self.place_label(&fault);
+        self.line("call void @cool_shift_fault()");
+        self.br(&ok);
+        self.place_label(&ok);
     }
 
     fn gen_struct_lit(&mut self, name: &str, fields: &[(String, Expr)]) -> Val {
@@ -1406,7 +1931,10 @@ impl<'a> Fb<'a> {
                 continue;
             };
             let fv = self.gen_expr(fexpr);
-            let op = self.coerce(&fv.ty, &fv.op, &fty);
+            // adapt, not coerce: a struct field of interface type boxes its
+            // value, and a slice field views an array literal; both fat
+            // conversions live in adapt. A scalar field falls through to coerce.
+            let op = self.adapt(fv, &fty).op;
             let d = self.fresh();
             self.line(&format!(
                 "{d} = insertvalue {} {agg}, {} {op}, {idx}",
@@ -1430,14 +1958,44 @@ impl<'a> Fb<'a> {
     }
 
     fn gen_array_lit(&mut self, elems: &[Expr], hint: Option<CTy>) -> Val {
-        let vals: Vec<Val> = elems.iter().map(|e| self.gen_expr(e)).collect();
-        let elem_ty = hint
-            .or_else(|| vals.first().map(|v| v.ty.clone()))
-            .unwrap_or(CTy::Int(64));
+        // With a declared element type, thread it into the elements so a nested
+        // array literal builds at the right inner type. A ragged nested literal
+        // then does not guess a fixed length from its first sibling: each inner
+        // literal is built to the hint (a slice element makes them all uniform
+        // { ptr, i64 } regardless of length). Without a hint, lower hint-less and
+        // guess the element type from the first element.
+        let (elem_ty, vals) = match hint {
+            Some(h) => {
+                let inner_hint = match &h {
+                    CTy::Slice(e) | CTy::Array(e, _) => Some((**e).clone()),
+                    _ => None,
+                };
+                let mut vals = Vec::with_capacity(elems.len());
+                for e in elems {
+                    let v = match (&e.kind, &inner_hint) {
+                        (ExprKind::Array(inner), Some(ih)) => {
+                            self.gen_array_lit(inner, Some(ih.clone()))
+                        }
+                        _ => self.gen_expr(e),
+                    };
+                    vals.push(v);
+                }
+                (h, vals)
+            }
+            None => {
+                let vals: Vec<Val> = elems.iter().map(|e| self.gen_expr(e)).collect();
+                let elem_ty = vals.first().map(|v| v.ty.clone()).unwrap_or(CTy::Int(64));
+                (elem_ty, vals)
+            }
+        };
         let aty = CTy::Array(Box::new(elem_ty.clone()), vals.len() as u64);
         let mut agg = "undef".to_string();
         for (i, v) in vals.into_iter().enumerate() {
-            let op = self.coerce(&v.ty, &v.op, &elem_ty);
+            // Adapt, not raw coerce: a struct element boxes to an interface and
+            // an inner array element views as a slice when the element type is fat
+            // (both conversions live in adapt); a scalar element falls through to
+            // coerce unchanged.
+            let op = self.adapt(v, &elem_ty).op;
             let d = self.fresh();
             self.line(&format!(
                 "{d} = insertvalue {} {agg}, {} {op}, {i}",
@@ -1472,11 +2030,17 @@ impl<'a> Fb<'a> {
     /// length (an array or a slice), so a slice can never fabricate a length
     /// that launders out of bounds reads past the index check. A raw pointer
     /// base has no length and stays the programmer's responsibility.
-    fn gen_slice(&mut self, base: &Expr, lo: &Expr, hi: &Expr) -> Val {
+    fn gen_slice(&mut self, base: &Expr, lo: &Expr, hi: &Expr, inclusive: bool) -> Val {
         let lov = self.gen_expr(lo);
         let lo_i = self.coerce(&lov.ty, &lov.op, &CTy::Int(64));
         let hiv = self.gen_expr(hi);
-        let hi_i = self.coerce(&hiv.ty, &hiv.op, &CTy::Int(64));
+        let mut hi_i = self.coerce(&hiv.ty, &hiv.op, &CTy::Int(64));
+        // An inclusive `lo..=hi` is `lo..hi+1`. The +1 lands here, before the
+        // `lo <= hi` and `hi <= len` checks, so a pathological hi of int64 max
+        // wraps and faults on the bounds check like any other out of range end.
+        if inclusive {
+            hi_i = self.op2("add", "i64", &hi_i, "1");
+        }
         let Some((data0, base_len, elem)) = self.slice_base(base) else {
             return Val::i0();
         };
@@ -1606,7 +2170,9 @@ impl<'a> Fb<'a> {
                     continue;
                 };
                 let av = self.gen_expr(a);
-                let op = self.coerce(&av.ty, &av.op, &fty);
+                // adapt, not coerce: an enum payload of interface type boxes its
+                // value, a slice payload views an array literal.
+                let op = self.adapt(av, &fty).op;
                 let fp = self.field_ptr(&pp, offsets.get(i).copied().unwrap_or(0));
                 self.line(&format!("store {} {op}, ptr {fp}", fty.ll()));
             }
@@ -1626,14 +2192,17 @@ impl<'a> Fb<'a> {
     }
 
     fn gen_match(&mut self, scrut: &Expr, arms: &[Arm], result: Option<(CTy, String)>) {
-        let (ety, addr) = match self.gen_place(scrut) {
-            Some(p) => p,
-            None => {
-                let v = self.gen_expr(scrut);
-                let slot = self.alloca(&v.ty);
-                self.line(&format!("store {} {}, ptr {slot}", v.ty.ll(), v.op));
-                (v.ty, slot)
-            }
+        // Always spill the scrutinee value into a fresh slot instead of matching
+        // through a mid-function place address. The tag load and every payload
+        // bind derive from this slot pointer, which is born at the alloca point
+        // (hoisted to the entry block under the async transform) and so
+        // dominates every arm reached across a resume edge. Pattern binds are
+        // immutable reads, so matching a copy is identical to matching in place.
+        let (ety, addr) = {
+            let v = self.gen_expr(scrut);
+            let slot = self.alloca(&v.ty);
+            self.line(&format!("store {} {}, ptr {slot}", v.ty.ll(), v.op));
+            (v.ty, slot)
         };
         let CTy::Enum(ename) = ety.clone() else {
             for arm in arms {
@@ -1711,7 +2280,16 @@ impl<'a> Fb<'a> {
                 break;
             };
             let fp = self.field_ptr(&pp, offsets.get(i).copied().unwrap_or(0));
-            self.locals.insert(b.clone(), (fty, fp));
+            // Copy the bound payload value into its own slot rather than aliasing
+            // the payload GEP, which is born mid-block at the top of this arm. The
+            // slot pointer is born at the alloca point (hoisted to entry under the
+            // async transform), so a read of the bind after a resume edge inside
+            // the arm still dominates. Pattern binds are immutable, so the copy is
+            // exact.
+            let val = self.load(&fty, &fp);
+            let slot = self.alloca(&fty);
+            self.line(&format!("store {} {val}, ptr {slot}", fty.ll()));
+            self.locals.insert(b.clone(), (fty, slot));
         }
     }
 
@@ -1728,7 +2306,9 @@ impl<'a> Fb<'a> {
             if i + 1 == n {
                 if let Stmt::Expr(e) = s {
                     let v = self.gen_expr(e);
-                    let op = self.coerce(&v.ty, &v.op, rty);
+                    // adapt, not coerce: a match expression whose result type is
+                    // an interface boxes each arm's struct tail.
+                    let op = self.adapt(v, rty).op;
                     self.line(&format!("store {} {op}, ptr {slot}", rty.ll()));
                     continue;
                 }
@@ -1769,7 +2349,7 @@ impl<'a> Fb<'a> {
                 }
             }
             ExprKind::Unary(UnOp::Not, _) => CTy::Bool,
-            ExprKind::Unary(UnOp::Neg, x) => self.static_ty(x),
+            ExprKind::Unary(UnOp::Neg, x) | ExprKind::Unary(UnOp::BitNot, x) => self.static_ty(x),
             ExprKind::Call(f, _) => match &f.kind {
                 ExprKind::Ident(n) => self.ctx.fns.get(n).map(|(r, _)| r.clone()).unwrap_or(CTy::Unknown),
                 _ => CTy::Unknown,
@@ -1817,12 +2397,19 @@ impl<'a> Fb<'a> {
                 let cv = self.gen_load(f);
                 return self.gen_closure_call(&cv, args);
             }
+            // An async function call mints a task and hands back a future; it
+            // must be caught before the ordinary-call path, since an async func
+            // also sits in ctx.fns under its declared (non-future) return.
+            if self.ctx.async_fns.contains_key(name) {
+                return self.gen_async_call(name, args);
+            }
             // A user defined function of the same name wins over a builtin, so
             // builtin names stay paradigm agnostic and never shadow user code.
             if self.ctx.fns.contains_key(name) {
                 return self.gen_user_call(name, args);
             }
             return match name.as_str() {
+                "async_run" => self.gen_async_run(args),
                 "print" => self.gen_print(args, false, false),
                 "println" => self.gen_print(args, true, false),
                 "printerr" => self.gen_print(args, true, true),
@@ -1963,7 +2550,9 @@ impl<'a> Fb<'a> {
         for (i, a) in args.iter().enumerate() {
             let v = self.gen_expr(a);
             let target = params.get(i + 1).cloned().unwrap_or(v.ty.clone());
-            let op = self.coerce(&v.ty, &v.op, &target);
+            // adapt, not coerce, mirroring gen_user_call: a method argument of
+            // interface type boxes a struct, a slice parameter views an array.
+            let op = self.adapt(v, &target).op;
             parts.push(format!("{} {op}", target.ll()));
         }
         let argstr = parts.join(", ");
@@ -2081,7 +2670,99 @@ impl<'a> Fb<'a> {
         Val::new(ret, d)
     }
 
+    /// An async call: mint a task and its future, fill the frame parameter slots
+    /// at the offsets frame_prefix assigns (the same offsets the poll reads), then
+    /// schedule it. Nothing runs yet. The value is the fat Future$... packed from
+    /// the record pointer and its header generation, the spawn epilogue shape.
+    fn gen_async_call(&mut self, name: &str, args: &[Expr]) -> Val {
+        let (ret, params, fut_struct) = {
+            let info = self.ctx.async_fns.get(name).expect("async callee is registered");
+            (info.ret.clone(), info.params.clone(), info.fut_struct.clone())
+        };
+        let ret_sa = self.ctx.size_align(&ret);
+        let param_sa: Vec<(u64, u64)> = params.iter().map(|p| self.ctx.size_align(p)).collect();
+        let prefix = crate::codegen::frame::frame_prefix(ret_sa, &param_sa);
+        // result_size is the future element size, at least one so a void task
+        // still owns a byte the runtime can address.
+        let result_size = ret_sa.0.max(1);
+        let fs = self.fresh();
+        self.line(&format!("{fs} = load i64, ptr @async.{name}.framesize"));
+        let fut = self.fresh();
+        self.line(&format!(
+            "{fut} = call ptr @cool_task_new(ptr @async.{name}.poll, i64 {fs}, i64 {result_size})"
+        ));
+        let fr = self.fresh();
+        self.line(&format!("{fr} = call ptr @cool_task_frame(ptr {fut})"));
+        for (i, a) in args.iter().enumerate() {
+            let v = self.gen_expr(a);
+            let target = params.get(i).cloned().unwrap_or(v.ty.clone());
+            let av = self.adapt(v, &target);
+            let off = prefix.param_offs.get(i).copied().unwrap_or(0);
+            let dst = self.fresh();
+            self.line(&format!("{dst} = getelementptr i8, ptr {fr}, i64 {off}"));
+            self.line(&format!("store {} {}, ptr {dst}", target.ll(), av.op));
+        }
+        self.line(&format!("call void @cool_task_start(ptr {fut})"));
+        let hp = self.fresh();
+        self.line(&format!("{hp} = getelementptr i8, ptr {fut}, i64 -8"));
+        let g = self.fresh();
+        self.line(&format!("{g} = load atomic i64, ptr {hp} seq_cst, align 8"));
+        let sty = CTy::Struct(fut_struct);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {} undef, ptr {fut}, 0", sty.ll()));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {} {a}, i64 {g}, 1", sty.ll()));
+        Val::new(sty, b)
+    }
+
+    /// async_run(g(args)): the only sync-to-async bridge. The argument is a direct
+    /// call of an async func (typeck verified), so evaluating it mints and starts
+    /// the task and yields its future; extract the handle words, crank the loop
+    /// until it completes, and load the result. The err word is discarded here,
+    /// since a task future completes with a NULL error and carries any failure in
+    /// its returned value.
+    fn gen_async_run(&mut self, args: &[Expr]) -> Val {
+        let Some(arg) = args.first() else {
+            return Val::i0();
+        };
+        let ret = match &arg.kind {
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Ident(g) => self.ctx.async_fns.get(g).map(|i| i.ret.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+        .unwrap_or(CTy::Int(32));
+        let futval = self.gen_expr(arg);
+        let h = self.fresh();
+        self.line(&format!("{h} = extractvalue {} {}, 0", futval.ty.ll(), futval.op));
+        let gen = self.fresh();
+        self.line(&format!("{gen} = extractvalue {} {}, 1", futval.ty.ll(), futval.op));
+        let (rsize, _) = self.ctx.size_align(&ret);
+        if matches!(ret, CTy::Void) {
+            let out = self.alloca_raw("i64");
+            self.line(&format!("call void @cool_loop_run(ptr {h}, i64 {gen}, ptr {out}, i64 0)"));
+            return Val::new(CTy::Void, "");
+        }
+        let out = self.alloca(&ret);
+        self.line(&format!(
+            "call void @cool_loop_run(ptr {h}, i64 {gen}, ptr {out}, i64 {rsize})"
+        ));
+        let r = self.load(&ret, &out);
+        Val::new(ret, r)
+    }
+
     fn alloca_raw(&mut self, llty: &str) -> String {
+        if self.frame.is_some() {
+            // Every raw scratch slot an async body mints today is a machine word
+            // (a loop counter or a scratch pointer). Long-lived closure envs use
+            // cool_task_env_alloc instead and do not reach here.
+            debug_assert!(
+                llty == "i64" || llty == "ptr",
+                "an async frame raw slot must be a word, not {llty}"
+            );
+            return self.frame_slot(llty.to_string(), (8, 8));
+        }
         let d = self.fresh();
         self.line(&format!("{d} = alloca {llty}"));
         d
@@ -2123,7 +2804,20 @@ impl<'a> Fb<'a> {
         let env = if caps.is_empty() {
             "null".to_string()
         } else {
-            let e = self.alloca_raw(&env_ty);
+            let e = if self.frame.is_some() {
+                // In an async body the env cannot live in a frame slot: a closure
+                // can outlive a poll turn, and a per-iteration closure needs its
+                // own storage, which a reused slot would alias. Allocate it per
+                // execution from the task's env arena, which cool_task_return
+                // frees at completion. The alloca_raw frame path stays word-only,
+                // so a multi-field env must never route through it.
+                let (size, _) = self.ctx.layout(&caps);
+                let p = self.fresh();
+                self.line(&format!("{p} = call ptr @cool_task_env_alloc(ptr %frame, i64 {size})"));
+                p
+            } else {
+                self.alloca_raw(&env_ty)
+            };
             for (i, (cname, cty)) in caps.iter().enumerate() {
                 let (lty, lptr) = self.locals.get(cname).cloned().unwrap();
                 let v = self.load(&lty, &lptr);
@@ -2362,7 +3056,7 @@ impl<'a> Fb<'a> {
             CTy::Array(e, _) => (**e).clone(),
             _ => CTy::Int(64),
         };
-        let slot = self.alloca(&arr.ty);
+        let slot = self.backing_slot(&arr.ty);
         self.line(&format!("store {} {}, ptr {slot}", arr.ty.ll(), arr.op));
         let a = self.fresh();
         self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {slot}, 0"));
@@ -2474,7 +3168,7 @@ impl<'a> Fb<'a> {
         self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
         let ev = self.load(&elem, &ep);
         let rv = self.invoke_closure(&cv, vec![Val::new(elem.clone(), ev)]);
-        let rop = self.coerce(&rv.ty, &rv.op, &out_elem);
+        let rop = self.adapt(rv, &out_elem).op;
         let op = self.fresh();
         self.line(&format!("{op} = getelementptr {}, ptr {out}, i64 {iv}", out_elem.ll()));
         self.line(&format!("store {} {rop}, ptr {op}", out_elem.ll()));
@@ -2560,7 +3254,7 @@ impl<'a> Fb<'a> {
             _ => init.ty.clone(),
         };
         let acc = self.alloca(&acc_ty);
-        let iv0 = self.coerce(&init.ty, &init.op, &acc_ty);
+        let iv0 = self.adapt(init, &acc_ty).op;
         self.line(&format!("store {} {iv0}, ptr {acc}", acc_ty.ll()));
         let i = self.alloca_raw("i64");
         self.line(&format!("store i64 0, ptr {i}"));
@@ -2582,7 +3276,7 @@ impl<'a> Fb<'a> {
             &cv,
             vec![Val::new(acc_ty.clone(), av), Val::new(elem.clone(), ev)],
         );
-        let rop = self.coerce(&rv.ty, &rv.op, &acc_ty);
+        let rop = self.adapt(rv, &acc_ty).op;
         self.line(&format!("store {} {rop}, ptr {acc}", acc_ty.ll()));
         let ni = self.op2("add", "i64", &iv, "1");
         self.line(&format!("store i64 {ni}, ptr {i}"));
@@ -2638,7 +3332,7 @@ impl<'a> Fb<'a> {
             &cv,
             vec![Val::new(elem.clone(), av), Val::new(elem.clone(), ev)],
         );
-        let rop = self.coerce(&rv.ty, &rv.op, &elem);
+        let rop = self.adapt(rv, &elem).op;
         self.line(&format!("store {} {rop}, ptr {acc}", elem.ll()));
         let ni = self.op2("add", "i64", &iv, "1");
         self.line(&format!("store i64 {ni}, ptr {i}"));
@@ -2961,7 +3655,7 @@ impl<'a> Fb<'a> {
             (self.gen_alloc_call(&sz, align), "0".to_string())
         };
         if let Some(v) = value {
-            let op = self.coerce(&v.ty, &v.op, &pointee);
+            let op = self.adapt(v, &pointee).op;
             self.line(&format!("store {} {op}, ptr {p}", pointee.ll()));
         }
         let fat = self.fat(&p, &gen);
@@ -3049,6 +3743,17 @@ impl<'a> Fb<'a> {
     }
 }
 
+/// Whether a shift amount is a literal already proven in range, so the runtime
+/// guard can be elided. Only a bare integer literal in `[0, width)` qualifies;
+/// anything else, including a value produced by mono substitution, is guarded.
+fn shift_amount_safe(b: &Expr, ty: &CTy) -> bool {
+    if let ExprKind::Int(v, _) = &b.kind {
+        let w = ty.int_bits().unwrap_or(64) as i64;
+        return *v >= 0 && *v < w;
+    }
+    false
+}
+
 fn arith_opcode(op: BinOp, is_float: bool) -> &'static str {
     use BinOp::*;
     match (op, is_float) {
@@ -3133,6 +3838,92 @@ mod tests {
         );
         assert!(out.contains("define i64 @add(i64 %a0, i64 %a1)"));
         assert!(out.contains("call i64 @add"));
+    }
+
+    #[test]
+    fn bitwise_ops_lower_to_llvm_bitops() {
+        let out = ir("func f(x: int64, y: int64) -> int64 { return (x & y) | (x ^ y) }");
+        assert!(out.contains("and i64"), "{out}");
+        assert!(out.contains("or i64"), "{out}");
+        assert!(out.contains("xor i64"), "{out}");
+    }
+
+    #[test]
+    fn bitnot_lowers_to_xor_minus_one() {
+        let out = ir("func f(x: int64) -> int64 { return ~x }");
+        assert!(out.contains("xor i64"), "{out}");
+        assert!(out.contains(", -1"), "{out}");
+    }
+
+    #[test]
+    fn right_shift_is_arithmetic() {
+        // Signedness is not tracked, so `>>` is `ashr` for every integer, never
+        // the logical `lshr`, so a negative value fills with its sign bit.
+        let out = ir("func f(x: int64) -> int64 { return x >> 2 }");
+        assert!(out.contains("ashr i64"), "{out}");
+        assert!(!out.contains("lshr"), "{out}");
+    }
+
+    #[test]
+    fn dynamic_shift_is_guarded() {
+        let out = ir("func f(x: int64, n: int64) -> int64 { return x << n }");
+        assert!(out.contains("icmp uge i64"), "{out}");
+        assert!(out.contains("call void @cool_shift_fault()"), "{out}");
+    }
+
+    #[test]
+    fn constant_in_range_shift_is_not_guarded() {
+        // A literal amount proven in range needs no runtime guard, so the fault
+        // call is absent even though the fault is always declared.
+        let out = ir("func f() -> int64 { return 1 << 3 }");
+        assert!(out.contains("shl i64 1, 3"), "{out}");
+        assert!(!out.contains("call void @cool_shift_fault()"), "{out}");
+    }
+
+    #[test]
+    fn compound_index_assign_computes_place_once() {
+        // `xs[i] += 1` must compute the element address exactly once and use it
+        // for both the load and the store, so a single getelementptr appears and
+        // a single bounds check fires.
+        let out = ir(
+            "func main() -> int32 {\n  mut xs: int64[3] = [10, 20, 30]\n  i := 1\n  xs[i] += 1\n  return 0\n}",
+        );
+        let geps = out.matches("getelementptr [3 x i64]").count();
+        assert_eq!(geps, 1, "expected one place computation, got {geps}:\n{out}");
+        let checks = out.matches("call void @cool_bounds_fault()").count();
+        assert_eq!(checks, 1, "expected one bounds check, got {checks}:\n{out}");
+    }
+
+    #[test]
+    fn inclusive_slice_adds_one_before_bounds_checks() {
+        // `xs[1..=3]` is `xs[1..4]`: the +1 lands before the `lo <= hi` and
+        // `hi <= len` checks, so an inclusive end past the array still faults.
+        let out = ir(
+            "func f(xs: int64[5]) -> int64 {\n  s := xs[1..=3]\n  return s[0]\n}\nfunc main() -> int32 { return 0 }",
+        );
+        let add_pos = out.find("add i64 3, 1").expect("expected the inclusive +1");
+        let ugt_pos = out.find("icmp ugt").expect("expected a bounds compare");
+        assert!(add_pos < ugt_pos, "the +1 must precede the bounds checks:\n{out}");
+    }
+
+    #[test]
+    fn exclusive_slice_has_no_extra_add() {
+        let out = ir(
+            "func f(xs: int64[5]) -> int64 {\n  s := xs[1..3]\n  return s[0]\n}\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(!out.contains("add i64 3, 1"), "{out}");
+    }
+
+    #[test]
+    fn integer_pow_calls_runtime_helper() {
+        let out = ir("func f(x: int64, y: int64) -> int64 { return x ** y }");
+        assert!(out.contains("call i64 @cool_pow_i64(i64"), "{out}");
+    }
+
+    #[test]
+    fn float_pow_calls_the_intrinsic() {
+        let out = ir("func f(a: float64, b: float64) -> float64 { return a ** b }");
+        assert!(out.contains("call double @llvm.pow.f64(double"), "{out}");
     }
 
     #[test]

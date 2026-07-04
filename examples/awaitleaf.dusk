@@ -1,0 +1,25 @@
+// Awaiting leaf timer futures: sleep_async mints a timer the loop's heap
+// completes with 0 at its deadline. amain awaits two in sequence with the
+// two-bind element+error form; each completes with value 0 and no error.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+
+async func amain() -> int32 {
+    v, e := await sleep_async(10)
+    e.ignore()
+    println(v)
+    v2, e2 := await sleep_async(5)
+    e2.ignore()
+    println(v2)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

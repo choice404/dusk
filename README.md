@@ -104,7 +104,7 @@ The `dawn` binary has four commands. They are `get`, `build`, `run`, and `versio
 
 See [CHANGELOG.md](CHANGELOG.md) for the release by release history.
 
-0.4.1. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
+0.4.2. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
 
 Releases 0.2.0 through 0.2.6 add memory safety. Strings have a growable `StringBuilder` with concatenation, the pointer layer splits into a managed `*T` and a raw `*raw T`, and the default heap is generational. Every managed pointer carries a generation that is checked at each dereference, so a use after free, a double free, or a stale pointer to a reused block faults instead of corrupting memory. A managed pointer is single owner, with `ref` for a non owning alias and `move` to transfer, and a return that lets a frame local escape is a compile error for the clear cases. A `foreign "C"` block then calls into libc across the raw pointer boundary, the first slice of the interop work.
 
@@ -121,6 +121,23 @@ Release 0.3.3 completes the concurrency line with the thread pool and the async 
 Release 0.4.0 opens the async line with futures and the event loop. `std.async.future` carries a one shot `Future<T>` completed exactly once from any thread and consumed exactly once on the loop thread, `await` parks instead of polling with `await_timeout` and `try_poll` as the refusing forms, `sleep_async` turns timers into futures, and an await nothing can complete aborts by name instead of hanging. A consumed future retires in the generational heap, so awaiting it twice faults like a double join.
 
 Release 0.4.1 adds the reactor, the second phase of the async line. `std.async.io` runs one C thread that turns file descriptor readiness into a one shot `Future<int64>` on the event loop, so `readable` and `writable` watches complete alongside timers and pool tasks with no polling loop anywhere. A non blocking byte surface over pipes, `read_nb`, `write_nb`, and friends, gives the watches something deterministic to test against, an armed watch raises a third gauge into the deadlock detector, and a watch left armed when the reactor stops faults by name rather than stranding a parked awaiter.
+
+Release 0.4.2 is the largest of the 0.4.x line, two tracks landing together. The complete operator set arrives: bitwise `& | ^ ~ << >>`, the full compound assignment family `+= -= *= /= %= &= |= ^= <<= >>=`, postfix `++` and `--`, a right associative exponent `**`, the pipe `|>`, and an inclusive range `..=`, over a documented thirteen level precedence ladder. Alongside it, `async func`, `await`, and `async_run` land the keyword layer the async line has been building toward. An async func compiles to a state machine over a heap allocated task frame; `await` suspends inside one in exactly four statement positions, `x := await f`, `x, e := await f`, a void discarding `await f`, and `return await f`; and `async_run(f(args))` is the only bridge a synchronous `main` uses to crank the loop, one enqueue and one scheduler turn per await, run to completion with no cancellation, and a named fatal for every way it can go wrong, a double await, two tasks on one future, or an idle loop with work still pending. Underneath both tracks, the escape check that keeps a frame local slice or closure from being returned is completed to see through every carrier, tuples, structs, enums, fixed arrays, and generic fields, at any nesting depth, and interface values boxed inside a struct field, an enum payload, or an array element now dispatch correctly.
+
+```text
+async func fetch(n: int64) -> int64 {
+    return n * 2
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(fetch(21))
+    loop_free()
+    println(rc)   // 42
+    return 0
+}
+```
 
 ## License
 

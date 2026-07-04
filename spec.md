@@ -12,13 +12,14 @@ This is the language reference for dusk. The sections below describe the 0.1.0 c
 2. [Source Files, Directives, Imports, Exports](#source-files-directives-imports-exports)
 3. [Paradigm System](#paradigm-system)
 4. [Type System](#type-system)
-5. [Memory Management](#memory-management)
-6. [Functions](#functions)
-7. [Object Oriented Concepts](#object-oriented-concepts)
-8. [Functional Concepts](#functional-concepts)
-9. [Error Handling](#error-handling)
-10. [Threads and the Memory Model](#threads-and-the-memory-model)
-11. [Builtins](#builtins)
+5. [Expressions and Operators](#expressions-and-operators)
+6. [Memory Management](#memory-management)
+7. [Functions](#functions)
+8. [Object Oriented Concepts](#object-oriented-concepts)
+9. [Functional Concepts](#functional-concepts)
+10. [Error Handling](#error-handling)
+11. [Threads and the Memory Model](#threads-and-the-memory-model)
+12. [Builtins](#builtins)
 
 ---
 
@@ -311,6 +312,60 @@ func area(s: Shape) -> float64 {
 
 ---
 
+## Expressions and Operators
+
+Added in 0.4.2. Every binary and unary operator sits on one precedence ladder, thirteen levels from loosest to tightest, each level left associative unless noted. Parentheses group as usual, and only the comparison level rejects chaining outright: `1 < 2 < 3` is a compile error, not a silently wrong bool.
+
+| Level (loosest to tightest) | Operators                       | Notes                                              |
+| ---------------------------- | -------------------------------- | --------------------------------------------------- |
+| 1. Range                     | `..` `..=`                       | only legal inside a slice index                     |
+| 2. Pipe                      | `\|>`                            | a parse time rewrite to a call, see below           |
+| 3. Or                        | `\|\|`                           |                                                       |
+| 4. And                       | `&&`                             |                                                       |
+| 5. Comparison                | `== != < <= > >=`                | not chainable                                       |
+| 6. Bitwise or                | `\|`                             |                                                       |
+| 7. Bitwise xor                | `^`                               |                                                       |
+| 8. Bitwise and                | `&`                               |                                                       |
+| 9. Shift                     | `<< >>`                          |                                                       |
+| 10. Additive                 | `+ -`                            |                                                       |
+| 11. Multiplicative           | `* / %`                          |                                                       |
+| 12. Exponent                 | `**`                             | right associative                                   |
+| 13. Unary, then postfix       | prefix `- ! ~ *`, then call, index, field | tightest, unary binds tighter than `**`             |
+
+Shifts sit between `&` and `+`, and the bitwise trio nests `|` loosest, `^` in the middle, `&` tightest, so `4 | 2 ^ 3 & 1` groups as `4 | (2 ^ (3 & 1))` and `1 + 2 << 3` groups as `(1 + 2) << 3`. `**` binds tighter than the multiplicatives and right associates, so `2 ** 3 ** 2` is `2 ** (3 ** 2)`, while unary minus binds tighter than `**` at the call site, so `-2 ** 2` is `(-2) ** 2`, which is `4`.
+
+### Bitwise operators
+
+`&`, `|`, and `^` are binary and `~` is unary, all on integer operands only, two's complement throughout. `~0` is `-1`, `-1 & 255` masks down to the low byte, and each width truncates the way ordinary arithmetic does, so an `int8` operand keeps the mask honest at eight bits.
+
+`<<` and `>>` shift by an integer amount. `<<` is a plain logical shift; `>>` is always an arithmetic shift, sign extending the top bit, because dusk does not track signedness separately from the type at the point a shift lowers. A constant shift amount outside `[0, width)` is a compile error, a negative constant included. A dynamic amount is checked at the shift itself and a miss aborts with the named fault `fatal: shift amount out of range`, never a silently masked or poison result.
+
+### Compound assignment
+
+`+= -= *= /= %= &= |= ^= <<= >>=` rewrite a place through a load, the operator, and a single store. The place, including any index expression, is evaluated exactly once: `xs[pick()] += 5` calls `pick()` once even though it names the index. A compound assignment on an immutable binding is rejected, the same rule the plain `=` form follows, and mixing widths on the right is the same error the binary operator gives.
+
+### Increment and decrement
+
+`++` and `--` are statement only, postfix only, and produce no value; there is no prefix form and neither can appear inside an expression. Each desugars to a compound assignment with the literal `1`, so `i++` is `i += 1` and an `int8` place wraps exactly the way `+ 1` does.
+
+### Exponent
+
+`**` is right associative. An integer base and exponent lower to `cool_pow_i64`, repeated squaring in `uint64_t` so the wraparound matches the plain `mul` codegen already emits; `0 ** 0` is `1`, the same convention Rust's `pow` uses. A negative integer exponent is meaningless for an integer result and aborts with the named fault `fatal: negative exponent in integer '**'` rather than returning a wrong value. A float base or exponent lowers to the LLVM `pow` intrinsic at the operand's width.
+
+### Pipe
+
+`x |> f(a)` rewrites at parse time to `f(x, a)`, prepending the left side as the call's first argument; `x |> f` with a bare name becomes `f(x)`. It is left associative and the loosest operator, so `1 + 2 |> double` pipes the whole sum, not just the `2`. The rewrite adds no capability, only a call spelling, so it is ungated by paradigm; a piped functional builtin still faces the ordinary paradigm gate on the call it rewrites to. The right side must be a function name or a call; anything else is a compile error naming the rule.
+
+### Inclusive range
+
+`a..=b` in a slice index is `a..b+1`: the endpoint moves before the ordinary `lo <= hi <= base.len` bounds check runs, so `xs[2..=1]` is the empty slice rather than a trap, and `xs[0..=n-1]` covers the whole backing.
+
+### Operators dusk does not have
+
+A few operators common elsewhere are deliberately absent. The ternary `?:`, optional chaining `?.`, and null coalescing `??` have no place in a language with no null: a managed pointer is single owner and every dereference is checked, a missing value is `Maybe.None` or an `error`, `if` already covers selection, and `?` is reserved. Spread `...` has no varargs to spread into. A concatenation operator, `<>` or a reused `++`, is also absent: `StringBuilder` owns string building explicitly, and a slice concatenation needs an allocator, which an operator has nowhere to name.
+
+---
+
 ## Memory Management
 
 ### Philosophy
@@ -416,6 +471,16 @@ These are debug build diagnostics, not language guarantees. Release builds omit 
 ### Safety
 
 0.1.0 does no ownership tracking, so freeing is manual. `defer` and arenas keep cleanup deterministic, and the debug allocator catches mistakes in tests. Generational references for sound use after free and double free detection arrive in 0.2.0. A generation token rides inside each reference and is checked at dereference, so it survives copies.
+
+### Escaping Value Lifetimes
+
+Added in 0.2.3, completed in 0.4.2. Two shapes of value hold a view into the returning frame rather than owning what they view, and returning either lets that view dangle the moment the frame is reclaimed. A slice into a frame local fixed array, an array literal or a range slice of one, dangles once its backing array is gone: `a slice into a local array escapes its frame; put the backing on the heap`. A closure that captures a frame local keeps that local alive only as long as its environment does, and returning the closure returns an environment about to be reclaimed: `a closure that captures a local escapes its frame; it cannot be returned`. A closure with no captures is a plain function pointer and returns fine, and a slice backed by a heap allocation or a slice parameter, whose backing the caller already owns, returns fine too.
+
+The check is flow sensitive and driven by the declared return shape, not only the returned expression's own syntax, so it follows a value through a binding, an alias, or a match before it reaches the return, and it sees through every carrier a fat value can ride in: a bare return, a tuple returned by literal or by name, a struct or enum returned by literal or by name, a fixed array of a reference shaped element, and any of those nested inside a generic field, at any nesting depth. `return xs[0..3]` from a `T[3]` local is caught directly; so is `return (row, 1)` when `row` is that same slice, `return Wrapper { items: row }`, `return [row, row]`, and a generic struct field that resolves to the same slice type once monomorphized. A managed pointer escape is not part of this check: dusk has no address of operator, every pointer is heap allocated, and the runtime generation check already catches a stale one at the dereference that follows.
+
+An interface value is a fat pointer, a data pointer paired with a vtable pointer, and boxing a concrete struct into one works correctly when the interface value sits inside a struct field, an enum variant's payload, or an array element: the struct literal, the enum constructor, and the array literal each box the concrete value into the field, payload, or element's fat pointer as they build it, so a later method call dispatches through the stored interface exactly as it would through a bare interface binding. Boxing a struct to an interface does not work at every position, though. Returning an interface value by value is rejected outright, since the boxed payload would sit in a frame slot that dangles the moment the function returns: `returning an interface value is not supported; return the concrete type or a pointer to it`. An interface value inside a tuple, whether returned or passed as an argument, is rejected the same way in both positions rather than accepted at one and miscompiled at the other: `an interface value inside a tuple is not supported; return or pass the concrete type, or box it outside the tuple`.
+
+A slice of a concrete struct type and a slice of an interface type share the same two word shape at the machine level, `{ ptr, len }`, which makes reinterpreting one as the other compile clean and read every element as a boxed interface at runtime, silently corrupting memory. Passing, assigning, or storing an existing slice value where a slice of an interface is expected is rejected as this covariance: `cannot pass a slice of '<concrete>' as a slice of interface '<iface>'; a slice of concrete values cannot be reinterpreted as a slice of interfaces`. An array literal of concrete structs coerced to a slice of an interface is exempt, since it boxes each element as it coerces rather than reinterpreting an existing buffer, and a slice of an interface passed where a slice of that same interface is expected is exempt for the same reason: it is not a reinterpretation at all.
 
 ### Garbage Collector
 
@@ -886,6 +951,107 @@ The fault family, each named: arming a watch while the reactor is not running or
 
 Bytes written to a pipe before the readiness event that reports it are visible to the read that follows the `await`: the kernel's own pipe ordering composes with the complete happens before consume edge the memory model already gives every future, so the two together order the whole path from write to read.
 
+### `async func`, `await`, and `async_run`
+
+Added in 0.4.2, the third phase of the async line and its keyword layer, on top of the futures and the event loop 0.4.0 and 0.4.1 built. Where those releases completed futures by hand, `async func` compiles a function to a single poll function over a heap allocated task frame. Calling it writes its arguments into a fresh frame, mints the task's result `Future<T>`, and runs nothing until the loop cranks it. `await` is the statement level suspension inside an async body, and `async_run` is the only bridge from synchronous code into the loop.
+
+```text
+async func amain() -> int32 {
+    println("in")
+    return 7
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    println(rc)
+    return 0
+}
+```
+
+Calling `amain()` mints a task and a future and does no work. `async_run` cranks the event loop until that future completes, then yields its value; it is the sync to async bridge, `main`'s job, and illegal anywhere else a task frame already exists.
+
+#### The signature rules
+
+An async func's task frame and future are laid out at one declared shape, so it takes no type parameters: `an async func cannot take type parameters`. A method cannot be async, `a method cannot be async`, since a method call cannot suspend across the receiver's borrow. `main` cannot be async, `main cannot be async; call an async func with async_run instead`, since it is the C entry point the runtime calls directly, with no task frame around it yet.
+
+A parameter or return type may not be a future, since a future belongs to the event loop thread and the caller should await it instead: `an async func cannot take '<name>': a future belongs to the event loop thread; await it in the caller instead`, and symmetrically for a return, `an async func cannot return a future; a future belongs to the event loop thread, so await it in the caller instead`. A parameter or return may not be a slice, a closure, or an interface value either, since the task frame outlives the call that made it and any of the three may view the caller's stack: `an async func cannot take '<name>': a slice, closure, or interface value may view the caller's frame, which the task outlives`, and for a return, `an async func cannot return a slice, closure, or interface value; the value would outlive the task frame it views`. Both walks see through a struct or tuple parameter or return type, so a future or a view buried in a field is still caught.
+
+An async func's name is only a callable; it cannot be stored or passed as a plain value: `'<name>' is async; call it with await or start it with async_run`. A bare call that mints a future and drops it before it is ever awaited or released is rejected for the same reason a leak is rejected everywhere else in the language: `the future from '<name>' is never awaited; bind it so it can be awaited or released`. A future that is bound then follows the ordinary unused variable rule beyond that.
+
+#### `await`, in exactly four statement positions
+
+`await` is not an operator. It never appears mid expression: `'await' cannot appear mid-expression; give the awaited value a name, as in v, e := await f`. It is legal in exactly four statement shapes, and nowhere else, each a keystone that keeps every value live across a suspension named and stored in the frame rather than sitting in an SSA register a resume cannot see.
+
+```text
+v := await f          // single bind: the value; the completer's error is discarded
+v, e := await f        // destructure: the value and the completer's pending error
+await f                 // void discard, legal only when f's element is void
+return await f          // propagation: forwards the awaited tuple whole
+```
+
+The void discard form is rejected when the awaited element is not void: `'await f' discards a value; bind it, as in v, e := await f`. When the awaited future's element is itself a tuple, such as the `(int64, error)` a fallible async func returns, a matching arity destructure binds each member directly instead of the value plus error pair, and a mismatched name count is rejected: `await destructures this future into {n} values, but {m} names are bound`. The error word of a two bind await is a pending error like any other and falls under the ordinary must handle rule: left unhandled it is `the error '<name>' is never handled; inspect it with exists, handle it with check, or discard it with ignore`.
+
+`await` only suspends inside an async func body, and only directly inside it, never inside a lambda literal created there: a lambda has no task frame of its own to suspend. Outside an async context, or inside a lambda, a leading `await` not written as the plain call `await(f)` is rejected: `'await' is only legal inside an async func`. Under `defer`, which runs at completion and can never suspend, a leading `await` is rejected the same way: `'await' cannot appear under defer; a defer runs at completion and cannot suspend`. `await` composes with every statement shape a value can sit in: inside a `while`, an `if`, a `for` over a named fixed array, and a `match` arm reading its payload after the await, each survives the resume because the loop counter, the array's data pointer, length, and index, and the match payload are all frame slots, reloaded on the resume edge rather than kept in a register the suspension bypassed.
+
+Ordinary rules keep applying underneath the keyword: `move(p)` into an awaited call still kills the mover's name at compile time, so touching `p` after `v := await consume(move(p))` is `use of a moved pointer` exactly as it would be with no await in the way.
+
+#### `async_run`
+
+`async_run(g(args))` takes a direct call of an async func, written at the call site, never a stored future: a future does not carry which async func minted it, so `async_run takes a direct call of an async func, written at the call site` is rejected even when the stored future genuinely came from one. It cannot be called from inside an async func, since the enclosing task frame can simply await the call instead: `async_run cannot be called inside an async func; await the call instead`. Calling it from a synchronous helper the loop invokes while already cranking, an async body reaching a sync function that itself calls `async_run`, is not a compile error, since the checker cannot see through an arbitrary call graph, but the loop refuses the re-entry by name at runtime, `fatal: async_run re-entered the event loop`.
+
+#### The frame and the state machine
+
+Below sema, an async func lowers to `define void @async.<name>.poll(ptr %frame)` plus an `@async.<name>.framesize` constant the call site reads. The frame is a heap block: a fixed 48 byte C task header the runtime owns, immediately followed by the dusk visible frame the poll addresses, state word first, then the pending future's data pointer and generation the last await wrote, then the result region, then every parameter in declaration order, then every local that must survive an await in emission order, each aligned to its own requirement and the whole frame rounded up to 16 bytes.
+
+The poll's entry block GEPs every one of those slots once, so every frame pointer is born in the entry block and dominates every resume edge, then loads the state word and switches on it: state 0 enters at the body's start, and each await site registers its own state and its own resume label. An await stores the state that names its resume label, records the pending future's data pointer and generation, suspends by returning from the poll, and the loop's crank later calls the poll again at that state. A resume reloads whatever it needs from its frame slots rather than trusting an SSA value, since nothing survives a suspension except what a frame slot holds; a return, including the implicit one at the end of a function that falls off the end, replays every registered `defer` in reverse order exactly once, then completes the task with its result bytes and retires it. A state the switch does not recognize is impossible by construction and traps rather than guessing: `fatal: a task resumed in an invalid state`.
+
+Both of the compiler's alloca funnels for a local that must persist route to a frame slot when they are lowering an async body. A closure created inside an async body is the one exception: its environment is not a frame slot, since a closure can outlive a single poll turn and a multi capture environment is wider than a slot reserves for scalar use; it allocates from a per task environment arena instead, one block per closure execution, freed in one pass when the task completes. The same per execution allocation covers a slice backed by an array literal and an interface value boxed inside the frame, so a loop that builds a fresh closure, slice, or boxed interface on each iteration and stores it for later keeps every iteration's value distinct rather than aliasing the last one through a reused slot.
+
+#### Determinism
+
+The whole async substrate runs on one loop thread with a FIFO ready queue: a task that becomes runnable, because its await found the future already complete or a completer enqueued it, joins the tail of that queue, and the crank runs one task to its next suspension or return before picking up the next. An await always costs exactly one scheduler turn, even against an already complete future, and never resumes inline, so two tasks each printing a line before yielding interleave in exact, reproducible program order: two `worker` tasks each printing a label and a counter around `await tick()` produce `a0 b0 a1 b1 a2 b2`, not a race. Anything that crosses the pool, a spawned thread, or the reactor funnels back through one future completion and one enqueue, so the loop thread's own ordering is never in question; only the moment a pool worker or a spawned thread finishes work is externally timed.
+
+#### Run to completion, no cancellation
+
+A task runs to completion once started; there is no mechanism to cancel one mid flight. This is what makes the `defer` replay at true completion sound: a suspension is never a premature exit, so a resource acquired before an await and deferred for release is guaranteed to see that release, in reverse registration order, exactly once, whenever the task actually returns, never at a suspension partway through.
+
+#### Errors as values, monadic bind
+
+There is no rejection channel. A completer hands its value and its error through together, and the awaited tuple destructures through the same must handle machinery every other fallible result uses; `return await f` propagates the pair whole. `await` is monadic bind performed by the compiler: it sequences a suspending computation, threads its result into the frame that continues, and forwards its error alongside the value rather than short circuiting through an exception.
+
+#### The fault family
+
+Every abort under the async keyword layer and the substrate beneath it is named and pinned by a golden.
+
+| Message | Fires when |
+| --- | --- |
+| `fatal: use of a dead future` | a future or task result is awaited, polled, or freed a second time |
+| `fatal: two tasks await one future` | a second task parks on a future that already carries a waiter |
+| `fatal: async_run re-entered the event loop` | `async_run` is called while the loop is already cranking |
+| `fatal: the event loop is idle but work is still pending` | an await parks with no timer, no live thread, no in flight pool task, and no armed watch left to complete it |
+| `fatal: a task resumed in an invalid state` | a poll's entry switch sees a state its own emission never produced |
+| `fatal: a task resumed on a pending future` | a resumed poll tries to take a future still in flight, an internal invariant, not a user reachable path |
+| `fatal: out of memory` | a task, its frame, or a closure environment block cannot be allocated |
+
+#### The cost table
+
+An async call is one frame allocation, the task header plus the dusk visible frame in a single block, and one future record in the generational heap; nothing runs until the loop schedules it. An await is one enqueue, when its future is already complete, or one waiter registration followed by one enqueue from whichever completion reaches it, and one scheduler turn either way; it never resumes inline. A leaf future, the kind `future_new` or a timer mints, is one generational record. Nothing here differs from the cost 0.4.0 already names for a hand rolled future; the keyword layer changes how the frame is built, not what completing one costs.
+
+#### The completer doctrine
+
+A future belongs to the event loop thread. A completer running on another thread, a pool worker or a spawned thread, never captures the typed `Future<T>` handle: capturing one is rejected wherever it would cross, a spawned lambda's captures and a submitted lambda's captures alike, since a heap copied environment would carry the typed handle off the thread that owns it. Instead the completer carries the future's two raw words, its handle and its generation, lifted out before the spawn or the submit, and completes through `complete_raw`, the completer surface built for exactly this crossing. `complete` and `complete_raw` are otherwise identical: exactly one completion wins and a late loser is refused and dropped, whether it arrives before or after the awaiter consumes the future.
+
+#### The pumping doctrine
+
+Inside an async body the only way to wait on a future is `await`; nothing inside an async body may call the loop's blocking `await`, `await_timeout`, or `try_poll` primitives directly on some other future to pump it manually, since that would park the one thread the whole loop cranks on, and every other task, timer, and completion behind it, on a wait the keyword layer already has a name for. A pumped await that stalls the only crank thread does not hang silently; it converts a stuck task into the same named idle fatal an ordinary deadlocked await produces, since from the loop's own gauges the thread is simply gone.
+
+#### Migration from 0.4.0 and 0.4.1
+
+The six async examples 0.4.0 and 0.4.1 built by hand around a completer lambda now complete through `complete_raw` instead of a raw runtime call, with their goldens unchanged; `complete_raw` is the same completer surface a task's own pool offload uses. The stdlib `await` function, the one `std.async.future` already exported, keeps working for sync code that awaits a future outside any async body: the keyword is context sensitive and only absorbs the name `await` as a suspension inside an async func body, so `await(f)` stays a plain call everywhere else.
+
 ### The memory model
 
 dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, a `complete` happens before the `await`, timed await, or poll that consumes the future it completed, an `unlock` happens before the next `lock` of the same mutex, and `join` orders everything the thread did before everything the joiner does after. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one, unless a mutex guards every touch.
@@ -942,8 +1108,11 @@ Builtins are always available regardless of paradigm directives unless noted.
 | spawn    | spawn(f: () -> void) -> (thread, error) | start an OS thread running a lambda literal |
 | join     | join(t: thread) -> error | wait for a thread; retires the handle     |
 | submit   | submit(f: () -> void) -> error | queue a lambda literal on the global thread pool |
+| async_run | async_run(g(args)) -> T | crank the event loop until a direct async call's future completes |
 
 `alloc` and `free` resolve to the in scope allocator. See [Memory Management](#memory-management).
+
+`async func` and `await` are keywords, not builtins, added in 0.4.2 and gated behind no paradigm, the same as `spawn` and `submit`. `async func` marks a function's task frame and state machine transform; `await` suspends inside one, in exactly the four statement positions [the async chapter](#threads-and-the-memory-model) names. `async_run` is a builtin like `alloc`, callable from any file regardless of paradigm, but only outside an async body; see the async chapter for its rules and the whole keyword layer.
 
 ### Functional Builtins (require `@paradigm functional`)
 

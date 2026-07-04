@@ -47,11 +47,20 @@ export func future_wrap<T>(h: *void) -> Future<T> {
 // value is dropped. Passing an error here does not discharge it; the
 // completer still inspects or ignores its own binding.
 export func complete<T>(f: Future<T>, v: T, e: error) -> error {
+    return complete_raw(f.h, f.gen, v, e)
+}
+
+// Completes a future addressed by its raw handle words, the completer surface a
+// thread carries when the typed future belongs to the loop thread. The two
+// words, h and gen, are the future struct's fields lifted out before the spawn,
+// so the completion crosses without capturing a future. Otherwise identical to
+// complete: exactly one completion wins and a late loser is dropped.
+export func complete_raw<T>(h: *void, gen: int64, v: T, e: error) -> error {
     buf: *raw T = alloc_bytes(sizeof(T))
     buf[0] = v
     ebuf: *raw error = alloc_bytes(sizeof(int64))
     ebuf[0] = e
-    rc := cool_future_complete(f.h, f.gen, buf, ebuf)
+    rc := cool_future_complete(h, gen, buf, ebuf)
     free(buf)
     free(ebuf)
     if rc == 1 {

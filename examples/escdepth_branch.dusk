@@ -1,0 +1,23 @@
+// A conditional reassignment of a struct binding whose enum field would wrap a
+// local slice. The if arm may run, so the may-join keeps w flagged past the
+// branch, and returning it is rejected.
+@paradigm procedural
+enum E { V(rows: int64[]), N }
+struct W { e: E }
+func mk(xs: int64[], c: bool) -> W {
+    mut w := W { e: E.V(xs) }
+    a: int64[3] = [1, 2, 3]
+    if c {
+        w = W { e: E.V(a[0..2]) }
+    }
+    return w
+}
+func main() -> int32 {
+    d: int64[3] = [1, 2, 3]
+    r := mk(d[0..3], true)
+    match r.e {
+        V(v) => { println(v[0]) }
+        N => { println(0) }
+    }
+    return 0
+}

@@ -28,6 +28,10 @@ pub enum Item {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Func {
     pub exported: bool,
+    /// True for an `async func`. The state machine transform lives in codegen,
+    /// below sema, so every checker pass sees the intact body and only new node
+    /// arms; this flag rides the declaration through loader, sema, and mono.
+    pub is_async: bool,
     pub name: String,
     /// The span of the function's name, for diagnostics about the whole function.
     pub span: Span,
@@ -136,6 +140,11 @@ pub struct Block {
 pub enum Stmt {
     Let(Let),
     Assign(Expr, Expr),
+    /// A compound assignment `place op= rhs`, as in `xs[i] += 1`. Kept as its own
+    /// statement rather than a clone of `place = place op rhs` so the place is
+    /// evaluated exactly once by codegen. The `++` and `--` statements desugar to
+    /// this with an `Add`/`Sub` and a literal 1.
+    AssignOp(BinOp, Expr, Expr),
     Return(Option<Expr>),
     Defer(Expr),
     If(If),
@@ -235,7 +244,10 @@ pub enum ExprKind {
     Call(Box<Expr>, Vec<Expr>),
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
-    Range(Box<Expr>, Box<Expr>),
+    /// A range `lo..hi` or, when the flag is set, an inclusive `lo..=hi`. Ranges
+    /// exist only inside a slice index. An inclusive range is defined as
+    /// `lo..hi+1`, converted before the bounds checks run.
+    Range(Box<Expr>, Box<Expr>, bool),
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
     StructLit(String, Vec<(String, Expr)>),
@@ -245,6 +257,13 @@ pub enum ExprKind {
     /// The name selects which `bind` and `unit` the block desugars to, so several
     /// monads can coexist. A bare `do` uses the top level `bind` and `unit`.
     Do(Option<String>, Vec<DoBind>),
+    /// `await e`, the statement level suspension inside an async func. The
+    /// operand is the awaited future; the optional type is its element type,
+    /// left None by the parser and filled by the monomorphizer. Constructed only
+    /// as the whole value of a let, the whole operand of a return, or the whole
+    /// expression of a bare statement, so the suspension always sits at a
+    /// statement boundary the codegen state machine can resume at.
+    Await(Box<Expr>, Option<Type>),
     /// `sizeof` of a resolved type. Produced only by the monomorphizer when a
     /// `sizeof(T)` over a type parameter is substituted to its concrete type, so
     /// composite types such as slices and tuples are sized correctly.
@@ -256,6 +275,7 @@ pub enum UnOp {
     Deref,
     Neg,
     Not,
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +293,12 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Pow,
 }
 
 // Free variable collection, shared by closure lowering and the escape check. The
@@ -294,6 +320,10 @@ pub fn collect_stmt(s: &Stmt, used: &mut Vec<String>, bound: &mut HashSet<String
             }
         }
         Stmt::Assign(a, b) => {
+            collect_expr(a, used, bound);
+            collect_expr(b, used, bound);
+        }
+        Stmt::AssignOp(_, a, b) => {
             collect_expr(a, used, bound);
             collect_expr(b, used, bound);
         }
@@ -341,7 +371,7 @@ pub fn collect_expr(e: &Expr, used: &mut Vec<String>, bound: &mut HashSet<String
     match &e.kind {
         ExprKind::Ident(n) => used.push(n.clone()),
         ExprKind::Unary(_, x) => collect_expr(x, used, bound),
-        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
+        ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b, _) => {
             collect_expr(a, used, bound);
             collect_expr(b, used, bound);
         }
@@ -369,6 +399,36 @@ pub fn collect_expr(e: &Expr, used: &mut Vec<String>, bound: &mut HashSet<String
             collect_block(&l.body, used, bound);
         }
         ExprKind::Match(m) => collect_match(m, used, bound),
+        ExprKind::Await(op, _) => collect_expr(op, used, bound),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ident(name: &str) -> Expr {
+        Expr {
+            kind: ExprKind::Ident(name.to_string()),
+            span: Span::new(0, 0),
+        }
+    }
+
+    #[test]
+    fn compound_assign_captures_both_sides() {
+        // A lambda body of only `xs[i] += 1` must capture xs and i, or closure
+        // lowering and the escape check miss them, a silent miscompile.
+        let lhs = Expr {
+            kind: ExprKind::Index(Box::new(ident("xs")), Box::new(ident("i"))),
+            span: Span::new(0, 0),
+        };
+        let stmt = Stmt::AssignOp(BinOp::Add, lhs, ident("one"));
+        let mut used = Vec::new();
+        let mut bound = HashSet::new();
+        collect_stmt(&stmt, &mut used, &mut bound);
+        assert!(used.contains(&"xs".to_string()), "xs must be captured");
+        assert!(used.contains(&"i".to_string()), "i must be captured");
+        assert!(used.contains(&"one".to_string()), "the rhs must be captured");
     }
 }

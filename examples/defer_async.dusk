@@ -1,0 +1,35 @@
+// Defers that span awaits. Three defers are registered before two awaits and an
+// early return; they replay at true completion, in reverse order, exactly once,
+// never at a suspension. free(p) reads the managed pointer's frame slot at
+// completion and runs between the two printing defers.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func val(n: int64) -> int64 {
+    return n
+}
+
+async func amain() -> int32 {
+    p: *int64 = alloc()
+    p[0] = 42
+    defer println("last")
+    defer free(p)
+    defer println("first")
+    a := await val(1)
+    println(a)
+    if a == 1 {
+        return 0
+    }
+    b := await val(2)
+    println(b)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

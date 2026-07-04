@@ -1,0 +1,22 @@
+// An async func taking an int64 and a string, called through async_run. The
+// call site writes both arguments into the task frame at the offsets the poll
+// reads them from, so echoing them back proves the frame layout agrees on both
+// sides. The task returns a computed int64 the loop hands to main.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func compute(n: int64, label: string) -> int64 {
+    print(label)
+    println(n)
+    return n * 2
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    r := async_run(compute(21, "value="))
+    loop_free()
+    println(r)
+    return 0
+}

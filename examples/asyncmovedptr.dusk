@@ -1,0 +1,23 @@
+@paradigm procedural
+@import std.async.future
+
+// move(p) into the call hands the pointer's ownership to consume; the name
+// p dies at the move, so using it afterward, even past an await, is the
+// single owner rule catching a use after move.
+async func consume(p: *int64) -> int64 {
+    return *p
+}
+
+async func amain() -> int64 {
+    p: *int64 = alloc(8)
+    *p = 5
+    v := await consume(move(p))
+    println(*p)
+    return v
+}
+
+func main() -> int32 {
+    r := async_run(amain())
+    println(r)
+    return 0
+}

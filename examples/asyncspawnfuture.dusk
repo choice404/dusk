@@ -1,0 +1,16 @@
+@paradigm procedural
+@import std.async.future
+
+// A future belongs to the event loop thread; a spawned lambda cannot capture
+// it, since a heap copied environment would carry the typed handle off the
+// loop thread that owns it.
+func main() -> int32 {
+    f: Future<int64> = future_new()
+    t, e := spawn(lambda () -> void {
+        println(f.gen)
+    })
+    e.ignore()
+    je := join(t)
+    je.ignore()
+    return 0
+}

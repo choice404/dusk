@@ -1,0 +1,18 @@
+// A struct field whose TYPE is an enum wrapping a frame-local view. The escape
+// walk must descend through the struct field into the enum payload, one carrier
+// nested inside another, to catch the local slice.
+@paradigm procedural
+enum E { V(rows: int64[]), N }
+struct W { e: E }
+func mk() -> W {
+    a: int64[3] = [1, 2, 3]
+    return W { e: E.V(a[0..2]) }
+}
+func main() -> int32 {
+    w := mk()
+    match w.e {
+        V(r) => { println(r[0]) }
+        N => { println(0) }
+    }
+    return 0
+}

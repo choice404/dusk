@@ -1,0 +1,39 @@
+// The C2 miscompile guard: a loop creates one closure per iteration, each
+// capturing per-iteration locals, with an await inside the body. Both closures
+// are stored and called AFTER the loop. Each iteration's env is a distinct
+// cool_task_env_alloc block (not a reused frame slot), so the two captured
+// values stay distinct across the suspension; a reused slot would make both
+// closures see the last iteration's values.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func val(n: int64) -> int64 {
+    return n
+}
+
+async func amain() -> int32 {
+    mut fns: (() -> int64)[2] = [lambda () -> int64 { return 0 }, lambda () -> int64 { return 0 }]
+    mut i := 0
+    while i < 2 {
+        c := i * 10
+        v := await val(i)
+        fns[i] = lambda () -> int64 {
+            return c + v
+        }
+        i = i + 1
+    }
+    r0 := fns[0]()
+    r1 := fns[1]()
+    println(r0)
+    println(r1)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

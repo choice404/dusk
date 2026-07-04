@@ -1,0 +1,38 @@
+// An enum variant whose payload is an interface. The constructor boxes the
+// concrete struct into the interface fat pointer, so the payload carries a
+// dispatchable value the match arm reads. Before routing enum payloads through
+// adapt this was a clang reject.
+@paradigm oop
+@paradigm procedural
+
+interface Sized {
+    size() -> int64
+}
+
+struct Box {
+    v: int64,
+}
+
+impl Sized for Box {
+    func size() -> int64 {
+        return self.v
+    }
+}
+
+enum Shape {
+    W(s: Sized),
+    N,
+}
+
+func main() -> int32 {
+    e: Shape = Shape.W(Box { v: 5 })
+    match e {
+        W(x) => {
+            println(x.size())
+        }
+        N => {
+            println(0)
+        }
+    }
+    return 0
+}

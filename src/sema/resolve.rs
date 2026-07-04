@@ -17,7 +17,7 @@ const BUILTINS: &[&str] = &[
     "alloc", "free", "print", "println", "printerr", "sizeof", "alloc_bytes", "ptr_add", "map",
     "filter", "reduce", "fold", "foreach", "debug_alloc", "debug_free", "debug_leaks",
     "debug_double_frees", "read_file", "write_file", "read_line", "read_all", "parse_float",
-    "cstr", "move", "spawn", "join", "submit",
+    "cstr", "move", "spawn", "join", "submit", "async_run",
 ];
 
 /// Resolves names and checks scope rules for a module, returning diagnostics.
@@ -203,6 +203,10 @@ impl Resolver {
                 self.expr(rhs);
                 self.assign_target(lhs);
             }
+            Stmt::AssignOp(_, lhs, rhs) => {
+                self.expr(rhs);
+                self.assign_target(lhs);
+            }
             Stmt::Return(Some(e)) => self.expr(e),
             Stmt::Return(None) => {}
             Stmt::Defer(e) => self.expr(e),
@@ -328,7 +332,7 @@ impl Resolver {
                 self.expr(x);
                 self.expr(i);
             }
-            ExprKind::Range(a, b) => {
+            ExprKind::Range(a, b, _) => {
                 self.expr(a);
                 self.expr(b);
             }
@@ -344,6 +348,9 @@ impl Resolver {
             }
             ExprKind::Lambda(l) => self.lambda(l),
             ExprKind::Match(m) => self.match_(m),
+            // The awaited operand is a use of its future binding, so an
+            // unawaited future would still trip the unused variable rule.
+            ExprKind::Await(op, _) => self.expr(op),
             ExprKind::Do(_, binds) => {
                 for b in binds {
                     self.expr(&b.expr);
@@ -410,6 +417,18 @@ mod tests {
     #[test]
     fn mut_ok() {
         let e = errs("func f() -> int64 {\n  mut x: int64 = 5\n  x = 6\n  return x\n}");
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn compound_assign_to_immutable_rejected() {
+        let e = errs("func f() -> int64 {\n  x := 5\n  x += 1\n  return x\n}");
+        assert!(e.iter().any(|d| d.msg.contains("immutable")), "{e:?}");
+    }
+
+    #[test]
+    fn compound_assign_to_mut_ok() {
+        let e = errs("func f() -> int64 {\n  mut x: int64 = 5\n  x += 1\n  return x\n}");
         assert!(e.is_empty(), "{e:?}");
     }
 

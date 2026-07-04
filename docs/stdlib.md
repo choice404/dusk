@@ -376,3 +376,73 @@ loop_free()
 ```
 
 The readiness mask is 1 for readable, 2 for writable, 4 for hangup, and 8 for error, ORed together. Only one watch may be armed on a file descriptor at a time; a second watch on an already armed fd is a fault. `future_free` on a readiness future does not disarm its watch. Stage `read_nb` and `write_nb` buffers through `alloc_bytes`, the same idiom `Pipe`'s own two fds use internally. Writing to a pipe whose read end is closed delivers `SIGPIPE` and kills the process; do not write to a pipe with no reader.
+
+## Async keywords
+
+Added in 0.4.2. `async func`, `await`, and `async_run` are keywords and a builtin, not a stdlib module, but they ride the same `std.async.future` and `std.async.loop` machinery every other entry in this file describes, so they belong beside it. See the language reference's async chapter for the full signature and statement rules, the fault family, and the cost table.
+
+| Form                          | Description                                            |
+| ------------------------------| ------------------------------------------------------|
+| `async func f(...) -> T`      | Compiles to a poll function over a heap frame; calling it mints a task and a `Future<T>` and runs nothing until the loop cranks it. No type parameters, no future, slice, closure, or interface value as a parameter or return. |
+| `x := await f`                | Suspends until `f` completes; binds the value, discards the completer's error. |
+| `x, e := await f`             | Suspends until `f` completes; binds the value and the completer's error. |
+| `await f`                     | Suspends until `f` completes; discards the value, legal only when `f`'s element is void. |
+| `return await f`              | Suspends until `f` completes, then propagates the value and error to the caller. |
+| `async_run(f(args)) -> T`     | Cranks the event loop until a direct call of an async func's future completes, then yields its value. The only sync to async bridge; illegal inside an async func. |
+
+```text
+@import std.async.future
+@import std.async.loop
+
+async func fetch(n: int64) -> int64 {
+    return n * 2
+}
+
+async func amain() -> int32 {
+    a := await fetch(10)
+    b := await fetch(20)
+    println(a + b)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}
+```
+
+`await` is legal only in the four statement shapes above, never mid expression, and only directly inside an async func body, never inside a lambda literal created there or under `defer`. A future, a slice, a closure, and an interface value all share one reason for being barred from an async func's signature and from a spawned or submitted lambda's captures: each may view a frame or a thread the task outlives, so a completer on another thread carries a future's raw handle and generation through `complete_raw` instead of the typed value.
+
+## Operators
+
+Added in 0.4.2, the complete operator set, on a thirteen level precedence ladder from loosest to tightest: range, pipe, or, and, comparison, bitwise or, bitwise xor, bitwise and, shift, additive, multiplicative, exponent, then unary and postfix. See the language reference's Expressions and Operators chapter for the full table and every family's rules.
+
+| Operator                                   | Description                                            |
+| --------------------------------------------| ------------------------------------------------------|
+| `& \| ^ ~`                                  | Bitwise and, or, xor, and unary not, on integers only. |
+| `<< >>`                                     | Shift left, arithmetic shift right; a dynamic out of range amount faults, a constant one is a compile error. |
+| `+= -= *= /= %= &= \|= ^= <<= >>=`          | Compound assignment; the place is computed once.       |
+| `++ --`                                     | Postfix increment and decrement, statement only, no value. |
+| `**`                                        | Exponent, right associative, tighter than `* / %`.     |
+| `\|>`                                       | Pipe: `x \|> f(a)` rewrites to `f(x, a)`.               |
+| `..=`                                       | Inclusive range in a slice index: `a..=b` is `a..b+1`. |
+
+```text
+@paradigm procedural
+
+func double(n: int64) -> int64 {
+    return n * 2
+}
+
+func main() -> int32 {
+    mut x: int64 = 10
+    x += 5
+    x <<= 1
+    println(x & 15)
+    println(2 ** 10 |> double)
+    return 0
+}
+```

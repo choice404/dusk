@@ -1,0 +1,16 @@
+// A slice of concrete structs passed where a slice of an interface is expected.
+// Both are {ptr,i64} at the machine level, so it compiles clean but reads each
+// element as a boxed interface, corrupting memory. Rejected as a covariance error.
+@paradigm oop
+@paradigm procedural
+interface Sized { size() -> int64 }
+struct Box { v: int64 }
+impl Sized for Box { func size() -> int64 { return self.v } }
+func take(ys: Sized[]) -> int64 {
+    return ys[0].size() + ys[1].size()
+}
+func main() -> int32 {
+    b: Box[2] = [Box { v: 10 }, Box { v: 20 }]
+    println(take(b[0..2]))
+    return 0
+}

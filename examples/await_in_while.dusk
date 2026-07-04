@@ -1,0 +1,28 @@
+// An await inside a while body. The loop back-edge re-enters the body after
+// each resume; the counter lives in a frame slot, so it survives the
+// suspension and the condition reloads it every turn.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func val(n: int64) -> int64 {
+    return n
+}
+
+async func amain() -> int32 {
+    mut i := 0
+    while i < 3 {
+        v := await val(i)
+        println(v)
+        i = i + 1
+    }
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

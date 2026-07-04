@@ -1,0 +1,21 @@
+// A conditional reassignment of an array binding to frame-local element views. r
+// starts clean, aliasing a param array, then an if arm reassigns it to a fixed
+// array whose elements slice a local array; the may-join keeps r flagged past
+// the branch, so the return is rejected.
+@paradigm procedural
+func mk(base: int64[][2], c: bool) -> int64[][2] {
+    mut r := base
+    a: int64[3] = [1, 2, 3]
+    if c {
+        r = [a[0..2], a[0..1]]
+    }
+    return r
+}
+func main() -> int32 {
+    x: int64[3] = [10, 20, 30]
+    y: int64[3] = [40, 50, 60]
+    two: int64[][2] = [x[0..3], y[0..3]]
+    g := mk(two, true)
+    println(g[0][0])
+    return 0
+}

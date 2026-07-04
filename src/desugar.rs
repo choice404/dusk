@@ -71,6 +71,7 @@ impl Desugar<'_> {
     fn func(&self, f: &Func) -> Func {
         Func {
             exported: f.exported,
+            is_async: f.is_async,
             name: f.name.clone(),
             span: f.span,
             generics: f.generics.clone(),
@@ -96,6 +97,7 @@ impl Desugar<'_> {
                 value: self.expr(&l.value),
             }),
             Stmt::Assign(a, b) => Stmt::Assign(self.expr(a), self.expr(b)),
+            Stmt::AssignOp(op, a, b) => Stmt::AssignOp(*op, self.expr(a), self.expr(b)),
             Stmt::Return(Some(e)) => Stmt::Return(Some(self.expr(e))),
             Stmt::Return(None) => Stmt::Return(None),
             Stmt::Defer(e) => Stmt::Defer(self.expr(e)),
@@ -147,8 +149,8 @@ impl Desugar<'_> {
             ExprKind::Index(a, b) => {
                 ExprKind::Index(Box::new(self.expr(a)), Box::new(self.expr(b)))
             }
-            ExprKind::Range(a, b) => {
-                ExprKind::Range(Box::new(self.expr(a)), Box::new(self.expr(b)))
+            ExprKind::Range(a, b, incl) => {
+                ExprKind::Range(Box::new(self.expr(a)), Box::new(self.expr(b)), *incl)
             }
             ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| self.expr(x)).collect()),
             ExprKind::Array(xs) => ExprKind::Array(xs.iter().map(|x| self.expr(x)).collect()),
@@ -162,6 +164,9 @@ impl Desugar<'_> {
                 body: self.block(&l.body),
             }),
             ExprKind::Match(m) => ExprKind::Match(Box::new(self.match_(m))),
+            ExprKind::Await(op, ty) => {
+                ExprKind::Await(Box::new(self.expr(op)), ty.clone())
+            }
             ExprKind::Do(monad, binds) => {
                 return self.do_to_calls(monad.as_deref(), binds, e.span)
             }

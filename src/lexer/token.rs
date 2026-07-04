@@ -93,12 +93,38 @@ pub enum TokenKind {
     FatArrow,
     LArrow,
     DotDot,
+    DotDotEq,
     EqEq,
     Ne,
     Le,
     Ge,
     AndAnd,
     OrOr,
+
+    // Bitwise and shift operators.
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+    // Exponent and pipe.
+    StarStar,
+    PipeGt,
+    // Increment and decrement.
+    PlusPlus,
+    MinusMinus,
+    // Compound assignment, one per binary operator.
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
 
     Assign,
     Plus,

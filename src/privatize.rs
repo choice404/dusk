@@ -187,6 +187,10 @@ impl Renamer {
                 self.expr(a, skip, bound);
                 self.expr(b, skip, bound);
             }
+            Stmt::AssignOp(_, a, b) => {
+                self.expr(a, skip, bound);
+                self.expr(b, skip, bound);
+            }
             Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => self.expr(e, skip, bound),
             Stmt::Return(None) => {}
             Stmt::If(i) => {
@@ -245,7 +249,7 @@ impl Renamer {
                 }
             }
             ExprKind::Unary(_, x) => self.expr(x, skip, bound),
-            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b, _) => {
                 self.expr(a, skip, bound);
                 self.expr(b, skip, bound);
             }
@@ -280,6 +284,12 @@ impl Renamer {
                 bound.pop();
             }
             ExprKind::Match(m) => self.match_(m, skip, bound),
+            ExprKind::Await(op, ty) => {
+                self.expr(op, skip, bound);
+                if let Some(t) = ty {
+                    self.ty(t, skip);
+                }
+            }
             ExprKind::Do(_, binds) => {
                 // A do bind name scopes over the rest of the block; the coarse
                 // approximation binds them all up front, which only over shadows.

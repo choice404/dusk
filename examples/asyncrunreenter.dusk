@@ -1,0 +1,27 @@
+// async_run re-entered. A sync helper calls async_run while the loop is already
+// cranking (an async body invoked the helper), which the loop refuses by name.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func g() -> int64 {
+    return 1
+}
+
+func helper() -> int64 {
+    return async_run(g())
+}
+
+async func amain() -> int32 {
+    x := helper()
+    println(x)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

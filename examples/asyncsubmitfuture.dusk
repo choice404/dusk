@@ -1,0 +1,17 @@
+@paradigm procedural
+@import std.async.future
+@import std.concurrent.pool
+
+// The pool task shares spawn's capture rule: a future belongs to the event
+// loop thread, so a submitted lambda cannot capture it either.
+func main() -> int32 {
+    pe := pool_start(1)
+    pe.ignore()
+    f: Future<int64> = future_new()
+    s := submit(lambda () -> void {
+        println(f.gen)
+    })
+    s.ignore()
+    pool_shutdown()
+    return 0
+}

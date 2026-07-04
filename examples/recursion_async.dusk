@@ -1,0 +1,23 @@
+// Async recursion: each recursive call mints its own task and frame, awaits the
+// child, and adds. The framesize constant is loaded at every call site, so a
+// self-call needs no emission ordering. sum(5) = 5+4+3+2+1+0.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func sum(n: int64) -> int64 {
+    if n == 0 {
+        return 0
+    }
+    m := await sum(n - 1)
+    return n + m
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    r := async_run(sum(5))
+    loop_free()
+    println(r)
+    return 0
+}

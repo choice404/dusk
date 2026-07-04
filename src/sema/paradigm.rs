@@ -113,6 +113,10 @@ impl Gate {
                 self.expr(a);
                 self.expr(b);
             }
+            Stmt::AssignOp(_, a, b) => {
+                self.expr(a);
+                self.expr(b);
+            }
             Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => self.expr(e),
             Stmt::Return(None) => {}
             Stmt::If(i) => {
@@ -170,7 +174,7 @@ impl Gate {
                 }
             }
             ExprKind::Unary(_, x) => self.expr(x),
-            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b) => {
+            ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) | ExprKind::Range(a, b, _) => {
                 self.expr(a);
                 self.expr(b);
             }
@@ -187,6 +191,8 @@ impl Gate {
             }
             ExprKind::Lambda(l) => self.block(&l.body),
             ExprKind::Match(m) => self.match_(m),
+            // async is paradigm agnostic; the gate only walks into the operand.
+            ExprKind::Await(op, _) => self.expr(op),
             ExprKind::Int(..)
             | ExprKind::Float(..)
             | ExprKind::Str(_)

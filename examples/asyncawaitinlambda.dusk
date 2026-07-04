@@ -1,0 +1,20 @@
+@paradigm procedural
+@import std.async.future
+
+// A lambda has no task frame of its own; only the enclosing async func can
+// suspend. Awaiting from inside a lambda body is rejected even though the
+// lambda closes over a legally minted future.
+async func amain() -> int64 {
+    f: Future<int64> = future_new()
+    h := lambda () -> int64 {
+        v := await f
+        return v
+    }
+    return h()
+}
+
+func main() -> int32 {
+    r := async_run(amain())
+    println(r)
+    return 0
+}
