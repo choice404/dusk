@@ -1422,6 +1422,10 @@ golden!(pipewake, "pipewake.dusk", "armed\n1\n7\n");
 golden!(timerinterleave, "timerinterleave.dusk", "0\n1\n0\n");
 golden!(reactorsum, "reactorsum.dusk", "10\n");
 golden!(writewatch, "writewatch.dusk", "2\n");
+golden!(sigpipe, "sigpipe.dusk", "broken pipe\n0\n");
+golden!(fdexhaust_pipe, "fdexhaust_pipe.dusk", "too many open files\nok\n");
+golden!(fdexhaust_connect, "fdexhaust_connect.dusk", "too many open files\nok\n");
+golden!(fdexhaust_accept, "fdexhaust_accept.dusk", "too many open files\nok\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");
@@ -1440,6 +1444,10 @@ golden!(doasync, "doasync.dusk", "17\n");
 golden!(iomonad, "iomonad.dusk", "30\n");
 golden!(tcplocal, "tcplocal.dusk", "ping\n");
 golden!(acceptloop, "acceptloop.dusk", "6\n");
+golden!(stress_timers, "stress_timers.dusk", "2000\n");
+golden!(stress_tasks, "stress_tasks.dusk", "1000\n");
+golden!(stress_accept, "stress_accept.dusk", "4950\n");
+golden!(stress_pool, "stress_pool.dusk", "49995000\n");
 
 #[test]
 fn awaiting_a_net_future_outside_an_async_func_is_rejected() {

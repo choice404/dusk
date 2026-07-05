@@ -1,0 +1,85 @@
+// fd-exhaustion contract for tcp_accept. A client connection is established
+// first, so the listener has a real pending connection to accept. Then the fd
+// table is starved: accepting the pending connection would mint a server-side
+// fd, which now fails with EMFILE. tcp_accept must surface that as a terminal
+// "too many open files" error, NOT as would-block (which would hot-spin the
+// accept loop re-arming readable on a listener that stays ready). Raising the
+// limit and accepting the still-queued connection proves the reactor survived.
+// The transcript is deterministic: the error line, then "ok".
+@paradigm procedural
+@import std.async.net
+@import std.async.future
+@import std.async.loop
+
+foreign "C" {
+    func cool_rlimit_nofile(n: int64) -> int64
+}
+
+async func amain() -> int32 {
+    lfd, le := tcp_listen(0, 16)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    port, pe := tcp_local_port(lfd)
+    if pe.exists() {
+        printerr(pe)
+        lc := tcp_close(lfd)
+        lc.ignore()
+        return 1
+    }
+
+    // Establish the pending connection BEFORE starving the table: await the
+    // client connect to completion so the listener has something to accept.
+    cfd, cce := await tcp_connect("127.0.0.1", port)
+    if cce.exists() {
+        printerr(cce)
+        lc := tcp_close(lfd)
+        lc.ignore()
+        return 1
+    }
+
+    re := cool_rlimit_nofile(3)
+    if re != 0 {
+        println("could not lower the fd limit")
+        return 1
+    }
+
+    sc, ae := await tcp_accept(lfd)
+    if ae.exists() {
+        println(ae.toString())
+    } else {
+        cc := tcp_close(sc)
+        cc.ignore()
+    }
+
+    // Raise the limit and accept the still-pending connection to prove the
+    // reactor and loop kept working through the exhaustion.
+    re2 := cool_rlimit_nofile(64)
+    re2.ignore()
+    sc2, ae2 := await tcp_accept(lfd)
+    if ae2.exists() {
+        println("recovery failed")
+        return 1
+    }
+    cc2 := tcp_close(sc2)
+    cc2.ignore()
+
+    ccf := tcp_close(cfd)
+    ccf.ignore()
+    lc := tcp_close(lfd)
+    lc.ignore()
+    println("ok")
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    rc := async_run(amain())
+    reactor_stop()
+    loop_free()
+    return rc
+}

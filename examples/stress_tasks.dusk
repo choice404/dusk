@@ -1,0 +1,60 @@
+// Stress: 1000 async tasks, ten in flight at a time across 100 batches. Each
+// batch mints ten bare futures from a direct async call (the sanctioned
+// unannotated `f := one()` form gofanin.dusk uses) before awaiting any of
+// them, so ten tasks sit pending on the loop's ready queue at once; a single
+// loop thread drains that queue FIFO, so every batch's sum is exact and the
+// grand total is deterministic at 1000 every run.
+//
+// Note: a bare future from a direct async call can only be named and awaited
+// this way. Passing it as a function argument, storing it in an array
+// literal, or pushing it into a generic Vector<Future<T>> all fail to
+// type-check here (the checker's ground pass sees the async call's raw
+// declared return, not the Future<T> its surface pass minted), so this
+// golden fans tasks out through named bindings per batch rather than a
+// container, sidestepping that gap instead of tripping it.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func one() -> int64 {
+    return 1
+}
+
+async func amain() -> int32 {
+    mut sum: int64 = 0
+    mut batch := 0
+    while batch < 100 {
+        f0 := one()
+        f1 := one()
+        f2 := one()
+        f3 := one()
+        f4 := one()
+        f5 := one()
+        f6 := one()
+        f7 := one()
+        f8 := one()
+        f9 := one()
+        v0 := await f0
+        v1 := await f1
+        v2 := await f2
+        v3 := await f3
+        v4 := await f4
+        v5 := await f5
+        v6 := await f6
+        v7 := await f7
+        v8 := await f8
+        v9 := await f9
+        sum = sum + v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9
+        batch = batch + 1
+    }
+    println(sum)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

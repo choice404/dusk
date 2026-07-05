@@ -104,7 +104,7 @@ The `dawn` binary has four commands. They are `get`, `build`, `run`, and `versio
 
 See [CHANGELOG.md](CHANGELOG.md) for the release by release history.
 
-0.4.3. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
+0.4.4. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run.
 
 Releases 0.2.0 through 0.2.6 add memory safety. Strings have a growable `StringBuilder` with concatenation, the pointer layer splits into a managed `*T` and a raw `*raw T`, and the default heap is generational. Every managed pointer carries a generation that is checked at each dereference, so a use after free, a double free, or a stale pointer to a reused block faults instead of corrupting memory. A managed pointer is single owner, with `ref` for a non owning alias and `move` to transfer, and a return that lets a frame local escape is a compile error for the clear cases. A `foreign "C"` block then calls into libc across the raw pointer boundary, the first slice of the interop work.
 
@@ -140,6 +140,8 @@ func main() -> int32 {
 ```
 
 Release 0.4.3 rounds out the async line with networking, an awaitable channel, and the generic monad. `std.async.net` puts TCP over the reactor's readiness futures: `tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_read`, and `tcp_write` are async functions that await a socket the same way a task awaits any future, so a server accept loop and a client both compose under `async_run` with no polling. `chan_recv_async` makes a blocking channel receive awaitable on the loop, a detached helper completing the future off thread so the loop never stalls. `do` notation now composes over any generic monad, `Maybe`, `Either`, or a user `monad` block, monomorphizing a fresh `bind` and `unit` pair per `do` site, and `std.functional.io` ships an `IO<T>` that rides it. The same change hardened an old soundness seam: a width mismatch inside a generic `do` continuation, once silently truncated, is now caught by a second type check over the fully concrete program.
+
+Release 0.4.4 is the second platform and the hardening pass. The reactor's poller splits behind a six function seam, `create`, `destroy`, `arm`, `disarm`, `wait`, and `wake`, over a normalized readiness mask, so a second backend sits beside the first. `reactor_epoll.c` is the Linux path, the existing epoll and eventfd code lifted verbatim so every reactor golden and the seam under ThreadSanitizer stay unchanged, and `reactor_kqueue.c` is a kqueue backend for the BSDs and macOS, written against the same seam though it waits on a BSD or macOS runner to compile and run. The syscall surface hardens: `SIGPIPE` is ignored process wide so a write to a closed peer returns a `broken pipe` error instead of killing the process, every blocking call retries on `EINTR`, and file descriptor exhaustion surfaces as a handled `too many open files` error that leaks nothing and leaves the reactor usable. Four async stress goldens, 2000 timers, 1000 tasks, 100 connections, and 10000 pool sends, pin the runtime under load, the pool saturation and accept storm among them ThreadSanitizer clean.
 
 ## License
 

@@ -1,0 +1,45 @@
+// Stress: N zero-delay timers minted up front, then awaited in order. Every
+// sleep_async(0) future fires on the next await or poll, so the count of
+// awaits that complete is exact and deterministic regardless of the
+// machine's timing. N is pinned at 2000, not 10000, because cool_timers_purge
+// runs O(n^2) per take (a flagged runtime cost, not a checker concern here);
+// 2000 keeps this golden fast while still exercising the same heap-drain path
+// a larger N would. This is a deliberate cap for wall-clock speed, not a
+// silent truncation: the loop still mints and awaits all 2000 timers, no
+// fewer.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+@import std.vector
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+
+    n: int64 = 2000
+    v: *Vector<Future<int64>> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < n {
+        f := sleep_async(0)
+        vec_push(v, f)
+        i = i + 1
+    }
+
+    mut count: int64 = 0
+    mut j: int64 = 0
+    while j < n {
+        f := vec_get(v, j)
+        val, e := await(f)
+        e.ignore()
+        val.ignore()
+        count = count + 1
+        j = j + 1
+    }
+
+    vec_free(v)
+    free(v)
+    println(count)
+    loop_free()
+    return 0
+}

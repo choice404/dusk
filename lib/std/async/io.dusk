@@ -83,6 +83,10 @@ export func fd_nonblock(fd: int64) -> error {
 export func pipe_new() -> (Pipe, error) {
     out2: *raw int64 = alloc_bytes(2 * sizeof(int64))
     rc := cool_pipe2(out2)
+    if rc == -3 {
+        free(out2)
+        return (Pipe { r: -1, w: -1 }, error { message: "too many open files" })
+    }
     if rc == 1 {
         free(out2)
         return (Pipe { r: -1, w: -1 }, error { message: "the pipe could not be created" })
@@ -119,14 +123,17 @@ export func read_nb(fd: int64, buf: *void, cap: int64) -> (int64, error) {
 }
 
 // Writes up to n bytes from buf without blocking. Returns the count written;
-// -1 is "would block", -2 is a hard write failure. SIGPIPE honesty note:
-// writing to a pipe whose read end is closed delivers SIGPIPE and kills the
-// process; signal hardening lands in a later phase, so do not write to a
-// reader less pipe.
+// -1 is "would block", -2 is a hard write failure, -3 is a broken pipe. The
+// runtime ignores SIGPIPE process-wide, so writing to a pipe whose read end is
+// closed (or a reset socket) returns a "broken pipe" error value, not a process
+// kill; handle it like any other error.
 export func write_nb(fd: int64, buf: *void, n: int64) -> (int64, error) {
     rc := cool_write_nb(fd, buf, n)
     if rc == -1 {
         return (0, error { message: "would block" })
+    }
+    if rc == -3 {
+        return (0, error { message: "broken pipe" })
     }
     if rc == -2 {
         return (0, error { message: "the write failed" })

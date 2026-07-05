@@ -1,0 +1,33 @@
+// Writing to a pipe whose read end is closed once delivered SIGPIPE and killed
+// the process. The runtime now ignores SIGPIPE process-wide, so write_nb
+// surfaces the condition as a "broken pipe" error value and the program lives
+// to exit cleanly. This golden is the proof: the error surfaces on stdout, the
+// write count is zero, no fatal reaches stderr, and the exit code is 0 (a
+// SIGPIPE kill would make the run fail instead). No reactor or loop is needed;
+// write_nb is a plain nonblocking byte write.
+@paradigm procedural
+@import std.async.io
+
+func main() -> int32 {
+    p, pe := pipe_new()
+    pe.ignore()
+
+    // Close the read end, then write to the write end: with no reader the
+    // write() returns EPIPE, which write_nb maps to a "broken pipe" error
+    // instead of raising SIGPIPE.
+    ce := fd_close(p.r)
+    ce.ignore()
+
+    buf: *raw int64 = alloc_bytes(sizeof(int64))
+    buf[0] = 7
+    n, we := write_nb(p.w, buf, sizeof(int64))
+    if we.exists() {
+        println(we.toString())
+    }
+    println(n)
+    free(buf)
+
+    cwe := fd_close(p.w)
+    cwe.ignore()
+    return 0
+}

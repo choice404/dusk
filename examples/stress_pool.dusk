@@ -1,0 +1,45 @@
+// Stress: N submit tasks, each writing its own index to a shared channel;
+// main drains N receives and folds an exact sum. The pool workers only ever
+// touch the channel through chan_send, and main only ever touches it through
+// chan_recv on the single loop thread, so there is no other shared mutable
+// state between threads, a TSan-clean shape. The sum is exact and
+// deterministic (0 + 1 + ... + (N-1)) regardless of which worker's send lands
+// first, since a fold over a full drain is commutative.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.concurrent.pool
+
+func main() -> int32 {
+    pe := pool_start(4)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+
+    n: int64 = 10000
+    done: Channel<int64> = chan_new(256)
+    mut i: int64 = 0
+    while i < n {
+        idx := i
+        s := submit(lambda () -> void {
+            se := chan_send(done, idx)
+            se.ignore()
+        })
+        s.ignore()
+        i = i + 1
+    }
+
+    mut sum: int64 = 0
+    mut got: int64 = 0
+    while got < n {
+        v, e := chan_recv(done)
+        e.ignore()
+        sum = sum + v
+        got = got + 1
+    }
+    println(sum)
+
+    pool_shutdown()
+    chan_free(done)
+    return 0
+}

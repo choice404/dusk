@@ -50,3 +50,22 @@ gauge drop, and two completers racing one future.
   reactor but sharing the same completion path the reactor's fire step reuses.
 
 Swap the example name in the two commands above to cover a different golden.
+
+## Coverage for the 0.4.4 release
+
+Two stress goldens join the list, both async and both likely to expose a race
+only a long run surfaces.
+
+- `stress_pool`, a pool saturation golden: many more tasks than workers
+  submitted at once, so the pool's queue, its worker wakeups, and every
+  completion's channel handoff all run under sustained contention rather than
+  the light load the earlier goldens exercise.
+- `stress_accept`, an accept storm golden: many clients connecting against one
+  listener at once, so `tcp_accept`'s await and retry loop, the reactor's watch
+  churn on the listening descriptor, and the fd exhaustion path all run
+  back to back under load instead of one connection at a time.
+
+Run both through the same rebuild, link, and twenty iteration loop as
+`reactorsum` above; `stress_accept` touches `std.async.net`, whose TCP shims
+live in `runtime/reactor.c` already, so no extra runtime file joins the four
+already listed.

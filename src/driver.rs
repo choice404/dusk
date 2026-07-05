@@ -86,5 +86,7 @@ fn runtime_sources() -> Vec<PathBuf> {
         rt.join("thread.c"),
         rt.join("async.c"),
         rt.join("reactor.c"),
+        rt.join("reactor_epoll.c"),
+        rt.join("reactor_kqueue.c"),
     ]
 }

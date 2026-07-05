@@ -2,6 +2,31 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.4.4
+
+The second platform and the hardening pass. The reactor's poller splits behind a six function seam so a second backend can sit beside the first: epoll stays the Linux path, byte for byte unchanged, and a kqueue backend for the BSDs and macOS is written against the same seam. The syscall surface hardens against the three things a networked program meets in the wild, a peer that hangs up mid write, a signal that interrupts a blocking call, and a process that runs out of file descriptors. Four async stress goldens pin the runtime under load. 325 unit tests and 268 golden integration tests pass, the reactor seam and the four stress goldens ThreadSanitizer clean.
+
+The poller seam and the second backend.
+
+- The reactor splits into a portable core and a poller backend. The core keeps the watch registry, the armed gauge, the arm, fire, and drop path, and the start and stop lifecycle; the backend is six functions, `create`, `destroy`, `arm`, `disarm`, `wait`, and `wake`, over a normalized readiness mask, chosen at compile time by a platform guard. `reactor_epoll.c` is the Linux backend, the existing epoll fd, eventfd sentinel, and `EPOLLONESHOT` path lifted verbatim, so every reactor and net golden and the seam under ThreadSanitizer are unchanged. The split moves no lock boundary and no gauge raise or drop, proven by re-running the goldens and diffing the emitted IR empty.
+- `reactor_kqueue.c` is the BSD and macOS backend over kqueue and kevent, an `EVFILT_USER` event as the wake sentinel in place of the eventfd and `EV_ADD | EV_ONESHOT` for the one shot arm. It is written and reads clean but is not compiled or run on this machine, which is Linux with no kqueue header; a BSD or macOS runner is what compiles and exercises it. One behavior diverges and is documented rather than smoothed over: a close while armed then reused file descriptor re-arms clean on epoll, whose registration the close already dropped, but faults on kqueue, since `EV_ADD` cannot fail on a duplicate the way `EPOLL_CTL_ADD` returns `EEXIST`, so the kqueue backend reproduces the already armed fault by probing the registry first. Both backends reject a readiness watch on a regular file, epoll through `EPERM` and kqueue through an `fstat`.
+
+SIGPIPE, EINTR, and fd exhaustion.
+
+- `SIGPIPE` is ignored process wide by a load time constructor, so a write to a closed peer, whether a pipe or a socket, returns an error value instead of killing the process. The non blocking write classifies the broken pipe distinctly, `broken pipe`, from a generic `the write failed`; a peer reset, which is `ECONNRESET` rather than `EPIPE`, falls to the generic one.
+- Every blocking syscall retries on `EINTR`: the reactor wait, the stop sentinel read and write, the non blocking byte calls, `accept`, and `connect`. `close` treats `EINTR` as success rather than retrying, since the descriptor is already gone on return and a retry could close a reused one. The fast, register only calls that do not return `EINTR` are audited and left alone.
+- File descriptor exhaustion, `EMFILE` from the process limit or `ENFILE` from the system, surfaces at every socket and pipe mint as a handled `too many open files` error, never a crash. The half open descriptor is closed before the error returns, so nothing leaks, and the reactor stays usable, so a program recovers once the limit lifts. On accept the exhausted return is terminal, not a would block, so the accept loop cannot spin on a listener that stays ready.
+
+Async stress goldens.
+
+- Four goldens pin the runtime under load, each exact or commutative so its output is deterministic regardless of interleave: 2000 zero delay timers minted then awaited, 1000 tasks ten in flight across a hundred batches, 100 TCP connections against one accept loop with the echoed byte sum fixed at 4950, and 10000 pool tasks each writing its index to one channel that a single loop thread drains to an exact fold. The timer count is pinned at 2000 rather than higher because the timer cancellation is a linear scan, an honest cap for wall clock speed with every timer still minted and awaited. The pool saturation and accept storm goldens are ThreadSanitizer clean.
+
+The spec's async chapter.
+
+- The reference gains the reactor's portability, the poller seam and its two backends and the one documented divergence, and the hardening contract for `SIGPIPE`, `EINTR`, and fd exhaustion, and states plainly that the async state machine lowering landed in line rather than waiting for a later release.
+
+Deferred. The kqueue backend waits on a BSD or macOS runner to compile and exercise the full reactor, net, and stress matrix and to pin the documented divergence. A checker gap the stress work surfaced and confirmed waits for 0.5.0: a bare future from a direct async func call can only be named and awaited, not passed as an argument, annotated, or stored in a container, since the type check reads the call's raw return outside an await; it is a loud, safe reject, not a miscompile. Name resolution stays out, literal IPv4 addresses only.
+
 ## 0.4.3
 
 Phase four of the async line: the awaitable channel, TCP, and the generic monad, plus a soundness hardening of the generic `do` path that turned out to sit under all of it. `do` notation grows up from a single concrete monad to any generic one, `chan_recv_async` gives a blocking channel receive a home on the event loop, `std.functional.io` ships an `IO<T>` monad, and `std.async.net` puts TCP over the reactor. 325 unit tests and 260 golden integration tests pass, the channel bridge seam and the accept loop ThreadSanitizer clean.

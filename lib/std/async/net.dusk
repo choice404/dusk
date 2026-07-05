@@ -27,6 +27,9 @@ foreign "C" {
 // call carries an error channel. Sync: no fd is watched, so nothing parks.
 export func tcp_listen(port: int64, backlog: int64) -> (int64, error) {
     fd := cool_tcp_listen(port, backlog)
+    if fd == -3 {
+        return (-1, error { message: "too many open files" })
+    }
     if fd == -1 {
         return (-1, error { message: "the listening socket could not be opened" })
     }
@@ -52,10 +55,13 @@ export func tcp_close(fd: int64) -> error {
 
 // Accepts one pending connection off the listening fd, parking until a client
 // arrives. cool_tcp_accept_nb returns the client fd (>= 0), -1 for would-block,
-// or -2 for a hard error. On would-block the accept parks on readable(fd), the
-// keyword await, and retries when the listener wakes; a mask error bit surfaces
-// as an error rather than a spin. The returned client fd is nonblocking and
-// close on exec, ready to read and write.
+// -3 when the fd table is exhausted, or -2 for a hard error. On would-block the
+// accept parks on readable(fd), the keyword await, and retries when the listener
+// wakes; a mask error bit surfaces as an error rather than a spin. The -3 is
+// terminal, NOT would-block: it exits the loop with a "too many open files"
+// error instead of re-arming readable(fd) on a listener that stays ready with a
+// pending connection the fd table cannot receive. The returned client fd is
+// nonblocking and close on exec, ready to read and write.
 export async func tcp_accept(fd: int64) -> (int64, error) {
     mut client := cool_tcp_accept_nb(fd)
     while client == -1 {
@@ -66,6 +72,9 @@ export async func tcp_accept(fd: int64) -> (int64, error) {
         }
         client = cool_tcp_accept_nb(fd)
     }
+    if client == -3 {
+        return (-1, error { message: "too many open files" })
+    }
     if client == -2 {
         return (-1, error { message: "the accept failed" })
     }
@@ -75,8 +84,10 @@ export async func tcp_accept(fd: int64) -> (int64, error) {
 // Connects to a literal IPv4 dotted host on port, parking until the nonblocking
 // handshake resolves. cool_tcp_connect_ip opens the socket and starts connect:
 // it returns the pending fd (>= 0, connected or in progress), -1 for an
-// immediate refusal, or -2 for a hard failure including an inet_pton reject of a
-// malformed host. A pending fd is finished by awaiting writable(fd), the keyword
+// immediate refusal, -3 when the fd table is exhausted at the socket mint (a
+// "too many open files" error before any watch is armed), or -2 for a hard
+// failure including an inet_pton reject of a malformed host. A pending fd is
+// finished by awaiting writable(fd), the keyword
 // await, then reading the deferred SO_ERROR with cool_tcp_connect_error: 0 is
 // connected, a positive errno is a deferred refusal, -1 is a getsockopt failure.
 // The host string is copied into a NUL terminated byte buffer for the C boundary,
@@ -92,6 +103,9 @@ export async func tcp_connect(host: string, port: int64) -> (int64, error) {
     buf[n] = 0
     fd := cool_tcp_connect_ip(buf, port)
     free(buf)
+    if fd == -3 {
+        return (-1, error { message: "too many open files" })
+    }
     if fd == -2 {
         return (-1, error { message: "the connection could not be initiated" })
     }

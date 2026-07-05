@@ -1,0 +1,45 @@
+// fd-exhaustion contract for pipe_new. Lowering RLIMIT_NOFILE to the three
+// standard descriptors starves the next fd mint into EMFILE. pipe_new must
+// surface that as a "too many open files" error value, not a crash, and the
+// atomic pipe mint leaks nothing on failure. Raising the limit back and minting
+// a fresh pipe proves the runtime survived. The transcript is deterministic:
+// the error line, then "ok".
+@paradigm procedural
+@import std.async.io
+
+foreign "C" {
+    func cool_rlimit_nofile(n: int64) -> int64
+}
+
+func main() -> int32 {
+    re := cool_rlimit_nofile(3)
+    if re != 0 {
+        println("could not lower the fd limit")
+        return 1
+    }
+
+    p, pe := pipe_new()
+    if pe.exists() {
+        println(pe.toString())
+    } else {
+        // Not expected under the starved limit; close both ends so nothing leaks.
+        c1 := fd_close(p.r)
+        c1.ignore()
+        c2 := fd_close(p.w)
+        c2.ignore()
+    }
+
+    re2 := cool_rlimit_nofile(64)
+    re2.ignore()
+    p2, pe2 := pipe_new()
+    if pe2.exists() {
+        println("recovery failed")
+        return 1
+    }
+    c3 := fd_close(p2.r)
+    c3.ignore()
+    c4 := fd_close(p2.w)
+    c4.ignore()
+    println("ok")
+    return 0
+}

@@ -1,0 +1,124 @@
+// Stress: an accept-loop server over std.async.net at N=100 connections, ten
+// clients in flight per batch across ten batches. The server is a single
+// async task looping 100 accepts; each client connects, writes its own index
+// byte, and reads it back. Clients within a batch race the reactor in
+// whatever order it wakes them, and batches run one after another, but the
+// proof stays commutative: the sum of the echoed bytes is fixed at
+// 0 + 1 + ... + 99 = 4950 regardless of interleave, immune to any reactor
+// scheduling. Ten in flight at a time (not all 100 at once) because a bare
+// future from a direct async call can only be named and awaited, never
+// stored in an array or a Vector<Future<T>> (see stress_tasks.dusk), so the
+// fan out width is however many named bindings one batch spells.
+@paradigm procedural
+@import std.async.net
+@import std.async.future
+@import std.async.loop
+
+async func serve(listen_fd: int64, count: int64) -> (int64, error) {
+    mut i := 0
+    while i < count {
+        cfd, ae := await tcp_accept(listen_fd)
+        if ae.exists() {
+            return (i, ae)
+        }
+        buf: *raw char = alloc_bytes(8)
+        n, re := await tcp_read(cfd, buf, 8)
+        if re.exists() {
+            free(buf)
+            cc := tcp_close(cfd)
+            cc.ignore()
+            return (i, re)
+        }
+        w, we := await tcp_write(cfd, buf, n)
+        we.ignore()
+        w.ignore()
+        free(buf)
+        cc := tcp_close(cfd)
+        cc.ignore()
+        i = i + 1
+    }
+    return (0, error {})
+}
+
+async func client(port: int64, id: int64) -> int64 {
+    fd, ce := await tcp_connect("127.0.0.1", port)
+    ce.ignore()
+    msg: *raw char = alloc_bytes(8)
+    msg[0] = id
+    wn, we := await tcp_write(fd, msg, 1)
+    we.ignore()
+    wn.ignore()
+    rn, re := await tcp_read(fd, msg, 8)
+    re.ignore()
+    rn.ignore()
+    echoed: int64 = msg[0]
+    free(msg)
+    cc := tcp_close(fd)
+    cc.ignore()
+    return echoed
+}
+
+async func amain() -> int32 {
+    lfd, le := tcp_listen(0, 16)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    port, pe := tcp_local_port(lfd)
+    if pe.exists() {
+        printerr(pe)
+        lc := tcp_close(lfd)
+        lc.ignore()
+        return 1
+    }
+
+    sf := serve(lfd, 100)
+
+    mut sum: int64 = 0
+    mut base := 0
+    while base < 100 {
+        c0 := client(port, base + 0)
+        c1 := client(port, base + 1)
+        c2 := client(port, base + 2)
+        c3 := client(port, base + 3)
+        c4 := client(port, base + 4)
+        c5 := client(port, base + 5)
+        c6 := client(port, base + 6)
+        c7 := client(port, base + 7)
+        c8 := client(port, base + 8)
+        c9 := client(port, base + 9)
+        v0 := await c0
+        v1 := await c1
+        v2 := await c2
+        v3 := await c3
+        v4 := await c4
+        v5 := await c5
+        v6 := await c6
+        v7 := await c7
+        v8 := await c8
+        v9 := await c9
+        sum = sum + v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9
+        base = base + 10
+    }
+
+    sv, se := await sf
+    se.ignore()
+    sv.ignore()
+
+    lc := tcp_close(lfd)
+    lc.ignore()
+
+    println(sum)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    rc := async_run(amain())
+    reactor_stop()
+    loop_free()
+    return rc
+}
