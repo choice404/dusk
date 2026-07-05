@@ -17,6 +17,9 @@ extern void *cool_gen_alloc(int64_t size);
 extern void cool_gen_free(void *p);
 extern int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n);
 extern void cool_loop_kick(void);
+extern void *cool_future_new(int64_t elem_size);
+extern int64_t cool_future_gen(void *f);
+extern int64_t cool_future_complete(void *f, int64_t gen, void *elem, void *err_stage);
 
 /* Gauges for the event loop's deadlock check: how many spawned threads are
    alive and how many accepted pool tasks have not finished. Each count drops
@@ -331,6 +334,89 @@ void cool_chan_close(void *ch) {
     pthread_cond_broadcast(&c->not_full);
     pthread_cond_broadcast(&c->not_empty);
     pthread_mutex_unlock(&c->mu);
+}
+
+/* The awaitable channel receive bridge. A blocking bounded channel receive is
+   made awaitable on the event loop without stalling the loop thread: a detached
+   helper thread parks in cool_chan_recv off the loop thread and completes a
+   loop future from off-thread when a value or the drained close arrives. The
+   live-thread gauge is raised before the helper is created and dropped strictly
+   after the completion returns, then the loop is kicked, exactly the
+   cool_thread_tramp discipline, so the deadlock gate never fires against a recv
+   still in flight nor races the completion the helper performed.
+
+   The dusk side foreign signature this backs (added in a later milestone):
+     func cool_chan_recv_future(ch: *void, elem_size: int64) -> *void */
+typedef struct {
+    void *ch;
+    void *fut;
+    int64_t gen;
+    int64_t elem_size;
+} cool_recv_bridge;
+
+/* Runs off the loop thread. Blocks in cool_chan_recv, then completes the loop
+   future with the received bytes and a one word error: the closed-and-drained
+   message on the closed sentinel (cool_chan_recv returns 1), else NULL. The
+   error is staged behind a local and passed by address, the cool_future_complete
+   FFI shape. The completion is refusal tolerant, so a freed or already taken
+   awaiter loses quietly with no fault, the racing completer rule. The gauge is
+   dropped strictly after the completion returns and the loop kicked, so the
+   completion is visible under the loop lock before the count can reach zero. */
+static void *cool_chan_recv_bridge_main(void *arg) {
+    cool_recv_bridge b = *(cool_recv_bridge *)arg;
+    free(arg);
+    void *buf = malloc((size_t)b.elem_size);
+    if (!buf) {
+        cool_thread_fatal("fatal: out of memory\n");
+    }
+    int64_t rc = cool_chan_recv(b.ch, buf);
+    void *err = NULL;
+    if (rc == 1) {
+        err = (void *)"receive on a closed, drained channel";
+    }
+    cool_future_complete(b.fut, b.gen, buf, &err);
+    free(buf);
+    __atomic_fetch_sub(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
+    cool_loop_kick();
+    return NULL;
+}
+
+/* Called on the loop thread from chan_recv_async. Mints the pending future,
+   spawns the detached helper blocked in cool_chan_recv, and returns the future
+   handle for the caller to await. On a create failure the raised gauge is
+   dropped back and the future is completed with an error so the awaiter is
+   never left parked on a recv that will never run; no awaiter can be parked yet
+   at that point since the handle has not been returned, so the drop-then-complete
+   order cannot false-fire the deadlock gate. */
+void *cool_chan_recv_future(void *ch, int64_t elem_size) {
+    void *fut = cool_future_new(elem_size);
+    int64_t gen = cool_future_gen(fut);
+    cool_recv_bridge *b = malloc(sizeof *b);
+    if (!b) {
+        cool_thread_fatal("fatal: out of memory\n");
+    }
+    b->ch = ch;
+    b->fut = fut;
+    b->gen = gen;
+    b->elem_size = elem_size;
+    // Raised before the create so the count can never dip below the number of
+    // recvs in flight; a refused create takes it right back.
+    __atomic_fetch_add(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
+    pthread_t t;
+    if (pthread_create(&t, NULL, cool_chan_recv_bridge_main, b) != 0) {
+        __atomic_fetch_sub(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
+        void *zero = calloc(1, (size_t)elem_size);
+        if (!zero) {
+            cool_thread_fatal("fatal: out of memory\n");
+        }
+        void *err = (void *)"channel receive could not start a helper thread";
+        cool_future_complete(fut, gen, zero, &err);
+        free(zero);
+        free(b);
+        return fut;
+    }
+    pthread_detach(t);
+    return fut;
 }
 
 /* Mutexes and condition variables, thin wrappers over pthread with the named

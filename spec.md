@@ -651,15 +651,13 @@ monad Maybe<T> {
 
 The standard library ships these monads through import.
 
-| Monad        | Description                       |
-| ------------ | --------------------------------- |
-| Maybe<T>     | an optional value                 |
-| Either<L, R> | one of two possible types         |
-
-Do notation currently desugars against a monad whose `bind` has concrete types. A `bind` generic over the element type is not yet monomorphized through `do`, so ground monads work and fully generic ones wait on a later release.
-| Result<T, E> | success or a typed failure        |
-| IO<T>        | wraps side effecting computations |
-| List<T>      | the list monad                    |
+| Monad        | Description                                                       |
+| ------------ | ------------------------------------------------------------------ |
+| Maybe<T>     | an optional value                                                  |
+| Either<L, R> | one of two possible types                                         |
+| IO<T>        | wraps a side effecting computation, eager over its carried value   |
+| Result<T, E> | success or a typed failure (planned, not yet in the tree)          |
+| List<T>      | the list monad (planned, not yet in the tree)                     |
 
 This program unwraps a `Maybe` and prints the value.
 
@@ -678,16 +676,76 @@ func main() -> int32 {
 }
 ```
 
-Do notation requires `@paradigm functional`.
+Do notation requires `@paradigm functional`. A `do Name { ... }` block names the monad it desugars against, so several monads coexist in one file; a bare `do { ... }` desugars against the plain top level names `bind` and `unit` instead of a namespaced pair, a shape none of the shipped monads export, so name the monad in practice. A do block is a sequence of `name <- expr` binds followed by one final expression, evaluated top to bottom, with no `return` inside it.
 
 ```text
-result: Maybe<int32> = do {
+result: Maybe<int32> = do Maybe {
     x <- maybe_divide(10, 2)
     y <- maybe_divide(x, 0)
     z <- maybe_add(y, 1)
-    return z
+    z
 }
 ```
+
+Added in 0.4.3, `do` desugars against a generic `bind` and `unit`, not only a pair already ground to concrete types. Before this release a `do` block only worked when its target monad's `bind` had no type parameters of its own; now `Maybe`, a hand rolled monad shaped like `Either`, and any user `monad Name { ... }` block generic over its element type all compose through `do` the same way.
+
+```text
+struct Box<T> {
+    v: T,
+}
+
+monad Box {
+    export func bind<A, B>(m: Box<A>, f: (A) -> Box<B>) -> Box<B> {
+        return f(m.v)
+    }
+    export func unit<A>(x: A) -> Box<A> {
+        return Box { v: x }
+    }
+}
+
+func main() -> int32 {
+    r := do Box {
+        a <- Box { v: 3 }
+        b <- Box { v: 4 }
+        c <- Box { v: 5 }
+        a * b + c
+    }
+    println(r.v)   // 19
+    return 0
+}
+```
+
+The desugar emits a chain of generic bind continuations over an open type hole, one bind for the value between each pair of steps, and monomorphization resolves and instantiates the `bind` and `unit` pair fresh at each `do` site rather than once for the whole program: an argument pass reading the types actually bound, an expected type or annotation pass, a lambda body pass, and first binding wins once one of those pins a concrete type. A `do` over a type with no `monad Name { ... }` block is rejected at the names its desugar calls, `undefined name '<Name>.bind'` and `undefined name '<Name>.unit'`, and a `bind` whose signature drops the continuation parameter is rejected as an arity mismatch on the desugared call, such as `expected 1 argument(s), found 2`.
+
+Because the continuation the desugar builds carries an open type hole until monomorphization closes it, a second, types only pass re-runs the real type checker over the whole module once every type in it is concrete, recovering the width and type checks the open hole would otherwise let the continuation's body skip. Before this pass landed, an int32 and int64 mix inside a generic `do` continuation's body silently truncated instead of being rejected; it is now caught exactly as the same expression is in plain code, `arithmetic mixes int32 and int64; match the widths`, and a `do` block's inferred element type clashing with an explicit annotation on its binding is caught the same way, `return type does not match the function's return type`. The fix is general, not a special case for `do`: the same recheck also catches a width mismatch hiding inside an ordinary generic function body.
+
+`std.functional.io` ships `IO<T>` as a `monad IO { ... }` block over a plain struct, composing through the generic `do` above like any other monad. `run(io: IO<A>) -> A` is the one effect boundary: it mints a future, offloads the carried value to a pool worker that completes it, and awaits the result back on the loop thread, the offload idiom the async examples already settled on. The loop and the pool must both be running before `run` and torn down after the last one.
+
+```text
+@paradigm functional
+
+@import std.functional.io
+@import std.async.loop
+@import std.concurrent.pool
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    pe := pool_start(2)
+    pe.ignore()
+    r := run(do IO {
+        a <- io_pure(10)
+        b <- io_pure(20)
+        a + b
+    })
+    println(r)   // 30
+    pool_shutdown()
+    loop_free()
+    return 0
+}
+```
+
+This `IO` is eager over its carried value, not lazy: `bind` applies its continuation immediately and returns the continuation's own `IO`, storing no closure anywhere. A lazy `IO`, one that stores its continuation as a thunk and defers running it until `run`, is not expressible yet: the escape check rejects a struct field holding a closure that captures a local and is returned out of the frame that built it, `a closure that captures a local escapes its frame; it cannot be returned`. This is a deferred item, not an oversight. The eager form is sound and composes; the lazy form waits on a carrier the escape check has no shape for yet.
 
 ---
 
@@ -814,6 +872,8 @@ Ownership crosses a thread boundary by moving a managed pointer through a channe
 A moved send that the channel refuses loses the record. When `chan_send(c, move(p))` returns the closed error, the value never entered the ring, the sender's name is already dead, and no name anywhere reaches the allocation again, so it leaks. The same applies to managed pointers still buffered when `chan_free` runs, since the ring holds raw bytes and frees none of them. Neither is corruption, and neither happens in the sanctioned protocol where senders finish before the close, but a design that closes under active movers pays in leaked records, not faults.
 
 Added in 0.3.3, three operations refuse instead of parking. `chan_try_send(c, x) -> error` reports "channel is full" without waiting for room, `chan_try_recv(c) -> (T, error)` reports "channel is empty" without waiting for a value, and `chan_recv_timeout(c, ms) -> (T, error)` parks at most `ms` milliseconds against a monotonic clock and reports "receive timed out", so a wall clock step cannot stretch or shrink the wait. Each still reports the closed message its blocking twin uses, and the value beside any of these errors is the zero pattern for `T`. A tick loop parks on `chan_recv_timeout`, does a round of work, and loops back in, which is the event loop shape the async release builds on.
+
+Added in 0.4.3, `chan_recv_async(c: Channel<T>) -> Future<T>` makes a receive awaitable on the event loop instead of blocking the caller. A blocking `chan_recv` on the loop thread stalls every task, so this is the sanctioned answer: it mints a future and hands the blocking receive to a detached helper thread, which completes the future off the loop thread when a value arrives or the channel closes and drains, the closed case completing with the `receive on a closed, drained channel` error its blocking twin uses. The loop awaits that future like any other, and the helper raises the live thread gauge before it starts and drops it strictly after the completion, so the deadlock detector keeps the awaiter parked while the receive is outstanding rather than declaring the loop idle. Because the helper is detached and cannot be joined, the drain discipline is close and settle, not the blocking channel's close then join: closing the channel releases the helper with the closed error, and the completion settles before the channel is freed. The future element obeys the same ban as `future_new` and `future_wrap`, so a slice, closure, or interface element is rejected where the future is minted.
 
 Shutdown follows one order: close the channel, join every thread that touches it, then `chan_free` it. Freeing a channel while a thread is blocked inside a send or receive is fatal with a named message, caught best effort. Using a channel after `chan_free` is undefined, the raw layer's honor system, since the one word handle carries no generation.
 
@@ -1052,6 +1112,31 @@ Inside an async body the only way to wait on a future is `await`; nothing inside
 
 The six async examples 0.4.0 and 0.4.1 built by hand around a completer lambda now complete through `complete_raw` instead of a raw runtime call, with their goldens unchanged; `complete_raw` is the same completer surface a task's own pool offload uses. The stdlib `await` function, the one `std.async.future` already exported, keeps working for sync code that awaits a future outside any async body: the keyword is context sensitive and only absorbs the name `await` as a suspension inside an async func body, so `await(f)` stays a plain call everywhere else.
 
+### TCP networking
+
+Added in 0.4.3. `std.async.net` puts TCP over the reactor's readiness futures. A socket is an ordinary file descriptor the reactor already knows how to watch, so the networking surface is a thin standard library layer over the non blocking socket calls and the `readable` and `writable` watches, with no new event machinery and no compiler change.
+
+`tcp_listen`, `tcp_local_port`, and `tcp_close` are synchronous. `tcp_accept`, `tcp_connect`, `tcp_read`, and `tcp_write` are async funcs: each tries its non blocking socket call, and when the call would block it awaits `readable` or `writable` on the descriptor and retries, so a server that accepts many connections and a client that connects both suspend and resume as tasks under `async_run`, never pumping the loop from inside a task. `tcp_connect` finishes the non blocking connect handshake by awaiting writability and then reading the socket error, so a connection refused after the handshake began surfaces as a clean error rather than a descriptor that fails on first use. `tcp_write` sends every byte, looping over writability and the non blocking write until the whole buffer is gone, so a short write never silently drops the tail. Addresses are literal IPv4 dotted quads; there is no name resolution yet. A listener bound to port 0 is assigned an ephemeral port the caller reads back with `tcp_local_port`.
+
+Awaiting a networking future is subject to the same rule as any other await: it is legal only inside an `async func`, and awaiting `tcp_accept` or `tcp_connect` from a synchronous function is rejected, `'await' is only legal inside an async func`.
+
+```text
+@import std.async.net
+
+async func serve(lfd: int64) -> int64 {
+    cfd, ae := tcp_accept(lfd)
+    ae.ignore()
+    buf: *raw int64 = alloc_bytes(64)
+    n, re := tcp_read(cfd, buf, 64)
+    re.ignore()
+    w, we := tcp_write(cfd, buf, n)
+    we.ignore()
+    ce := tcp_close(cfd)
+    ce.ignore()
+    return w
+}
+```
+
 ### The memory model
 
 dusk does not detect data races. When two threads touch the same memory, at least one writes, and no sanctioned path orders the accesses, the program has a data race and its behavior is undefined, exactly as in the C the runtime compiles down to. The sanctioned paths provide the ordering they name: capture at `spawn` copies values into the thread's private environment, the sequentially consistent atomics in `std.concurrent.atomic` order the accesses they mediate, a `chan_recv` happens after the `chan_send` that delivered the value, a `complete` happens before the `await`, timed await, or poll that consumes the future it completed, an `unlock` happens before the next `lock` of the same mutex, and `join` orders everything the thread did before everything the joiner does after. Sharing built by hand out of `*raw T` buffers is on the raw layer's honor system across threads, exactly as it is within one, unless a mutex guards every touch.
@@ -1088,6 +1173,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.async.loop        | the event loop's lifecycle                            |
 | std.async.time        | timers as futures the loop completes                  |
 | std.async.io          | the readiness reactor, pipes, and non blocking read/write |
+| std.async.net         | TCP over the readiness reactor, non blocking connect and accept |
 
 ---
 

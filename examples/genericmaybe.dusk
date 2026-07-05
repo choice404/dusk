@@ -1,0 +1,31 @@
+// F-M1: generic `bind` through `do`, monomorphized per do-site. Maybe's bind
+// and unit are generic over the element type, `bind<A, B>` and `unit<A>`, so
+// this single `do Maybe { ... }` block instantiates fresh per call: one chain
+// folds two present values, the other short-circuits the moment it hits None.
+
+@paradigm functional
+
+@import std.functional.maybe
+
+func main() -> int32 {
+    ok := do Maybe {
+        a <- Maybe.Some(10)
+        b <- Maybe.Some(20)
+        a + b
+    }
+    match ok {
+        Some(v) => println("Some({})", v),
+        None => println("none"),
+    }
+
+    bad := do Maybe {
+        a <- Maybe.Some(10)
+        b <- Maybe.None
+        a + b
+    }
+    match bad {
+        Some(v) => println("Some({})", v),
+        None => println("none"),
+    }
+    return 0
+}

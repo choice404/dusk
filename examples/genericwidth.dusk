@@ -1,0 +1,25 @@
+// REGRESSION-PIN (0.4.3 F-M1 Option C): before the fix, a generic `do`'s
+// continuation body escaped width/type checking (its operands carried
+// `Ty::Unknown`), so mixing int32 and int64 inside a `do Maybe { ... }`
+// silently truncated instead of being rejected. The types-only re-check over
+// the mono-expanded module now catches it like any other arithmetic mismatch.
+
+@paradigm functional
+
+@import std.functional.maybe
+
+func small() -> Maybe<int32> { return Maybe.Some(0i32) }
+func big() -> Maybe<int64> { return Maybe.Some(4294967297) }
+
+func main() -> int32 {
+    r := do Maybe {
+        a <- small()
+        b <- big()
+        a + b
+    }
+    match r {
+        Some(v) => println("{}", v),
+        None => println("none"),
+    }
+    return 0
+}

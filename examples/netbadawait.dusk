@@ -1,0 +1,16 @@
+@paradigm procedural
+@import std.async.net
+@import std.async.future
+
+// tcp_accept is an async func; its await only suspends inside another async
+// func's task frame. A sync func has no task frame to park, so awaiting it
+// here is rejected at the parse where 'await' appears, the same as awaiting
+// any other future outside an async func.
+func main() -> int32 {
+    lfd, le := tcp_listen(0, 4)
+    le.ignore()
+    cfd, ae := await tcp_accept(lfd)
+    ae.ignore()
+    println(cfd)
+    return 0
+}

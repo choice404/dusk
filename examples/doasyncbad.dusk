@@ -1,0 +1,30 @@
+// Compile-fail twin of doasync.dusk: Box's bind drops the continuation
+// parameter, `bind<A, B>(m: Box<A>) -> Box<B>`, one argument instead of the two
+// every real monad bind takes. A `do` block with more than one bind desugars
+// to a call passing the continuation anyway, so the checker must reject the
+// arity mismatch rather than silently accepting a bind that cannot compose.
+
+@paradigm functional
+
+struct Box<T> {
+    v: T,
+}
+
+monad Box {
+    export func bind<A, B>(m: Box<A>) -> Box<B> {
+        return Box { v: m.v }
+    }
+    export func unit<A>(x: A) -> Box<A> {
+        return Box { v: x }
+    }
+}
+
+func main() -> int32 {
+    r := do Box {
+        a <- Box { v: 3 }
+        b <- Box { v: 4 }
+        a + b
+    }
+    println(r.v)
+    return 0
+}

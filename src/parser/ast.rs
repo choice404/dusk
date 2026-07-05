@@ -129,6 +129,11 @@ pub enum Type {
     Tuple(Vec<Type>),
     Func(Vec<Type>, Box<Type>),
     Unit,
+    /// A type hole produced only by desugar, for the open continuation lambdas of
+    /// a `do` over a generic monad, and resolved only by mono's per-site
+    /// inference. The parser never constructs it, and it is a hard error anywhere
+    /// downstream of mono: codegen treats it as unreachable.
+    Infer,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,0 +1,109 @@
+// Loopback echo over std.async.net. The server task listens on an OS-assigned
+// ephemeral port; the client task connects to 127.0.0.1 on that port, writes
+// "ping", the server accepts, reads it, and echoes it back, and the client reads
+// the echo and prints it. serve is minted as a future and started in flight
+// before the client runs, so two async tasks sit on one event loop at once,
+// interleaved by the reactor's readiness. async_run drives; the port is read
+// back from the listener and passed to the client through a shared binding on
+// the loop thread, so the transcript is deterministic despite the OS-assigned
+// port.
+@paradigm procedural
+@import std.async.net
+@import std.async.future
+@import std.async.loop
+
+async func serve(listen_fd: int64) -> (int64, error) {
+    cfd, ae := await tcp_accept(listen_fd)
+    if ae.exists() {
+        return (1, ae)
+    }
+    buf: *raw char = alloc_bytes(64)
+    n, re := await tcp_read(cfd, buf, 64)
+    if re.exists() {
+        free(buf)
+        cc := tcp_close(cfd)
+        cc.ignore()
+        return (2, re)
+    }
+    w, we := await tcp_write(cfd, buf, n)
+    we.ignore()
+    free(buf)
+    cc := tcp_close(cfd)
+    cc.ignore()
+    if w != n {
+        return (3, error { message: "short echo write" })
+    }
+    return (0, error {})
+}
+
+async func client(port: int64) -> (int64, error) {
+    fd, ce := await tcp_connect("127.0.0.1", port)
+    if ce.exists() {
+        return (1, ce)
+    }
+    msg: *raw char = alloc_bytes(8)
+    msg[0] = 112
+    msg[1] = 105
+    msg[2] = 110
+    msg[3] = 103
+    msg[4] = 0
+    w, we := await tcp_write(fd, msg, 4)
+    we.ignore()
+    if w != 4 {
+        free(msg)
+        cc := tcp_close(fd)
+        cc.ignore()
+        return (2, error { message: "short request write" })
+    }
+    n, re := await tcp_read(fd, msg, 7)
+    re.ignore()
+    msg[n] = 0
+    view := cstr(msg)
+    println(view)
+    free(msg)
+    cc := tcp_close(fd)
+    cc.ignore()
+    return (0, error {})
+}
+
+async func amain() -> int32 {
+    lfd, le := tcp_listen(0, 4)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    port, pe := tcp_local_port(lfd)
+    if pe.exists() {
+        printerr(pe)
+        lc := tcp_close(lfd)
+        lc.ignore()
+        return 1
+    }
+
+    sf := serve(lfd)
+    cv, ce := await client(port)
+    ce.ignore()
+    sv, se := await sf
+    se.ignore()
+
+    lc := tcp_close(lfd)
+    lc.ignore()
+    if cv != 0 {
+        return 1
+    }
+    if sv != 0 {
+        return 1
+    }
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    rc := async_run(amain())
+    reactor_stop()
+    loop_free()
+    return rc
+}

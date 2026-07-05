@@ -1,0 +1,21 @@
+// Compile-fail twin of genericmaybe.dusk: `do Foo { ... }` names a generic
+// struct with no `monad Foo { ... }` block, so the desugared `Foo.bind` and
+// `Foo.unit` calls name nothing. The checker must reject it rather than
+// silently accepting a `do` over a type that never opted into the monad
+// protocol.
+
+@paradigm functional
+
+struct Foo<T> {
+    v: T,
+}
+
+func main() -> int32 {
+    r := do Foo {
+        a <- Foo { v: 10 }
+        b <- Foo { v: 20 }
+        a + b
+    }
+    println(r.v)
+    return 0
+}

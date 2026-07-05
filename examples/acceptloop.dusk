@@ -1,0 +1,108 @@
+// Accept-loop server over std.async.net. The server accepts N clients in an
+// await readable / await tcp_accept loop, echoing one byte to each; N client
+// tasks connect concurrently, each writing its own index byte and reading it
+// back. The clients complete in whatever order the reactor interleaves them,
+// so the proof is commutative: the sum of the echoed bytes is fixed at
+// 0 + 1 + 2 + 3 = 6 regardless of order, immune to any pool, loop, or reactor
+// interleave.
+@paradigm procedural
+@import std.async.net
+@import std.async.future
+@import std.async.loop
+
+async func serve(listen_fd: int64, count: int64) -> (int64, error) {
+    mut i := 0
+    while i < count {
+        cfd, ae := await tcp_accept(listen_fd)
+        if ae.exists() {
+            return (i, ae)
+        }
+        buf: *raw char = alloc_bytes(8)
+        n, re := await tcp_read(cfd, buf, 8)
+        if re.exists() {
+            free(buf)
+            cc := tcp_close(cfd)
+            cc.ignore()
+            return (i, re)
+        }
+        w, we := await tcp_write(cfd, buf, n)
+        we.ignore()
+        w.ignore()
+        free(buf)
+        cc := tcp_close(cfd)
+        cc.ignore()
+        i = i + 1
+    }
+    return (0, error {})
+}
+
+async func client(port: int64, id: int64) -> (int64, error) {
+    fd, ce := await tcp_connect("127.0.0.1", port)
+    if ce.exists() {
+        return (0, ce)
+    }
+    msg: *raw char = alloc_bytes(8)
+    msg[0] = id
+    wn, we := await tcp_write(fd, msg, 1)
+    we.ignore()
+    wn.ignore()
+    rn, re := await tcp_read(fd, msg, 8)
+    re.ignore()
+    rn.ignore()
+    echoed: int64 = msg[0]
+    free(msg)
+    cc := tcp_close(fd)
+    cc.ignore()
+    return (echoed, error {})
+}
+
+async func amain() -> int32 {
+    lfd, le := tcp_listen(0, 8)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    port, pe := tcp_local_port(lfd)
+    if pe.exists() {
+        printerr(pe)
+        lc := tcp_close(lfd)
+        lc.ignore()
+        return 1
+    }
+
+    sf := serve(lfd, 4)
+    c0 := client(port, 0)
+    c1 := client(port, 1)
+    c2 := client(port, 2)
+    c3 := client(port, 3)
+
+    v0, e0 := await c0
+    e0.ignore()
+    v1, e1 := await c1
+    e1.ignore()
+    v2, e2 := await c2
+    e2.ignore()
+    v3, e3 := await c3
+    e3.ignore()
+
+    sv, se := await sf
+    se.ignore()
+    sv.ignore()
+
+    lc := tcp_close(lfd)
+    lc.ignore()
+
+    println(v0 + v1 + v2 + v3)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    rc := async_run(amain())
+    reactor_stop()
+    loop_free()
+    return rc
+}

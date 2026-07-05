@@ -4,6 +4,8 @@
 // copies freely; every copy names the same channel. The sanctioned shutdown
 // order is close, then join every thread that touches the channel, then free.
 
+@import std.async.future
+
 foreign "C" {
     func cool_chan_new(elem_size: int64, cap: int64) -> *void
     func cool_chan_send(ch: *void, elem: *void) -> int64
@@ -11,6 +13,7 @@ foreign "C" {
     func cool_chan_try_send(ch: *void, elem: *void) -> int64
     func cool_chan_try_recv(ch: *void, out: *void) -> int64
     func cool_chan_recv_timeout(ch: *void, out: *void, ms: int64) -> int64
+    func cool_chan_recv_future(ch: *void, elem_size: int64) -> *void
     func cool_chan_close(ch: *void) -> void
     func cool_chan_free(ch: *void) -> void
 }
@@ -55,6 +58,19 @@ export func chan_recv<T>(c: Channel<T>) -> (T, error) {
         return (v, error { message: "receive on a closed, drained channel" })
     }
     return (v, error {})
+}
+
+// Receives the oldest value on the event loop without parking the loop thread.
+// A detached helper blocks in the same recv off-thread and completes the loop
+// future when a value or the drained close arrives, so awaiting this yields the
+// same pair chan_recv would: the value and the empty error, or the zero pattern
+// for T beside "receive on a closed, drained channel". The binding annotation
+// pins the element type, as in f: Future<int64> = chan_recv_async(c). An element
+// that could view a frame, a slice, a closure, or an interface value, is
+// rejected at compile time, the future element ban at the minting site.
+export func chan_recv_async<T>(c: Channel<T>) -> Future<T> {
+    f: Future<T> = future_wrap(cool_chan_recv_future(c.h, sizeof(T)))
+    return f
 }
 
 // Sends x only if the channel has room right now, never blocking. The error

@@ -161,6 +161,7 @@ impl Renamer {
                 self.ty(r, skip);
             }
             Type::Unit => {}
+            Type::Infer => {}
         }
     }
 

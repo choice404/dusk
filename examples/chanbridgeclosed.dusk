@@ -1,0 +1,27 @@
+// A channel closed with nothing buffered still completes chan_recv_async's
+// future: the detached helper's ordinary recv sees the drained close and
+// hands back the zero value beside the named error, exactly what chan_recv
+// itself would report, just off the loop thread.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.async.loop
+@import std.async.future
+
+func main() -> int32 {
+    le := loop_init()
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    c: Channel<int64> = chan_new(1)
+    chan_close(c)
+    f: Future<int64> = chan_recv_async(c)
+    v, e := await(f)
+    if e.exists() {
+        println(e.toString())
+    }
+    println(v)
+    loop_free()
+    chan_free(c)
+    return 0
+}

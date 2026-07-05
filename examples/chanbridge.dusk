@@ -1,0 +1,53 @@
+// chan_recv_async bridges a bounded channel onto the event loop: a detached
+// helper blocks in the ordinary recv off thread while main's await never
+// stalls the loop. Three pool workers send concurrently, so the arrival
+// order across senders is not pinned, but the fold is a sum, commutative and
+// so deterministic regardless of interleave.
+@paradigm procedural
+@import std.concurrent.channel
+@import std.concurrent.pool
+@import std.async.loop
+@import std.async.future
+
+func main() -> int32 {
+    pe := pool_start(4)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    le := loop_init()
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    c: Channel<int64> = chan_new(3)
+    s1 := submit(lambda () -> void {
+        we := chan_send(c, 10)
+        we.ignore()
+    })
+    s1.ignore()
+    s2 := submit(lambda () -> void {
+        we := chan_send(c, 20)
+        we.ignore()
+    })
+    s2.ignore()
+    s3 := submit(lambda () -> void {
+        we := chan_send(c, 12)
+        we.ignore()
+    })
+    s3.ignore()
+    mut sum: int64 = 0
+    mut i: int64 = 0
+    while i < 3 {
+        f: Future<int64> = chan_recv_async(c)
+        v, e := await(f)
+        e.ignore()
+        sum = sum + v
+        i = i + 1
+    }
+    println(sum)
+    pool_shutdown()
+    loop_free()
+    chan_free(c)
+    return 0
+}

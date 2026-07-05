@@ -671,6 +671,10 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
         ),
         Type::Tuple(ts) => CTy::Tuple(ts.iter().map(|t| lower_ty(t, nom)).collect()),
         Type::Unit => CTy::Void,
+        // A hole reaching codegen means mono failed to resolve a do-continuation
+        // and analyze should already have aborted on emit_ty's diagnostic. If this
+        // fires, mono has a bug.
+        Type::Infer => unreachable!("unresolved type hole reached codegen"),
     }
 }
 

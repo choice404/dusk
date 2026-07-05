@@ -22,24 +22,25 @@ type AsyncSig = (Vec<(String, Type)>, Type, Span);
 
 /// Expands all generics in a module into concrete monomorphic items.
 pub fn expand(module: &Module) -> Module {
+    expand_with_diags(module).0
+}
+
+/// Expands the module and returns both the ground result and the inference
+/// diagnostics from a single run: a type parameter no call site pins down, or an
+/// impl block on a generic type, which expansion would silently default or drop.
+/// Sema expands once through here so it can feed both these diagnostics and the
+/// ground type re-check without expanding twice. Reported so `dusk check` catches
+/// the problem at the source line instead of codegen emitting a wrong program.
+pub fn expand_with_diags(module: &Module) -> (Module, Vec<Diagnostic>) {
     let mut m = Mono::new(module);
     let items = m.run();
-    Module {
+    let out = Module {
         paradigms: module.paradigms.clone(),
         imports: module.imports.clone(),
         monads: module.monads.clone(),
         items,
-    }
-}
-
-/// Runs the expansion for its diagnostics only: a type parameter no call site
-/// pins down, or an impl block on a generic type, which expansion would silently
-/// default or drop. Reported from sema so `dusk check` catches them at the
-/// source line instead of codegen emitting a wrong program.
-pub fn diagnose(module: &Module) -> Vec<Diagnostic> {
-    let mut m = Mono::new(module);
-    m.run();
-    m.diags
+    };
+    (out, m.diags)
 }
 
 struct Mono<'a> {
@@ -214,6 +215,17 @@ impl<'a> Mono<'a> {
                 Box::new(self.emit_ty(r)),
             ),
             Type::Unit => Type::Unit,
+            // A hole reaching emit means a do-continuation's element type was never
+            // pinned by per-site inference. Report it and fall back to a ground
+            // type so mangling stays total; analyze fails on the diagnostic first,
+            // so codegen never sees the fallback.
+            Type::Infer => {
+                self.diags.push(Diagnostic::new(
+                    "could not infer the type of this do-continuation; annotate the monad element",
+                    Span::new(0, 0),
+                ));
+                named("int64")
+            }
         }
     }
 
@@ -398,6 +410,9 @@ impl<'a> Mono<'a> {
                 }
                 true
             }
+            // A hole is never a concrete carrier; it is resolved before any
+            // crossing check matters, so it is trivially crossable here.
+            Type::Infer => true,
             _ => true,
         }
     }
@@ -438,6 +453,7 @@ impl<'a> Mono<'a> {
                 self.check_future_spell(r, span);
             }
             Type::Unit => {}
+            Type::Infer => {}
         }
     }
 
@@ -809,11 +825,20 @@ impl<'a> Mono<'a> {
                 }
             }
             if let Some(gf) = self.gfuncs.get(f).copied() {
-                let cargs: Vec<Expr> =
-                    args.iter().map(|a| self.rw_expr(a, subst, env, None)).collect();
-                let (targs, missing) = self.infer_fn_args(gf, args, subst, env, expected);
+                // Infer the type arguments before rewriting the value arguments, so
+                // a continuation lambda's open (`Infer`) parameter and return holes
+                // can be filled with the now-concrete types the declared signature
+                // pins. This is what lets a `do` over a generic monad instantiate a
+                // fresh bind/unit pair per site.
+                let (targs, missing) = self.solve_call(gf, args, subst, env, expected);
                 self.report_missing(&missing, f, callee.span);
                 self.check_chan_element(f, &targs, callee.span);
+                let inf_full = bind(&gf.generics, &targs);
+                let cargs: Vec<Expr> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| self.rw_arg(a, gf.params.get(i).map(|p| &p.ty), &inf_full, subst, env))
+                    .collect();
                 let mg = node(ExprKind::Ident(self.instantiate(f, &targs)), callee.span);
                 return ExprKind::Call(Box::new(mg), cargs);
             }
@@ -854,7 +879,15 @@ impl<'a> Mono<'a> {
     }
 
 
-    fn infer_fn_args(
+    /// Infers a generic function's type arguments at one call site, seeing
+    /// through continuation lambdas. Non-lambda arguments and the expected type
+    /// bind the parameters they mention first, so those bindings are authoritative
+    /// (`unify` keeps the first binding for each name). Then each lambda argument
+    /// is typed with its own parameters pinned to the bindings so far, and its
+    /// returned expression's type pins any parameter that lives only in the
+    /// lambda's result. This resolves the open bind/unit pair a `do` over a
+    /// generic monad desugars to, one instantiation per site.
+    fn solve_call(
         &self,
         gf: &Func,
         args: &[Expr],
@@ -864,19 +897,85 @@ impl<'a> Mono<'a> {
     ) -> (Vec<Type>, Vec<String>) {
         let params: HashSet<String> = gf.generics.iter().cloned().collect();
         let mut inf = Subst::new();
-        for (i, p) in gf.params.iter().enumerate() {
-            if let Some(a) = args.get(i) {
-                if let Some(at) = self.static_ty(a, subst, env) {
-                    unify(&p.ty, &at, &params, &mut inf);
-                }
+        // Non-lambda arguments first. Their types are authoritative, so a later
+        // lambda pass can never override a binding an argument already made.
+        for (i, decl) in gf.params.iter().enumerate() {
+            let Some(a) = args.get(i) else { continue };
+            if matches!(a.kind, ExprKind::Lambda(_)) {
+                continue;
+            }
+            if let Some(at) = self.static_ty(a, subst, env) {
+                unify(&decl.ty, &at, &params, &mut inf);
             }
         }
-        // Push down the expected (annotation) type so params that appear only in
-        // the return position get inferred instead of silently defaulting.
+        // Push down the expected (annotation) type so a parameter appearing only
+        // in the return position is inferred instead of silently defaulting.
         if let Some(et) = expected {
             unify(&gf.ret, et, &params, &mut inf);
         }
+        // Lambda arguments last. Each is typed with its parameters bound to the
+        // inference so far; its body's returned expression then pins any parameter
+        // that lives only in the lambda's result type.
+        for (i, decl) in gf.params.iter().enumerate() {
+            let Some(a) = args.get(i) else { continue };
+            let ExprKind::Lambda(l) = &a.kind else { continue };
+            let Type::Func(pdecl, rdecl) = &decl.ty else { continue };
+            let merged = union(subst, &inf);
+            let mut env2 = env.clone();
+            for (j, lp) in l.params.iter().enumerate() {
+                if let Some(pt) = pdecl.get(j) {
+                    env2.insert(lp.name.clone(), subst_apply(pt, &merged));
+                }
+            }
+            // Desugar-emitted continuations are exactly `{ return E }`; only that
+            // shape lets the body pin a return-only parameter, so anything else is
+            // left to the argument and expected passes.
+            if let [Stmt::Return(Some(e))] = l.body.stmts.as_slice() {
+                if let Some(rt) = self.static_ty(e, subst, &env2) {
+                    unify(rdecl, &rt, &params, &mut inf);
+                }
+            }
+        }
         solve(&gf.generics, &inf)
+    }
+
+    /// Rewrites one call argument, filling a continuation lambda's open holes with
+    /// the concrete types the callee's declared parameter pins. A non-lambda
+    /// argument, or a lambda in a call whose matching parameter is not a function
+    /// type, is rewritten unchanged.
+    fn rw_arg(
+        &mut self,
+        arg: &Expr,
+        decl: Option<&Type>,
+        inf_full: &Subst,
+        subst: &Subst,
+        env: &Env,
+    ) -> Expr {
+        if let ExprKind::Lambda(l) = &arg.kind {
+            if let Some(Type::Func(pdecl, rdecl)) = decl {
+                let params = l
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(j, lp)| Param {
+                        using: lp.using,
+                        name: lp.name.clone(),
+                        ty: pdecl
+                            .get(j)
+                            .map(|pt| subst_apply(pt, inf_full))
+                            .unwrap_or_else(|| lp.ty.clone()),
+                    })
+                    .collect();
+                let patched = crate::parser::ast::Lambda {
+                    params,
+                    ret: subst_apply(rdecl, inf_full),
+                    body: l.body.clone(),
+                };
+                let e = node(ExprKind::Lambda(patched), arg.span);
+                return self.rw_expr(&e, subst, env, None);
+            }
+        }
+        self.rw_expr(arg, subst, env, None)
     }
 
     fn infer_struct_args(
@@ -972,21 +1071,20 @@ impl<'a> Mono<'a> {
             },
             ExprKind::Call(callee, args) => match &callee.kind {
                 ExprKind::Ident(f) => {
-                    if let Some(gf) = self.gfuncs.get(f) {
-                        let params: HashSet<String> = gf.generics.iter().cloned().collect();
-                        let mut inf = Subst::new();
-                        for (i, p) in gf.params.iter().enumerate() {
-                            if let Some(a) = args.get(i) {
-                                if let Some(at) = self.static_ty(a, subst, env) {
-                                    unify(&p.ty, &at, &params, &mut inf);
-                                }
-                            }
-                        }
-                        let r = subst_apply(&gf.ret, &inf);
-                        if mentions(&r, &params) {
+                    if let Some(gf) = self.gfuncs.get(f).copied() {
+                        // Full call-site inference, including the lambda pass, so a
+                        // nested `bind(...)` in a continuation body reports its real
+                        // element type instead of falling to None. A parameter the
+                        // site could not pin is left unbound; if the return type
+                        // still mentions it the result is unknown, matching the old
+                        // behavior, otherwise the ground return type is returned.
+                        let (targs, missing) = self.solve_call(gf, args, subst, env, None);
+                        let miss: HashSet<String> = missing.into_iter().collect();
+                        if mentions(&gf.ret, &miss) {
                             None
                         } else {
-                            Some(r)
+                            let inf = bind(&gf.generics, &targs);
+                            Some(subst_apply(&gf.ret, &inf))
                         }
                     } else {
                         self.fn_ret.get(f).cloned().or_else(|| builtin_ret(f))
@@ -1131,6 +1229,18 @@ fn bind(generics: &[String], args: &[Type]) -> Subst {
     generics.iter().cloned().zip(args.iter().cloned()).collect()
 }
 
+/// Merges two substitutions, the second overriding the first on a shared name.
+/// Used to apply a callee's declared lambda parameter type, which names the
+/// callee's own type parameters, under both the outer monomorphization
+/// substitution and the freshly inferred bindings.
+fn union(base: &Subst, over: &Subst) -> Subst {
+    let mut out = base.clone();
+    for (k, v) in over {
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
+
 /// Whether a type still mentions any of the given type parameter names. Used to
 /// reject a not fully inferred type before it leaks into outer inference.
 fn mentions(ty: &Type, names: &HashSet<String>) -> bool {
@@ -1141,6 +1251,7 @@ fn mentions(ty: &Type, names: &HashSet<String>) -> bool {
         Type::Tuple(xs) => xs.iter().any(|x| mentions(x, names)),
         Type::Func(ps, r) => ps.iter().any(|p| mentions(p, names)) || mentions(r, names),
         Type::Unit => false,
+        Type::Infer => false,
     }
 }
 
@@ -1180,6 +1291,7 @@ fn subst_apply(ty: &Type, subst: &Subst) -> Type {
             Box::new(subst_apply(r, subst)),
         ),
         Type::Unit => Type::Unit,
+        Type::Infer => Type::Infer,
     }
 }
 
@@ -1261,6 +1373,9 @@ pub(crate) fn flat(ty: &Type) -> String {
             format!("$f{}${}${}", ps.len(), parts.join("$"), flat(r))
         }
         Type::Unit => "$void".to_string(),
+        // Poison: a hole should never reach mangling, since emit_ty reports it and
+        // analyze fails first. The token keeps flat total if it ever slips through.
+        Type::Infer => "$infer".to_string(),
     }
 }
 
@@ -1443,7 +1558,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        diagnose(&m).into_iter().map(|d| d.msg).collect()
+        expand_with_diags(&m).1.into_iter().map(|d| d.msg).collect()
     }
 
     #[test]

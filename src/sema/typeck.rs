@@ -16,7 +16,24 @@ use crate::parser::ast::*;
 
 /// Type checks a module, returning diagnostics.
 pub fn check(module: &Module) -> Vec<Diagnostic> {
+    run_pass(module, false)
+}
+
+/// Re-runs only the type/width/argument/exhaustiveness class over a
+/// mono-expanded (ground) module. A `do` over a generic monad desugars its
+/// continuations with `Type::Infer` holes that lower to `Unknown`; the surface
+/// pass wildcards them, so a continuation body's widths go unchecked there. Once
+/// mono makes those types ground, this pass width-checks them with the real
+/// walk. The ownership, escape, and must-handle classes stay suppressed here
+/// (`types_only`), since the surface pass already ran them at full fidelity on
+/// the un-erased AST and `Unknown` erasure never suppressed them.
+pub fn check_ground(module: &Module) -> Vec<Diagnostic> {
+    run_pass(module, true)
+}
+
+fn run_pass(module: &Module, types_only: bool) -> Vec<Diagnostic> {
     let mut tc = TypeChecker::new();
+    tc.types_only = types_only;
     tc.collect_sigs(module);
     tc.run(module);
     tc.errors
@@ -136,6 +153,11 @@ struct TypeChecker {
     in_async: bool,
     cur_generics: HashSet<String>,
     cur_ret: Ty,
+    // True for the ground re-check over the mono-expanded module. It suppresses
+    // the ownership, escape, and must-handle diagnostics, which the surface pass
+    // already reported at full fidelity on the un-erased AST, and keeps only the
+    // type/width/argument/exhaustiveness class, the one `Unknown` erasure hid.
+    types_only: bool,
     errors: Vec<Diagnostic>,
 }
 
@@ -164,6 +186,7 @@ impl TypeChecker {
             in_async: false,
             cur_generics: HashSet::new(),
             cur_ret: Ty::Unit,
+            types_only: false,
             errors: Vec::new(),
         }
     }
@@ -565,17 +588,21 @@ impl TypeChecker {
         self.esc_closures.pop();
         self.esc_slices.pop();
         // Every error bound in this scope must have been handled by now. The
-        // handled ones were removed at their handling site; the rest report.
+        // handled ones were removed at their handling site; the rest report. The
+        // stack is popped either way to stay balanced, but the ground re-check
+        // suppresses the report, which the surface pass already made.
         if let Some(pending) = self.err_binds.pop() {
-            let mut pending: Vec<(String, Span)> = pending.into_iter().collect();
-            pending.sort_by_key(|(_, s)| s.lo);
-            for (name, span) in pending {
-                self.err(
-                    format!(
-                        "the error '{name}' is never handled; inspect it with exists, handle it with check, or discard it with ignore"
-                    ),
-                    span,
-                );
+            if !self.types_only {
+                let mut pending: Vec<(String, Span)> = pending.into_iter().collect();
+                pending.sort_by_key(|(_, s)| s.lo);
+                for (name, span) in pending {
+                    self.err(
+                        format!(
+                            "the error '{name}' is never handled; inspect it with exists, handle it with check, or discard it with ignore"
+                        ),
+                        span,
+                    );
+                }
             }
         }
     }
@@ -1085,7 +1112,7 @@ impl TypeChecker {
                 }
                 self.check_int_fits(rhs, &lt);
                 self.check_assign_target(lhs);
-                if is_managed(&lt) {
+                if is_managed(&lt) && !self.types_only {
                     // `q = p` aliases two owners exactly like the let form copy, so
                     // flag it the same. This takes priority, naming the precise
                     // mistake when both sides are owners.
@@ -1417,10 +1444,12 @@ impl TypeChecker {
             }
             ExprKind::Ident(src) => match self.own_of(src) {
                 Some(Own::Owner) => {
-                    self.err(
-                        "cannot copy an owning pointer; bind a `ref` alias or `move` it",
-                        l.value.span,
-                    );
+                    if !self.types_only {
+                        self.err(
+                            "cannot copy an owning pointer; bind a `ref` alias or `move` it",
+                            l.value.span,
+                        );
+                    }
                     Own::Owner
                 }
                 _ => Own::Borrow,
@@ -1440,7 +1469,14 @@ impl TypeChecker {
             Ty::Future(el) => *el,
             Ty::Unknown => Ty::Unknown,
             _ => {
-                self.err("the operand of await is not a future", span);
+                // On the ground AST mono has mangled `Future<T>` to `Future$T`, a
+                // plain named type the surface `Ty::Future` shape no longer
+                // matches, so the operand looks non-future. The surface pass
+                // already validated every await operand, so the ground re-check
+                // stays permissive here rather than false-firing.
+                if !self.types_only {
+                    self.err("the operand of await is not a future", span);
+                }
                 Ty::Unknown
             }
         }
@@ -1523,6 +1559,12 @@ impl TypeChecker {
     /// The walk is driven by the declared return shape so an escaping fat value
     /// buried in a returned tuple is caught, not only a whole-return fat value.
     fn check_escape(&mut self, e: &Expr, t: &Ty) {
+        // The whole escape class is a surface-only concern: it ran at full
+        // fidelity on the un-erased AST, and `Unknown` erasure never suppressed
+        // it, so the ground re-check skips it to avoid a foreign re-fire.
+        if self.types_only {
+            return;
+        }
         let declared = self.cur_ret.clone();
         self.escape_walk(e, &declared, t);
     }
@@ -1805,7 +1847,7 @@ impl TypeChecker {
             ExprKind::Char(_) => Ty::Char,
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Ident(name) => {
-                if matches!(self.own_of(name), Some(Own::Moved)) {
+                if !self.types_only && matches!(self.own_of(name), Some(Own::Moved)) {
                     self.err("use of a moved pointer", e.span);
                 }
                 // An async function's name in value position cannot be stored or
@@ -2048,7 +2090,9 @@ impl TypeChecker {
                     let t = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
                     if let Some(a) = args.first() {
                         if let ExprKind::Ident(src) = &a.kind {
-                            if matches!(self.own_of(src), Some(Own::Borrow)) {
+                            if !self.types_only
+                                && matches!(self.own_of(src), Some(Own::Borrow))
+                            {
                                 self.err(
                                     "cannot move a borrowed pointer; only its owner can be moved",
                                     a.span,
@@ -2066,7 +2110,9 @@ impl TypeChecker {
                         let t = self.infer(a);
                         if is_managed(&t) {
                             if let ExprKind::Ident(p) = &a.kind {
-                                if matches!(self.own_of(p), Some(Own::Borrow)) {
+                                if !self.types_only
+                                    && matches!(self.own_of(p), Some(Own::Borrow))
+                                {
                                     self.err(
                                         "cannot free a borrowed pointer; only its owner frees it",
                                         a.span,
@@ -2798,6 +2844,10 @@ fn lower(t: &Type, generics: &HashSet<String>) -> Ty {
             Box::new(lower(r, generics)),
         ),
         Type::Unit => Ty::Unit,
+        // A do-continuation hole is open to any monad element; Unknown lets the
+        // compatibility rule wildcard it, so typeck stays permissive until mono
+        // pins the concrete type per site.
+        Type::Infer => Ty::Unknown,
     }
 }
 

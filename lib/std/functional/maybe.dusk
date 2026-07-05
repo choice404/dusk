@@ -1,5 +1,7 @@
 // std.functional.maybe: an optional value, Some or None.
 
+@paradigm functional
+
 export enum Maybe<T> {
     Some(v: T),
     None,
@@ -16,5 +18,20 @@ export func unwrap_or<T>(m: Maybe<T>, fallback: T) -> T {
     match m {
         Some(v) => return v,
         None => return fallback,
+    }
+}
+
+// The Maybe monad: `do Maybe { ... }` threads Some values and short-circuits on
+// the first None. bind runs the continuation on a present value and passes None
+// straight through; unit lifts a plain value into Some.
+monad Maybe {
+    export func bind<A, B>(m: Maybe<A>, f: (A) -> Maybe<B>) -> Maybe<B> {
+        match m {
+            Some(a) => return f(a),
+            None => return Maybe.None,
+        }
+    }
+    export func unit<A>(x: A) -> Maybe<A> {
+        return Maybe.Some(x)
     }
 }

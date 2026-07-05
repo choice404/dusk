@@ -318,6 +318,37 @@ e: Either<int64, int64> = Either.Left(-5)
 println(left_or(e, 0))   // -5
 ```
 
+## std.functional.io
+
+`IO<T>` as a monad over a plain struct, composing through generic `do` like any other monad. It is eager over its carried value: `bind` applies its continuation immediately and stores no closure, so it clears the escape check that a lazy, thunk storing `IO` would trip. `run` bridges the value onto the event loop through the pool offload idiom, so the loop and pool must both be up.
+
+| Function                       | Description                                                             |
+| ------------------------------ | ---------------------------------------------------------------------- |
+| `io_pure<A>(x: A) -> IO<A>`     | Wrap a value in `IO`.                                                   |
+| `bind`, `unit` (in `monad IO`)  | The monad pair a `do IO { ... }` block desugars against.               |
+| `run<A>(io: IO<A>) -> A`        | Run the effect on the loop and return the value.                        |
+
+```text
+@paradigm functional
+
+@import std.functional.io
+@import std.async.loop
+@import std.concurrent.pool
+
+le := loop_init()
+le.ignore()
+pe := pool_start(2)
+pe.ignore()
+r := run(do IO {
+    a <- io_pure(10)
+    b <- io_pure(20)
+    a + b
+})
+println(r)   // 30
+pool_shutdown()
+loop_free()
+```
+
 ## std.async.io
 
 The readiness reactor and the non blocking byte surface it watches. The reactor is one C thread that turns file descriptor readiness into a one shot `Future<int64>` on the event loop; it runs no user code and touches no user memory. Pipes are the deterministic rig to exercise it. Start the loop, then the reactor, before arming any watch, and stop the reactor before freeing the loop.
@@ -376,6 +407,22 @@ loop_free()
 ```
 
 The readiness mask is 1 for readable, 2 for writable, 4 for hangup, and 8 for error, ORed together. Only one watch may be armed on a file descriptor at a time; a second watch on an already armed fd is a fault. `future_free` on a readiness future does not disarm its watch. Stage `read_nb` and `write_nb` buffers through `alloc_bytes`, the same idiom `Pipe`'s own two fds use internally. Writing to a pipe whose read end is closed delivers `SIGPIPE` and kills the process; do not write to a pipe with no reader.
+
+## std.async.net
+
+TCP over the readiness reactor. Sockets are non blocking file descriptors the reactor watches, so this module is a thin layer over `std.async.io`. The connecting and accepting calls are `async func`s that await `readable` or `writable` and retry; the setup and teardown calls are synchronous. Literal IPv4 addresses only, no name resolution.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `tcp_listen(port: int64, backlog: int64) -> (int64, error)`      | Bind and listen on loopback; port 0 lets the OS assign one.    |
+| `tcp_local_port(fd: int64) -> (int64, error)`                    | The ephemeral port a listener was assigned.                    |
+| `tcp_accept(fd: int64) -> (int64, error)`                        | Await a connection and return the client descriptor. Async.    |
+| `tcp_connect(host: string, port: int64) -> (int64, error)`       | Connect to a literal IPv4 address, completing the handshake and surfacing a refusal. Async. |
+| `tcp_read(fd: int64, buf: *void, cap: int64) -> (int64, error)`  | Await readability and read once; 0 is end of stream. Async.    |
+| `tcp_write(fd: int64, buf: *void, n: int64) -> (int64, error)`   | Write every byte, awaiting writability as needed. Async.       |
+| `tcp_close(fd: int64) -> error`                                  | Close a descriptor.                                            |
+
+Awaiting any of the async calls is legal only inside an `async func`; a server accept loop and its clients run as tasks under `async_run`.
 
 ## Async keywords
 

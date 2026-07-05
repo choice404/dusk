@@ -30,9 +30,11 @@
      innocent successor's registration and hang its awaiter. The fire path
      DELs only when the registry still maps this fd to THIS watch record; an
      arm overwrites the entry for a reused fd, so a stale fire skips its DEL. */
-#define _GNU_SOURCE /* pipe2, eventfd, epoll_create1, EPOLLONESHOT */
+#define _GNU_SOURCE /* pipe2, eventfd, epoll_create1, EPOLLONESHOT, accept4 */
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -40,6 +42,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 extern void *cool_future_new(int64_t elem_size);
@@ -446,4 +449,145 @@ int64_t cool_fd_close(int64_t fd) {
         return 0;
     }
     return 1;
+}
+
+/* TCP shims for std.async.net. These are ONLY socket syscalls that mint or
+   probe file descriptors; they touch NO event machinery. Every socket is born
+   O_NONBLOCK | O_CLOEXEC (SOCK_NONBLOCK | SOCK_CLOEXEC in the type), so it
+   drops straight into the reactor's readiness model and never leaks across an
+   exec. A returned fd is an ordinary fd the dusk surface hands to
+   readable(fd) / writable(fd), which arm the watch through the paths above.
+   No fd->watch registry entry and no armed gauge is touched here.
+
+   Return contract, chosen to mirror cool_read_nb / cool_write_nb so the dusk
+   readiness loop treats sockets and pipes uniformly:
+
+     >= 0  success: a fresh fd, an accepted client fd, or a host-order port.
+     -1    "would block" OR a clean refused: EAGAIN / EWOULDBLOCK on accept,
+           ECONNREFUSED on connect. The dusk surface maps -1 to "arm the watch
+           and retry" (accept -> readable(fd), connect step -> writable(fd))
+           or to a clean "connection refused" error value.
+     -2    hard error: any other errno. The dusk surface maps -2 to a hard
+           error value; there is nothing to await.
+
+   Note cool_tcp_listen and cool_tcp_local_port are one-shot setup/probe calls
+   with no would-block state, so they use only >= 0 (success) and -1 (error).
+
+   The nonblocking connect handshake is four steps: cool_tcp_connect_ip returns
+   a pending fd on EINPROGRESS; the caller awaits writable(fd); it then calls
+   cool_tcp_connect_error(fd) to read the pending SO_ERROR. 0 means the connect
+   completed, > 0 is the deferred refusal/error errno (ECONNREFUSED etc). So a
+   refusal that did not surface synchronously at connect time surfaces here, and
+   the dusk tcp_connect returns a clean error instead of handing back a broken
+   fd. cool_tcp_connect_error uses 0 (connected), > 0 (deferred errno), and -1
+   (getsockopt itself failed). */
+
+/* Opens a nonblocking loopback listener bound to INADDR_LOOPBACK:port. port 0
+   asks the OS for an ephemeral port (read it back with cool_tcp_local_port),
+   which is what makes a self-connecting test deterministic. A backlog <= 0 is
+   clamped to a sane default of 16. Returns the listening fd, or -1 on any
+   failure (the half-open fd is closed before returning). */
+int64_t cool_tcp_listen(int64_t port, int64_t backlog) {
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    int one = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0) {
+        close(fd);
+        return -1;
+    }
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    int bl = (backlog <= 0) ? 16 : (int)backlog;
+    if (listen(fd, bl) != 0) {
+        close(fd);
+        return -1;
+    }
+    return (int64_t)fd;
+}
+
+/* Accepts one pending connection on a listening fd, minting the client fd
+   O_NONBLOCK | O_CLOEXEC. EINTR is retried. Returns the client fd (>= 0) on
+   success, -1 on EAGAIN / EWOULDBLOCK (arm readable(fd) and retry), -2 on any
+   other error. */
+int64_t cool_tcp_accept_nb(int64_t fd) {
+    int c;
+    do {
+        c = accept4((int)fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    } while (c < 0 && errno == EINTR);
+    if (c >= 0) {
+        return (int64_t)c;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return -1;
+    }
+    return -2;
+}
+
+/* Opens a nonblocking IPv4 client and starts connecting to ip:port. ip is a
+   NUL-terminated dotted-quad literal string (a dusk string's raw bytes); DNS
+   is out of scope, so an inet_pton parse failure closes the fd and returns -2.
+   A nonblocking connect that returns EINPROGRESS is SUCCESS: the caller awaits
+   writable(fd) then checks SO_ERROR, so return the fd. An immediate connect
+   (loopback) is also success. ECONNREFUSED returns -1 (clean refused); any
+   other error closes the fd and returns -2. */
+int64_t cool_tcp_connect_ip(void *ip, int64_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        return -2;
+    }
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, (char *)ip, &addr.sin_addr) != 1) {
+        close(fd);
+        return -2;
+    }
+    int rc;
+    do {
+        rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    } while (rc != 0 && errno == EINTR);
+    if (rc == 0 || errno == EINPROGRESS) {
+        return (int64_t)fd;
+    }
+    if (errno == ECONNREFUSED) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+    return -2;
+}
+
+/* Reads the host-order local port bound to fd via getsockname; needed so a
+   listener opened on port 0 can report the OS-assigned ephemeral port. Returns
+   the port (>= 0) or -1 on error. */
+int64_t cool_tcp_local_port(int64_t fd) {
+    struct sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    if (getsockname((int)fd, (struct sockaddr *)&addr, &len) != 0) {
+        return -1;
+    }
+    return (int64_t)ntohs(addr.sin_port);
+}
+
+/* Fourth step of the nonblocking connect handshake: after cool_tcp_connect_ip
+   returned a pending fd and the caller awaited writable(fd), read the pending
+   socket error. 0 = connected OK; > 0 = the connect failed with this errno
+   (ECONNREFUSED etc); -1 = getsockopt itself failed. */
+int64_t cool_tcp_connect_error(int64_t fd) {
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt((int)fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0) {
+        return -1;
+    }
+    return (int64_t)err;
 }

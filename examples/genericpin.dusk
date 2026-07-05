@@ -1,0 +1,21 @@
+// REGRESSION-PIN (0.4.3 F-M1 Option C): a generic `do`'s inferred element
+// type clashing with an explicit annotation on the binding used to reach
+// clang unchecked before the fix. The annotation pins `Maybe<int32>` but the
+// element bound inside the `do` is int64; the types-only re-check must catch
+// the mismatch at `dusk check` rather than let it through to codegen.
+
+@paradigm functional
+
+@import std.functional.maybe
+
+func main() -> int32 {
+    r: Maybe<int32> = do Maybe {
+        a <- Maybe.Some(4294967297)
+        a
+    }
+    match r {
+        Some(v) => println("{}", v),
+        None => println("none"),
+    }
+    return 0
+}

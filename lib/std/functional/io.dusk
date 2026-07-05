@@ -1,0 +1,58 @@
+// std.functional.io: IO<T> as a monad, with run bridging the effect onto the
+// event loop. This is the eager over value form. bind applies its continuation
+// at once and threads the plain value, storing no closure, because dusk's
+// escape check refuses a struct field that captures a frame, so a value holding
+// a suspended thunk cannot leave the frame that built it. The lazy IO that
+// stores a continuation waits on that field kind and is deferred. The effect
+// boundary is run, which mints a future, hands the value to a pool worker that
+// completes it, and awaits the result on the loop thread, the offload idiom the
+// 0.4.2 examples settled on.
+
+@paradigm functional
+@import std.async.future
+@import std.async.loop
+@import std.concurrent.pool
+
+export struct IO<T> {
+    v: T,
+}
+
+// The IO monad: `do IO { ... }` threads a value through each bind. bind is
+// eager, it runs the continuation on the carried value immediately and returns
+// the continuation's own IO, holding no closure. unit lifts a plain value into
+// IO. F-M1's generic bind through do resolves this pair per site.
+monad IO {
+    export func bind<A, B>(m: IO<A>, f: (A) -> IO<B>) -> IO<B> {
+        return f(m.v)
+    }
+    export func unit<A>(x: A) -> IO<A> {
+        return IO { v: x }
+    }
+}
+
+// Lifts a plain value into IO, the named surface unit gives the do block. Same
+// eager carrier: the value sits in the field until run discharges it.
+export func io_pure<A>(x: A) -> IO<A> {
+    return IO { v: x }
+}
+
+// Discharges the effect. Mints a pending future, lifts its raw handle words out
+// before the submit so the offloaded body completes it without capturing a
+// future, and awaits the result on the loop thread. The pool worker only carries
+// scalars, h, gen, and the carried value, so the submit capture rule accepts it.
+// The loop must be running and the pool started before run, and torn down after
+// the last run, the loop_init, pool_start, work, pool_shutdown, loop_free order.
+export func run<A>(io: IO<A>) -> A {
+    f: Future<A> = future_new()
+    h := f.h
+    g := f.gen
+    x := io.v
+    e0 := submit(lambda () -> void {
+        e := complete_raw(h, g, x, error {})
+        e.ignore()
+    })
+    e0.ignore()
+    v, e := await(f)
+    e.ignore()
+    return v
+}

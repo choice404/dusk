@@ -2,6 +2,33 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.4.3
+
+Phase four of the async line: the awaitable channel, TCP, and the generic monad, plus a soundness hardening of the generic `do` path that turned out to sit under all of it. `do` notation grows up from a single concrete monad to any generic one, `chan_recv_async` gives a blocking channel receive a home on the event loop, `std.functional.io` ships an `IO<T>` monad, and `std.async.net` puts TCP over the reactor. 325 unit tests and 260 golden integration tests pass, the channel bridge seam and the accept loop ThreadSanitizer clean.
+
+Generic `bind` through `do`.
+
+- `do` notation composes over any generic monad, not only one whose `bind` is already ground to concrete types. `Maybe`, an `Either` shaped monad, and any user `monad Name { ... }` block generic over its element all thread through `do` the same way. The desugar emits the continuation chain over an open type hole, and monomorphization resolves and instantiates the `bind` and `unit` pair fresh at each `do` site: an argument pass, an expected type or annotation pass, and a lambda body pass, with the first pass to pin a type winning. This is the one compiler investment of the async line that pays outside async.
+- A `do` over a type with no `monad` block is rejected at the names its desugar calls, `undefined name '<Name>.bind'` and `undefined name '<Name>.unit'`, and a `bind` whose signature drops the continuation parameter is an arity mismatch on the desugared call.
+
+The soundness hardening under it.
+
+- The open type hole the continuation carries lowers to the permissive unknown type, which is compatible with everything, so the continuation body escaped the width and type checks and an int32 and int64 mix inside a generic `do` continuation silently truncated. The fix runs a second, types only, pass of the real type checker over the monomorphized program, where every type is concrete, recovering the width and agreement checks with no duplicated logic while leaving the ownership, escape, and must handle checks to the first pass. The mix is now caught, `arithmetic mixes int32 and int64; match the widths`, and an inferred element type clashing with an explicit annotation is caught the same way, `return type does not match the function's return type`. The fix is general: the same recheck catches a width mismatch buried in an ordinary generic function body too. Pinned by the genericwidth and genericpin goldens.
+
+The awaitable channel.
+
+- `chan_recv_async(c: Channel<T>) -> Future<T>` makes a receive awaitable on the loop instead of blocking the caller, since a blocking `chan_recv` on the loop thread stalls every task. It mints a future and hands the blocking receive to a detached helper thread that completes the future off the loop thread, the live threads gauge raised before the helper starts and dropped strictly after the completion so the deadlock detector never false fires. A closed and drained channel completes with `receive on a closed, drained channel`. Because the helper is detached and cannot be joined, the drain discipline is close and settle, not close then join.
+
+std.functional.io.
+
+- `IO<T>` is a `monad IO { ... }` block over a plain struct, composing through the generic `do`. `run(io: IO<A>) -> A` is the one effect boundary, minting a future, offloading the carried value to a pool worker that completes it, and awaiting the result on the loop thread. The `IO` is eager over its value: `bind` applies its continuation immediately and stores no closure. A lazy `IO` that stores its continuation as a thunk is not expressible yet, since the escape check rejects a struct field holding a closure that captures a local and is returned, `a closure that captures a local escapes its frame; it cannot be returned`, a deferred item rather than an oversight.
+
+std.async.net.
+
+- TCP over the reactor's readiness futures. `tcp_listen`, `tcp_local_port`, and `tcp_close` are synchronous; `tcp_accept`, `tcp_connect`, `tcp_read`, and `tcp_write` are async funcs that await `readable` or `writable` and retry, so a server accept loop and its clients run as tasks under `async_run` and never pump the loop from inside a task. `tcp_connect` completes the non blocking connect handshake by awaiting writability then reading the socket error, so a refusal surfaces as a clean error not a broken descriptor. `tcp_write` sends every byte, looping until the buffer is gone, so a short write never drops the tail. Literal IPv4 addresses only, no name resolution. Awaiting a networking future outside an async func is rejected, `'await' is only legal inside an async func`.
+
+Deferred. A lazy `IO` and the broader escape work it needs wait for 0.5.0. Name resolution and the second reactor platform wait for later in the line.
+
 ## 0.4.2
 
 The largest release of the 0.4.x line, two tracks landing together plus a soundness hardening underneath both. The complete operator set closes out arithmetic and control expressions the language had leaned on a small subset of since 0.1.0, bitwise, compound assignment, increment and decrement, exponent, pipe, and an inclusive range. `async func`, `await`, and `async_run` then land the keyword layer the whole async line has been building toward: an async func compiles to a state machine over a heap frame, `await` is a statement level suspension inside one, and `async_run` is the only bridge a synchronous `main` uses to crank the loop. Underneath both, the escape check and the interface boxing codegen it rides on are completed end to end. 325 unit tests and 247 golden integration tests pass, the async transform included.

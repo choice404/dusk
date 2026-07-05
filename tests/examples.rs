@@ -1275,6 +1275,47 @@ fn a_slice_of_interface_passed_as_a_slice_of_interface_runs() {
 }
 
 #[test]
+fn a_do_over_a_struct_with_no_monad_block_is_rejected() {
+    // F-M1's generic `bind`/`unit` only exist once a type opts in with a
+    // `monad Name { ... }` block; `do Foo { ... }` over a plain generic struct
+    // desugars to `Foo.bind`/`Foo.unit`, which name nothing.
+    let err = check_fails("genericmaybebad.dusk");
+    assert!(err.contains("undefined name 'Foo.bind'"), "{err}");
+    assert!(err.contains("undefined name 'Foo.unit'"), "{err}");
+}
+
+#[test]
+fn a_do_over_a_monad_bind_with_the_wrong_arity_is_rejected() {
+    // Every real monad's bind takes the value and the continuation; a bind
+    // missing the continuation parameter cannot back a multi-step `do`, so the
+    // desugared call passing both arguments is an arity mismatch.
+    let err = check_fails("doasyncbad.dusk");
+    assert!(err.contains("expected 1 argument(s), found 2"), "{err}");
+}
+
+#[test]
+fn regression_pin_generic_do_width_mismatch_is_rejected() {
+    // REGRESSION-PIN (0.4.3 F-M1 Option C): before the fix, a generic `do`'s
+    // continuation body escaped width/type checking entirely (`Ty::Unknown`),
+    // so mixing int32 and int64 inside the continuation silently truncated
+    // instead of being rejected. The types-only re-check over the
+    // mono-expanded module must catch this like any other arithmetic
+    // mismatch, or the miscompile is back.
+    let err = check_fails("genericwidth.dusk");
+    assert!(err.contains("arithmetic mixes int32 and int64; match the widths"), "{err}");
+}
+
+#[test]
+fn regression_pin_generic_do_annotation_element_clash_is_rejected() {
+    // REGRESSION-PIN (0.4.3 F-M1 Option C): before the fix, a generic `do`
+    // binding's annotation could clash with the element type produced inside
+    // the `do` and reach clang unchecked. The types-only re-check must reject
+    // it at `dusk check`.
+    let err = check_fails("genericpin.dusk");
+    assert!(err.contains("return type does not match the function's return type"), "{err}");
+}
+
+#[test]
 fn a_malformed_interface_body_is_rejected_in_bounded_time() {
     // A stray `func` where a method name is expected must not spin the parser.
     let err = check_fails("malformed_interface.dusk");
@@ -1285,6 +1326,20 @@ fn a_malformed_interface_body_is_rejected_in_bounded_time() {
 fn a_malformed_foreign_body_is_rejected_in_bounded_time() {
     let err = check_fails("malformed_foreign.dusk");
     assert!(err.contains("unexpected token in foreign block"), "{err}");
+}
+
+#[test]
+fn a_struct_field_holding_a_capturing_lambda_returned_out_of_its_frame_is_rejected() {
+    // F-M3's IO is eager over its carried value precisely because a field
+    // cannot hold a suspended thunk that escapes the frame that built it; a
+    // lazy IO storing a capturing lambda in a struct field, returned out of
+    // its constructing function, must be rejected the same way any other
+    // closure escape is.
+    let err = check_fails("iomonadbad.dusk");
+    assert!(
+        err.contains("a closure that captures a local escapes its frame; it cannot be returned"),
+        "{err}"
+    );
 }
 
 macro_rules! golden {
@@ -1347,6 +1402,12 @@ golden!(trypoll, "trypoll.dusk", "full\n9\n");
 golden!(recvtimeout, "recvtimeout.dusk", "timed out\n0\n5\nclosed\n0\n");
 golden!(offload, "offload.dusk", "60\n");
 golden!(awaitoffload, "awaitoffload.dusk", "60\n");
+golden!(chanbridge, "chanbridge.dusk", "42\n");
+golden!(
+    chanbridgeclosed,
+    "chanbridgeclosed.dusk",
+    "receive on a closed, drained channel\n0\n"
+);
 golden!(spawnfuture, "spawnfuture.dusk", "42\n");
 golden!(racingcomplete, "racingcomplete.dusk", "2\n");
 golden!(sleepsum, "sleepsum.dusk", "42\n");
@@ -1374,6 +1435,17 @@ golden!(singleval, "singleval.dusk", "9\n25\n11\n");
 golden!(incdec, "incdec.dusk", "6\n-128\n1\n");
 golden!(pipes, "pipes.dusk", "10\n13\n6\n");
 golden!(inclusive, "inclusive.dusk", "9\n0\n15\n");
+golden!(genericmaybe, "genericmaybe.dusk", "Some(30)\nnone\n");
+golden!(doasync, "doasync.dusk", "17\n");
+golden!(iomonad, "iomonad.dusk", "30\n");
+golden!(tcplocal, "tcplocal.dusk", "ping\n");
+golden!(acceptloop, "acceptloop.dusk", "6\n");
+
+#[test]
+fn awaiting_a_net_future_outside_an_async_func_is_rejected() {
+    let err = check_fails("netbadawait.dusk");
+    assert!(err.contains("'await' is only legal inside an async func"), "{err}");
+}
 
 /// Runs an example feeding `input` to its stdin, so a program that reads with
 /// `read_line` can be exercised deterministically from a pipe.

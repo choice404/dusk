@@ -1,0 +1,22 @@
+// Compile-fail twin of iomonad.dusk: std.functional.io's IO is eager because a
+// struct field cannot hold a suspended continuation and leave the frame that
+// built it. This is the lazy shape IO refuses: a lambda that captures a local
+// `x`, stashed in a struct field and returned out of the function that built
+// it. The checker must reject the closure's escape rather than let the thunk
+// dangle past its frame.
+
+@paradigm functional
+
+struct LazyIO<T> {
+    thunk: () -> T,
+}
+
+func defer_effect<A>(x: A) -> LazyIO<A> {
+    return LazyIO { thunk: lambda () -> A { return x } }
+}
+
+func main() -> int32 {
+    l := defer_effect(10)
+    println(l.thunk())
+    return 0
+}

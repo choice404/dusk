@@ -1,0 +1,163 @@
+// std.async.net: TCP over the readiness futures. A socket is an ordinary file
+// descriptor the reactor watches, so a connect that has not finished and an
+// accept with no pending client both park on a readable / writable future the
+// keyword await consumes, the same Future<int64> std.async.io mints. The five
+// cool_tcp_* shims live in the reactor: they open, probe, and drive the
+// nonblocking handshakes; the readiness surface here folds them into async funcs
+// that compose under async_run. IPv4 dotted literals only, no DNS. The readiness
+// mask the reactor completes with is 1 readable, 2 writable, 4 hangup, 8 error,
+// ORed together; an 8 bit means the kernel reported a socket error while we
+// parked, which we surface rather than spin on.
+
+@import std.async.io
+@import std.async.future
+@import std.string
+
+foreign "C" {
+    func cool_tcp_listen(port: int64, backlog: int64) -> int64
+    func cool_tcp_accept_nb(fd: int64) -> int64
+    func cool_tcp_connect_ip(ip: *void, port: int64) -> int64
+    func cool_tcp_local_port(fd: int64) -> int64
+    func cool_tcp_connect_error(fd: int64) -> int64
+}
+
+// Opens a nonblocking, close on exec listening socket bound to port with the
+// given backlog. A port of 0 asks the OS for an ephemeral port; read it back
+// with tcp_local_port. An OS refusal is an error value, not a fault, since the
+// call carries an error channel. Sync: no fd is watched, so nothing parks.
+export func tcp_listen(port: int64, backlog: int64) -> (int64, error) {
+    fd := cool_tcp_listen(port, backlog)
+    if fd == -1 {
+        return (-1, error { message: "the listening socket could not be opened" })
+    }
+    return (fd, error {})
+}
+
+// Reads the host order local port bound to fd via getsockname, the way a
+// listener opened on port 0 reports its OS-assigned port. An error value on a
+// getsockname refusal. Sync.
+export func tcp_local_port(fd: int64) -> (int64, error) {
+    port := cool_tcp_local_port(fd)
+    if port == -1 {
+        return (-1, error { message: "the local port could not be read" })
+    }
+    return (port, error {})
+}
+
+// Closes fd, the same discipline as std.async.io's fd_close. Disarm or fire any
+// watch on fd before closing it. Sync.
+export func tcp_close(fd: int64) -> error {
+    return fd_close(fd)
+}
+
+// Accepts one pending connection off the listening fd, parking until a client
+// arrives. cool_tcp_accept_nb returns the client fd (>= 0), -1 for would-block,
+// or -2 for a hard error. On would-block the accept parks on readable(fd), the
+// keyword await, and retries when the listener wakes; a mask error bit surfaces
+// as an error rather than a spin. The returned client fd is nonblocking and
+// close on exec, ready to read and write.
+export async func tcp_accept(fd: int64) -> (int64, error) {
+    mut client := cool_tcp_accept_nb(fd)
+    while client == -1 {
+        m, e := await readable(fd)
+        e.ignore()
+        if (m & 8) != 0 {
+            return (-1, error { message: "the listening socket reported an error while waiting to accept" })
+        }
+        client = cool_tcp_accept_nb(fd)
+    }
+    if client == -2 {
+        return (-1, error { message: "the accept failed" })
+    }
+    return (client, error {})
+}
+
+// Connects to a literal IPv4 dotted host on port, parking until the nonblocking
+// handshake resolves. cool_tcp_connect_ip opens the socket and starts connect:
+// it returns the pending fd (>= 0, connected or in progress), -1 for an
+// immediate refusal, or -2 for a hard failure including an inet_pton reject of a
+// malformed host. A pending fd is finished by awaiting writable(fd), the keyword
+// await, then reading the deferred SO_ERROR with cool_tcp_connect_error: 0 is
+// connected, a positive errno is a deferred refusal, -1 is a getsockopt failure.
+// The host string is copied into a NUL terminated byte buffer for the C boundary,
+// since a string view is not a raw pointer the shim can read.
+export async func tcp_connect(host: string, port: int64) -> (int64, error) {
+    n := str_len(host)
+    buf: *raw char = alloc_bytes(n + 1)
+    mut i := 0
+    while i < n {
+        buf[i] = host[i]
+        i = i + 1
+    }
+    buf[n] = 0
+    fd := cool_tcp_connect_ip(buf, port)
+    free(buf)
+    if fd == -2 {
+        return (-1, error { message: "the connection could not be initiated" })
+    }
+    if fd == -1 {
+        return (-1, error { message: "the connection was refused" })
+    }
+    m, e := await writable(fd)
+    e.ignore()
+    if (m & 8) != 0 {
+        ce := fd_close(fd)
+        ce.ignore()
+        return (-1, error { message: "the connection was refused" })
+    }
+    se := cool_tcp_connect_error(fd)
+    if se > 0 {
+        ce := fd_close(fd)
+        ce.ignore()
+        return (-1, error { message: "the connection was refused" })
+    }
+    if se == -1 {
+        ce := fd_close(fd)
+        ce.ignore()
+        return (-1, error { message: "the connect status could not be read" })
+    }
+    return (fd, error {})
+}
+
+// Reads up to cap bytes from fd into buf, parking on readable(fd) until the
+// socket has data or a readiness bit reports otherwise. On readiness the read is
+// a single read_nb: a positive count is data, a count of 0 with no error is end
+// of stream once the peer closed, and the readiness path leaves a real read
+// failure as read_nb's error. A mask error bit surfaces before the read. Stage
+// buf through alloc_bytes, the channel element idiom.
+export async func tcp_read(fd: int64, buf: *void, cap: int64) -> (int64, error) {
+    m, e := await readable(fd)
+    e.ignore()
+    if (m & 8) != 0 {
+        return (0, error { message: "the socket reported an error while waiting to read" })
+    }
+    return read_nb(fd, buf, cap)
+}
+
+// Writes all n bytes from buf to fd, parking on writable(fd) whenever the socket
+// cannot take more. Each turn awaits writability, then does one write_nb over the
+// unsent tail at ptr_add(buf, sent); write_nb signals a full send buffer as the
+// "would block" recoverable string with a count of 0, which is not a failure, so
+// that turn simply re-parks instead of returning. The loop closes the partial
+// write trap: a payload larger than the socket send buffer is drained across as
+// many wake ups as it takes. Returns the count sent, which equals n on success,
+// paired with a hard write error and the partial count already sent when the
+// socket fails. A mask error bit surfaces before the write.
+export async func tcp_write(fd: int64, buf: *void, n: int64) -> (int64, error) {
+    mut sent := 0
+    while sent < n {
+        m, me := await writable(fd)
+        me.ignore()
+        if (m & 8) != 0 {
+            return (sent, error { message: "the socket reported an error while waiting to write" })
+        }
+        w, we := write_nb(fd, ptr_add(buf, sent), n - sent)
+        if we.exists() {
+            if str_eq(we.toString(), "would block") == false {
+                return (sent, we)
+            }
+        }
+        sent = sent + w
+    }
+    return (sent, error {})
+}

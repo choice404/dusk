@@ -30,10 +30,20 @@ pub fn run(module: &Module) -> Module {
 /// The parameter and return types of the continuation lambda passed to `bind`,
 /// read from the named `bind` function's second parameter `(A) -> B`. Defaults to
 /// int64 when the function or its signature is absent.
+///
+/// A generic `bind` (one with type parameters, as every real monad has) cannot
+/// name a concrete continuation type at desugar time: the element varies per
+/// do-site. Both the parameter and the return are opened as `Type::Infer` holes,
+/// which mono pins per site while instantiating the bind/unit pair. The concrete
+/// (non-generic) path is unchanged, so existing single-monad `do` blocks desugar
+/// byte-for-byte as before.
 fn cont_type(module: &Module, bind_name: &str) -> (Type, Type) {
     for item in &module.items {
         if let Item::Func(f) = item {
             if f.name == bind_name {
+                if !f.generics.is_empty() {
+                    return (Type::Infer, Type::Infer);
+                }
                 if let Some(p) = f.params.get(1) {
                     if let Type::Func(ps, r) = &p.ty {
                         let a = ps.first().cloned().unwrap_or_else(int_ty);
