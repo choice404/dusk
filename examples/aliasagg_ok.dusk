@@ -1,0 +1,23 @@
+@paradigm procedural
+@paradigm functional
+// The no-over-reject twin of the two-layer aggregate rejects: a pointer buried
+// through a name-bound intermediate aggregate, used only in frame, never dangles.
+// `inner := Inner { c: c }` and `outer := Outer { inner: inner }` link `outer` to
+// `inner` and transitively to `c`, and `x := outer.inner.c` joins the group, but
+// storing only a SCALAR through it, `(*x).n = 42`, raises no frame-view flag, so
+// the coarse links reject nothing. The pointer stays owned and freed in this
+// frame, so the program is accepted and runs, printing the value written through
+// the two-layer projected alias.
+struct Cell { n: int64 }
+struct Inner { c: *Cell }
+struct Outer { inner: Inner }
+func main() -> int32 {
+    c: *Cell = alloc(Cell { n: 7 })
+    inner := Inner { c: c }
+    outer := Outer { inner: inner }
+    x := outer.inner.c
+    (*x).n = 42
+    println((*c).n)
+    free(c)
+    return 0
+}

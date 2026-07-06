@@ -1,0 +1,27 @@
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+// The mutable-tuple slice storage inside an async body, where every local slot is
+// backed by the task frame arena rather than an inline alloca. The binding's slice
+// tuple slot is sized on the frame, the array-literal initializer adapts into it,
+// and the slice reassignment stores into it, all through the frame path. Reads the
+// slice member and the int member on both sides of the reassignment.
+async func amain() -> int32 {
+    mut t := ([1, 2, 3], 5)
+    a0, b0 := t
+    println(a0[0] + a0[1] + a0[2] + b0)
+    xs: int64[] = [4, 5, 6]
+    t = (xs, 9)
+    a1, b1 := t
+    println(a1[0] + a1[1] + a1[2] + b1)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

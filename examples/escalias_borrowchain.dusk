@@ -1,0 +1,27 @@
+@paradigm procedural
+@paradigm functional
+// A chain of `ref` aliases resolves transitively: `ref c := p; ref q := c` links
+// `q` to `c` to `p`, so a frame slice stored through `q` taints `p` through the
+// group closure and the returned `p` is caught.
+struct Cell { rows: int64[] }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func store_rows(c: *Cell, s: int64[]) -> void {
+    (*c).rows = s
+}
+func mk() -> *Cell {
+    p: *Cell = alloc(Cell { rows: heap4() })
+    ref c := p
+    ref q := c
+    local: int64[4] = [111, 222, 333, 444]
+    store_rows(q, local[0..4])
+    return p
+}
+func main() -> int32 {
+    p := mk()
+    println((*p).rows[0])
+    free(p)
+    return 0
+}

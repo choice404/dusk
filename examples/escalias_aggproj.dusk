@@ -1,0 +1,32 @@
+@paradigm procedural
+@paradigm functional
+// A projection that reads out an intermediate aggregate, not a bare pointer, must
+// still join the group. `y := outer.inner` projects the `Inner` struct out of
+// `outer`; its type is a concrete `Inner` (not managed, not Unknown), but `Inner`
+// reaches a managed pointer, so the projection gate links `y` to the root
+// `outer`, whose group already reaches `c`. The store `(*y.c).rows = local[0..4]`
+// raises `y` and the edge taints `c`, so returning `c` hands the dangling frame
+// view out, which is caught. Without the reaches-managed widening the concrete
+// aggregate projection read as inert and the store escaped silently.
+struct Cell { rows: int64[] }
+struct Inner { c: *Cell }
+struct Outer { inner: Inner }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    inner := Inner { c: c }
+    outer := Outer { inner: inner }
+    y := outer.inner
+    local: int64[4] = [111, 222, 333, 444]
+    (*y.c).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

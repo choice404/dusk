@@ -1,0 +1,20 @@
+// No-over-reject (M5): a frame view laundered through a passthrough call but
+// CONSUMED within the frame that owns the backing. id returns its parameter;
+// main slices a frame-local array, launders it through id, and reads the result
+// while local is still alive. Nothing escapes, so this must stay accepted after
+// interprocedural escape enforcement lands, and it prints the array's values.
+@paradigm procedural
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+func main() -> int32 {
+    local: int64[4] = [111, 222, 333, 444]
+    view := id(local[0..4])
+    println(view[0])
+    println(view[1])
+    println(view[2])
+    println(view[3])
+    return 0
+}

@@ -1,0 +1,22 @@
+@paradigm procedural
+@paradigm functional
+// The accept twin of escalias_assignembed: an aggregate reassigned into a mut
+// binding aliases the pointer it embeds, but a SCALAR stored through it is an
+// in-frame mutation, not a frame view. `outer = Outer { inner: c }` forms the
+// alias link `outer` -> `c`, but `(*outer.inner).n = 42` raises no frame-view
+// flag, so nothing pollutes `c`; the pointer stays owned and is freed in this
+// frame, so the program is accepted and runs, printing the value written through
+// the reassigned-aggregate alias.
+struct Cell { n: int64 }
+struct Outer { inner: *Cell }
+func main() -> int32 {
+    c: *Cell = alloc(Cell { n: 7 })
+    d: *Cell = alloc(Cell { n: 9 })
+    mut outer := Outer { inner: d }
+    outer = Outer { inner: c }
+    (*outer.inner).n = 42
+    println((*c).n)
+    free(d)
+    free(c)
+    return 0
+}

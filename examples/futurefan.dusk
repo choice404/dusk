@@ -1,0 +1,48 @@
+// Fans ten async tasks into a Vector<Future<int64>>, then drains the container
+// awaiting each in turn. Every direct async call mints a bare future the source
+// never annotates, and pushing it into a generic vector stores it by value, the
+// container form the checker's ground pass once rejected because a mangled
+// Future$int64 element could not meet the surface Future<int64> a call mints.
+// All ten futures sit pending on the loop's ready queue at once before the first
+// await, and a single loop thread drains that queue FIFO, so the sum is exact at
+// ten every run.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.vector
+
+async func one() -> int64 {
+    return 1
+}
+
+async func amain() -> int32 {
+    v: *Vector<Future<int64>> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < 10 {
+        f := one()
+        vec_push(v, f)
+        i = i + 1
+    }
+
+    mut sum: int64 = 0
+    mut j: int64 = 0
+    while j < 10 {
+        f := vec_get(v, j)
+        x := await f
+        sum = sum + x
+        j = j + 1
+    }
+
+    vec_free(v)
+    free(v)
+    println(sum)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

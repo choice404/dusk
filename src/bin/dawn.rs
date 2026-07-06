@@ -57,15 +57,20 @@ fn cmd_build(path: Option<&String>, run: bool) -> ExitCode {
         eprintln!("dawn: {e}");
         return ExitCode::FAILURE;
     }
-    let (module, errs) = analyze(path);
+    let (analysis, errs) = analyze(path);
     for e in &errs {
         eprintln!("{e}");
     }
-    let Some(module) = module else {
+    let Some(analysis) = analysis else {
         return ExitCode::FAILURE;
     };
     let out = PathBuf::from("target").join("dawn-out");
-    let art = match driver::build_module(&module, &out, stem(path)) {
+    let art = match driver::build_module(
+        &analysis.module,
+        &analysis.mut_tuple_types,
+        &out,
+        stem(path),
+    ) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("dawn: {e}");

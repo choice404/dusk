@@ -1,0 +1,32 @@
+// Compile-fail: the closure counterpart of esccapture_field. A frame-capturing
+// lambda, bad := lambda () { return local[0] }, is handed to a struct-field
+// lambda callee, box.f(bad), whose body stashes it through a captured managed
+// pointer, (*h).g = cb. A field callee is opaque to the escape analysis: dusk
+// cannot see the captured place it stores into, so a closure that captures a
+// frame local handed to it is refused conservatively, the capture store the
+// argument-to-argument flow model cannot follow through a closure hidden behind a
+// struct field. Returning h then dangles, since (*h).g holds a closure viewing
+// the frame-local array that dies with mk.
+@paradigm procedural
+@paradigm functional
+
+struct Holder { g: () -> int64 }
+struct Box { f: (() -> int64) -> void }
+
+func mk() -> *Holder {
+    h: *Holder = alloc(Holder { g: lambda () -> int64 { return 0 } })
+    box := Box { f: lambda (cb: () -> int64) -> void {
+        (*h).g = cb
+    } }
+    local: int64[4] = [111, 222, 333, 444]
+    bad := lambda () -> int64 { return local[0] }
+    box.f(bad)
+    return h
+}
+
+func main() -> int32 {
+    h := mk()
+    println((*h).g())
+    free(h)
+    return 0
+}

@@ -13,6 +13,7 @@ pub struct Module {
     str_count: u32,
     strings: std::collections::HashMap<String, String>,
     lambda_count: u32,
+    funcval_thunks: std::collections::HashSet<String>,
 }
 
 impl Module {
@@ -27,6 +28,7 @@ impl Module {
             str_count: 0,
             strings: std::collections::HashMap::new(),
             lambda_count: 0,
+            funcval_thunks: std::collections::HashSet::new(),
         }
     }
 
@@ -35,6 +37,14 @@ impl Module {
         let n = self.lambda_count;
         self.lambda_count += 1;
         n
+    }
+
+    /// Register a function-value forwarding thunk for emission. Returns true the
+    /// first time a given function is seen and false on repeats, so a function
+    /// used as a value at several sites still emits exactly one thunk definition
+    /// (LLVM rejects a redefinition).
+    pub fn need_funcval_thunk(&mut self, name: &str) -> bool {
+        self.funcval_thunks.insert(name.to_string())
     }
 
     /// Declares a named struct type, e.g. define_type("Point", "{ double, double }").

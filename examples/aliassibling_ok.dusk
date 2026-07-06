@@ -1,0 +1,25 @@
+@paradigm procedural
+@paradigm functional
+// The set-esc-not-propagated no-over-reject: a struct bound with an unrelated
+// frame-view sibling field raises the struct's own flag at binding time, but that
+// raise must not taint the embedded pointer. `st` holds `c` and a frame slice
+// `d`; binding `st` flags `st` (for `d`), yet `c` stays clean and is returned.
+struct Cell { rows: int64[] }
+struct Store { c: *Cell, d: int64[] }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    st := Store { c: c, d: local[0..4] }
+    println(st.d[1])
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

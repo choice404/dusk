@@ -13,10 +13,14 @@ use std::collections::{HashMap, HashSet};
 
 use crate::diag::{Diagnostic, Span};
 use crate::parser::ast::*;
+use crate::sema::summary::{builtin_summary, EscapeInfo, EscapeSummary, ParamSet};
 
-/// Type checks a module, returning diagnostics.
-pub fn check(module: &Module) -> Vec<Diagnostic> {
-    run_pass(module, false)
+/// Type checks a module, returning diagnostics and the storage types of the
+/// narrow mutable-tuple class the surface pass reconciled, which mono stamps onto
+/// the affected bindings so codegen sizes their slots as slices.
+pub fn check(module: &Module, escape: &EscapeInfo) -> (Vec<Diagnostic>, HashMap<Span, Type>) {
+    let (diags, muts) = run_pass(module, false, &HashMap::new(), escape);
+    (diags, muts)
 }
 
 /// Re-runs only the type/width/argument/exhaustiveness class over a
@@ -27,16 +31,59 @@ pub fn check(module: &Module) -> Vec<Diagnostic> {
 /// walk. The ownership, escape, and must-handle classes stay suppressed here
 /// (`types_only`), since the surface pass already ran them at full fidelity on
 /// the un-erased AST and `Unknown` erasure never suppressed them.
-pub fn check_ground(module: &Module) -> Vec<Diagnostic> {
-    run_pass(module, true)
+///
+/// `future_table` maps each mangled `Future$T` name mono minted back to its
+/// element type. Mono lowers `Future<T>` to the named struct `Future$T`, but an
+/// async call still types as the surface `Ty::Future`, so an annotation, a
+/// parameter, or a container element spelled `Future<T>` would look like an
+/// unrelated named type here and clash with the call it came from. Restoring the
+/// `Ty::Future` shape from the table before comparison recovers exactly the
+/// forms the surface pass accepted, so a future passed, annotated, or stored in
+/// a container ground-checks the same as one that is named and awaited.
+pub fn check_ground(module: &Module, future_table: &HashMap<String, Type>) -> Vec<Diagnostic> {
+    run_pass(module, true, future_table, &EscapeInfo::default()).0
 }
 
-fn run_pass(module: &Module, types_only: bool) -> Vec<Diagnostic> {
+fn run_pass(
+    module: &Module,
+    types_only: bool,
+    future_table: &HashMap<String, Type>,
+    escape: &EscapeInfo,
+) -> (Vec<Diagnostic>, HashMap<Span, Type>) {
     let mut tc = TypeChecker::new();
     tc.types_only = types_only;
+    tc.summaries = escape.fns.clone();
+    tc.method_summaries = escape.method_summaries.clone();
+    tc.lambda_returns = escape.lambda_returns.clone();
+    tc.lambda_sinks = escape.lambda_sinks.clone();
+    tc.lambda_capture_flows = escape.lambda_capture_flows.clone();
+    // Every direct store of a frame view into a place reachable through a
+    // parameter, found by the summary walk: the view dies with the frame no
+    // matter what the caller does, so each site is a diagnostic outright. The
+    // walk sees the store through a borrowed pointer, a destructured borrow, or
+    // a lambda capture identically, so no per-shape arm exists here to fall out
+    // of date. Surface pass only; the ground pass carries an empty table.
+    if !types_only {
+        for &(span, j) in &escape.frame_stores {
+            tc.errors.push(Diagnostic::new(
+                format!(
+                    "a view of the current frame is stored into a place reachable through parameter {}, which outlives it; put the backing on the heap",
+                    j + 1
+                ),
+                span,
+            ));
+        }
+    }
+    // The element types arrive as ground AST types; lower each once so the
+    // unmangle walk can splice a ready `Ty` in place of the mangled named type.
+    let no_generics = HashSet::new();
+    tc.future_elems = future_table
+        .iter()
+        .map(|(name, elem)| (name.clone(), lower(elem, &no_generics)))
+        .collect();
     tc.collect_sigs(module);
     tc.run(module);
-    tc.errors
+    (tc.errors, tc.mut_tuple_types)
 }
 
 /// A checked type. `Int(w)` and `Float(w)` carry the bit width; width 0 is a
@@ -86,6 +133,15 @@ enum CrossFail {
     View,
 }
 
+/// The escape relation of a call's target at a call site (M5). A known callee
+/// carries its computed summary; an opaque one (a closure value, a
+/// function-typed parameter, a method, or a foreign symbol) gets the
+/// conservative TOP, treated as returning and cross-storing every argument.
+enum CalleeEsc {
+    Known(EscapeSummary),
+    Top,
+}
+
 struct TypeChecker {
     sigs: HashMap<String, (Vec<Ty>, Ty)>,
     // Async function names mapped to their declared return type, the element of
@@ -98,6 +154,11 @@ struct TypeChecker {
     // which is globally unique. Used by the escape walk to gate a fat payload
     // returned by value the same way a struct field is gated.
     variant_payloads: HashMap<String, Vec<Ty>>,
+    // The same payloads keyed by the owning enum and the variant, so a qualified
+    // constructor's arity and payload types check against the enum it names even
+    // when two enums happen to share a variant name and the by-name map holds only
+    // the last. Absent for a nullary variant.
+    variant_payloads_by_enum: HashMap<(String, String), Vec<Ty>>,
     // Each struct's generic flag and its declared fields, for struct literal
     // validation. A generic struct checks field names only, since matching a
     // field's type parameter against a concrete value needs inference.
@@ -134,6 +195,17 @@ struct TypeChecker {
     // caught by type alone. A scope maps a name to its escape flag, so a shadowing
     // or a reassignment writes a fresh flag that masks any outer or stale one.
     esc_slices: Vec<HashMap<String, bool>>,
+    // Symmetric alias adjacency over managed-pointer binding names, per scope. Two
+    // bindings share an edge when one is a `ref` or borrow-copy of the other, when
+    // a non-pointer aggregate binding embeds a bare pointer member, when a
+    // destructure binder takes a pointer member, or when a call hands one argument's
+    // pointer back through its result. The escape flag raised on any member of an
+    // alias group is propagated to the whole group at `raise_esc`, so a frame view
+    // stored through one name is caught when a different name in the group is
+    // returned. Scope-stacked so a shadow does not carry a stale edge out; the group
+    // closure unions every stacked scope so a chain built across scopes still
+    // resolves. Managed bindings only; empty on the ground pass.
+    alias_edges: Vec<HashMap<String, HashSet<String>>>,
     scopes: Vec<HashMap<String, Ty>>,
     owns: Vec<HashMap<String, Own>>,
     // Mutable binding names, tracked here so an element or field store can walk
@@ -148,16 +220,121 @@ struct TypeChecker {
     // inside one is rejected, since defers replay lexically at every return and
     // a conditional registration cannot be honored.
     branch_depth: u32,
+    // Nonzero while replaying a loop body to raise loop-carried escape flags to a
+    // fixpoint. Diagnostics are suppressed on the replay so the final real pass
+    // emits each once, with the escape state the fixpoint settled on.
+    suppress: u32,
     // True while checking an async func body, so async_run and the awaited
     // control forms can reject what is illegal inside a task.
     in_async: bool,
+    // Whether the function being checked is an impl method, so `self` names the
+    // receiver value. The self-value-in-pointer check keys on this context, not on
+    // the spelling of the name, so a function-local binding a user happens to call
+    // `self` gets the ordinary mismatch message, not the receiver-value one.
+    in_method: bool,
     cur_generics: HashSet<String>,
     cur_ret: Ty,
+    // Each mangled `Future$T` name mono minted, mapped to its element type. Mono
+    // lowers the `Future<T>` struct to a named type, so a `Future<T>` written in
+    // an annotation, a parameter, or a container element reaches the ground pass
+    // as `Ty::Named("Future$T")`, while an async call still types as the surface
+    // `Ty::Future`. Restoring the future shape from this table before a
+    // comparison lets a future cross the same forms a plain value does. Empty on
+    // the surface pass, where nothing is mangled, so the unmangle walk no-ops.
+    future_elems: HashMap<String, Ty>,
     // True for the ground re-check over the mono-expanded module. It suppresses
     // the ownership, escape, and must-handle diagnostics, which the surface pass
     // already reported at full fidelity on the un-erased AST, and keeps only the
     // type/width/argument/exhaustiveness class, the one `Unknown` erasure hid.
     types_only: bool,
+    // Interprocedural escape summaries (M5), keyed by top-level function name.
+    // Read at a call site to decide whether the call returns a view of a frame
+    // argument or stores one into another argument. Empty on the ground pass, so
+    // the escape class stays surface-only.
+    summaries: HashMap<String, EscapeSummary>,
+    // Interprocedural escape summaries of impl methods (M5), keyed by the receiver
+    // type name and the method name. The receiver is the method's implicit
+    // parameter 0, so a method call threads its receiver as argument 0 and reads
+    // this table exactly as a named call reads `summaries`: a method that sinks or
+    // stores through `self` is caught on a polluted receiver. Empty on the ground
+    // pass, so the escape class stays surface-only.
+    method_summaries: HashMap<(String, String), EscapeSummary>,
+    // The lowered parameter types of each impl method, keyed by the receiver type
+    // name and the method name. A method call resolves its callee's parameters
+    // here to catch a value `self` handed into a `*T` parameter position, the same
+    // precise self-value message a direct call earns; without it the call stays
+    // opaque (infer returns Unknown) and the backend faults on the struct where a
+    // fat pointer belongs. Populated on both passes from the impl declarations.
+    method_params: HashMap<(String, String), Vec<Ty>>,
+    // Each lambda literal's self-alias set, keyed by its expression span: the
+    // lambda's own parameter indices whose views or pointees may reach its
+    // return value, decided by the summary module's abstract walk. The
+    // higher-order gates read it, so an element passthrough laundered through a
+    // local alias, a call, or a tuple wrap is classified the same as a bare
+    // `return x`. Empty on the ground pass.
+    lambda_returns: HashMap<Span, ParamSet>,
+    // Each lambda literal's self-sink set, keyed by its expression span: the
+    // lambda's own parameter indices whose value or pointee reaches a channel
+    // send in its body, decided by the summary module's abstract walk. A lambda
+    // bound to a local has no computed summary, so a direct call of the bound
+    // name reads this to reject a polluted argument in a sink position, the
+    // interprocedural send the leaf-site check cannot see through a closure.
+    // Empty on the ground pass.
+    lambda_sinks: HashMap<Span, ParamSet>,
+    // Local bindings that hold a lambda literal, mapped to that lambda's sink
+    // set (empty for a clean lambda), scope-stacked so a shadow masks an outer
+    // binding. A direct call of such a name is checked against the recorded set,
+    // the closure counterpart of the named-helper sink check; the entry also
+    // marks the binding as a known lambda, not an opaque callee the conservative
+    // send-reject would refuse. Populated on the surface pass only.
+    lambda_sink_binds: Vec<HashMap<String, ParamSet>>,
+    // Each lambda literal's capture-flow edge set, keyed by its expression span:
+    // the lambda's own parameter indices paired with the captured binding name
+    // each flows into, from the summary module's synthetic lambda walk. A lambda
+    // bound to a local has no computed summary, so a direct call of the bound
+    // name reads this to raise the captured binding's escape flag when the
+    // argument in that position is a frame view, the capture store the argument-
+    // to-argument flow model cannot see. Empty on the ground pass.
+    lambda_capture_flows: HashMap<Span, Vec<(u8, String)>>,
+    // Local bindings that hold a lambda literal, mapped to that lambda's capture-
+    // flow edges, scope-stacked so a shadow masks an outer binding. A direct call
+    // of such a name raises each captured binding's escape flag when the matching
+    // argument is a frame view, so a later return, send, or spawn of the captured
+    // binding is caught while a purely local use stays legal. Surface pass only.
+    lambda_capture_binds: Vec<HashMap<String, Vec<(u8, String)>>>,
+    // The locals of the function being checked that resolve to a module function:
+    // a name bound once by a straight `f := g` to a top-level function and never
+    // reassigned. A call of such a name is that function's known relation, not an
+    // opaque callee, so the leaf-frame send check reads its summary rather than
+    // refusing a polluted pointer argument. Recomputed per function on the surface
+    // pass; empty on the ground pass, where the send class is off.
+    resolvable_fn_binds: HashMap<String, String>,
+    // The parameter names of the function currently being checked, so a view
+    // laundered into a parameter through a call is known to outlive the frame,
+    // while a view laundered into a local waits for the local's own return check.
+    cur_params: HashSet<String>,
+    // The parameter names of the function currently being checked, mapped to their
+    // 0-based index, so a store through a pointer local that aliases a parameter
+    // can name the parameter it reaches. Reset per function.
+    cur_param_index: HashMap<String, usize>,
+    // Pointer locals that alias a parameter pointer (`d := c`, or a `ref` of one),
+    // mapped to the aliased parameter's index. Scope-stacked so a shadow does not
+    // carry a stale alias out. A frame view stored through such a local reaches the
+    // caller's object at once, exactly as a store through the parameter itself.
+    ptr_param_borrows: Vec<HashMap<String, usize>>,
+    // For a local raised to hold a frame view through a call's store edge, the
+    // originating call span and the source/destination argument indices, so a
+    // later return of that local names the store precisely. Reset per function.
+    flow_prov: HashMap<String, (Span, u8, u8)>,
+    // The reconciled storage type of each narrow mutable-tuple binding, keyed by
+    // its value span. A binding `mut t := ([1, 2, 3], 5)` infers its array-literal
+    // member as a slice, since a later `t = (xs, 9)` may store one, but the
+    // initializer alone shapes that member as a fixed array. Codegen sizes an
+    // unannotated slot from the initializer, so it would build a fixed-array slot
+    // the fat slice cannot store into. Recording the reconciled tuple type here
+    // lets mono stamp it onto `Bind.ty` and drive codegen's annotated-let path,
+    // which sizes the slot as a slice. Filled only on the surface pass.
+    mut_tuple_types: HashMap<Span, Type>,
     errors: Vec<Diagnostic>,
 }
 
@@ -169,6 +346,7 @@ impl TypeChecker {
             ifaces: HashSet::new(),
             enums: HashMap::new(),
             variant_payloads: HashMap::new(),
+            variant_payloads_by_enum: HashMap::new(),
             structs: HashMap::new(),
             iface_methods: HashMap::new(),
             impls: HashSet::new(),
@@ -178,15 +356,33 @@ impl TypeChecker {
             slice_iface_elem: Vec::new(),
             esc_closures: Vec::new(),
             esc_slices: Vec::new(),
+            alias_edges: Vec::new(),
             scopes: Vec::new(),
             owns: Vec::new(),
             muts: Vec::new(),
             err_binds: Vec::new(),
             branch_depth: 0,
+            suppress: 0,
             in_async: false,
+            in_method: false,
             cur_generics: HashSet::new(),
             cur_ret: Ty::Unit,
+            future_elems: HashMap::new(),
             types_only: false,
+            summaries: HashMap::new(),
+            method_summaries: HashMap::new(),
+            method_params: HashMap::new(),
+            lambda_returns: HashMap::new(),
+            lambda_sinks: HashMap::new(),
+            lambda_sink_binds: Vec::new(),
+            lambda_capture_flows: HashMap::new(),
+            lambda_capture_binds: Vec::new(),
+            resolvable_fn_binds: HashMap::new(),
+            cur_params: HashSet::new(),
+            cur_param_index: HashMap::new(),
+            ptr_param_borrows: Vec::new(),
+            flow_prov: HashMap::new(),
+            mut_tuple_types: HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -214,8 +410,11 @@ impl TypeChecker {
                             // Stored unfixed, so an interface payload element keeps
                             // its name for the slice-covariance check; the escape
                             // walk reads only the top-level shape.
-                            let payloads = v.fields.iter().map(|f| lower(&f.ty, &gens)).collect();
-                            self.variant_payloads.insert(v.name.clone(), payloads);
+                            let payloads: Vec<Ty> =
+                                v.fields.iter().map(|f| lower(&f.ty, &gens)).collect();
+                            self.variant_payloads.insert(v.name.clone(), payloads.clone());
+                            self.variant_payloads_by_enum
+                                .insert((e.name.clone(), v.name.clone()), payloads);
                         }
                     }
                 }
@@ -228,6 +427,16 @@ impl TypeChecker {
                             );
                         }
                     }
+                    // Record each method's lowered parameter types so a method call
+                    // can catch a value `self` in a `*T` argument position. Only the
+                    // top-level pointer shape is read, so an unfixed interface name
+                    // buried in a param is harmless here.
+                    for m in &im.methods {
+                        let gens: HashSet<String> = m.generics.iter().cloned().collect();
+                        let params = m.params.iter().map(|p| lower(&p.ty, &gens)).collect();
+                        self.method_params
+                            .insert((im.ty.clone(), m.name.clone()), params);
+                    }
                 }
                 _ => {}
             }
@@ -238,8 +447,12 @@ impl TypeChecker {
                     let gens: HashSet<String> = f.generics.iter().cloned().collect();
                     self.raw_sigs
                         .insert(f.name.clone(), f.params.iter().map(|p| lower(&p.ty, &gens)).collect());
-                    let params = f.params.iter().map(|p| self.fix(lower(&p.ty, &gens))).collect();
-                    let ret = self.fix(lower(&f.ret, &gens));
+                    let params = f
+                        .params
+                        .iter()
+                        .map(|p| self.unmangle(self.fix(lower(&p.ty, &gens))))
+                        .collect();
+                    let ret = self.unmangle(self.fix(lower(&f.ret, &gens)));
                     if f.is_async {
                         // A call of an async func mints a Future of its declared
                         // return, so the signature table records the wrapped type
@@ -271,7 +484,7 @@ impl TypeChecker {
                     let fields = s
                         .fields
                         .iter()
-                        .map(|f| (f.name.clone(), self.fix(lower(&f.ty, &gens))))
+                        .map(|f| (f.name.clone(), self.unmangle(self.fix(lower(&f.ty, &gens)))))
                         .collect();
                     self.structs.insert(s.name.clone(), (is_gen, fields));
                     let raw = s.fields.iter().map(|f| lower(&f.ty, &gens)).collect();
@@ -308,12 +521,28 @@ impl TypeChecker {
                     if f.name == "main" {
                         self.check_main_sig(f);
                     }
-                    self.func(f, false);
+                    self.func(f, None);
                 }
                 Item::Impl(im) => {
+                    // Codegen dispatches a method call only on a struct receiver; a
+                    // method on an enum emits no call and a `match self` in its body
+                    // falls to the non-enum path and silently yields a wrong value.
+                    // Reject it here, naming the fix, so the broken lowering is never
+                    // reached. (When codegen learns enum-receiver dispatch this guard
+                    // lifts.)
+                    if self.enums.contains_key(&im.ty) {
+                        self.err(
+                            format!(
+                                "methods on the enum '{}' are not supported; methods are supported on struct types only",
+                                im.ty
+                            ),
+                            im.span,
+                        );
+                        continue;
+                    }
                     self.check_impl_complete(im);
                     for m in &im.methods {
-                        self.func(m, true);
+                        self.func(m, Some(im.ty.as_str()));
                     }
                 }
                 Item::Foreign(fb) => self.check_foreign(fb),
@@ -435,11 +664,31 @@ impl TypeChecker {
         }
     }
 
-    fn func(&mut self, f: &Func, is_method: bool) {
+    fn func(&mut self, f: &Func, self_ty: Option<&str>) {
         self.cur_generics = f.generics.iter().cloned().collect();
-        self.cur_ret = lower(&f.ret, &self.cur_generics);
+        self.cur_ret = self.unmangle(lower(&f.ret, &self.cur_generics));
         self.branch_depth = 0;
         self.in_async = f.is_async;
+        self.in_method = self_ty.is_some();
+        self.cur_params = f.params.iter().map(|p| p.name.clone()).collect();
+        self.cur_param_index = f.params.iter().enumerate().map(|(i, p)| (p.name.clone(), i)).collect();
+        self.flow_prov = HashMap::new();
+        // The locals this function binds once to a module function, so the
+        // leaf-frame send check resolves a call of such a name to that function's
+        // known relation instead of refusing it as an opaque callee. The summary
+        // keys are exactly the module functions; the ground pass has none, so the
+        // map is empty there and the send class stays off.
+        let module_fns: HashSet<String> = self.summaries.keys().cloned().collect();
+        self.resolvable_fn_binds =
+            crate::sema::summary::resolvable_fn_binds(f, &module_fns);
+        // The signature is the first place a generic instantiation over an
+        // interface can be spelled, `func take(b: Box<Speaker>)` or a return of
+        // one; reject it here so the monomorphizer never receives a request with
+        // no ground shape to expand.
+        for p in &f.params {
+            self.reject_iface_targ(&p.ty, f.span);
+        }
+        self.reject_iface_targ(&f.ret, f.span);
         if f.is_async {
             self.check_async_sig(f);
         } else if matches!(&self.cur_ret, Ty::Named(n) if self.ifaces.contains(n)) {
@@ -453,8 +702,16 @@ impl TypeChecker {
             );
         }
         self.push_scope();
-        if is_method {
-            self.declare("self", Ty::Unknown);
+        if let Some(t) = self_ty {
+            // `self` is the receiver value, of the concrete struct type the impl
+            // names. Codegen passes the receiver by pointer and loads the value
+            // for a bare `self`, so a whole-value use of `self` types as the
+            // struct, not a pointer to it: `return self` against a `*T` return, or
+            // `chan_send(ch, self)` into a `Channel<*T>`, is a value where a
+            // pointer is required, caught by the ordinary return and argument
+            // checks instead of miscompiling in the backend. Naming the receiver
+            // type also lets `self.field` and `self.method()` resolve precisely.
+            self.declare("self", named_ty(t));
             // A method takes its receiver by pointer, so writing through
             // `self.field` mutates the caller's value by design.
             self.declare_mut("self");
@@ -565,7 +822,82 @@ impl TypeChecker {
     }
 
     fn lower(&self, t: &Type) -> Ty {
-        self.fix(lower(t, &self.cur_generics))
+        self.unmangle(self.fix(lower(t, &self.cur_generics)))
+    }
+
+    /// Restores the surface `Ty::Future` shape wherever mono left a mangled
+    /// `Future$T` named type, walking every carrier so a future buried in a
+    /// slice, array, tuple, pointer, or function type is restored too. Empty
+    /// `future_elems` on the surface pass makes this a pass-through, so it costs
+    /// nothing there and only rewrites on the ground re-check.
+    fn unmangle(&self, t: Ty) -> Ty {
+        if self.future_elems.is_empty() {
+            return t;
+        }
+        match t {
+            Ty::Named(n) => match self.future_elems.get(&n) {
+                Some(elem) => Ty::Future(Box::new(self.unmangle(elem.clone()))),
+                None => Ty::Named(n),
+            },
+            Ty::Ptr(b) => Ty::Ptr(Box::new(self.unmangle(*b))),
+            Ty::RawPtr(b) => Ty::RawPtr(Box::new(self.unmangle(*b))),
+            Ty::Slice(b) => Ty::Slice(Box::new(self.unmangle(*b))),
+            Ty::Array(b, n) => Ty::Array(Box::new(self.unmangle(*b)), n),
+            Ty::Tuple(xs) => Ty::Tuple(xs.into_iter().map(|x| self.unmangle(x)).collect()),
+            Ty::Func(ps, r) => Ty::Func(
+                ps.into_iter().map(|p| self.unmangle(p)).collect(),
+                Box::new(self.unmangle(*r)),
+            ),
+            Ty::Future(b) => Ty::Future(Box::new(self.unmangle(*b))),
+            other => other,
+        }
+    }
+
+    /// Rejects an interface named as a generic type argument, anywhere it is
+    /// buried in an annotation: `Box<Speaker>`, `Box<Pair<Speaker>>`, or
+    /// `Box<Speaker>[]`. A generic is monomorphized into one concrete copy per
+    /// distinct type argument, and an interface has no single concrete layout to
+    /// instantiate against, so it cannot stand in for a type parameter. Left
+    /// unchecked the request reaches the monomorphizer, which has no ground shape
+    /// to expand and used to diverge; catching it here reports at the source
+    /// annotation with the fix named. A bare `T` in `self.cur_generics` is a type
+    /// parameter, not an interface, and is skipped.
+    fn reject_iface_targ(&mut self, t: &Type, span: Span) {
+        match t {
+            Type::Named(_, args) => {
+                for a in args {
+                    if let Type::Named(n, _) = a {
+                        // A type parameter in scope shadows any interface of the
+                        // same name, so `func wrap<Speaker>(...) -> Box<Speaker>`
+                        // names the parameter, not the interface, and must not be
+                        // rejected. Only a genuine interface name, one not bound as
+                        // a current type parameter, is refused.
+                        if self.ifaces.contains(n) && !self.cur_generics.contains(n) {
+                            self.err(
+                                "an interface cannot be a generic type argument; generics are monomorphized over concrete types",
+                                span,
+                            );
+                        }
+                    }
+                    self.reject_iface_targ(a, span);
+                }
+            }
+            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => {
+                self.reject_iface_targ(b, span)
+            }
+            Type::Tuple(ts) => {
+                for x in ts {
+                    self.reject_iface_targ(x, span);
+                }
+            }
+            Type::Func(ps, r) => {
+                for p in ps {
+                    self.reject_iface_targ(p, span);
+                }
+                self.reject_iface_targ(r, span);
+            }
+            Type::Unit | Type::Infer => {}
+        }
     }
 
     fn push_scope(&mut self) {
@@ -577,6 +909,10 @@ impl TypeChecker {
         self.slice_iface_elem.push(HashMap::new());
         self.esc_closures.push(HashMap::new());
         self.esc_slices.push(HashMap::new());
+        self.alias_edges.push(HashMap::new());
+        self.ptr_param_borrows.push(HashMap::new());
+        self.lambda_sink_binds.push(HashMap::new());
+        self.lambda_capture_binds.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -587,6 +923,10 @@ impl TypeChecker {
         self.slice_iface_elem.pop();
         self.esc_closures.pop();
         self.esc_slices.pop();
+        self.alias_edges.pop();
+        self.ptr_param_borrows.pop();
+        self.lambda_sink_binds.pop();
+        self.lambda_capture_binds.pop();
         // Every error bound in this scope must have been handled by now. The
         // handled ones were removed at their handling site; the rest report. The
         // stack is popped either way to stay balanced, but the ground re-check
@@ -660,6 +1000,13 @@ impl TypeChecker {
         if let Some(scope) = self.esc_closures.last_mut() {
             scope.insert(name.to_string(), closure);
         }
+        // A fresh binding of this name starts with no store-edge provenance. The
+        // flag stacks are scope-nested, so a shadow masks an outer binding's flag,
+        // but flow_prov is flat, so a stale entry from an outer binding of the same
+        // name would misdirect the diagnostic to the outer store site. Clearing it
+        // here keeps the provenance in step with the binding the flag describes; a
+        // later store edge re-records it for this binding.
+        self.flow_prov.remove(name);
     }
 
     /// Updates the escape flags of a reassigned binding in the scope that owns it,
@@ -692,8 +1039,76 @@ impl TypeChecker {
     /// another field may still hold one, so it joins into the owning scope like a
     /// conditional assignment regardless of branch depth.
     fn raise_esc(&mut self, name: &str, slice: bool, closure: bool) {
-        Self::update_owner(&mut self.esc_slices, name, slice, true);
-        Self::update_owner(&mut self.esc_closures, name, closure, true);
+        // A frame view stored through one name pollutes the heap object every name
+        // in its alias group reaches, so raising the flag here carries it to the
+        // whole group: a store through `q` (a `ref` of `c`) taints `c`, a store
+        // through a struct binding that embeds `c` taints `c`, and a later return
+        // of any group member is caught. The join is unconditional, like the raise
+        // itself, since a store can only add a view. The single sink covers the
+        // direct store path, the call-flow paths, and the capture-flow path, all of
+        // which raise through here. The propagation is deliberately absent from
+        // set_esc and assign_esc: a struct bound with an unrelated frame-view
+        // sibling field raises the struct there and must not taint the embedded
+        // pointer.
+        for m in self.alias_group(name) {
+            Self::update_owner(&mut self.esc_slices, &m, slice, true);
+            Self::update_owner(&mut self.esc_closures, &m, closure, true);
+        }
+    }
+
+    /// Records a symmetric alias edge between two managed-pointer binding names in
+    /// the current scope. A self-edge is a no-op. The edge lets a frame view raised
+    /// on one name reach the other, so a store through an alias taints the name a
+    /// later return escapes.
+    fn alias_link(&mut self, a: &str, b: &str) {
+        if a == b {
+            return;
+        }
+        if let Some(scope) = self.alias_edges.last_mut() {
+            scope.entry(a.to_string()).or_default().insert(b.to_string());
+            scope.entry(b.to_string()).or_default().insert(a.to_string());
+        }
+    }
+
+    /// The transitive alias closure of a name: every binding reachable from it over
+    /// the union of every stacked scope's adjacency, by breadth-first search, so a
+    /// chain (`ref c := p; ref q := c`) and a cross-scope link both resolve. Always
+    /// includes the name itself, so a name with no edges returns the singleton set.
+    fn alias_group(&self, name: &str) -> HashSet<String> {
+        let mut seen = HashSet::new();
+        seen.insert(name.to_string());
+        let mut queue = vec![name.to_string()];
+        while let Some(cur) = queue.pop() {
+            for scope in &self.alias_edges {
+                if let Some(neighbors) = scope.get(&cur) {
+                    for n in neighbors {
+                        if seen.insert(n.clone()) {
+                            queue.push(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+        seen
+    }
+
+    /// Drops every alias edge touching a name, from the innermost scope that binds
+    /// it, mirroring drop_lambda_sink. A binding reassigned to a value dusk cannot
+    /// alias (a non-pointer, a projection, a call result) no longer aliases its old
+    /// group, so its edges are removed unconditionally; the drop can only narrow the
+    /// group, which stays sound. The symmetric back-edges from its neighbors are
+    /// removed too, so no stale edge points back at the dropped name.
+    fn alias_drop(&mut self, name: &str) {
+        for scope in self.alias_edges.iter_mut().rev() {
+            if let Some(neighbors) = scope.remove(name) {
+                for n in neighbors {
+                    if let Some(back) = scope.get_mut(&n) {
+                        back.remove(name);
+                    }
+                }
+                break;
+            }
+        }
     }
 
     /// Classifies a bound value as holding a frame-local slice and/or closure, so
@@ -712,11 +1127,28 @@ impl TypeChecker {
                 // unannotated array literal binding infers to a slice, so the type
                 // check alone would miss re-slicing it.
                 let base_local = matches!(self.chain_ty(base), Ty::Array(..))
-                    || matches!(&base.kind, ExprKind::Ident(n) if self.is_esc_slice(n));
+                    || matches!(&base.kind, ExprKind::Ident(n) if self.is_esc_slice(n))
+                    || self.value_escape(base).0;
                 (base_local, false)
             }
             ExprKind::Lambda(l) => (false, self.lambda_captures_local(l)),
             ExprKind::Ident(n) => (self.is_esc_slice(n), self.is_esc_closure(n)),
+            // Reading a value out through a bare dereference yields whatever a
+            // store edge (or the caller) put behind the pointer. A fat pointee
+            // that roots to a binding flagged as holding a frame view carries
+            // that view out, so `return *p` after `p := alloc(local[0..n])`
+            // dangles the same as returning the slice directly. A scalar pointee
+            // or a clean pointer stays clean. Field and index chains that cross
+            // a deref are handled by projection_escape's deref root instead.
+            ExprKind::Unary(UnOp::Deref, _) => {
+                if !self.member_carries_view(&self.chain_ty(e)) {
+                    return (false, false);
+                }
+                match store_root(e) {
+                    Some(root) => (self.is_esc_slice(&root), self.is_esc_closure(&root)),
+                    None => (false, false),
+                }
+            }
             // A projection extracts a fat sub-value out of an aggregate. When the
             // aggregate roots to a local binding holding a frame-local view, the
             // projected slice, closure, tuple, struct, or enum views it too. A
@@ -755,27 +1187,22 @@ impl TypeChecker {
             // payload viewing a frame local escapes. The payload is gated by the
             // variant's declared field types, the same discipline as a struct
             // field. Both the bare `V(x)` and the qualified `E.V(x)` forms resolve
-            // to the variant by its globally unique name.
+            // to the variant by its globally unique name. Any other call is a
+            // plain function or closure call, whose result views a frame when the
+            // callee returns one of its frame-view arguments (M5, interprocedural).
             ExprKind::Call(callee, args) => {
-                let variant = match &callee.kind {
-                    ExprKind::Ident(v) => Some(v),
-                    ExprKind::Field(base, v)
-                        if matches!(&base.kind, ExprKind::Ident(en) if self.enums.contains_key(en)) =>
-                    {
-                        Some(v)
-                    }
-                    _ => None,
-                };
-                let mut slice = false;
-                let mut closure = false;
-                if let Some(payloads) = variant.and_then(|v| self.variant_payloads.get(v)).cloned() {
+                if let Some(vname) = self.variant_name(callee) {
+                    let payloads = self.variant_payloads.get(vname).cloned().unwrap_or_default();
+                    let mut slice = false;
+                    let mut closure = false;
                     for (arg, pty) in args.iter().zip(&payloads) {
                         let (s, c) = self.field_kind_escape(arg, pty);
                         slice |= s;
                         closure |= c;
                     }
+                    return (slice, closure);
                 }
-                (slice, closure)
+                self.call_result_escape(callee, args)
             }
             // A match used as a return value builds its result from the arm tails.
             // A tail that names one of the arm's payload bindings projects the
@@ -808,15 +1235,24 @@ impl TypeChecker {
 
     /// The escape of a projection, a field access or a non-range index. Only a fat
     /// projected member can carry a view; the projection escapes when its base
-    /// roots to a binding recorded as holding a frame-local slice or closure.
+    /// roots to a binding recorded as holding a frame-local slice or closure, or
+    /// when the chain reads through a pointer binding a call polluted with one,
+    /// so `(*c).rows` after a store edge tainted `c` is a frame view here too.
     fn projection_escape(&self, e: &Expr) -> (bool, bool) {
         if !self.member_carries_view(&self.chain_ty(e)) {
             return (false, false);
         }
-        match self.projection_root(e) {
-            Some(root) => (self.is_esc_slice(&root), self.is_esc_closure(&root)),
-            None => (false, false),
+        let mut slice = false;
+        let mut closure = false;
+        if let Some(root) = self.projection_root(e) {
+            slice |= self.is_esc_slice(&root);
+            closure |= self.is_esc_closure(&root);
         }
+        if let Some(root) = deref_root(e) {
+            slice |= self.is_esc_slice(&root);
+            closure |= self.is_esc_closure(&root);
+        }
+        (slice, closure)
     }
 
     /// The base binding of a projection chain, rooting through every field access
@@ -833,12 +1269,158 @@ impl TypeChecker {
         }
     }
 
+    /// The single binding-alias choke every binding-introduction site funnels
+    /// through, so the rule for "which managed pointers does this new binding
+    /// alias" lives in one function instead of being re-derived at each binding
+    /// form. Given a freshly bound (or reassigned) name and its initializer, it
+    /// links the name into the alias group of every managed pointer the
+    /// initializer hands it, computed by `binding_alias_targets`: a bare Ident
+    /// whose type reaches a managed pointer (a `ref`/borrow chain, or a whole
+    /// aggregate copied by name), a by-value projection (field, index, deref)
+    /// that reads a managed value out of an aggregate and joins the projection
+    /// root's group, and each bare pointer embedded in an aggregate literal (a
+    /// struct, tuple, array, or variant constructor) or in an `alloc` of one, at
+    /// any nesting depth. A slice, scalar, or any type that reaches no managed
+    /// pointer hands no target, so precision holds: a frame-slice sibling never
+    /// taints the embedded pointer. `reassign` selects the mut-reassign join: a
+    /// fresh binding has no prior edges and passes `false`; an Assign passes
+    /// `true`, where at straight line the name leaves its old group first
+    /// (replace) and inside a branch the old edges stay while the new targets
+    /// union on top (a may-join, since the name may still hold its prior
+    /// pointer). A reassign to a value that hands no target drops the old edges
+    /// unconditionally, the name no longer holding its old pointer through that
+    /// value; the drop can only narrow the group, which stays sound.
+    fn link_binding_aliases(&mut self, name: &str, init: &Expr, reassign: bool) {
+        let targets = self.binding_alias_targets(init);
+        if reassign && (self.branch_depth == 0 || targets.is_empty()) {
+            self.alias_drop(name);
+        }
+        for t in &targets {
+            self.alias_link(name, t);
+        }
+    }
+
+    /// The managed-pointer alias targets an initializer hands its binding: the
+    /// bare-Ident chain, the projection root, or every pointer an aggregate
+    /// literal (or an `alloc` of one) embeds at any depth. Pure over the checker
+    /// state; the caller decides whether to link (a fresh binding) or reassign
+    /// (an Assign). This is the one place the binding forms agree on the rule, so
+    /// a new binding site need only route its initializer here.
+    fn binding_alias_targets(&self, init: &Expr) -> Vec<String> {
+        let mut out = Vec::new();
+        match &init.kind {
+            // A bare binding hands its whole alias group whenever its type can
+            // reach a managed pointer, not only when it is a bare pointer: a
+            // `ref`/borrow chain, or an aggregate copied by name that buries a
+            // pointer, both carry it. A plain copy of an owner is rejected at
+            // binding_own; a `move` reads as a call, not an Ident, and hands no
+            // target here.
+            ExprKind::Ident(src) if self.links_as_alias(&self.lookup(src)) => {
+                out.push(src.clone());
+            }
+            // A by-value projection reads a managed value out of an aggregate and
+            // joins the projection root's group: `x := st.c`, `x := arr[0]`, and
+            // `x := (*b).c` each read a pointer (or a pointer-bearing aggregate)
+            // out of a larger object, so a store through `x` taints what a return
+            // of the root, or a group member, escapes. A rootless projection (of
+            // a call result) has no root and hands no target.
+            ExprKind::Field(..) | ExprKind::Index(..) | ExprKind::Unary(UnOp::Deref, _)
+                if self.chain_projection_manages(init) =>
+            {
+                if let Some(root) = store_root(init) {
+                    out.push(root);
+                }
+            }
+            // An aggregate literal, or an `alloc` of one, buries the bare
+            // pointers it wraps at any nesting depth, so the binding aliases each
+            // one: `outer := Outer { inner: inner }` reaches the pointer `inner`
+            // buries, and `b := alloc(Box { c: c })` aliases `c` a projection
+            // reads back out. The walk descends only aggregate literals; a `move`
+            // or a fresh `alloc` member reads as a call and hands no target.
+            ExprKind::Tuple(members) | ExprKind::Array(members) => {
+                for m in members {
+                    self.collect_embedded(m, &mut out);
+                }
+            }
+            ExprKind::StructLit(_, fields) => {
+                for (_, f) in fields {
+                    self.collect_embedded(f, &mut out);
+                }
+            }
+            ExprKind::Call(callee, args) => {
+                // A variant constructor buries its payload the same way a struct
+                // literal buries a field: `o := Some(c)` embeds `c`, so a store
+                // through a projection of `o` (or a match binder off it) taints
+                // `c` and a later return of it is caught. The compiler builds the
+                // variant here, so its payload is transparent, unlike an opaque
+                // function call whose buried alias is the summary domain's job.
+                if self.variant_name(callee).is_some() {
+                    for a in args {
+                        self.collect_embedded(a, &mut out);
+                    }
+                } else if args.len() == 1
+                    && matches!(&callee.kind, ExprKind::Ident(n) if n == "alloc" && !self.sigs.contains_key(n))
+                {
+                    // `b := alloc(Box { c: c })` allocates a heap object that
+                    // embeds the bare pointers its initializer names; a projection
+                    // reads one back out (`x := (*b).c`), so the allocation
+                    // binding aliases each embedded pointer the same as a stack
+                    // aggregate does. A nested `move` or `alloc` member reads as a
+                    // call and is skipped at every layer.
+                    self.collect_embedded(&args[0], &mut out);
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// Collects every bare managed-pointer binding an aggregate literal embeds,
+    /// at any nesting depth, into `out`. A member named by a bare binding whose
+    /// type reaches a managed pointer is a target; a nested struct, tuple, or
+    /// array member is descended. A member that is a `move`, a fresh `alloc`, or
+    /// any non-literal reads as a call, not a nested literal, so the walk steps
+    /// past it and collects nothing there, at every layer. A slice, array, or
+    /// scalar member reaches no managed pointer and is collected only when it in
+    /// turn nests a pointer, so a frame-slice sibling stays off the pointer.
+    fn collect_embedded(&self, e: &Expr, out: &mut Vec<String>) {
+        match &e.kind {
+            ExprKind::Ident(mn) if self.links_as_alias(&self.lookup(mn)) => {
+                out.push(mn.clone());
+            }
+            ExprKind::Tuple(members) | ExprKind::Array(members) => {
+                for m in members {
+                    self.collect_embedded(m, out);
+                }
+            }
+            ExprKind::StructLit(_, fields) => {
+                for (_, init) in fields {
+                    self.collect_embedded(init, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Whether a type can carry a frame-local view when projected out by value: a
-    /// slice, closure, tuple, struct, enum, interface, or a fat array of them. A
-    /// scalar, a pointer, or a scalar array is copied or heap-backed and cannot.
+    /// slice, closure, tuple, struct, enum, interface, a managed pointer (whose
+    /// heap object a store edge may have polluted with a view), or a fat array
+    /// of any of them. A scalar or a scalar array is copied and cannot. `*void`
+    /// is the raw allocator currency and never a view carrier.
+    ///
+    /// A `*raw T` is deliberately excluded: the raw pointer layer is the FFI
+    /// boundary, honor-system by design, so the escape walk does not trace a view
+    /// stored through it and the managed-pointer generation backstop does not
+    /// cover it. A frame view stashed through a `*raw T` is the caller's
+    /// responsibility, the same contract a foreign pointer carries.
     fn member_carries_view(&self, t: &Ty) -> bool {
         match t {
             Ty::Slice(_) | Ty::Func(..) | Ty::Tuple(_) => true,
+            Ty::Ptr(inner) => !matches!(**inner, Ty::Unit),
+            // The raw pointer layer is honor-system; a view stored through it is
+            // outside the escape walk by design, so this arm is `false` on
+            // purpose rather than falling through the wildcard.
+            Ty::RawPtr(_) => false,
             Ty::Named(n) => {
                 self.structs.contains_key(n) || self.enums.contains_key(n) || self.ifaces.contains(n)
             }
@@ -856,21 +1438,12 @@ impl TypeChecker {
     /// field whose type is an enum or fat array, is caught at any depth.
     fn field_kind_escape(&self, init: &Expr, fty: &Ty) -> (bool, bool) {
         match fty {
-            Ty::Slice(_) | Ty::Func(..) | Ty::Tuple(_) => self.value_escape(init),
-            Ty::Named(n)
-                if self.structs.contains_key(n)
-                    || self.enums.contains_key(n)
-                    || self.ifaces.contains(n) =>
-            {
-                self.value_escape(init)
-            }
             // A fat fixed array mirrors the top-level array walk: a literal is
             // checked per element by the element type, a binding by its recorded
             // flags. Routing straight to value_escape would flag a param-backed
-            // array literal, so the element gate is kept here too.
-            Ty::Array(elem, _)
-                if matches!(**elem, Ty::Slice(_) | Ty::Func(..) | Ty::Tuple(_) | Ty::Named(_)) =>
-            {
+            // array literal, so the element gate is kept here; the carrier set is
+            // `member_carries_view`, the same one every gate uses.
+            Ty::Array(elem, _) if self.member_carries_view(elem) => {
                 if let ExprKind::Array(elems) = &init.kind {
                     let mut slice = false;
                     let mut closure = false;
@@ -884,6 +1457,12 @@ impl TypeChecker {
                     self.value_escape(init)
                 }
             }
+            // Any other carrier, a slice, closure, tuple, struct, enum,
+            // interface, or managed pointer whose heap object a store edge may
+            // have polluted, views whatever its initializer does. The single
+            // `member_carries_view` gate replaces the old per-constructor list,
+            // so this layer and the projection/return gates cannot drift apart.
+            _ if self.member_carries_view(fty) => self.value_escape(init),
             // A generic type parameter, or an interface field, erases to Unknown,
             // so the declared type cannot say the field is fat. Fall back to the
             // initializer's own dataflow: a frame-local view buried behind a type
@@ -891,6 +1470,459 @@ impl TypeChecker {
             Ty::Unknown => self.value_escape(init),
             _ => (false, false),
         }
+    }
+
+    /// The variant name a call constructs, if the callee is a bare or
+    /// enum-qualified constructor, else None. A nullary variant carries no
+    /// payload and is never a store or view origin, so it is not named here.
+    fn variant_name<'a>(&self, callee: &'a Expr) -> Option<&'a str> {
+        match &callee.kind {
+            ExprKind::Ident(v) if self.variant_payloads.contains_key(v) => Some(v),
+            ExprKind::Field(base, v)
+                if matches!(&base.kind, ExprKind::Ident(en) if self.enums.contains_key(en))
+                    && self.variant_payloads.contains_key(v) =>
+            {
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+
+    /// The enum that declares a variant of the given name, if any. Variant names
+    /// are unique across the module, so at most one enum owns each. Used to reject
+    /// an unqualified `Some(x)` constructor and to name the qualified form
+    /// `Opt.Some(x)` in the fix. A nullary variant carries no payload entry, so
+    /// this scans the full variant list, not `variant_payloads`.
+    fn variant_owner(&self, vname: &str) -> Option<&str> {
+        self.enums
+            .iter()
+            .find(|(_, vs)| vs.iter().any(|v| v == vname))
+            .map(|(en, _)| en.as_str())
+    }
+
+    /// Checks a qualified enum constructor's argument count and payload types
+    /// against the variant's declaration. A wrong arity (`Opt.Some()`,
+    /// `Opt.Some(1, 2)`) or a mistyped scalar payload (`Opt.Some(true)` where the
+    /// payload is int64) is rejected at the constructor site rather than slipping
+    /// through as the Unknown the constructor otherwise infers as and an
+    /// annotation would paper over. An interface or slice-of-interface payload is
+    /// left to the conformance and covariance guards, which allow a boxed concrete
+    /// value; a generic payload lowers to Unknown here and wildcards against any
+    /// argument. Surface pass only: the ground pass runs solely on an already-clean
+    /// program, and mono may share a variant name across instantiations, so no
+    /// arity is re-derived there.
+    fn check_variant_ctor_args(&mut self, en: &str, v: &str, args: &[Expr], arg_tys: &[Ty], span: Span) {
+        if self.types_only {
+            return;
+        }
+        // Only a real variant of this enum is a constructor; a mistyped member
+        // name is not one and is not shaped here.
+        if !self.enums.get(en).is_some_and(|vs| vs.iter().any(|x| x == v)) {
+            return;
+        }
+        // Keyed by the enum this constructor names, so a variant name two enums
+        // share is checked against the right declaration, not the by-name map's
+        // last writer. Absent means a nullary variant of this enum.
+        let payloads = self
+            .variant_payloads_by_enum
+            .get(&(en.to_string(), v.to_string()))
+            .cloned()
+            .unwrap_or_default();
+        if payloads.len() != args.len() {
+            self.err(
+                format!(
+                    "'{en}.{v}' takes {} argument(s), but {} were given",
+                    payloads.len(),
+                    args.len()
+                ),
+                span,
+            );
+            return;
+        }
+        for (i, (p, a)) in payloads.iter().zip(arg_tys).enumerate() {
+            // An interface payload boxes a concrete implementer, and a slice-of-
+            // interface payload is governed by the covariance guard, so neither is
+            // a plain type match; skip both and let those checks own the case.
+            if self.payload_iface_exempt(p) {
+                continue;
+            }
+            if !compatible(p, a) {
+                let s = args.get(i).map(|x| x.span).unwrap_or(span);
+                self.err(format!("argument {} to '{en}.{v}' has the wrong type", i + 1), s);
+            }
+        }
+    }
+
+    /// Whether a variant payload type is an interface or a slice of one, so the
+    /// plain type match is skipped in favor of the conformance and covariance
+    /// guards that allow a boxed concrete value.
+    fn payload_iface_exempt(&self, p: &Ty) -> bool {
+        match p {
+            Ty::Named(n) => self.ifaces.contains(n),
+            Ty::Slice(e) => matches!(&**e, Ty::Named(n) if self.ifaces.contains(n)),
+            _ => false,
+        }
+    }
+
+    /// The escape relation of a call's target: the known summary of a top-level
+    /// function or a builtin, or the conservative TOP of an opaque callee (a
+    /// closure value, a function-typed parameter, a method, or a foreign symbol).
+    /// A local of function type shadows any module function of the same name, so
+    /// its call is opaque, not the shadowed summary.
+    fn callee_esc(&self, callee: &Expr) -> CalleeEsc {
+        if let ExprKind::Ident(name) = &callee.kind {
+            if !self.is_local(name) {
+                if let Some(s) = self.summaries.get(name) {
+                    return CalleeEsc::Known(s.clone());
+                }
+                if let Some(s) = builtin_summary(name) {
+                    return CalleeEsc::Known(s);
+                }
+            } else if let Some(g) = self.resolvable_fn_binds.get(name) {
+                // A local proven bound once to one module function resolves to
+                // that function's relation, not the opaque TOP, so its flow path
+                // matches its sink path and no spurious cross-flow is invented on
+                // top of the precise sink diagnostic.
+                if let Some(s) = self.summaries.get(g) {
+                    return CalleeEsc::Known(s.clone());
+                }
+            }
+        }
+        CalleeEsc::Top
+    }
+
+    /// The argument indices whose frame-view kind feeds a call's result: the
+    /// parameters the callee returns (`returns_alias`) and those it reads a view
+    /// back through (`reads_through`, a pointer passthrough or a heap read-back).
+    /// Both apply the same way at the call site, checking `value_escape` of the
+    /// caller's argument, so a polluted pointer argument taints the result exactly
+    /// as a frame-view argument does. An opaque callee may expose any argument.
+    fn summary_alias_indices(&self, callee: &Expr, args_len: usize) -> Vec<usize> {
+        match self.callee_esc(callee) {
+            CalleeEsc::Known(sum) => {
+                let mut v: Vec<usize> = sum.returns_alias.to_vec().iter().map(|&i| i as usize).collect();
+                for j in sum.reads_through.to_vec() {
+                    v.push(j as usize);
+                }
+                v.sort_unstable();
+                v.dedup();
+                v
+            }
+            CalleeEsc::Top => (0..args_len.min(64)).collect(),
+        }
+    }
+
+    /// The frame-view kind of a plain call's result: it views a frame when the
+    /// callee returns one of its arguments (per its summary), reads a view back
+    /// through a pointer argument, and that argument is itself a frame-local view
+    /// or a polluted pointer. An opaque callee may return any argument, so every
+    /// frame-view argument feeds the result. The higher-order builtins are
+    /// element-aware: `map`/`filter` leak the collection's frame views only when
+    /// the mapping function hands its element back, and `fold`/`reduce` leak the
+    /// accumulator's when the folding function returns it.
+    fn call_result_escape(&self, callee: &Expr, args: &[Expr]) -> (bool, bool) {
+        if self.types_only {
+            return (false, false);
+        }
+        if let Some((s, c, _)) = self.higher_order_taint(callee, args) {
+            return (s, c);
+        }
+        let mut slice = false;
+        let mut closure = false;
+        for i in self.summary_alias_indices(callee, args.len()) {
+            if let Some(a) = args.get(i) {
+                let (s, c) = self.value_escape(a);
+                slice |= s;
+                closure |= c;
+            }
+        }
+        (slice, closure)
+    }
+
+    /// If `e` is a plain call whose result views a frame through a returned or
+    /// read-back argument, the call span and the 0-based index of the first such
+    /// argument, for the interprocedural return diagnostic. None for a
+    /// constructor or a call that returns no frame view.
+    fn call_frame_origin(&self, e: &Expr) -> Option<(Span, usize)> {
+        let ExprKind::Call(callee, args) = &e.kind else {
+            return None;
+        };
+        if self.variant_name(callee).is_some() {
+            return None;
+        }
+        if let Some((s, c, idx)) = self.higher_order_taint(callee, args) {
+            return if s || c { Some((e.span, idx)) } else { None };
+        }
+        for i in self.summary_alias_indices(callee, args.len()) {
+            if let Some(a) = args.get(i) {
+                let (s, c) = self.value_escape(a);
+                if s || c {
+                    return Some((e.span, i));
+                }
+            }
+        }
+        None
+    }
+
+    /// The frame-view taint of a higher-order builtin result, with the argument
+    /// index the diagnostic should name, or None when the callee is not one (or is
+    /// shadowed by a local of the same name). Each builtin is a set-side model:
+    /// `map` leaks the collection when its function's result may alias the element
+    /// parameter; `filter`'s result is a subset of the collection's elements no
+    /// matter what the predicate does, so a view-carrying element type leaks the
+    /// collection outright; `fold` and `reduce` leak the seed through the
+    /// accumulator parameter and the collection through the element parameter. A
+    /// function that mints a fresh value, or a scalar element type, stays clean,
+    /// so a map over a frame-local array of scalars (the common case) is not
+    /// over-rejected.
+    fn higher_order_taint(&self, callee: &Expr, args: &[Expr]) -> Option<(bool, bool, usize)> {
+        let ExprKind::Ident(name) = &callee.kind else {
+            return None;
+        };
+        // A local of the same name, or a top-level function that shadows the
+        // builtin, is not the higher-order builtin, so defer to its own summary.
+        if self.is_local(name) || self.summaries.contains_key(name) {
+            return None;
+        }
+        match name.as_str() {
+            "map" if args.len() == 2 => {
+                let (s, c) = if self.mapper_aliases(&args[1], 0) {
+                    self.value_escape(&args[0])
+                } else {
+                    (false, false)
+                };
+                Some((s, c, 0))
+            }
+            "filter" if args.len() == 2 => {
+                let elem = elem_of(&self.chain_ty(&args[0]));
+                let (s, c) = if self.member_carries_view(&elem) || matches!(elem, Ty::Unknown) {
+                    self.value_escape(&args[0])
+                } else {
+                    (false, false)
+                };
+                Some((s, c, 0))
+            }
+            "fold" if args.len() == 3 => {
+                if self.mapper_aliases(&args[2], 0) {
+                    let (s, c) = self.value_escape(&args[1]);
+                    if s || c {
+                        return Some((s, c, 1));
+                    }
+                }
+                let (s, c) = if self.mapper_aliases(&args[2], 1) {
+                    self.value_escape(&args[0])
+                } else {
+                    (false, false)
+                };
+                Some((s, c, 0))
+            }
+            "reduce" if args.len() == 2 => {
+                // reduce's seed is the collection's first element, so both the
+                // accumulator and the element parameter lead back to argument 0.
+                let (s, c) = if self.mapper_aliases(&args[1], 0) || self.mapper_aliases(&args[1], 1) {
+                    self.value_escape(&args[0])
+                } else {
+                    (false, false)
+                };
+                Some((s, c, 0))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a higher-order builtin's function may hand parameter `i` (or its
+    /// pointee) back through its result. A lambda literal is answered by the
+    /// summary module's abstract walk of its body, recorded per span, so an
+    /// alias chain, a passthrough call, or a tuple wrap counts the same as a
+    /// bare `return x`; a named module function is answered by its computed
+    /// summary; an opaque function value by its declared result type. A missing
+    /// table entry stays conservative.
+    fn mapper_aliases(&self, f: &Expr, i: u8) -> bool {
+        match &f.kind {
+            ExprKind::Lambda(_) => self
+                .lambda_returns
+                .get(&f.span)
+                .map(|ps| ps.contains(i))
+                .unwrap_or(true),
+            ExprKind::Ident(n) if !self.is_local(n) => match self.summaries.get(n) {
+                Some(sum) => sum.returns_alias.contains(i) || sum.reads_through.contains(i),
+                None => matches!(self.chain_ty(f), Ty::Func(_, r) if self.member_carries_view(&r)),
+            },
+            _ => matches!(self.chain_ty(f), Ty::Func(_, r) if self.member_carries_view(&r)),
+        }
+    }
+
+    /// The store-edge provenance of a returned local, if a call stored a frame
+    /// view into it. Only a bare name carries the record; a projection off it is
+    /// caught by its own root instead.
+    fn returned_flow_prov(&self, e: &Expr) -> Option<(Span, u8, u8)> {
+        match &e.kind {
+            ExprKind::Ident(n) => self.flow_prov.get(n).copied(),
+            _ => None,
+        }
+    }
+
+    /// The store-edge provenance behind a returned pointer value: the record on
+    /// a bare name, or on the root binding of a projection that carries the
+    /// flagged pointer out, so the diagnostic names the store that polluted it.
+    fn value_flow_prov(&self, e: &Expr) -> Option<(Span, u8, u8)> {
+        match &e.kind {
+            ExprKind::Ident(n) => self.flow_prov.get(n).copied(),
+            ExprKind::Field(..) | ExprKind::Index(..) => {
+                let root = self.projection_root(e).or_else(|| deref_root(e))?;
+                self.flow_prov.get(&root).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// The store-edge provenance of a struct literal's field, if one wraps a
+    /// pointer or slice binding a call polluted with a frame view. A struct that
+    /// carries such a field walks the dangling view out, so the field's provenance
+    /// names the store precisely rather than falling to the generic message.
+    fn struct_lit_flow_prov(&self, e: &Expr) -> Option<(Span, u8, u8)> {
+        let ExprKind::StructLit(_, fields) = &e.kind else {
+            return None;
+        };
+        for (_, init) in fields {
+            if let ExprKind::Ident(n) = &init.kind {
+                if let Some(pv) = self.flow_prov.get(n).copied() {
+                    return Some(pv);
+                }
+            }
+        }
+        None
+    }
+
+    /// Applies a call's store edges to the caller. For each edge (i, j) where
+    /// argument i is a frame-local view, the view flows into argument j's place:
+    /// a place rooted at a parameter escapes this frame at once (a parameter
+    /// outlives the call), and a place rooted at a local raises that local's
+    /// escape flag so its own return check catches the laundered view. Runs on
+    /// the surface pass only; the ground pass carries no summaries.
+    fn apply_call_flows(&mut self, callee: &Expr, args: &[Expr], call_span: Span) {
+        if self.types_only || self.variant_name(callee).is_some() {
+            return;
+        }
+        let edges: Vec<(u8, u8)> = match self.callee_esc(callee) {
+            CalleeEsc::Known(sum) => sum.flows_into.clone(),
+            CalleeEsc::Top => top_flow_edges(args.len()),
+        };
+        self.apply_flow_edges(&edges, args, call_span);
+    }
+
+    /// The shared body of the call-flow application: route each store edge `(i, j)`
+    /// from a frame-view argument `i` into argument `j`'s place. The named-call
+    /// path (`apply_call_flows`) and the method-call path
+    /// (`check_method_call_escape`, whose effective argument 0 is the receiver)
+    /// both route through here, so a method that stores a frame view through `self`
+    /// pollutes the receiver's binding exactly as a `stash(s, c)` helper does.
+    fn apply_flow_edges(&mut self, edges: &[(u8, u8)], args: &[Expr], call_span: Span) {
+        // The frame-view kind of every argument before any edge raises a flag, so
+        // an edge reads the pre-call state.
+        let src: Vec<(bool, bool)> = args.iter().map(|a| self.value_escape(a)).collect();
+        for &(i, j) in edges {
+            let (iu, ju) = (i as usize, j as usize);
+            if iu >= src.len() || ju >= args.len() {
+                continue;
+            }
+            let (fs, fc) = src[iu];
+            if !fs && !fc {
+                continue;
+            }
+            let Some(root) = store_root(&args[ju]) else {
+                continue;
+            };
+            if self.cur_params.contains(&root) {
+                self.emit_flow_escape(call_span, i, j);
+            } else if let Some(pidx) = self.param_alias_of(&root) {
+                // The destination is a pointer local that aliases a parameter, so
+                // the store reaches the caller's object at once. `d := c` routes
+                // the edge into a local that is never returned, so raising the
+                // local would lose it; naming the borrowed parameter reports it.
+                self.emit_escape(
+                    format!(
+                        "a frame view is stored through a pointer that borrows argument {} and may outlive this frame",
+                        pidx + 1
+                    ),
+                    call_span,
+                );
+            } else {
+                self.raise_esc(&root, fs, fc);
+                self.flow_prov.insert(root, (call_span, i, j));
+            }
+        }
+    }
+
+    /// The parameter a pointer name aliases, if it is a parameter itself or a
+    /// pointer local recorded as borrowing one. None for a fresh local allocation,
+    /// whose polluted object stays frame-local unless the pointer is returned.
+    fn param_alias_of(&self, name: &str) -> Option<usize> {
+        if let Some(&i) = self.cur_param_index.get(name) {
+            return Some(i);
+        }
+        for scope in self.ptr_param_borrows.iter().rev() {
+            if let Some(&i) = scope.get(name) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Emits the frame-escape diagnostic for a returned slice: the interprocedural
+    /// message when the value comes from a call that returns a frame argument, the
+    /// store-edge message when a call stored a frame view into the returned local,
+    /// else the intraprocedural message existing tests depend on.
+    fn report_slice_escape(&mut self, e: &Expr) {
+        if let Some((span, n)) = self.call_frame_origin(e) {
+            self.emit_escape(
+                format!("this call may return a view of argument {}, which views the current frame", n + 1),
+                span,
+            );
+        } else if let Some((span, i, j)) = self.returned_flow_prov(e) {
+            self.emit_flow_escape(span, i, j);
+        } else if let Some((span, i, j)) = self.struct_lit_flow_prov(e) {
+            self.emit_flow_escape(span, i, j);
+        } else {
+            self.err(
+                "a slice into a local array escapes its frame; put the backing on the heap",
+                e.span,
+            );
+        }
+    }
+
+    /// The closure counterpart of `report_slice_escape`.
+    fn report_closure_escape(&mut self, e: &Expr) {
+        if let Some((span, n)) = self.call_frame_origin(e) {
+            self.emit_escape(
+                format!("this call may return a view of argument {}, which views the current frame", n + 1),
+                span,
+            );
+        } else if let Some((span, i, j)) = self.returned_flow_prov(e) {
+            self.emit_flow_escape(span, i, j);
+        } else {
+            self.err(
+                "a closure that captures a local escapes its frame; it cannot be returned",
+                e.span,
+            );
+        }
+    }
+
+    fn emit_flow_escape(&mut self, span: Span, i: u8, j: u8) {
+        self.emit_escape(
+            format!(
+                "argument {}'s view is stored into argument {} and may outlive this frame",
+                i + 1,
+                j + 1
+            ),
+            span,
+        );
+    }
+
+    /// The single choke point for the interprocedural escape diagnostics, so the
+    /// two M5 messages are constructed and emitted in one place.
+    fn emit_escape(&mut self, msg: String, span: Span) {
+        self.err(msg, span);
     }
 
     /// Registers an error typed binding as pending until a handling site clears it.
@@ -945,6 +1977,30 @@ impl TypeChecker {
         self.scopes.iter().any(|s| s.contains_key(name))
     }
 
+    /// A whole-value use of `self` where a managed pointer is required. `self` is
+    /// the receiver value, of the concrete struct type the impl names; codegen
+    /// passes the receiver by pointer and loads the value for a bare `self`, so
+    /// `return self` against a `*T` return, or `chan_send(ch, self)` into a
+    /// `Channel<*T>`, hands the struct where the fat pointer belongs and the
+    /// backend faults on the type. Reject it here, naming the mismatch, rather
+    /// than leaving a stray backend error. Returns true when it fired, so the
+    /// caller suppresses the generic mismatch that would otherwise double it.
+    fn self_value_in_ptr_position(&mut self, e: &Expr, expected: &Ty) -> bool {
+        // Gate on the impl-method context, not the spelling: a function-local
+        // binding named `self` is an ordinary value, and a mismatch on it earns
+        // the plain message, not the misleading receiver-value one.
+        let is_self =
+            self.in_method && matches!(&e.kind, ExprKind::Ident(n) if n == "self");
+        if is_self && matches!(expected, Ty::Ptr(_)) && matches!(self.lookup("self"), Ty::Named(_)) {
+            self.err(
+                "cannot use 'self' where a pointer is required; 'self' is the receiver value, not a pointer to it",
+                e.span,
+            );
+            return true;
+        }
+        false
+    }
+
     /// The unfixed slice-of-interface type a binding was annotated with, if any,
     /// so an assignment into it can be checked for slice covariance.
     fn slice_iface_of(&self, name: &str) -> Option<Ty> {
@@ -984,7 +2040,52 @@ impl TypeChecker {
     }
 
     fn err(&mut self, msg: impl Into<String>, span: Span) {
+        // A loop-body replay only raises escape flags to a fixpoint; the real pass
+        // that follows emits each diagnostic once, so the replay stays silent.
+        if self.suppress > 0 {
+            return;
+        }
         self.errors.push(Diagnostic::new(msg, span));
+    }
+
+    /// Replays a loop body until its escape flags stop rising, then walks it once
+    /// for real. A loop-carried alias chain (`out = tmp; tmp = s`) closes only on a
+    /// later iteration, so a single visit under-reports; the escape state is
+    /// raise-only, so the replay climbs a finite lattice and converges. The replay
+    /// is silent (see `err`) and the final pass emits diagnostics against the
+    /// settled state, so nothing is doubled and nothing is missed.
+    fn loop_body_fixpoint(&mut self, body: &Block) {
+        let cap = 64usize;
+        self.suppress += 1;
+        let mut prev = self.esc_snapshot();
+        for _ in 0..cap {
+            self.branch_block(body);
+            let now = self.esc_snapshot();
+            if now == prev {
+                break;
+            }
+            prev = now;
+        }
+        self.suppress -= 1;
+        self.branch_block(body);
+    }
+
+    /// A comparable snapshot of the raise-only escape-flag stacks, so the loop
+    /// fixpoint can detect convergence. Ownership and scope structure are restored
+    /// by `block` on every pass, so only the escape flags need comparing.
+    #[allow(clippy::type_complexity)]
+    fn esc_snapshot(&self) -> (Vec<Vec<(String, bool)>>, Vec<Vec<(String, bool)>>) {
+        let snap = |stack: &[HashMap<String, bool>]| -> Vec<Vec<(String, bool)>> {
+            stack
+                .iter()
+                .map(|m| {
+                    let mut v: Vec<(String, bool)> = m.iter().map(|(k, &b)| (k.clone(), b)).collect();
+                    v.sort();
+                    v
+                })
+                .collect()
+        };
+        (snap(&self.esc_slices), snap(&self.esc_closures))
     }
 
     fn block(&mut self, b: &Block) {
@@ -1054,8 +2155,11 @@ impl TypeChecker {
         }
     }
 
-    /// A side effect free type walk for assignment chains. Unlike `infer`, it
-    /// never emits diagnostics, so walking the same expression twice is safe.
+    /// A side effect free type walk for assignment and projection chains. Unlike
+    /// `infer`, it never emits diagnostics, so walking the same expression twice
+    /// is safe. A range index is a re-slice, so it keeps the slice shape over
+    /// the base's element instead of projecting the element out, matching what
+    /// `infer` computes for the same expression.
     fn chain_ty(&self, e: &Expr) -> Ty {
         match &e.kind {
             ExprKind::Ident(n) => self.lookup(n),
@@ -1067,12 +2171,94 @@ impl TypeChecker {
                     .unwrap_or(Ty::Unknown),
                 _ => Ty::Unknown,
             },
-            ExprKind::Index(base, _) => elem_of(&self.chain_ty(base)),
+            ExprKind::Index(base, idx) => {
+                let bt = self.chain_ty(base);
+                if matches!(idx.kind, ExprKind::Range(..)) {
+                    Ty::Slice(Box::new(elem_of(&bt)))
+                } else {
+                    elem_of(&bt)
+                }
+            }
             ExprKind::Unary(UnOp::Deref, p) => match self.chain_ty(p) {
                 Ty::Ptr(inner) | Ty::RawPtr(inner) => *inner,
                 _ => Ty::Unknown,
             },
             _ => Ty::Unknown,
+        }
+    }
+
+    /// Whether a field, index, or dereference projection reads out a value that
+    /// links its binding into the base's alias group. A concrete `*T` field
+    /// answers yes directly; so does a projection whose type can reach a managed
+    /// pointer through a struct, tuple, array, or enum layer (`y := outer.inner`,
+    /// where `Inner` buries a `*Cell`), so a store through the projected
+    /// aggregate's own pointer taints the root's group. A generic field of type
+    /// `T` erases to `Unknown` (its width resolves in codegen), so `chain_ty`
+    /// cannot tell a `Box<*Cell>.c` from a `Box<int>.c`; the maybe joins the
+    /// group on the erased case too, the coarse over-approximate direction, safe
+    /// for an escape reject. A scalar field, or an aggregate that reaches no
+    /// managed pointer, answers no. The link alone rejects nothing, so a
+    /// projection consumed only in frame stays accepted; only a frame view stored
+    /// through the binding and a later return of a group member then trips.
+    fn chain_projection_manages(&self, e: &Expr) -> bool {
+        self.links_as_alias(&self.chain_ty(e))
+    }
+
+    /// Whether a member or projected value of this type links its binding into an
+    /// alias group. A managed pointer links directly; any type that can reach a
+    /// managed pointer through a struct field, enum payload, tuple element, or
+    /// array element links too, and an erased generic member (`Unknown`, whose
+    /// width resolves in codegen) reads as a maybe and links, so a frame view
+    /// stored through the buried pointer and a later return of a group member is
+    /// caught. This one predicate is the single rule the embed walk and the
+    /// projection gate share: whenever a type can reach a managed pointer, chain
+    /// it. A slice, array, or scalar that reaches no managed pointer does not
+    /// link, so a frame-slice sibling (`Store { c: c, d: local[0..4] }`) never
+    /// taints the embedded pointer; that escape rides the binding's own view flag,
+    /// a separate path the alias mechanism must not double-count.
+    fn links_as_alias(&self, t: &Ty) -> bool {
+        is_managed(t) || self.ty_reaches_managed(t)
+    }
+
+    /// The `Ty`-domain twin of the summary walk's `reaches_managed_ptr`: whether a
+    /// type can reach a managed pointer, however deeply a struct field, enum
+    /// payload, tuple element, or array/slice element buries it. Recursion guards
+    /// against a self-referential type by name. An `Unknown` reads as a maybe (a
+    /// managed pointer may hide behind an erased generic), the coarse
+    /// over-approximate direction; a `*raw T` is the honor-system FFI layer and
+    /// never counts, matching `member_carries_view`; a closure and a bare scalar
+    /// reach nothing.
+    fn ty_reaches_managed(&self, t: &Ty) -> bool {
+        let mut seen = HashSet::new();
+        self.ty_reaches_managed_rec(t, &mut seen)
+    }
+
+    fn ty_reaches_managed_rec(&self, t: &Ty, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Ty::Ptr(inner) => !matches!(**inner, Ty::Unit),
+            Ty::RawPtr(_) => false,
+            Ty::Unknown => true,
+            Ty::Slice(e) | Ty::Array(e, _) => self.ty_reaches_managed_rec(e, seen),
+            Ty::Tuple(ts) => ts.iter().any(|x| self.ty_reaches_managed_rec(x, seen)),
+            Ty::Named(n) => {
+                if !seen.insert(n.clone()) {
+                    return false;
+                }
+                if let Some((_, fields)) = self.structs.get(n) {
+                    return fields
+                        .iter()
+                        .any(|(_, ft)| self.ty_reaches_managed_rec(ft, seen));
+                }
+                if let Some(variants) = self.enums.get(n) {
+                    return variants.iter().any(|v| {
+                        self.variant_payloads
+                            .get(v)
+                            .is_some_and(|ps| ps.iter().any(|pt| self.ty_reaches_managed_rec(pt, seen)))
+                    });
+                }
+                false
+            }
+            _ => false,
         }
     }
 
@@ -1141,21 +2327,63 @@ impl TypeChecker {
                 }
                 // Reassigning a bare binding updates its escape flag in the scope
                 // that owns it, so a rebind inside a branch is not lost when the
-                // branch scope pops. A field store, `s.rows = ...`, cannot rebind
-                // the whole binding but can put a frame-local view into a struct
-                // field, so it raises the root binding's flag, never clears it.
+                // branch scope pops. A projection or dereference store,
+                // `s.rows = ...`, `xs[i] = ...`, `(*p).f = ...`, cannot rebind
+                // the whole binding but can put a frame-local view into a place
+                // the root reaches, so it raises the root binding's flag through
+                // the unified store root (which follows every index and
+                // dereference), never clears it. A place rooted at a parameter
+                // or a borrow of one is skipped here: the summary walk's
+                // frame-store table already rejected the store outright, and a
+                // raised flag on a parameter would misclassify its later uses.
                 if let ExprKind::Ident(dst) = &lhs.kind {
                     let (esc_s, esc_c) = self.value_escape(rhs);
                     self.assign_esc(dst, esc_s, esc_c);
+                    // A reassign to a lambda literal re-records the new lambda's
+                    // sink set, so a binding reversed to a sinking lambda is caught
+                    // at the call and one reversed to a clean lambda stays precisely
+                    // accepted, both keeping the name a known lambda. A reassign to
+                    // any other value drops the record so the binding falls to the
+                    // opaque conservative send-reject, since dusk can no longer see
+                    // what the name now holds.
+                    if let ExprKind::Lambda(_) = &rhs.kind {
+                        let ps = self.lambda_sinks.get(&rhs.span).copied().unwrap_or_default();
+                        self.rebind_lambda_sink(dst, ps);
+                        let cf = self.lambda_capture_flows.get(&rhs.span).cloned().unwrap_or_default();
+                        self.rebind_lambda_capture(dst, cf);
+                    } else {
+                        self.drop_lambda_sink(dst);
+                        self.drop_lambda_capture(dst);
+                    }
+                    // A reassign updates the binding's alias membership through
+                    // the same choke every binding site funnels through, with the
+                    // reassign join: `q = d` leaves q's old group and joins d's at
+                    // straight line, unions d's group on top inside a branch (a
+                    // may-join, since q may still hold its prior pointer), and a
+                    // reassign to a value that hands no alias drops q's edges, so a
+                    // stale alias never carries a raised flag onward. The aggregate
+                    // form `outer = Outer { inner: inner }` reaches the pointers the
+                    // literal embeds, the same as the let-embed does, so the Assign
+                    // site no longer walks past a re-bound aggregate. Gated on
+                    // whether either the place type or the value can reach a managed
+                    // pointer: a field read infers to Unknown here (its width
+                    // resolves in codegen), so `chain_ty` re-derives the projected
+                    // type, and an aggregate place carries its embedded pointers
+                    // through `links_as_alias`.
+                    if self.links_as_alias(&lt) || self.links_as_alias(&self.chain_ty(rhs)) {
+                        self.link_binding_aliases(dst, rhs, true);
+                    }
                     // Assigning a slice of concrete structs to a slice-of-interface
                     // binding is the covariance error the fixed binding type hides.
                     if let Some(raw) = self.slice_iface_of(dst) {
                         self.check_slice_covariance(&raw, &rt, rhs, rhs.span);
                     }
-                } else if let Some((root, _)) = self.value_chain_root(lhs) {
-                    let (esc_s, esc_c) = self.value_escape(rhs);
-                    if esc_s || esc_c {
-                        self.raise_esc(&root, esc_s, esc_c);
+                } else if let Some(root) = store_root(lhs) {
+                    if self.param_alias_of(&root).is_none() {
+                        let (esc_s, esc_c) = self.value_escape(rhs);
+                        if esc_s || esc_c {
+                            self.raise_esc(&root, esc_s, esc_c);
+                        }
                     }
                 }
             }
@@ -1204,6 +2432,10 @@ impl TypeChecker {
                     // A precise interface-in-tuple error already fired; the generic
                     // mismatch would otherwise double it, since the unfixed return
                     // tuple never `compatible`s against the concrete member.
+                } else if self.self_value_in_ptr_position(e, &ret) {
+                    // A `return self` against a `*T` return already earned the
+                    // precise self-value message; the generic mismatch would double
+                    // it.
                 } else if !compatible(&ret, &t) {
                     self.err("return type does not match the function's return type", e.span);
                 }
@@ -1241,13 +2473,32 @@ impl TypeChecker {
                 if !compatible(&Ty::Bool, &c) {
                     self.err("while condition must be a bool", w.cond.span);
                 }
-                self.branch_block(&w.body);
+                self.loop_body_fixpoint(&w.body);
             }
             Stmt::For(f) => {
-                self.infer(&f.iter);
+                let it_ty = self.infer(&f.iter);
                 self.push_scope();
                 self.declare(&f.var, Ty::Unknown);
-                self.branch_block(&f.body);
+                // The loop variable views an element of the iterand. When the
+                // iterand is a frame-tainted view and its element type can itself
+                // carry a view, each element views the frame too, so returning the
+                // loop variable dangles once the frame is reclaimed. A scalar
+                // element is a value copy and never escapes.
+                if self.member_carries_view(&elem_of(&it_ty)) {
+                    let (esc_s, esc_c) = self.value_escape(&f.iter);
+                    self.set_esc(&f.var, esc_s, esc_c);
+                }
+                // The loop variable also aliases the iterand's group when the
+                // element type can reach a managed pointer: `for p in arr[0..1]`
+                // where `arr` embeds a `*Cell` links `p` to `arr` (to `c`), so a
+                // frame view stored through `(*p).rows` taints `c` and a later
+                // return of it is caught. Routed through the same binding-alias
+                // choke a `p := <iter>[i]` element read uses, gated on the element
+                // type so a scalar loop variable links nothing.
+                if self.links_as_alias(&elem_of(&it_ty)) {
+                    self.link_binding_aliases(&f.var, &f.iter, false);
+                }
+                self.loop_body_fixpoint(&f.body);
                 self.pop_scope();
             }
             Stmt::Match(m) => self.walk_match(m),
@@ -1338,6 +2589,10 @@ impl TypeChecker {
             let ty = match &b.ty {
                 Some(t) => {
                     let lt = self.lower(t);
+                    // A generic instantiation over an interface, `b: Box<Speaker>`,
+                    // is refused at the annotation before its request reaches the
+                    // monomorphizer.
+                    self.reject_iface_targ(t, l.value.span);
                     // The annotation with the interface name intact, so binding a
                     // struct to an interface checks its impl instead of emitting
                     // a reference to a vtable that does not exist.
@@ -1375,12 +2630,97 @@ impl TypeChecker {
             if is_managed(&ty) {
                 let own = self.binding_own(l, &vt);
                 self.declare_own(&b.name, own);
+                // A pointer that reaches a parameter pointer's object, directly
+                // or transitively, lets a frame view stored through it escape.
+                // Record the aliased parameter's index for the store-edge check:
+                // a plain copy or `ref` alias roots at its source name, and a
+                // call result roots at any pointer argument the callee's summary
+                // says the result aliases or reads through (`d := same(c)`,
+                // `d := move(c)`), so a borrow laundered through a call routes
+                // the same way the bare copy does.
+                if let ExprKind::Ident(src) = &l.value.kind {
+                    if let Some(idx) = self.param_alias_of(src) {
+                        if let Some(scope) = self.ptr_param_borrows.last_mut() {
+                            scope.insert(b.name.clone(), idx);
+                        }
+                    }
+                }
+                if let ExprKind::Call(callee, cargs) = &l.value.kind {
+                    if self.variant_name(callee).is_none() {
+                        for i in self.summary_alias_indices(callee, cargs.len()) {
+                            if let Some(ExprKind::Ident(src)) = cargs.get(i).map(|a| &a.kind) {
+                                // The callee hands this argument's pointer back
+                                // through its result, so the result binding aliases
+                                // the argument: a frame view later stored through the
+                                // result taints the argument a return escapes
+                                // (`d := same(c)`). Managed pointers only.
+                                if is_managed(&self.lookup(src)) {
+                                    self.alias_link(&b.name, src);
+                                }
+                                if let Some(idx) = self.param_alias_of(src) {
+                                    if let Some(scope) = self.ptr_param_borrows.last_mut() {
+                                        scope.insert(b.name.clone(), idx);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
+            // A tuple literal that packs a parameter-borrowing pointer keeps the
+            // borrow on the tuple binding, so a later destructure hands it back
+            // out and a frame view stored through the rebound pointer still
+            // names the borrowed parameter.
+            if let ExprKind::Tuple(members) = &l.value.kind {
+                for mexpr in members {
+                    if let ExprKind::Ident(src) = &mexpr.kind {
+                        if let Some(idx) = self.param_alias_of(src) {
+                            if let Some(scope) = self.ptr_param_borrows.last_mut() {
+                                scope.insert(b.name.clone(), idx);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            // Every intra-function alias the initializer forms is generated by
+            // the single binding-alias choke: a `ref`/borrow chain or a whole
+            // aggregate copied by name, a by-value projection that reads a managed
+            // value out of an aggregate, and each bare pointer an aggregate
+            // literal (or an `alloc` of one) embeds at any depth. A frame view
+            // stored through any group member then taints the pointer a later
+            // return escapes. The param-borrow and call-summary edges above are a
+            // separate, interprocedural mechanism (the callee's summary, not the
+            // initializer's value shape), so they stay outside the choke.
+            self.link_binding_aliases(&b.name, &l.value, false);
             // Record whether the binding holds a frame-local slice or closure, so
             // returning the bare name, or an alias of it, is caught as an escape
             // even though the return expression is not the escaping literal.
             let (esc_s, esc_c) = self.value_escape(&l.value);
             self.set_esc(&b.name, esc_s, esc_c);
+            // A binding of a lambda literal keeps that lambda's sink set, empty for
+            // a clean lambda, so a later direct call of the name is checked exactly
+            // against what the lambda does: a sinking lambda rejects a polluted
+            // argument the same as a named relaying helper, a clean lambda accepts
+            // even a polluted pointer, and either way the binding is a known lambda
+            // the leaf-frame send check never treats as an opaque callee. Keyed by
+            // the lambda expression's span, the summary walk's handle on the literal.
+            if let ExprKind::Lambda(_) = &l.value.kind {
+                let ps = self.lambda_sinks.get(&l.value.span).copied().unwrap_or_default();
+                if let Some(scope) = self.lambda_sink_binds.last_mut() {
+                    scope.insert(b.name.clone(), ps);
+                }
+                // The lambda's capture-flow edges ride the binding the same way,
+                // so a direct call of the name raises each captured binding's flag
+                // when the matching argument is a frame view: the capture store the
+                // argument-to-argument flow model cannot see through a closure.
+                let cf = self.lambda_capture_flows.get(&l.value.span).cloned().unwrap_or_default();
+                if let Some(scope) = self.lambda_capture_binds.last_mut() {
+                    scope.insert(b.name.clone(), cf);
+                }
+            }
+            self.record_mut_tuple(l, b, &ty);
             return;
         }
         let parts = match &vt {
@@ -1391,10 +2731,13 @@ impl TypeChecker {
                 vec![Ty::Unknown; l.binds.len()]
             }
         };
-        for (b, pt) in l.binds.iter().zip(parts) {
+        for (b, pt) in l.binds.iter().zip(parts.iter()) {
             let ty = match &b.ty {
-                Some(t) => self.lower(t),
-                None => harden(pt),
+                Some(t) => {
+                    self.reject_iface_targ(t, l.value.span);
+                    self.lower(t)
+                }
+                None => harden(pt.clone()),
             };
             // A destructured managed pointer is conservatively an owner, so it is
             // tracked and freeing it is not wrongly rejected. The static copy
@@ -1410,15 +2753,108 @@ impl TypeChecker {
             }
             self.declare(&b.name, ty);
         }
-        // Destructuring a tuple literal binds each name to a member, so a member
-        // that holds a frame-local slice or closure marks its bound name escaping.
-        if let ExprKind::Tuple(members) = &l.value.kind {
-            if members.len() == l.binds.len() {
+        // Destructuring a tuple binds each name to a member. A tuple literal
+        // exposes its members directly, so each binder inherits its own member's
+        // escape. Any other tuple value, a call result, an alias, or a match, has
+        // no per-position expression, so each view-carrying binder conservatively
+        // inherits the whole value's frame-view flag; a scalar member cannot carry
+        // a view and stays clean. The flag alone rejects nothing, so a destructure
+        // consumed within the owning frame is still accepted; only a later return
+        // or store of a flagged binder is caught.
+        match &l.value.kind {
+            ExprKind::Tuple(members) if members.len() == l.binds.len() => {
                 for (b, m) in l.binds.iter().zip(members) {
                     let (esc_s, esc_c) = self.value_escape(m);
                     self.set_esc(&b.name, esc_s, esc_c);
+                    // Each binder aliases the member it takes, through the single
+                    // binding-alias choke: an Ident member (`a, n := (inner, 1)`
+                    // where `inner` wraps a `*Cell` links `a` to `inner` and
+                    // transitively to the pointer), a projection member, or a
+                    // nested aggregate member all route here, so a frame view
+                    // stored through `a.c` taints the buried pointer and a later
+                    // return is caught. A slice or scalar member reaches nothing
+                    // and links nothing.
+                    self.link_binding_aliases(&b.name, m, false);
+                    // A pointer member that aliases a parameter pointer keeps its
+                    // borrow through the destructure, so a frame view stored
+                    // through the binder still names the borrowed parameter.
+                    if let ExprKind::Ident(src) = &m.kind {
+                        if let Some(idx) = self.param_alias_of(src) {
+                            if let Some(scope) = self.ptr_param_borrows.last_mut() {
+                                scope.insert(b.name.clone(), idx);
+                            }
+                        }
+                    }
                 }
             }
+            _ => {
+                let (esc_s, esc_c) = self.value_escape(&l.value);
+                if esc_s || esc_c {
+                    for (b, pt) in l.binds.iter().zip(parts.iter()) {
+                        if self.member_carries_view(pt) {
+                            self.set_esc(&b.name, esc_s, esc_c);
+                        }
+                    }
+                }
+                // Destructuring a tuple binding that carries a parameter borrow
+                // (a `t := (c, 1)` round-trip) hands the borrow to every managed
+                // pointer binder, so a frame view stored through one still names
+                // the borrowed parameter. The whole-tuple record cannot say
+                // which member held the pointer, so each pointer binder inherits
+                // it, conservatively.
+                if let ExprKind::Ident(src) = &l.value.kind {
+                    if let Some(idx) = self.param_alias_of(src) {
+                        for (b, pt) in l.binds.iter().zip(parts.iter()) {
+                            if is_managed(pt) {
+                                if let Some(scope) = self.ptr_param_borrows.last_mut() {
+                                    scope.insert(b.name.clone(), idx);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Destructuring a non-literal tuple hands each view-reaching binder
+                // the alias group of the whole tuple binding, through the same
+                // binding-alias choke the literal arm uses: `t := (st, 7); a, n := t`
+                // links `a` to `t` and transitively to the pointer `st` buries, so a
+                // frame view stored through `a.c` taints that pointer and a later
+                // return of it is caught. The whole-value form cannot name the member
+                // each binder took, so every binder whose part type can reach a
+                // managed pointer, not only a bare pointer binder but an aggregate
+                // binder like a `Store` that buries one, conservatively joins the
+                // whole group; a scalar member reaches nothing and links nothing. A
+                // call or other rootless value hands no target here and links nothing.
+                for (b, pt) in l.binds.iter().zip(parts.iter()) {
+                    if self.links_as_alias(pt) {
+                        self.link_binding_aliases(&b.name, &l.value, false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Records the storage type of the narrow mutable-tuple class, keyed by the
+    /// binding's value span, so mono can stamp it onto `Bind.ty`. The class is a
+    /// single unannotated mutable binding whose value is a tuple with at least one
+    /// array-literal member: the checker infers such a member as a slice, since a
+    /// later reassignment may store one, but the initializer alone shapes it as a
+    /// fixed array, so an unannotated codegen slot would be too narrow for the fat
+    /// slice a reassignment writes. Only fires on the surface pass, and only when
+    /// the whole tuple converts to a spellable AST type, so a member the printer
+    /// cannot name (a generic, an interface, a struct) leaves the binding untouched
+    /// and its already-loud build failure in place rather than risking a wrong slot.
+    fn record_mut_tuple(&mut self, l: &Let, b: &Bind, ty: &Ty) {
+        if self.types_only || !l.mutable || b.ty.is_some() {
+            return;
+        }
+        let ExprKind::Tuple(members) = &l.value.kind else {
+            return;
+        };
+        if !members.iter().any(|m| matches!(m.kind, ExprKind::Array(_))) {
+            return;
+        }
+        if let Some(at) = ty_to_ast(ty) {
+            self.mut_tuple_types.insert(l.value.span, at);
         }
     }
 
@@ -1468,12 +2904,18 @@ impl TypeChecker {
         match self.infer(op) {
             Ty::Future(el) => *el,
             Ty::Unknown => Ty::Unknown,
+            // On the ground AST mono may leave a future as its mangled `Future$T`
+            // named type where the operand's type was read from a table the
+            // unmangle walk does not pass through, a struct field among them. The
+            // future table names its element, so an await still yields the right
+            // type instead of falling to the permissive backstop.
+            Ty::Named(n) if self.future_elems.contains_key(&n) => {
+                self.future_elems.get(&n).cloned().unwrap_or(Ty::Unknown)
+            }
             _ => {
-                // On the ground AST mono has mangled `Future<T>` to `Future$T`, a
-                // plain named type the surface `Ty::Future` shape no longer
-                // matches, so the operand looks non-future. The surface pass
-                // already validated every await operand, so the ground re-check
-                // stays permissive here rather than false-firing.
+                // The surface pass already validated every await operand, so the
+                // ground re-check stays permissive here rather than false-firing
+                // on a shape the erasure or a mangle left it unable to name.
                 if !self.types_only {
                     self.err("the operand of await is not a future", span);
                 }
@@ -1580,20 +3022,37 @@ impl TypeChecker {
             // a map result, or a slice parameter, whose backing the caller owns,
             // is fine.
             Ty::Slice(_) if self.slice_escapes(e, inferred) => {
-                self.err(
-                    "a slice into a local array escapes its frame; put the backing on the heap",
-                    e.span,
-                );
+                self.report_slice_escape(e);
             }
             // A closure that captures a frame local keeps its environment on this
             // frame, so returning it, as a lambda literal or as a binding that
             // holds one, dangles. A closure with no captures is a plain function
             // pointer and may be returned.
             Ty::Func(..) if self.expr_is_local_closure(e) => {
-                self.err(
-                    "a closure that captures a local escapes its frame; it cannot be returned",
-                    e.span,
-                );
+                self.report_closure_escape(e);
+            }
+            // A managed pointer to a heap object polluted with a frame view: a
+            // view stored through the pointer via a call lands in the caller-
+            // visible object, so the returned pointer carries the dangling view
+            // out. The generation check guards the allocation itself, not a view
+            // laundered inside it, so it is caught here (M5). The check is the
+            // general value walk, not a per-constructor list, so a bare name, a
+            // call (`return move(c)`, `return same(c)`), a projection
+            // (`return h.c`), a destructured binder, and a match payload all
+            // classify the same way.
+            Ty::Ptr(_) => {
+                let (esc_s, esc_c) = self.value_escape(e);
+                if esc_s || esc_c {
+                    if let Some((span, i, j)) = self.value_flow_prov(e) {
+                        self.emit_flow_escape(span, i, j);
+                    } else {
+                        let span = self.call_frame_origin(e).map(|(s, _)| s).unwrap_or(e.span);
+                        self.emit_escape(
+                            "this returns a pointer to an object that stores a view of the current frame".to_string(),
+                            span,
+                        );
+                    }
+                }
             }
             Ty::Tuple(ds) => {
                 if let ExprKind::Tuple(es) = &e.kind {
@@ -1615,15 +3074,9 @@ impl TypeChecker {
                     // fat members on this frame, so an escaping one must be caught.
                     let (esc_s, esc_c) = self.value_escape(e);
                     if esc_s {
-                        self.err(
-                            "a slice into a local array escapes its frame; put the backing on the heap",
-                            e.span,
-                        );
+                        self.report_slice_escape(e);
                     } else if esc_c {
-                        self.err(
-                            "a closure that captures a local escapes its frame; it cannot be returned",
-                            e.span,
-                        );
+                        self.report_closure_escape(e);
                     }
                 }
             }
@@ -1634,25 +3087,17 @@ impl TypeChecker {
             Ty::Named(sname) if self.structs.contains_key(sname) || self.enums.contains_key(sname) => {
                 let (esc_s, esc_c) = self.value_escape(e);
                 if esc_s {
-                    self.err(
-                        "a slice into a local array escapes its frame; put the backing on the heap",
-                        e.span,
-                    );
+                    self.report_slice_escape(e);
                 } else if esc_c {
-                    self.err(
-                        "a closure that captures a local escapes its frame; it cannot be returned",
-                        e.span,
-                    );
+                    self.report_closure_escape(e);
                 }
             }
             // A fixed array returned by value copies its elements, so it escapes
-            // only when the element type is a reference shape, a slice, closure,
-            // tuple, or named aggregate, that views a frame local. A scalar array
-            // is copied whole and never escapes. A literal recurses per element;
-            // a binding or alias reflects its recorded flags.
-            Ty::Array(elem, _)
-                if matches!(**elem, Ty::Slice(_) | Ty::Func(..) | Ty::Tuple(_) | Ty::Named(_)) =>
-            {
+            // only when the element type can carry a view (the same carrier set
+            // every other gate uses) and the elements view a frame local. A
+            // scalar array is copied whole and never escapes. A literal recurses
+            // per element; a binding or alias reflects its recorded flags.
+            Ty::Array(elem, _) if self.member_carries_view(elem) => {
                 if let ExprKind::Array(elems) = &e.kind {
                     for el in elems {
                         self.escape_walk(el, elem, &Ty::Unknown);
@@ -1660,15 +3105,9 @@ impl TypeChecker {
                 } else {
                     let (esc_s, esc_c) = self.value_escape(e);
                     if esc_s {
-                        self.err(
-                            "a slice into a local array escapes its frame; put the backing on the heap",
-                            e.span,
-                        );
+                        self.report_slice_escape(e);
                     } else if esc_c {
-                        self.err(
-                            "a closure that captures a local escapes its frame; it cannot be returned",
-                            e.span,
-                        );
+                        self.report_closure_escape(e);
                     }
                 }
             }
@@ -1686,8 +3125,11 @@ impl TypeChecker {
                 // A local array base, or a binding already known to hold a
                 // frame-local slice, since re-slicing a frame-local slice stays
                 // frame-local and its unannotated array literal infers to a slice.
+                // A call result base is re-sliced through its own escape: `id(
+                // local[0..4])[0..2]` re-slices a laundered frame view.
                 matches!(self.infer(base), Ty::Array(..))
                     || matches!(&base.kind, ExprKind::Ident(n) if self.is_esc_slice(n))
+                    || self.value_escape(base).0
             }
             // An array literal materializes in this frame, so returning it as a
             // slice views a dead frame no matter what its type says.
@@ -1754,9 +3196,12 @@ impl TypeChecker {
         for c in &caps {
             let t = self.lookup(c);
             let mut seen = HashSet::new();
-            if matches!(t, Ty::Future(_)) {
+            let mut fseen = HashSet::new();
+            if self.ptr_reaches_future(&t, &mut fseen) {
                 // A future is loop-thread property; a completer thread carries
-                // the raw handle words, not the typed future.
+                // the raw handle words, not the typed future. The reach walk
+                // sees a future behind a pointer too, so a `*Future<T>` smuggled
+                // into the frame names this same reason, not the slice rule.
                 self.err(
                     format!("{name} cannot capture '{c}': a future belongs to the event loop thread"),
                     args[0].span,
@@ -1768,12 +3213,577 @@ impl TypeChecker {
                     ),
                     args[0].span,
                 );
+            } else if self.is_esc_slice(c) || self.is_esc_closure(c) {
+                // The type says the capture crosses, but the flow says its value
+                // holds (or its heap object stores) a view of this frame: the
+                // task may outlive the frame and read it dead. The store edge
+                // that polluted the binding names the site when one is recorded.
+                if let Some((pspan, i, j)) = self.flow_prov.get(c).copied() {
+                    self.err(
+                        format!(
+                            "{name} cannot capture '{c}': argument {}'s view was stored into argument {} here, leaving '{c}' viewing the spawning frame; move the backing to the heap",
+                            i + 1,
+                            j + 1
+                        ),
+                        pspan,
+                    );
+                } else {
+                    self.err(
+                        format!(
+                            "{name} cannot capture '{c}': it holds a view of the spawning frame, which the task outlives; move the backing to the heap or send it through a channel"
+                        ),
+                        args[0].span,
+                    );
+                }
             }
             if is_managed(&t) && !matches!(self.own_of(c), Some(Own::Moved)) {
                 borrowed.push(c.clone());
             }
         }
         self.infer_lambda(l, args[0].span, &borrowed);
+    }
+
+    /// The binding a channel send hands over, seen through a `move` wrapper and a
+    /// projection chain: `chan_send(ch, move(c))`, `chan_send(ch, c)`, and
+    /// `chan_send(ch, d)` after `d := c` all root at the pointer whose heap
+    /// object a store edge may have polluted. None for a value with no binding
+    /// root, a fresh literal or a heap constructor, which carries no frame view.
+    fn send_value_root(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Call(callee, cargs)
+                if cargs.len() == 1
+                    && matches!(&callee.kind, ExprKind::Ident(n) if n == "move") =>
+            {
+                self.send_value_root(&cargs[0])
+            }
+            ExprKind::Ident(n) => Some(n.clone()),
+            ExprKind::Field(..) | ExprKind::Index(..) => {
+                self.projection_root(e).or_else(|| deref_root(e))
+            }
+            _ => None,
+        }
+    }
+
+    /// A channel send crosses a thread boundary that outlives the sending frame,
+    /// so a sent value whose binding holds, or whose heap object a store edge
+    /// polluted with, a view of this frame would dangle in the receiver. The
+    /// monomorphizer's element-type ban catches a slice, closure, or interface
+    /// element at the minting site; this catches the value channel the type ban
+    /// clears, a managed pointer whose object stores a frame view, the same flow
+    /// a spawn or submit capture is refused for. The store edge that polluted the
+    /// binding names the site when one is recorded, else the send site is blamed.
+    fn check_chan_send_flow(&mut self, name: &str, args: &[Expr]) {
+        if self.types_only || args.len() != 2 {
+            return;
+        }
+        let Some(root) = self.send_value_root(&args[1]) else {
+            return;
+        };
+        if !(self.is_esc_slice(&root) || self.is_esc_closure(&root)) {
+            return;
+        }
+        if let Some((pspan, i, j)) = self.flow_prov.get(&root).copied() {
+            self.err(
+                format!(
+                    "{name} cannot send '{root}': argument {}'s view was stored into argument {} here, leaving '{root}' viewing the sending frame; move the backing to the heap",
+                    i + 1,
+                    j + 1
+                ),
+                pspan,
+            );
+        } else {
+            self.err(
+                format!(
+                    "{name} cannot send '{root}': it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data"
+                ),
+                args[1].span,
+            );
+        }
+    }
+
+    /// The interprocedural counterpart of `check_chan_send_flow`: a call whose
+    /// callee sinks one of its parameters into a channel (per the escape summary's
+    /// `sinks`) hands that argument's value across a thread boundary the receiver
+    /// outlives, so a polluted argument in a sink position dangles in the receiver
+    /// exactly as a direct `chan_send` of it would. The leaf-site check catches
+    /// the send in the frame that owns the value; this catches the send one or
+    /// more hops away, through a `relay(ch, c)` helper the leaf check cannot see.
+    /// The store edge that polluted the argument names the site when one is
+    /// recorded, mirroring the leaf message; else the call site is blamed.
+    fn check_call_sinks(&mut self, callee: &Expr, args: &[Expr], call_span: Span) {
+        if self.types_only {
+            return;
+        }
+        let ExprKind::Ident(cname) = &callee.kind else {
+            return;
+        };
+        // The channel-send builtins carry a stdlib summary whose body sinks the
+        // element through the foreign send intrinsic, so their `sinks` now name
+        // the element parameter. The leaf-site `check_chan_send_flow` already owns
+        // a direct send by name, on the identical polluted-argument condition, so
+        // deferring to it here keeps the canonical message and avoids a double
+        // diagnostic. Every hop away from the frame that owns the value is still
+        // caught: a helper that calls `chan_send` sinks its own parameter, and a
+        // call of that helper is a plain summarized call this check does fire on.
+        if cname == "chan_send" || cname == "chan_try_send" {
+            return;
+        }
+        // A local of function type is opaque, not the summarized module function
+        // of the same name, so its call carries no known sink relation, unless it
+        // is a local proven bound once to one module function: then its call is
+        // that function's known relation, checked here so a polluted argument to
+        // `f := relay; f(ch, c)` is refused exactly as a direct `relay(ch, c)`
+        // would be, closing the resolvable-fn-bind leaf-frame send path. Any other
+        // local (a function-typed parameter, a reassigned or tuple-sourced binding)
+        // falls to the opaque conservative reject instead.
+        let target = if self.is_local(cname) {
+            match self.resolvable_fn_binds.get(cname) {
+                Some(g) => g.clone(),
+                None => return,
+            }
+        } else {
+            cname.clone()
+        };
+        let Some(sum) = self.summaries.get(&target).cloned() else {
+            return;
+        };
+        self.check_summary_sinks(cname, &sum, args, call_span);
+    }
+
+    /// The shared body of the interprocedural sink check: for each sink parameter
+    /// `j` of a callee's summary, reject a polluted argument in that position. The
+    /// named-call path (`check_call_sinks`) and the method-call path
+    /// (`check_method_call_escape`, whose effective argument 0 is the receiver)
+    /// both route through here, so a self-sink method is caught on a polluted
+    /// receiver with the identical message a `relay(ch, c)` helper earns.
+    fn check_summary_sinks(&mut self, cname: &str, sum: &EscapeSummary, args: &[Expr], call_span: Span) {
+        for j in sum.sinks.to_vec() {
+            let Some(arg) = args.get(j as usize) else {
+                continue;
+            };
+            let Some(root) = self.send_value_root(arg) else {
+                continue;
+            };
+            if !(self.is_esc_slice(&root) || self.is_esc_closure(&root)) {
+                continue;
+            }
+            if let Some((pspan, i, k)) = self.flow_prov.get(&root).copied() {
+                self.emit_escape(
+                    format!(
+                        "'{cname}' sends '{root}' across a channel, but argument {}'s view was stored into argument {} here, leaving '{root}' viewing the sending frame; move the backing to the heap",
+                        i + 1,
+                        k + 1
+                    ),
+                    pspan,
+                );
+            } else {
+                self.emit_escape(
+                    format!(
+                        "'{cname}' sends '{root}' across a channel, but it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data"
+                    ),
+                    call_span,
+                );
+            }
+        }
+    }
+
+    /// The concrete receiver type of a method call, peeling any managed or raw
+    /// pointer off the base's type: `c.m()` on `c: *Cell` and `(*c).m()` both name
+    /// `Cell`. None when the base is not a concrete named type (an interface value,
+    /// a generic, or an inference hole), where no method summary is keyed and the
+    /// call stays opaque to this check. Side-effect free: it walks the AST types
+    /// through `chain_ty` and never re-runs inference.
+    fn receiver_type_name(&self, base: &Expr) -> Option<String> {
+        let mut t = self.chain_ty(base);
+        loop {
+            match t {
+                Ty::Ptr(inner) | Ty::RawPtr(inner) => t = *inner,
+                Ty::Named(n) => return Some(n),
+                _ => return None,
+            }
+        }
+    }
+
+    /// The resolved method name and escape summary of a method call `base.m(..)`,
+    /// when the base's type names a concrete type with a computed method summary.
+    /// None for an error-method call, a struct-field callee, or an interface or
+    /// generic receiver, none of which key a method summary. Both the escape check
+    /// and the opaque-callee gate read this, so a method with a precise summary is
+    /// checked once, precisely, rather than falling to the conservative opaque
+    /// reject a field callee gets.
+    fn resolved_method_summary(&self, callee: &Expr) -> Option<(String, EscapeSummary)> {
+        let ExprKind::Field(base, mname) = &callee.kind else {
+            return None;
+        };
+        let tname = self.receiver_type_name(base)?;
+        let sum = self.method_summaries.get(&(tname, mname.clone()))?.clone();
+        Some((mname.clone(), sum))
+    }
+
+    /// The interprocedural escape check for a method call. A method is a named
+    /// function whose hidden first parameter is the by-pointer receiver, so the
+    /// leaf and helper send checks that read a callee's summary miss it: the
+    /// callee is a field expression, not a bare name, and the receiver never sits
+    /// in the argument list. This threads the receiver as effective argument 0,
+    /// looks up the method's summary (self as parameter 0), and applies the same
+    /// sink and store-edge checks a named call gets, so `c.ship(ch)` with a
+    /// polluted `c` whose `ship` sends `self` is rejected exactly as a direct
+    /// `chan_send(ch, c)` is, and a method that stores a frame view through `self`
+    /// pollutes the receiver's binding for its own later egress check. A method
+    /// with a summary is not opaque, so the conservative opaque-callee reject
+    /// steps aside (see `callee_is_opaque`) and this precise check owns the call.
+    fn check_method_call_escape(&mut self, callee: &Expr, args: &[Expr], call_span: Span) {
+        if self.types_only {
+            return;
+        }
+        let ExprKind::Field(base, _) = &callee.kind else {
+            return;
+        };
+        let Some((mname, sum)) = self.resolved_method_summary(callee) else {
+            return;
+        };
+        // The receiver is the method's implicit parameter 0; the declared
+        // arguments follow it. A method takes `self` by pointer, so the pointer
+        // that becomes `self` is the base itself when the base is already a
+        // pointer (`c.ship()`), or the dereferenced binding when the base
+        // re-addresses one (`(*c).ship()` re-takes the address of `c`); both name
+        // the same pointer whose object a store edge may have polluted. Every
+        // summary index is stated against that frame, so the effective argument
+        // list carries the receiver at 0 and the call's arguments at 1, 2, ....
+        let recv = match &base.kind {
+            ExprKind::Unary(UnOp::Deref, inner) => (**inner).clone(),
+            _ => (**base).clone(),
+        };
+        let eff: Vec<Expr> = std::iter::once(recv).chain(args.iter().cloned()).collect();
+        self.check_summary_sinks(&mname, &sum, &eff, call_span);
+        self.apply_flow_edges(&sum.flows_into, &eff, call_span);
+    }
+
+    /// The recorded sink set of a local bound to a sinking lambda, from the
+    /// innermost scope that binds the name, so a shadow masks an outer binding.
+    fn lambda_sink_bind(&self, name: &str) -> Option<ParamSet> {
+        for scope in self.lambda_sink_binds.iter().rev() {
+            if let Some(ps) = scope.get(name) {
+                return Some(*ps);
+            }
+        }
+        None
+    }
+
+    /// The closure counterpart of `check_call_sinks`: a direct call of a local
+    /// bound to a lambda whose body sinks one of its parameters into a channel
+    /// hands that argument across a thread boundary the receiver outlives. A
+    /// lambda carries no computed summary, so `check_call_sinks` skips it as a
+    /// local; this reads the sink set recorded on the binding instead, rejecting
+    /// a polluted argument in a sink position exactly as a direct `chan_send` of
+    /// it, or a named `relay(ch, c)` helper call, would. The store edge that
+    /// polluted the argument names the site when one is recorded, mirroring the
+    /// leaf message; else the call site is blamed.
+    fn check_lambda_call_sinks(&mut self, callee: &Expr, args: &[Expr], call_span: Span) {
+        if self.types_only {
+            return;
+        }
+        let ExprKind::Ident(cname) = &callee.kind else {
+            return;
+        };
+        let Some(sinks) = self.lambda_sink_bind(cname) else {
+            return;
+        };
+        for j in sinks.to_vec() {
+            let Some(arg) = args.get(j as usize) else {
+                continue;
+            };
+            let Some(root) = self.send_value_root(arg) else {
+                continue;
+            };
+            if !(self.is_esc_slice(&root) || self.is_esc_closure(&root)) {
+                continue;
+            }
+            if let Some((pspan, i, k)) = self.flow_prov.get(&root).copied() {
+                self.emit_escape(
+                    format!(
+                        "'{cname}' sends '{root}' across a channel, but argument {}'s view was stored into argument {} here, leaving '{root}' viewing the sending frame; move the backing to the heap",
+                        i + 1,
+                        k + 1
+                    ),
+                    pspan,
+                );
+            } else {
+                self.emit_escape(
+                    format!(
+                        "'{cname}' sends '{root}' across a channel, but it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data"
+                    ),
+                    call_span,
+                );
+            }
+        }
+    }
+
+    /// Records the sink set of a lambda literal reassigned to an existing name, in
+    /// the scope that owns the binding. At straight line the new set replaces the
+    /// old, so a binding reversed from a clean lambda to a sinking one (or the
+    /// reverse) is checked against exactly what it now holds. Inside a branch the
+    /// update is a may-join, the union of the two sink sets, since the binding may
+    /// still be its prior lambda: a conditional reversal to a sinking lambda then
+    /// sinks, and a conditional reversal to a clean one cannot prove the prior
+    /// lambda gone. A name with no prior record starts one in the current scope.
+    fn rebind_lambda_sink(&mut self, name: &str, ps: ParamSet) {
+        let conditional = self.branch_depth > 0;
+        for scope in self.lambda_sink_binds.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(name) {
+                *existing = if conditional { existing.union(ps) } else { ps };
+                return;
+            }
+        }
+        if let Some(scope) = self.lambda_sink_binds.last_mut() {
+            scope.insert(name.to_string(), ps);
+        }
+    }
+
+    /// Drops a name's lambda-sink record, from the innermost scope that binds it,
+    /// so a binding reassigned to a non-lambda value is no longer a known lambda
+    /// and falls to the opaque conservative send-reject. The drop is
+    /// unconditional even inside a branch: it can only widen the reject, which
+    /// stays sound, and a binding that might now hold an opaque value cannot be
+    /// proven clean.
+    fn drop_lambda_sink(&mut self, name: &str) {
+        for scope in self.lambda_sink_binds.iter_mut().rev() {
+            if scope.remove(name).is_some() {
+                break;
+            }
+        }
+    }
+
+    /// The recorded capture-flow edges of a local bound to a lambda, from the
+    /// innermost scope that binds the name, so a shadow masks an outer binding.
+    fn lambda_capture_bind(&self, name: &str) -> Option<Vec<(u8, String)>> {
+        for scope in self.lambda_capture_binds.iter().rev() {
+            if let Some(cf) = scope.get(name) {
+                return Some(cf.clone());
+            }
+        }
+        None
+    }
+
+    /// Records the capture-flow edges of a lambda literal reassigned to an
+    /// existing name, mirroring `rebind_lambda_sink`. At straight line the new
+    /// edges replace the old; inside a branch the update is a may-join (the union
+    /// of both edge sets), since the binding may still be its prior lambda.
+    fn rebind_lambda_capture(&mut self, name: &str, cf: Vec<(u8, String)>) {
+        let conditional = self.branch_depth > 0;
+        for scope in self.lambda_capture_binds.iter_mut().rev() {
+            if let Some(existing) = scope.get_mut(name) {
+                if conditional {
+                    existing.extend(cf.iter().cloned());
+                    existing.sort();
+                    existing.dedup();
+                } else {
+                    *existing = cf;
+                }
+                return;
+            }
+        }
+        if let Some(scope) = self.lambda_capture_binds.last_mut() {
+            scope.insert(name.to_string(), cf);
+        }
+    }
+
+    /// Drops a name's capture-flow record, mirroring `drop_lambda_sink`: a binding
+    /// reassigned to a non-lambda value is no longer a known lambda, so its call
+    /// falls to the opaque conservative store-reject instead.
+    fn drop_lambda_capture(&mut self, name: &str) {
+        for scope in self.lambda_capture_binds.iter_mut().rev() {
+            if scope.remove(name).is_some() {
+                break;
+            }
+        }
+    }
+
+    /// Applies the capture-flow edges of a direct call of a lambda-bound local: for
+    /// each edge (i, B) where the lambda stores its parameter i's view through the
+    /// captured binding B, a frame-view argument in position i is stored through B
+    /// beyond this frame. When B is a parameter of the enclosing function, or a
+    /// pointer that borrows one, the store lands in the caller's own object and
+    /// escapes at once, so it is reported here. When B is a plain local, the store
+    /// only raises B's escape flag: the view dies with this frame, so a purely local
+    /// use stays legal and a later return, send, or spawn of B is what the existing
+    /// egress checks reject, exactly as a named helper's store edge is handled.
+    fn apply_lambda_capture_flows(&mut self, callee: &Expr, args: &[Expr], call_span: Span) {
+        if self.types_only {
+            return;
+        }
+        let ExprKind::Ident(cname) = &callee.kind else {
+            return;
+        };
+        let Some(edges) = self.lambda_capture_bind(cname) else {
+            return;
+        };
+        for (i, b) in edges {
+            let Some(arg) = args.get(i as usize) else {
+                continue;
+            };
+            let (fs, fc) = self.value_escape(arg);
+            if !fs && !fc {
+                continue;
+            }
+            if self.cur_params.contains(&b) || self.param_alias_of(&b).is_some() {
+                self.emit_escape(
+                    "this call stores a view of the current frame into a place that outlives it; put the backing on the heap".to_string(),
+                    call_span,
+                );
+            } else {
+                self.raise_esc(&b, fs, fc);
+            }
+        }
+    }
+
+    /// Whether a call's callee is opaque to the send analysis: dusk cannot see
+    /// which arguments it may hand to a channel the receiver outlives. Four callee
+    /// shapes are not opaque, each carrying a precise sink relation a dedicated
+    /// check already reads: a summarized module function, a builtin, a local
+    /// resolvably bound once to a module function, and a local bound to a lambda
+    /// literal whose sink set is recorded. A variant constructor allocates and
+    /// never sends, so it is not opaque either. Everything else is opaque: a field
+    /// or method callee, a reassigned or `mut` binding, a tuple- or
+    /// destructure-sourced binding, a call-result callee, or any other expression.
+    /// Whether a call's callee is a synchronous error handler that invokes its
+    /// function argument in place and never stores it: `e.check(h)` calls
+    /// `h(self)` immediately and returns, and `e.ignore()` discharges the error
+    /// with no argument at all. The receiver's type is `error`, so neither keys
+    /// a method summary, and both would otherwise fall to the conservative
+    /// opaque reject in `callee_is_opaque`, refusing a frame-capturing handler
+    /// that outlives nothing. Their escape relation is empty in every dimension,
+    /// so they are treated as not opaque and the frame-closure argument passes.
+    fn callee_is_sync_handler(&self, callee: &Expr) -> bool {
+        let ExprKind::Field(base, mname) = &callee.kind else {
+            return false;
+        };
+        matches!(self.chain_ty(base), Ty::Error)
+            && matches!(mname.as_str(), "check" | "ignore")
+    }
+
+    fn callee_is_opaque(&self, callee: &Expr) -> bool {
+        if self.variant_name(callee).is_some() {
+            return false;
+        }
+        // A method call whose receiver type names a concrete method summary is not
+        // opaque: `check_method_call_escape` threads the receiver as argument 0 and
+        // reads the method's precise sink and store-edge relations, which subsume
+        // the conservative opaque reject (a sink argument is caught by the sink
+        // check, a stored argument by the flow check, and an argument the method
+        // neither sends nor stores is provably safe). Letting the opaque face fire
+        // too would only double the diagnostic on the same store. A struct-field
+        // lambda callee keys no method summary, so it stays opaque here.
+        if self.resolved_method_summary(callee).is_some() {
+            return false;
+        }
+        // A synchronous error handler (`e.check(h)`, `e.ignore()`) invokes its
+        // function argument in the current frame and never stores it, so it is
+        // not opaque: its escape summary is empty in every dimension (no sink,
+        // no capture flow, no return). The receiver type is `error`, not a
+        // struct, so it keys no method summary and would otherwise fall through
+        // to the opaque reject below, refusing a frame-capturing handler that is
+        // only ever invoked in place (the `e.check(lambda ...)` idiom). Stepping
+        // aside here lets the precise checks pass a clean synchronous handler
+        // while the closure face still fires on a genuinely opaque callee (a
+        // struct-field, tuple, or reassigned lambda) that may stash it.
+        if self.callee_is_sync_handler(callee) {
+            return false;
+        }
+        match &callee.kind {
+            ExprKind::Ident(name) => {
+                if !self.is_local(name) {
+                    // A module function carries a computed summary; a builtin a
+                    // library one. Both name their sinks precisely.
+                    return !(self.summaries.contains_key(name)
+                        || builtin_summary(name).is_some());
+                }
+                // A local proven bound to one module function, or bound to a lambda
+                // literal, is a known callee the precise checks handle.
+                !(self.resolvable_fn_binds.contains_key(name)
+                    || self.lambda_sink_bind(name).is_some())
+            }
+            _ => true,
+        }
+    }
+
+    /// The leaf-frame counterpart of the summary and lambda sink checks: a call
+    /// whose callee is opaque may hand any argument to a channel the receiver
+    /// outlives, or store it through one of its own captures, and dusk cannot see
+    /// through it to know it does neither. Two argument shapes are refused
+    /// conservatively. A managed pointer whose heap object a store edge polluted
+    /// with a frame view: an opaque callee may send it across a channel, exactly as
+    /// a direct `chan_send` of it, or a named `relay(ch, c)` helper call, would be,
+    /// and the store edge that polluted it names the site. A bare frame slice: an
+    /// opaque callee (a struct-field or reassigned lambda whose captured
+    /// destinations the checker cannot see) may store it through a captured pointer
+    /// that outlives the frame, the capture store the argument-to-argument flow
+    /// model washes past; a slice cannot cross a channel, but it can be stashed
+    /// beyond the frame this way, so it is refused here. A frame-capturing closure
+    /// is refused for the same reason: an opaque callee may store it into one of
+    /// its own captures that outlives the frame, the `box.f(bad)` shape, so a
+    /// closure that captures a frame local is stopped here too. The synchronous
+    /// handler idiom that invokes its argument in place, `e.check(lambda ...)`, is
+    /// not opaque (see `callee_is_sync_handler`), so it never reaches this face
+    /// and the common higher-order call is not over-rejected. A named function and
+    /// a recorded lambda are not opaque either, so a frame slice or closure handed
+    /// to one of those, or to a builtin higher-order, is checked precisely and
+    /// unaffected by this face.
+    fn check_opaque_call_send(&mut self, callee: &Expr, args: &[Expr], call_span: Span) {
+        if self.types_only || !self.callee_is_opaque(callee) {
+            return;
+        }
+        for arg in args {
+            // A managed pointer whose object was polluted with a frame view: refused
+            // as a possible channel send, blamed at the polluting store edge.
+            if let Some(root) = self.send_value_root(arg) {
+                if is_managed(&self.lookup(&root))
+                    && (self.is_esc_slice(&root) || self.is_esc_closure(&root))
+                {
+                    if let Some((pspan, i, k)) = self.flow_prov.get(&root).copied() {
+                        self.emit_escape(
+                            format!(
+                                "this call may send '{root}' across a channel, but argument {}'s view was stored into argument {} here, leaving '{root}' viewing the current frame; move the backing to the heap",
+                                i + 1,
+                                k + 1
+                            ),
+                            pspan,
+                        );
+                    } else {
+                        self.emit_escape(
+                            format!(
+                                "this call may send '{root}' across a channel; '{root}' holds a view of the current frame, which the receiver outlives; move the backing to the heap or send heap owned data"
+                            ),
+                            call_span,
+                        );
+                    }
+                    continue;
+                }
+            }
+            // A bare frame slice or a frame-capturing closure: an opaque callee
+            // may store it through a captured place that outlives this frame (the
+            // capture store the argument-to-argument flow model washes past), so
+            // it is refused. A clean or heap-backed slice, and a closure that
+            // captures only parameters or globals, carry no frame view and are
+            // untouched. The synchronous higher-order idiom that invokes its
+            // handler in place, `e.check(lambda ...)`, is not opaque (see
+            // `callee_is_sync_handler`), so it never reaches this face; a
+            // genuinely opaque callee (a struct-field, tuple, or reassigned
+            // lambda) may stash the closure into a capture the frame outlives,
+            // exactly the `box.f(bad)` shape, and is caught here.
+            let (fs, fc) = self.value_escape(arg);
+            if fs {
+                self.emit_escape(
+                    "this call may store a view of the current frame beyond it; put the backing on the heap".to_string(),
+                    call_span,
+                );
+            } else if fc {
+                self.emit_escape(
+                    "this call may store a closure that captures the current frame beyond it; put the captured backing on the heap".to_string(),
+                    call_span,
+                );
+            }
+        }
     }
 
     /// Whether a value of this type may cross a `spawn` as a heap copied
@@ -1789,6 +3799,16 @@ impl TypeChecker {
             // value.
             Ty::Future(_) => false,
             Ty::Slice(_) | Ty::Func(..) => false,
+            // A pointer targets the heap, which the generation check covers, so a
+            // slice or interface value behind it is fine to copy into a spawned
+            // frame. A future is the exception: it is event-loop-thread property,
+            // so a future smuggled behind a pointer still faults when the completer
+            // thread awaits it. Hunt the pointee for a buried future and refuse
+            // only that, leaving every other pointer capturable.
+            Ty::Ptr(b) | Ty::RawPtr(b) => {
+                let mut fseen = HashSet::new();
+                !self.ptr_reaches_future(b, &mut fseen)
+            }
             Ty::Array(e, _) => self.spawn_capturable(e, seen),
             Ty::Tuple(ts) => ts.iter().all(|x| self.spawn_capturable(x, seen)),
             Ty::Named(n) => {
@@ -1804,6 +3824,32 @@ impl TypeChecker {
                 }
             }
             _ => true,
+        }
+    }
+
+    /// Whether a future is reachable through this type once a pointer is crossed.
+    /// A future belongs to the event loop thread, so smuggling one behind a managed
+    /// or raw pointer into a spawned frame still faults when the completer awaits
+    /// it. A slice or interface value behind a pointer is fine, so only a future
+    /// counts here; the walk follows nested pointers, arrays, tuples, and struct
+    /// fields. `seen` breaks recursive type cycles.
+    fn ptr_reaches_future(&self, t: &Ty, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Ty::Future(_) => true,
+            Ty::Ptr(b) | Ty::RawPtr(b) | Ty::Slice(b) | Ty::Array(b, _) => {
+                self.ptr_reaches_future(b, seen)
+            }
+            Ty::Tuple(ts) => ts.iter().any(|x| self.ptr_reaches_future(x, seen)),
+            Ty::Named(n) => {
+                if !seen.insert(n.clone()) {
+                    return false;
+                }
+                match self.embed_fields.get(n).cloned() {
+                    Some(fs) => fs.iter().any(|f| self.ptr_reaches_future(f, seen)),
+                    None => false,
+                }
+            }
+            _ => false,
         }
     }
 
@@ -1860,6 +3906,23 @@ impl TypeChecker {
                         e.span,
                     );
                 }
+                // A bare variant name in value position is not a constructor
+                // either: a nullary `None` must be written `Opt.None`, so it cannot
+                // slip through as the Unknown it otherwise looks up as and reach a
+                // codegen path that loads a non-existent binding. A function or an
+                // in-scope local of the same name shadows the variant and is the
+                // real value, so only a name that is a variant and nothing else is
+                // refused.
+                if !self.is_local(name) && !self.sigs.contains_key(name) {
+                    if let Some(en) = self.variant_owner(name).map(str::to_string) {
+                        self.err(
+                            format!(
+                                "use the qualified form '{en}.{name}' to name an enum value; the unqualified variant name is not one"
+                            ),
+                            e.span,
+                        );
+                    }
+                }
                 self.lookup(name)
             }
             ExprKind::Unary(op, x) => {
@@ -1877,7 +3940,41 @@ impl TypeChecker {
                 }
                 result
             }
-            ExprKind::Call(f, args) => self.infer_call(f, args),
+            ExprKind::Call(f, args) => {
+                // A helper that sinks a parameter into a channel crosses a thread
+                // boundary the receiver outlives, so a polluted argument in that
+                // position is rejected at the call, read before any edge raises a
+                // flag (M5, interprocedural chan-send). The named-helper form
+                // reads the callee's summary; the closure form reads the sink set
+                // recorded on a local bound to a sinking lambda.
+                self.check_call_sinks(f, args, e.span);
+                self.check_lambda_call_sinks(f, args, e.span);
+                // The leaf-frame default-deny: a call whose callee is opaque to the
+                // send analysis (a field or method callee, a reassigned or tuple-
+                // sourced binding, any callee outside the four known buckets) may
+                // hand an argument to a channel, so a polluted managed pointer in
+                // any argument position is refused, the case the value-flow through
+                // a laundered lambda binding would otherwise wash past.
+                self.check_opaque_call_send(f, args, e.span);
+                // A direct call of a lambda bound to a local stores its argument
+                // through the lambda's captured bindings (per the escape pass's
+                // capture-flow edges), a store the argument-to-argument flow model
+                // cannot see; raise each captured binding's flag so its own egress
+                // check catches a laundered frame view (M5, capture store).
+                self.apply_lambda_capture_flows(f, args, e.span);
+                // Apply the callee's store edges to the caller before typing the
+                // call, so a frame view laundered into a parameter or a local is
+                // flagged at its true source (M5, interprocedural escape).
+                self.apply_call_flows(f, args, e.span);
+                // A method call hides its receiver from every check above: the
+                // callee is a field expression, not a bare name, and the receiver
+                // is not in the argument list. Thread it as effective argument 0
+                // and read the method's summary (self as parameter 0), so a
+                // self-sink method on a polluted receiver, or a frame view stored
+                // through self, is caught (M5, method receiver sink).
+                self.check_method_call_escape(f, args, e.span);
+                self.infer_call(f, args)
+            }
             ExprKind::Field(x, name) => {
                 // A fixed array exposes only `.len`, the int64 count a slice's
                 // `.len` also yields. Any other field on an array is rejected here
@@ -1925,7 +4022,11 @@ impl TypeChecker {
                     // the compatibility rule accepts against any Future<T>.
                     Ty::Future(Box::new(Ty::Unknown))
                 } else {
-                    named_ty(name)
+                    // On the ground AST mono has mangled a `Future<T>` literal to
+                    // `Future$T`, so unmangle restores the future shape the async
+                    // call and the annotation both carry, keeping the three forms
+                    // mutually compatible. A plain struct name is left untouched.
+                    self.unmangle(named_ty(name))
                 }
             }
             ExprKind::Lambda(l) => self.infer_lambda(l, e.span, &[]),
@@ -1975,15 +4076,33 @@ impl TypeChecker {
         if let ExprKind::Field(base, mname) = &f.kind {
             let is_error = matches!(self.infer(base), Ty::Error);
             let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
-            // Enum constructor covariance: a variant payload of slice-of-interface
-            // type must not receive a slice of concrete structs reinterpreted.
+            // A qualified enum constructor, `Opt.Some(args)`. Check its argument
+            // count and payload types against the variant's declaration, and run
+            // the slice-of-interface covariance guard on each payload, so a wrong
+            // arity or a mistyped payload is caught at the constructor rather than
+            // papered over as the Unknown this branch otherwise returns.
             if let ExprKind::Ident(en) = &base.kind {
                 if self.enums.contains_key(en) {
+                    self.check_variant_ctor_args(en, mname, args, &arg_tys, f.span);
                     if let Some(payloads) = self.variant_payloads.get(mname).cloned() {
                         for (i, (pty, aty)) in payloads.iter().zip(&arg_tys).enumerate() {
                             if let Some(arg) = args.get(i) {
                                 self.check_slice_covariance(pty, aty, arg, arg.span);
                             }
+                        }
+                    }
+                }
+            }
+            // A method call is otherwise opaque (its return types as Unknown), but
+            // the callee's parameters are known from the impl. Passing a value
+            // `self` into a `*T` parameter hands the struct where a fat pointer
+            // belongs; catch it here with the same precise self-value message a
+            // direct call earns, rather than leaving a stray backend fault.
+            if let Some(tname) = self.receiver_type_name(base) {
+                if let Some(params) = self.method_params.get(&(tname, mname.clone())).cloned() {
+                    for (i, p) in params.iter().enumerate() {
+                        if let Some(arg) = args.get(i) {
+                            self.self_value_in_ptr_position(arg, p);
                         }
                     }
                 }
@@ -2008,7 +4127,37 @@ impl TypeChecker {
         // A builtin with a known return type, unless a user function of the same
         // name shadows it, in which case the normal signature path wins.
         if let ExprKind::Ident(name) = &f.kind {
+            // A channel send hands its element to a receiver thread that outlives
+            // the sending frame, so a value whose binding a store edge polluted
+            // with a frame view would dangle there. Checked by name beside the
+            // element-type ban the monomorphizer applies, since chan_send is a
+            // library generic, not a builtin, and reaches this signature path.
+            if name == "chan_send" || name == "chan_try_send" {
+                self.check_chan_send_flow(name, args);
+            }
             if !self.sigs.contains_key(name) {
+                // An unqualified variant name is not a constructor. `Some(x)` must
+                // be written `Opt.Some(x)`; rejecting the bare form here, before
+                // codegen, forecloses a lowering that would resolve it by the
+                // variant's global name and collide with a like-named function, a
+                // stale local now out of scope, or an ambiguous generic instance. A
+                // function or an in-scope local of the same name shadows the variant
+                // and dispatches normally, so only a name that is a variant and
+                // nothing else is refused.
+                if !self.is_local(name) {
+                    if let Some(en) = self.variant_owner(name).map(str::to_string) {
+                        self.err(
+                            format!(
+                                "use the qualified form '{en}.{name}' to construct an enum value; the unqualified variant name is not a constructor"
+                            ),
+                            f.span,
+                        );
+                        for a in args {
+                            self.infer(a);
+                        }
+                        return Ty::Unknown;
+                    }
+                }
                 if let Some(ty) = builtin_ret(name) {
                     for a in args {
                         self.infer(a);
@@ -2144,7 +4293,10 @@ impl TypeChecker {
                 );
             } else {
                 for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
-                    if !compatible(p, a) {
+                    // A `chan_send(ch, self)` into a `Channel<*T>` earns the precise
+                    // self-value message; only when that does not apply does the
+                    // generic argument mismatch fire.
+                    if !compatible(p, a) && !self.self_value_in_ptr_position(&args[i], p) {
                         self.err(format!("argument {} has the wrong type", i + 1), args[i].span);
                     }
                 }
@@ -2417,16 +4569,65 @@ impl TypeChecker {
 
     fn walk_match(&mut self, m: &Match) {
         let st = self.infer(&m.scrut);
+        // An arm binder projects the scrutinee's payload, so it inherits the
+        // scrutinee's escape flags the same way a destructured tuple binder
+        // does: only a binder whose payload type can carry a view is flagged,
+        // and a clean scrutinee flags nothing. Without this, a flagged value
+        // washed through `match x { V(d) => return d }` drops its flag.
+        let (scrut_s, scrut_c) = if self.types_only {
+            (false, false)
+        } else {
+            self.value_escape(&m.scrut)
+        };
         self.branch_depth += 1;
         for arm in &m.arms {
             self.push_scope();
             match &arm.pat {
-                Pattern::Variant(_, binds) => {
-                    for b in binds {
+                Pattern::Variant(vname, binds) => {
+                    let payloads = self.variant_payloads.get(vname).cloned().unwrap_or_default();
+                    for (i, b) in binds.iter().enumerate() {
                         self.declare(b, Ty::Unknown);
+                        if scrut_s || scrut_c {
+                            let carries = payloads
+                                .get(i)
+                                .map(|pt| self.member_carries_view(pt))
+                                .unwrap_or(true);
+                            if carries {
+                                self.set_esc(b, scrut_s, scrut_c);
+                            }
+                        }
+                        // A payload binder projects the scrutinee's payload, so it
+                        // aliases the scrutinee's group when the payload type can
+                        // reach a managed pointer: `match o { Some(p) => ... }`
+                        // where `o` carries a `*Cell` links `p` to `o` (to `c`), so
+                        // a frame view stored through `(*p).rows` taints `c` and a
+                        // later return of it is caught. Routed through the same
+                        // binding-alias choke a `p := <scrut>` projection uses,
+                        // gated on the payload type so a scalar binder links
+                        // nothing. An erased generic payload reads as a maybe and
+                        // links, the coarse over-approximate direction.
+                        let links = payloads
+                            .get(i)
+                            .map(|pt| self.links_as_alias(pt))
+                            .unwrap_or(true);
+                        if links {
+                            self.link_binding_aliases(b, &m.scrut, false);
+                        }
                     }
                 }
-                Pattern::Ident(name) => self.declare(name, Ty::Unknown),
+                Pattern::Ident(name) => {
+                    self.declare(name, Ty::Unknown);
+                    if scrut_s || scrut_c {
+                        self.set_esc(name, scrut_s, scrut_c);
+                    }
+                    // A catch-all binds the whole scrutinee to `name`, a named
+                    // binding chain, so it aliases the scrutinee's group when the
+                    // scrutinee reaches a managed pointer: a later re-match of
+                    // `name` links its own binder back through here to the
+                    // scrutinee. Routed through the same choke, which links nothing
+                    // when the scrutinee holds no pointer.
+                    self.link_binding_aliases(name, &m.scrut, false);
+                }
                 Pattern::Wildcard => {}
             }
             for s in &arm.body.stmts {
@@ -2716,6 +4917,50 @@ fn elem_of(t: &Ty) -> Ty {
     }
 }
 
+/// The root binding of a store place, rooting through field accesses, indexes,
+/// and pointer dereferences: a store through a parameter pointer reaches the
+/// caller's object, so the dereference is followed here. Mirrors the escape
+/// summary's `dest_root`, so the caller-side flow routing agrees with the
+/// callee-side edge that produced it.
+fn store_root(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n.clone()),
+        ExprKind::Field(base, _) | ExprKind::Index(base, _) => store_root(base),
+        ExprKind::Unary(UnOp::Deref, base) => store_root(base),
+        _ => None,
+    }
+}
+
+/// The pointer binding a by-value projection reads back through, when the chain
+/// crosses a dereference: reading `(*p).f` or `(*p)[i]` reads whatever lives
+/// behind `p`, so a `p` flagged by a store edge makes the projected view a
+/// frame view. None when the chain has no dereference; the plain-root walk
+/// (`projection_root`) covers that side. Mirrors the escape summary's
+/// `reads_through_root`, so the two layers classify the same chains.
+fn deref_root(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Field(base, _) | ExprKind::Index(base, _) => deref_root(base),
+        ExprKind::Unary(UnOp::Deref, base) => store_root(base),
+        _ => None,
+    }
+}
+
+/// The TOP store edges of an opaque callee: any argument's view may be stored
+/// into any other. Non-view arguments carry no frame view, so an edge from one
+/// self-limits at the routing site; the cap guards the absurd arity bound.
+fn top_flow_edges(n: usize) -> Vec<(u8, u8)> {
+    let n = n.min(64);
+    let mut edges = Vec::new();
+    for i in 0..n {
+        for j in 0..n {
+            if i != j {
+                edges.push((i as u8, j as u8));
+            }
+        }
+    }
+    edges
+}
+
 /// Whether an expression is a call to the `alloc` builtin with no arguments,
 /// the uninitialized allocation form. A user function named alloc shadows the
 /// builtin, so the signature table is consulted.
@@ -2851,6 +5096,58 @@ fn lower(t: &Type, generics: &HashSet<String>) -> Ty {
     }
 }
 
+/// Spells a checked type back as an AST type for the narrow mutable-tuple record,
+/// covering only the shapes that class carries: scalars, slices, arrays, tuples,
+/// and pointers. A width of 0, a bare literal, spells its default width, matching
+/// how codegen sizes an unannotated slot. Signedness is not spelled, since codegen
+/// tracks none, so `int64` stands for both the signed and unsigned word and the
+/// slot lowers identically either way. A shape the printer cannot name faithfully,
+/// a named struct or interface, a generic hole, a future, or a function, returns
+/// `None`, so the caller declines to record and leaves the binding untouched.
+fn ty_to_ast(t: &Ty) -> Option<Type> {
+    let r = match t {
+        Ty::Int(w) => Type::Named(int_width_name(*w)?, Vec::new()),
+        Ty::Float(w) => Type::Named(float_width_name(*w)?, Vec::new()),
+        Ty::Bool => Type::Named("bool".to_string(), Vec::new()),
+        Ty::Char => Type::Named("char".to_string(), Vec::new()),
+        Ty::Str => Type::Named("string".to_string(), Vec::new()),
+        Ty::Unit => Type::Unit,
+        Ty::Ptr(b) => Type::Ptr(Box::new(ty_to_ast(b)?)),
+        Ty::RawPtr(b) => Type::RawPtr(Box::new(ty_to_ast(b)?)),
+        Ty::Slice(b) => Type::Slice(Box::new(ty_to_ast(b)?)),
+        Ty::Array(b, n) => Type::Array(Box::new(ty_to_ast(b)?), *n),
+        Ty::Tuple(ts) => {
+            Type::Tuple(ts.iter().map(ty_to_ast).collect::<Option<Vec<_>>>()?)
+        }
+        _ => return None,
+    };
+    Some(r)
+}
+
+/// The AST name for a checked integer width, defaulting a bare literal's width 0
+/// to the int64 codegen picks for it. An unrecognized width returns `None`.
+fn int_width_name(w: u32) -> Option<String> {
+    let n = match w {
+        0 | 64 => "int64",
+        32 => "int32",
+        16 => "int16",
+        8 => "int8",
+        _ => return None,
+    };
+    Some(n.to_string())
+}
+
+/// The AST name for a checked float width, defaulting a bare literal's width 0 to
+/// float64. An unrecognized width returns `None`.
+fn float_width_name(w: u32) -> Option<String> {
+    let n = match w {
+        0 | 64 => "float64",
+        32 => "float32",
+        _ => return None,
+    };
+    Some(n.to_string())
+}
+
 /// Pins a bare literal's type to its default width, int64 or float64, when it
 /// lands in an unannotated binding, matching how codegen sizes the slot.
 fn harden(t: Ty) -> Ty {
@@ -2949,7 +5246,21 @@ mod tests {
         assert!(le.is_empty(), "lex errors: {le:?}");
         let (m, pe) = parse(t);
         assert!(pe.is_empty(), "parse errors: {pe:?}");
-        check(&m)
+        let escape = crate::sema::summary::compute(&m);
+        check(&m, &escape).0
+    }
+
+    /// The whole sema pipeline: surface typeck, monomorphization, and the ground
+    /// re-check the mono-expanded module goes through. A bare async-call future
+    /// pinning a generic type parameter is only mistyped once mono runs, and the
+    /// mismatch it caused surfaced in the ground re-check, so that class of bug is
+    /// invisible to the surface-only `errs` and needs the full run.
+    fn full(src: &str) -> Vec<Diagnostic> {
+        let (t, le) = lex(src);
+        assert!(le.is_empty(), "lex errors: {le:?}");
+        let (m, pe) = parse(t);
+        assert!(pe.is_empty(), "parse errors: {pe:?}");
+        crate::sema::check(&m).0
     }
 
     #[test]
@@ -3289,6 +5600,87 @@ mod tests {
     fn returning_a_slice_of_a_slice_parameter_is_allowed() {
         let e = errs("func f(xs: int64[]) -> int64[] {\n  return xs[0..2]\n}");
         assert!(!e.iter().any(|d| d.msg.contains("escapes")), "{e:?}");
+    }
+
+    // The method-receiver sink source, shared by the reject and the two accept
+    // twins below: a Cell method `ship` sends its by-pointer receiver over a
+    // channel. The receiver is the method's implicit parameter 0, so a polluted
+    // receiver crosses a thread boundary the receiver thread outlives.
+    const METHOD_SINK_SRC: &str = "struct Cell { rows: int64[] }\n\
+         impl Cell { func ship(ch: Channel<*Cell>) -> void {\n\
+           e := chan_send(ch, self)\n\
+           e.ignore()\n\
+         } }\n\
+         func heap4() -> int64[] {\n\
+           seed: int64[4] = [1, 2, 3, 4]\n\
+           return map(seed[0..4], lambda (x: int64) -> int64 { return x })\n\
+         }\n\
+         func stash(s: int64[], c: *Cell) -> void { (*c).rows = s }\n";
+
+    #[test]
+    fn a_method_that_sends_a_polluted_receiver_over_a_channel_is_rejected() {
+        // The method-receiver twin of escchan_helper: the send lives inside a
+        // method whose hidden receiver is the sent value. A store edge polluted the
+        // receiver's heap object with a frame view, and the call c.ship(ch) threads
+        // that receiver as effective argument 0, so the self-sink method is rejected
+        // on the polluted receiver exactly as a direct chan_send would be.
+        let src = format!(
+            "{METHOD_SINK_SRC}\
+             func send_one(ch: Channel<*Cell>) -> void {{\n\
+               c: *Cell = alloc(Cell {{ rows: heap4() }})\n\
+               local: int64[4] = [111, 222, 333, 444]\n\
+               stash(local[0..4], c)\n\
+               c.ship(ch)\n\
+             }}"
+        );
+        let e = errs(&src);
+        assert!(
+            e.iter().any(|d| d.msg.contains("'ship' sends 'c' across a channel")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_method_that_sends_a_clean_receiver_over_a_channel_is_allowed() {
+        // The accept twin: nothing on the sending frame is stashed into the cell, so
+        // the receiver carries no frame view and the self-sink method call is legal.
+        // The receiver-sink check finds the receiver clean and passes it.
+        let src = format!(
+            "{METHOD_SINK_SRC}\
+             func send_one(ch: Channel<*Cell>) -> void {{\n\
+               c: *Cell = alloc(Cell {{ rows: heap4() }})\n\
+               c.ship(ch)\n\
+             }}"
+        );
+        let e = errs(&src);
+        assert!(!e.iter().any(|d| d.msg.contains("across a channel")), "{e:?}");
+    }
+
+    #[test]
+    fn a_frame_view_stored_through_a_method_receiver_pollutes_it_and_a_later_send_is_rejected() {
+        // The method-flow twin: a method `fill(s) { (*self).rows = s }` stores its
+        // slice parameter through the receiver. Called with a frame-local slice, the
+        // store edge (parameter 1 into self, parameter 0) pollutes the receiver's
+        // binding, so a later send of that receiver is caught. Proves the method
+        // call routes its receiver through the store-edge flow, not only the sink.
+        let src = "struct Cell { rows: int64[] }\n\
+             impl Cell { func fill(s: int64[]) -> void { (*self).rows = s } }\n\
+             func heap4() -> int64[] {\n\
+               seed: int64[4] = [1, 2, 3, 4]\n\
+               return map(seed[0..4], lambda (x: int64) -> int64 { return x })\n\
+             }\n\
+             func send_one(ch: Channel<*Cell>) -> void {\n\
+               c: *Cell = alloc(Cell { rows: heap4() })\n\
+               local: int64[4] = [111, 222, 333, 444]\n\
+               c.fill(local[0..4])\n\
+               e := chan_send(ch, c)\n\
+               e.ignore()\n\
+             }";
+        let e = errs(src);
+        assert!(
+            e.iter().any(|d| d.msg.contains("chan_send cannot send 'c'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -3868,6 +6260,334 @@ mod tests {
         assert!(
             e.iter().any(|d| d.msg == "submit cannot capture 'f': a future belongs to the event loop thread"),
             "{e:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_capturing_a_future_behind_a_pointer_is_rejected() {
+        // A typed future smuggled to a worker behind a managed pointer still lets
+        // the worker await it off the loop thread, which faults at runtime. The
+        // capture walk sees the future through the pointer and names the real
+        // reason, not the slice rule.
+        let e = errs(
+            "func main() -> int32 {\n  f: Future<int64> = fnew()\n  p: *Future<int64> = alloc(f)\n  t, s := spawn(lambda () -> void {\n    use(p)\n  })\n  s.ignore()\n  return 0\n}",
+        );
+        assert!(
+            e.iter().any(|d| d.msg == "spawn cannot capture 'p': a future belongs to the event loop thread"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_capturing_a_slice_behind_a_pointer_is_ok() {
+        // A pointer to heap data whose fields hold a heap-backed slice is fine to
+        // capture: the pointer targets the heap, which the generation check
+        // covers, and nothing behind it views the spawning frame, so the
+        // future-only pointer ban must not widen to reject it.
+        let e = errs(
+            "struct Holder { s: int64[] }\n\
+             func main() -> int32 {\n  seed: int64[2] = [1, 2]\n  hs := map(seed[0..2], lambda (x: int64) -> int64 { return x })\n  h: Holder = Holder { s: hs }\n  p: *Holder = alloc(h)\n  t, s := spawn(lambda () -> void {\n    use(p)\n  })\n  s.ignore()\n  return 0\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("cannot capture")), "{e:?}");
+    }
+
+    #[test]
+    fn spawn_capturing_a_pointer_whose_object_views_the_frame_is_rejected() {
+        // The reject twin: the heap copy of the struct carries a slice that still
+        // views the spawning frame's array, so the task can read the frame dead.
+        // The capture check consults the binding's flow flags, not only its type.
+        let e = errs(
+            "struct Holder { s: int64[] }\n\
+             func main() -> int32 {\n  h: Holder = Holder { s: [1, 2] }\n  p: *Holder = alloc(h)\n  t, s := spawn(lambda () -> void {\n    use(p)\n  })\n  s.ignore()\n  return 0\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'p'")), "{e:?}");
+    }
+
+    #[test]
+    fn a_bare_future_pins_a_generic_type_parameter_as_a_future() {
+        // A bare async-call future passed to a generic pins the parameter to
+        // Future<ret>, not the unwrapped return, so the instantiation and the
+        // ground re-check agree on the value's real shape. This was a false reject
+        // reporting "argument 1 has the wrong type".
+        let e = full(
+            "struct Future<T> { h: *void, gen: int64 }\n\
+             async func one() -> int64 { return 1 }\n\
+             func hold<T>(x: T) -> T { return x }\n\
+             async func amain() -> int32 {\n  f := one()\n  g := hold(f)\n  v := await g\n  println(v)\n  return 0\n}\n\
+             func main() -> int32 {\n  rc := async_run(amain())\n  return rc\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("wrong type")), "{e:?}");
+        assert!(e.is_empty(), "the bare-future generic pin must check clean: {e:?}");
+    }
+
+    #[test]
+    fn a_bare_future_passed_to_a_multi_argument_generic_checks_clean() {
+        // Two future arguments pin the same parameter; first-wins unification and
+        // the ground re-check must both see Future<int64> in each position.
+        let e = full(
+            "struct Future<T> { h: *void, gen: int64 }\n\
+             async func one() -> int64 { return 1 }\n\
+             func push2<T>(x: T, y: T) -> T { return x }\n\
+             async func amain() -> int32 {\n  f := one()\n  g := one()\n  r := push2(f, g)\n  v := await r\n  println(v)\n  return 0\n}\n\
+             func main() -> int32 {\n  rc := async_run(amain())\n  return rc\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("wrong type")), "{e:?}");
+        assert!(e.is_empty(), "a future arg in a multi-parameter generic must check clean: {e:?}");
+    }
+
+    #[test]
+    fn a_direct_await_of_an_async_call_still_checks_clean() {
+        // The direct-await path stays correct: static typing now reports the async
+        // call as Future<ret>, which the await unwraps to the element.
+        let e = full(
+            "struct Future<T> { h: *void, gen: int64 }\n\
+             async func one() -> int64 { return 1 }\n\
+             async func amain() -> int32 {\n  v := await one()\n  println(v)\n  return 0\n}\n\
+             func main() -> int32 {\n  rc := async_run(amain())\n  return rc\n}",
+        );
+        assert!(e.is_empty(), "a direct await must check clean: {e:?}");
+    }
+
+    const IFACE_TARG_MSG: &str =
+        "an interface cannot be a generic type argument; generics are monomorphized over concrete types";
+
+    #[test]
+    fn interface_generic_arg_in_param_rejected() {
+        let e = errs(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Dog { name: int64 }\n\
+             impl Speaker for Dog { func speak() -> int64 { return self.name } }\n\
+             struct Box<T> { v: T }\n\
+             func take(b: Box<Speaker>) -> int64 { return 0 }\n\
+             func main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg == IFACE_TARG_MSG), "{e:?}");
+    }
+
+    #[test]
+    fn interface_generic_arg_in_let_rejected() {
+        let e = errs(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Dog { name: int64 }\n\
+             impl Speaker for Dog { func speak() -> int64 { return self.name } }\n\
+             struct Box<T> { v: T }\n\
+             func main() -> int32 {\n\
+               b: Box<Speaker> = Box { v: Dog { name: 3 } }\n\
+               println(b.v.speak())\n\
+               return 0\n\
+             }",
+        );
+        assert!(e.iter().any(|d| d.msg == IFACE_TARG_MSG), "{e:?}");
+    }
+
+    #[test]
+    fn interface_generic_arg_buried_rejected() {
+        // A burial one level deep, Box<Pair<Speaker, int64>>, is still an
+        // interface standing in for a type parameter and is rejected.
+        let e = errs(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Pair<A, B> { first: A, second: B }\n\
+             struct Box<T> { v: T }\n\
+             func take(b: Box<Pair<Speaker, int64>>) -> int64 { return 0 }\n\
+             func main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg == IFACE_TARG_MSG), "{e:?}");
+    }
+
+    #[test]
+    fn concrete_generic_arg_accepted() {
+        // A concrete type argument monomorphizes cleanly and must not be caught
+        // by the interface rule.
+        let e = errs(
+            "struct Box<T> { v: T }\n\
+             func main() -> int32 {\n\
+               b: Box<int64> = Box { v: 5 }\n\
+               println(b.v)\n\
+               return 0\n\
+             }",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn generic_type_parameter_is_not_an_interface() {
+        // A bare type parameter T in a generic function's own signature is not an
+        // interface and must pass, even though it shares the position an interface
+        // argument would occupy.
+        let e = errs(
+            "struct Box<T> { v: T }\n\
+             func wrap<T>(x: T) -> Box<T> { return Box { v: x } }\n\
+             func main() -> int32 {\n\
+               b := wrap(5)\n\
+               println(b.v)\n\
+               return 0\n\
+             }",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn type_parameter_shadowing_an_interface_name_is_accepted() {
+        // A generic function may name its type parameter after an interface;
+        // inside the function `Speaker` is the parameter, not the interface, so
+        // `Box<Speaker>` in the signature is a parameter argument, not an interface
+        // argument, and must not be rejected.
+        let e = errs(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Dog { name: int64 }\n\
+             impl Speaker for Dog { func speak() -> int64 { return self.name } }\n\
+             struct Box<T> { v: T }\n\
+             func wrap<Speaker>(x: Speaker) -> Box<Speaker> { return Box { v: x } }\n\
+             func main() -> int32 {\n  b := wrap(5)\n  println(b.v)\n  return 0\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg == IFACE_TARG_MSG), "{e:?}");
+    }
+
+    #[test]
+    fn a_real_interface_argument_is_still_rejected_when_not_shadowed() {
+        // The shadow exemption is narrow: an interface name that is not bound as a
+        // type parameter in scope is still refused as a generic argument.
+        let e = errs(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Dog { name: int64 }\n\
+             impl Speaker for Dog { func speak() -> int64 { return self.name } }\n\
+             struct Box<T> { v: T }\n\
+             func wrap<T>(x: T) -> Box<Speaker> { return Box { v: x } }\n\
+             func main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg == IFACE_TARG_MSG), "{e:?}");
+    }
+
+    #[test]
+    fn interface_as_plain_field_still_allowed() {
+        // An interface as an ordinary, non-generic field or binding is legal; only
+        // its use as a generic type argument is refused.
+        let e = errs(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Dog { name: int64 }\n\
+             impl Speaker for Dog { func speak() -> int64 { return self.name } }\n\
+             struct Wrap { s: Speaker }\n\
+             func main() -> int32 {\n\
+               w: Wrap = Wrap { s: Dog { name: 7 } }\n\
+               println(w.s.speak())\n\
+               return 0\n\
+             }",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn a_function_local_named_self_gets_the_plain_mismatch_not_the_receiver_message() {
+        // The self-value-in-pointer check keys on the impl-method context, not on
+        // the spelling of the name. A function-local binding a user happens to call
+        // `self` is an ordinary value, so passing it where a pointer is required is
+        // a plain argument mismatch, not a receiver-value use. The tailored message
+        // must not misfire here.
+        let e = errs(
+            "struct Cell { n: int64 }\n\
+             func take(p: *Cell) -> int64 { return (*p).n }\n\
+             func main() -> int32 {\n\
+               self := Cell { n: 3 }\n\
+               println(take(self))\n\
+               return 0\n\
+             }",
+        );
+        assert!(
+            e.iter().any(|d| d.msg == "argument 1 has the wrong type"),
+            "{e:?}"
+        );
+        assert!(
+            !e.iter().any(|d| d.msg.contains("receiver value")),
+            "the receiver-value message must not fire on a plain local: {e:?}"
+        );
+    }
+
+    #[test]
+    fn an_unqualified_variant_constructor_is_rejected() {
+        // `Some(7)` without its enum prefix is not a constructor; sema names the
+        // qualified fix and fires exactly once.
+        let e = errs(
+            "enum Opt { Some(v: int64), None }\n\
+             func main() -> int32 { o := Some(7) match o { Some(v) => println(v), None => println(-1) } return 0 }",
+        );
+        assert!(
+            e.iter().any(|d| d.msg
+                == "use the qualified form 'Opt.Some' to construct an enum value; the unqualified variant name is not a constructor"),
+            "{e:?}"
+        );
+        assert_eq!(
+            e.iter().filter(|d| d.msg.contains("is not a constructor")).count(),
+            1,
+            "single diagnostic: {e:?}"
+        );
+    }
+
+    #[test]
+    fn a_function_that_shares_a_variant_name_wins_over_the_variant() {
+        // A top-level function named like a variant is dispatched as the function;
+        // the unqualified name resolves to it, not to a constructor, so no rejection
+        // fires and the call type-checks.
+        let e = errs(
+            "enum E { Flag(v: int64), Other }\n\
+             func Flag(x: int64) -> int64 { return x * 2 }\n\
+             func main() -> int32 { y := Flag(7) println(y) return 0 }",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn a_local_shadowing_a_variant_name_is_not_a_constructor_reject() {
+        // An in-scope local named like a variant is the value; calling it is not a
+        // bare-constructor attempt, so the constructor rejection stays silent.
+        let e = errs(
+            "enum Opt { Some(v: int64), None }\n\
+             func main() -> int32 { Some := 5 println(Some) return 0 }",
+        );
+        assert!(
+            !e.iter().any(|d| d.msg.contains("is not a constructor")),
+            "a local shadow must not trip the constructor rejection: {e:?}"
+        );
+    }
+
+    #[test]
+    fn a_qualified_constructor_with_the_wrong_arity_is_rejected() {
+        let e = errs(
+            "enum Opt { Some(v: int64), None }\n\
+             func main() -> int32 { o := Opt.Some() match o { Some(v) => println(v), None => println(-1) } return 0 }",
+        );
+        assert!(
+            e.iter().any(|d| d.msg == "'Opt.Some' takes 1 argument(s), but 0 were given"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_qualified_constructor_with_a_mistyped_payload_is_rejected() {
+        let e = errs(
+            "enum Opt { Some(v: int64), None }\n\
+             func main() -> int32 { o := Opt.Some(true) match o { Some(v) => println(v), None => println(-1) } return 0 }",
+        );
+        assert!(
+            e.iter().any(|d| d.msg == "argument 1 to 'Opt.Some' has the wrong type"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_variant_name_two_enums_share_checks_arity_against_the_named_enum() {
+        // With two enums sharing a variant name, a qualified constructor's arity is
+        // checked against the enum it names, not the by-name payload map's last
+        // writer, so the one-payload `A.Hit` accepts one argument even though `B`
+        // also declares a two-payload `Hit`.
+        let e = errs(
+            "enum A { Hit(v: int64), MissA }\n\
+             enum B { Hit(a: int64, b: int64), MissB }\n\
+             func takeA(x: A) -> int64 { match x { Hit(v) => return v, MissA => return -1 } }\n\
+             func main() -> int32 { println(takeA(A.Hit(3))) return 0 }",
+        );
+        assert!(
+            !e.iter().any(|d| d.msg.contains("takes")),
+            "the named enum's arity must be used: {e:?}"
         );
     }
 }

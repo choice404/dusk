@@ -1,0 +1,29 @@
+// Interprocedural escape (M5): the frame view is laundered through two frames.
+// f -> g -> id each return their parameter slice, all intraprocedurally legal.
+// make builds a frame-local array and returns f(local[0..4]); no single frame
+// sees the escape, so only the transitive summary fixpoint (f returns arg 0
+// because it returns g, which returns id, which returns its argument) catches it.
+@paradigm procedural
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+func g(s: int64[]) -> int64[] {
+    return id(s)
+}
+
+func f(s: int64[]) -> int64[] {
+    return g(s)
+}
+
+func make() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return f(local[0..4])
+}
+
+func main() -> int32 {
+    view := make()
+    println(view[0])
+    return 0
+}

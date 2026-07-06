@@ -1,0 +1,33 @@
+@paradigm procedural
+@paradigm functional
+// KNOWN RESIDUAL (deferred): an alias buried inside an aggregate returned by a
+// call is not surfaced by the escape summary, so `st := wrap(c)` where `wrap`
+// returns `Store { c: c }` forms no edge from `st` to `c`. A frame slice stored
+// through `st.c` raises `st` but not `c`, so the returned `c` is accepted here
+// even though it dangles. Generation point 5 links a call result to a pointer
+// argument only when the summary names it, and it does not reach inside a
+// returned struct. This probe documents the boundary; it must NOT be run, and a
+// later milestone that surfaces aggregate-buried aliases will flip it to a
+// reject. Kept as a check-only marker of the current front-end acceptance.
+struct Cell { rows: int64[] }
+struct Store { c: *Cell }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func wrap(c: *Cell) -> Store {
+    return Store { c: c }
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    st := wrap(c)
+    local: int64[4] = [111, 222, 333, 444]
+    (*st.c).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

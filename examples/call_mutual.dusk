@@ -1,0 +1,31 @@
+// Interprocedural escape (M5): the passthrough is mutually recursive. ping and
+// pong each return their parameter slice or defer to the other; the summary
+// fixpoint converges through the cycle to returns-argument-0 for both. make
+// slices a frame-local array and returns ping(local[0..4], 3), so a view of
+// make's dying frame is handed back through the mutual recursion.
+@paradigm procedural
+
+func ping(s: int64[], n: int64) -> int64[] {
+    if n <= 0 {
+        return s
+    }
+    return pong(s, n - 1)
+}
+
+func pong(s: int64[], n: int64) -> int64[] {
+    if n <= 0 {
+        return s
+    }
+    return ping(s, n - 1)
+}
+
+func make() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return ping(local[0..4], 3)
+}
+
+func main() -> int32 {
+    view := make()
+    println(view[0])
+    return 0
+}

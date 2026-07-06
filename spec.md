@@ -310,27 +310,29 @@ func area(s: Shape) -> float64 {
 - Generic sum types are written `Maybe<T>`. They are monomorphized at compile time.
 - Layout is a tag (the smallest integer that fits the variant count) plus storage for the largest variant's payload.
 
+A variant is constructed through the enum qualified form, `Shape.Circle(2.0)`, the same qualifier a `match` arm reads back against. The bare form, `Circle(2.0)`, is not a constructor and is rejected, `use the qualified form 'Shape.Circle' to construct an enum value; the unqualified variant name is not a constructor`, naming the fix rather than resolving the variant by its global name and risking a collision with a like named function or a stale local of the same name still in scope. A constructor's argument count and each payload's type are checked against the variant's declaration: `Shape.Circle()` with no argument, and `Shape.Rect(1.0, true)` against a `float64` second field, are each rejected at the constructor site rather than left to surface later as an unrelated mismatch once the value is read back.
+
 ---
 
 ## Expressions and Operators
 
 Added in 0.4.2. Every binary and unary operator sits on one precedence ladder, thirteen levels from loosest to tightest, each level left associative unless noted. Parentheses group as usual, and only the comparison level rejects chaining outright: `1 < 2 < 3` is a compile error, not a silently wrong bool.
 
-| Level (loosest to tightest) | Operators                       | Notes                                              |
-| ---------------------------- | -------------------------------- | --------------------------------------------------- |
-| 1. Range                     | `..` `..=`                       | only legal inside a slice index                     |
-| 2. Pipe                      | `\|>`                            | a parse time rewrite to a call, see below           |
-| 3. Or                        | `\|\|`                           |                                                       |
-| 4. And                       | `&&`                             |                                                       |
-| 5. Comparison                | `== != < <= > >=`                | not chainable                                       |
-| 6. Bitwise or                | `\|`                             |                                                       |
-| 7. Bitwise xor                | `^`                               |                                                       |
-| 8. Bitwise and                | `&`                               |                                                       |
-| 9. Shift                     | `<< >>`                          |                                                       |
-| 10. Additive                 | `+ -`                            |                                                       |
-| 11. Multiplicative           | `* / %`                          |                                                       |
-| 12. Exponent                 | `**`                             | right associative                                   |
-| 13. Unary, then postfix       | prefix `- ! ~ *`, then call, index, field | tightest, unary binds tighter than `**`             |
+| Level (loosest to tightest) | Operators                                 | Notes                                     |
+| --------------------------- | ----------------------------------------- | ----------------------------------------- |
+| 1. Range                    | `..` `..=`                                | only legal inside a slice index           |
+| 2. Pipe                     | `\|>`                                     | a parse time rewrite to a call, see below |
+| 3. Or                       | `\|\|`                                    |                                           |
+| 4. And                      | `&&`                                      |                                           |
+| 5. Comparison               | `== != < <= > >=`                         | not chainable                             |
+| 6. Bitwise or               | `\|`                                      |                                           |
+| 7. Bitwise xor              | `^`                                       |                                           |
+| 8. Bitwise and              | `&`                                       |                                           |
+| 9. Shift                    | `<< >>`                                   |                                           |
+| 10. Additive                | `+ -`                                     |                                           |
+| 11. Multiplicative          | `* / %`                                   |                                           |
+| 12. Exponent                | `**`                                      | right associative                         |
+| 13. Unary, then postfix     | prefix `- ! ~ *`, then call, index, field | tightest, unary binds tighter than `**`   |
 
 Shifts sit between `&` and `+`, and the bitwise trio nests `|` loosest, `^` in the middle, `&` tightest, so `4 | 2 ^ 3 & 1` groups as `4 | (2 ^ (3 & 1))` and `1 + 2 << 3` groups as `(1 + 2) << 3`. `**` binds tighter than the multiplicatives and right associates, so `2 ** 3 ** 2` is `2 ** (3 ** 2)`, while unary minus binds tighter than `**` at the call site, so `-2 ** 2` is `(-2) ** 2`, which is `4`.
 
@@ -474,9 +476,15 @@ These are debug build diagnostics, not language guarantees. Release builds omit 
 
 ### Escaping Value Lifetimes
 
-Added in 0.2.3, completed in 0.4.2. Two shapes of value hold a view into the returning frame rather than owning what they view, and returning either lets that view dangle the moment the frame is reclaimed. A slice into a frame local fixed array, an array literal or a range slice of one, dangles once its backing array is gone: `a slice into a local array escapes its frame; put the backing on the heap`. A closure that captures a frame local keeps that local alive only as long as its environment does, and returning the closure returns an environment about to be reclaimed: `a closure that captures a local escapes its frame; it cannot be returned`. A closure with no captures is a plain function pointer and returns fine, and a slice backed by a heap allocation or a slice parameter, whose backing the caller already owns, returns fine too.
+Added in 0.2.3, completed in 0.4.2, made interprocedural in 0.5.0. Two shapes of value hold a view into the returning frame rather than owning what they view, and returning either lets that view dangle the moment the frame is reclaimed. A slice into a frame local fixed array, an array literal or a range slice of one, dangles once its backing array is gone: `a slice into a local array escapes its frame; put the backing on the heap`. A closure that captures a frame local keeps that local alive only as long as its environment does, and returning the closure returns an environment about to be reclaimed: `a closure that captures a local escapes its frame; it cannot be returned`. A closure with no captures is a plain function pointer and returns fine, and a slice backed by a heap allocation or a slice parameter, whose backing the caller already owns, returns fine too.
 
-The check is flow sensitive and driven by the declared return shape, not only the returned expression's own syntax, so it follows a value through a binding, an alias, or a match before it reaches the return, and it sees through every carrier a fat value can ride in: a bare return, a tuple returned by literal or by name, a struct or enum returned by literal or by name, a fixed array of a reference shaped element, and any of those nested inside a generic field, at any nesting depth. `return xs[0..3]` from a `T[3]` local is caught directly; so is `return (row, 1)` when `row` is that same slice, `return Wrapper { items: row }`, `return [row, row]`, and a generic struct field that resolves to the same slice type once monomorphized. A managed pointer escape is not part of this check: dusk has no address of operator, every pointer is heap allocated, and the runtime generation check already catches a stale one at the dereference that follows.
+The check is flow sensitive and driven by the declared return shape, not only the returned expression's own syntax, so it follows a value through a binding, an alias, or a match before it reaches the return, and it sees through every carrier a fat value can ride in: a bare return, a tuple returned by literal or by name, a struct or enum returned by literal or by name, a fixed array of a reference shaped element, and any of those nested inside a generic field, at any nesting depth. `return xs[0..3]` from a `T[3]` local is caught directly; so is `return (row, 1)` when `row` is that same slice, `return Wrapper { items: row }`, `return [row, row]`, and a generic struct field that resolves to the same slice type once monomorphized. A managed pointer escape is not part of this check: dusk has no address of operator, every pointer is heap allocated, and the runtime generation check already catches a stale one at the dereference that follows. A frame view stored through a `*raw T` is not part of it either: the raw pointer layer is the same FFI boundary honor system a foreign pointer rides on, outside the escape walk by design, so keeping a view backed while a `*raw T` holds it is the caller's responsibility.
+
+The 0.4.2 check above is intraprocedural: it walks one function body and stops at a call boundary, so a view laundered out through a call it cannot see into used to dangle uncaught. `func passthrough(s: int64[]) -> int64[] { return s }`, called on a slice into a frame local array and returned again by its caller, handed back a dangling view with no diagnostic. Since 0.5.0 escape enforcement is interprocedural, driven by a summary computed for every function and lambda literal: which parameters a return value may alias, which pointer parameters' pointees the return value may expose, which parameter's view may be stored into a place another parameter reaches, and which parameters are handed to `chan_send` or `chan_try_send`, directly or through a helper that itself does the same. A method's summary treats its by pointer `self` as the first parameter, so a method that stashes a frame view through `self` or sends `self` into a channel is caught the same way a plain function is. A callee the summary cannot see through, a closure value, a function parameter, or a lambda bound to a struct field, is opaque, and an opaque call defaults to rejecting a polluted argument, a managed pointer whose pointee a store has already touched, a bare frame slice, or a frame capturing closure, rather than accepting one it cannot prove clean. Enforcement runs on the surface pass; the ground, types only pass monomorphization drives never repeats it.
+
+Escape flags now travel with an alias, not only with the binding a view was first assigned to. Every binding introduction site, a `let`, a tuple or struct destructure, a match payload binder, a `for` loop variable, and a plain assignment, links the new name into the alias group of every managed pointer, or pointer reaching value, its initializer touches; storing a frame view through any member of the group raises the whole group, so `st := Store{c: c}`, `p := st.c`, and a loop variable bound the same way all keep a later escape of `c` linked back to `st` or `p`. The link only forms for a type that can reach a managed pointer, a bare pointer, an aggregate with one buried inside, or a generic field erased to the unknown type; a slice or a scalar member links nothing, so a clean sibling field or a scalar read through the same binding is never falsely tainted.
+
+Two residuals stay open past 0.5.0. A frame view stored through a `*raw T` is still outside the escape walk entirely, the same honor system boundary the FFI layer has always carried: the raw pointer layer speaks no generation and the escape summary makes no attempt to trace a view once a raw pointer holds it, so keeping the backing alive while a `*raw T` names it is the caller's responsibility. And an alias buried inside an aggregate a call returns is not yet surfaced: `wrap(c)` returning `Store{c: c}` forms no edge from the binding that receives the struct back to the pointer argument `c` itself, so a store through the returned struct's field and a separate, later use of `c` on its own can read clean when the two in fact name the same escaped view. Closing it needs the summary to expose a per field alias inside a returned aggregate, not only a whole parameter relation, and is left to later work. A nested enum variant's payload carries the same latent gap, not yet alias linked to the binding that built it, though this stays safe today since a locally constructed enum copies its payload into the enum's own storage rather than aliasing the argument; the two gaps close together the day enum payloads alias instead of copy.
 
 An interface value is a fat pointer, a data pointer paired with a vtable pointer, and boxing a concrete struct into one works correctly when the interface value sits inside a struct field, an enum variant's payload, or an array element: the struct literal, the enum constructor, and the array literal each box the concrete value into the field, payload, or element's fat pointer as they build it, so a later method call dispatches through the stored interface exactly as it would through a bare interface binding. Boxing a struct to an interface does not work at every position, though. Returning an interface value by value is rejected outright, since the boxed payload would sit in a frame slot that dangles the moment the function returns: `returning an interface value is not supported; return the concrete type or a pointer to it`. An interface value inside a tuple, whether returned or passed as an argument, is rejected the same way in both positions rather than accepted at one and miscompiled at the other: `an interface value inside a tuple is not supported; return or pass the concrete type, or box it outside the tuple`.
 
@@ -601,6 +609,8 @@ impl DisplayName for Person {
 }
 ```
 
+`self` inside a method names the receiver's value, of the concrete struct type the impl names, not a pointer to it, even though the receiver is passed by pointer underneath and `self.field` writes back through it by design. A whole value use of `self` where a pointer is required, `return self` against a `*T` return, `self` handed into a `*T` parameter at a direct call or a method call, or an explicit `*self`, is a value where a pointer is required and is rejected at the source rather than surfacing as a stray backend type error; returning `self` where the return type is the plain struct stays legal, since that is exactly the value `self` names. `impl` targets a struct receiver only. Codegen dispatches a method call on a struct, so an enum named as an impl's receiver type is rejected outright rather than compiling into a call that never fires and a `match self` inside it that silently falls to the wrong arm.
+
 ### Structs
 
 Structs are plain data containers available across all paradigms, not gated by `@paradigm oop`. Methods can be associated with structs through `impl`. Structs use interfaces for polymorphism.
@@ -651,13 +661,13 @@ monad Maybe<T> {
 
 The standard library ships these monads through import.
 
-| Monad        | Description                                                       |
-| ------------ | ------------------------------------------------------------------ |
-| Maybe<T>     | an optional value                                                  |
-| Either<L, R> | one of two possible types                                         |
-| IO<T>        | wraps a side effecting computation, eager over its carried value   |
-| Result<T, E> | success or a typed failure (planned, not yet in the tree)          |
-| List<T>      | the list monad (planned, not yet in the tree)                     |
+| Monad        | Description                                                      |
+| ------------ | ---------------------------------------------------------------- |
+| Maybe<T>     | an optional value                                                |
+| Either<L, R> | one of two possible types                                        |
+| IO<T>        | wraps a side effecting computation, eager over its carried value |
+| Result<T, E> | success or a typed failure (planned, not yet in the tree)        |
+| List<T>      | the list monad (planned, not yet in the tree)                    |
 
 This program unwraps a `Maybe` and prints the value.
 
@@ -1092,15 +1102,15 @@ There is no rejection channel. A completer hands its value and its error through
 
 Every abort under the async keyword layer and the substrate beneath it is named and pinned by a golden.
 
-| Message | Fires when |
-| --- | --- |
-| `fatal: use of a dead future` | a future or task result is awaited, polled, or freed a second time |
-| `fatal: two tasks await one future` | a second task parks on a future that already carries a waiter |
-| `fatal: async_run re-entered the event loop` | `async_run` is called while the loop is already cranking |
+| Message                                                   | Fires when                                                                                                   |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `fatal: use of a dead future`                             | a future or task result is awaited, polled, or freed a second time                                           |
+| `fatal: two tasks await one future`                       | a second task parks on a future that already carries a waiter                                                |
+| `fatal: async_run re-entered the event loop`              | `async_run` is called while the loop is already cranking                                                     |
 | `fatal: the event loop is idle but work is still pending` | an await parks with no timer, no live thread, no in flight pool task, and no armed watch left to complete it |
-| `fatal: a task resumed in an invalid state` | a poll's entry switch sees a state its own emission never produced |
-| `fatal: a task resumed on a pending future` | a resumed poll tries to take a future still in flight, an internal invariant, not a user reachable path |
-| `fatal: out of memory` | a task, its frame, or a closure environment block cannot be allocated |
+| `fatal: a task resumed in an invalid state`               | a poll's entry switch sees a state its own emission never produced                                           |
+| `fatal: a task resumed on a pending future`               | a resumed poll tries to take a future still in flight, an internal invariant, not a user reachable path      |
+| `fatal: out of memory`                                    | a task, its frame, or a closure environment block cannot be allocated                                        |
 
 #### The cost table
 
@@ -1157,29 +1167,29 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 
 ### Standard Library Modules, Shipped and Planned
 
-| Module                | Description                                           |
-| --------------------- | ----------------------------------------------------- |
-| std.io                | print, println, printerr, file I/O                    |
-| std.logging           | structured logging with levels and output redirection |
-| std.memory.arena      | arena allocator                                       |
-| std.memory.collector  | garbage collector allocator wrapper (later)           |
-| std.functional.maybe  | Maybe<T> monad                                        |
-| std.functional.either | Either<L, R> monad                                    |
-| std.functional.result | Result<T, E> monad                                    |
-| std.functional.io     | IO<T> monad                                           |
-| std.vector            | dynamic array                                         |
-| std.map               | hash map                                              |
-| std.string            | string manipulation utilities                         |
-| std.concurrent.atomic | sequentially consistent int64 atomics                 |
-| std.concurrent.channel | bounded thread safe queue between threads            |
-| std.concurrent.pool   | the global thread pool behind the submit builtin      |
-| std.concurrent.sync   | mutex and condition variable                          |
-| std.concurrent.thread | sleep_ms beside the spawn and join builtins           |
-| std.async.future      | one shot futures: mint, complete, await, poll         |
-| std.async.loop        | the event loop's lifecycle                            |
-| std.async.time        | timers as futures the loop completes                  |
-| std.async.io          | the readiness reactor, pipes, and non blocking read/write |
-| std.async.net         | TCP over the readiness reactor, non blocking connect and accept |
+| Module                 | Description                                                     |
+| ---------------------- | --------------------------------------------------------------- |
+| std.io                 | print, println, printerr, file I/O                              |
+| std.logging            | structured logging with levels and output redirection           |
+| std.memory.arena       | arena allocator                                                 |
+| std.memory.collector   | garbage collector allocator wrapper (later)                     |
+| std.functional.maybe   | Maybe<T> monad                                                  |
+| std.functional.either  | Either<L, R> monad                                              |
+| std.functional.result  | Result<T, E> monad                                              |
+| std.functional.io      | IO<T> monad                                                     |
+| std.vector             | dynamic array                                                   |
+| std.map                | hash map                                                        |
+| std.string             | string manipulation utilities                                   |
+| std.concurrent.atomic  | sequentially consistent int64 atomics                           |
+| std.concurrent.channel | bounded thread safe queue between threads                       |
+| std.concurrent.pool    | the global thread pool behind the submit builtin                |
+| std.concurrent.sync    | mutex and condition variable                                    |
+| std.concurrent.thread  | sleep_ms beside the spawn and join builtins                     |
+| std.async.future       | one shot futures: mint, complete, await, poll                   |
+| std.async.loop         | the event loop's lifecycle                                      |
+| std.async.time         | timers as futures the loop completes                            |
+| std.async.io           | the readiness reactor, pipes, and non blocking read/write       |
+| std.async.net          | TCP over the readiness reactor, non blocking connect and accept |
 
 ---
 
@@ -1189,18 +1199,18 @@ Builtins are always available regardless of paradigm directives unless noted.
 
 ### Always Available
 
-| Builtin  | Signature             | Description                                  |
-| -------- | --------------------- | -------------------------------------------- |
-| alloc    | alloc(value?) -> \*T  | heap allocate through the in scope allocator |
-| free     | free(p: \*T) -> void  | deallocate through the in scope allocator    |
-| print    | print(...) -> void    | print to stdout, handles all primitive types |
-| println  | println(...) -> void  | print to stdout with a newline               |
-| printerr | printerr(...) -> void | println to stderr                            |
-| sizeof   | sizeof(T) -> int64    | size of a type in bytes at compile time      |
-| spawn    | spawn(f: () -> void) -> (thread, error) | start an OS thread running a lambda literal |
-| join     | join(t: thread) -> error | wait for a thread; retires the handle     |
-| submit   | submit(f: () -> void) -> error | queue a lambda literal on the global thread pool |
-| async_run | async_run(g(args)) -> T | crank the event loop until a direct async call's future completes |
+| Builtin   | Signature                               | Description                                                       |
+| --------- | --------------------------------------- | ----------------------------------------------------------------- |
+| alloc     | alloc(value?) -> \*T                    | heap allocate through the in scope allocator                      |
+| free      | free(p: \*T) -> void                    | deallocate through the in scope allocator                         |
+| print     | print(...) -> void                      | print to stdout, handles all primitive types                      |
+| println   | println(...) -> void                    | print to stdout with a newline                                    |
+| printerr  | printerr(...) -> void                   | println to stderr                                                 |
+| sizeof    | sizeof(T) -> int64                      | size of a type in bytes at compile time                           |
+| spawn     | spawn(f: () -> void) -> (thread, error) | start an OS thread running a lambda literal                       |
+| join      | join(t: thread) -> error                | wait for a thread; retires the handle                             |
+| submit    | submit(f: () -> void) -> error          | queue a lambda literal on the global thread pool                  |
+| async_run | async_run(g(args)) -> T                 | crank the event loop until a direct async call's future completes |
 
 `alloc` and `free` resolve to the in scope allocator. See [Memory Management](#memory-management).
 

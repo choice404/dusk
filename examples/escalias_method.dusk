@@ -1,0 +1,31 @@
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+// An interface method that stores through the receiver's embedded pointer
+// pollutes the object it points to. `st` wraps `h`, `check` does
+// `(*self.h).g = cb` with a frame-capturing closure, so the alias edge from `st`
+// to `h` carries the raised flag and returning `h` is caught.
+struct Holder { g: () -> int64 }
+struct Store { h: *Holder }
+interface Checker {
+    check(cb: () -> int64) -> void
+}
+impl Checker for Store {
+    func check(cb: () -> int64) -> void {
+        (*self.h).g = cb
+    }
+}
+func mk() -> *Holder {
+    h: *Holder = alloc(Holder { g: lambda () -> int64 { return 0 } })
+    st := Store { h: h }
+    local: int64[4] = [111, 222, 333, 444]
+    bad := lambda () -> int64 { return local[0] }
+    st.check(bad)
+    return h
+}
+func main() -> int32 {
+    h := mk()
+    println((*h).g())
+    free(h)
+    return 0
+}

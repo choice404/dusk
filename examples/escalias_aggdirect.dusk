@@ -1,0 +1,29 @@
+@paradigm procedural
+@paradigm functional
+// The direct-store twin of escalias_aggbind: no intermediate projection binding,
+// the frame view is stored straight through the two-layer chain
+// `(*outer.inner.c).rows = local[0..4]`. The embed walk still links `outer` to
+// the name-bound `inner` and transitively to `c`, so the store's root `outer`
+// raises the whole group and returning `c` carries the dangling frame view out,
+// which is caught.
+struct Cell { rows: int64[] }
+struct Inner { c: *Cell }
+struct Outer { inner: Inner }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    inner := Inner { c: c }
+    outer := Outer { inner: inner }
+    local: int64[4] = [111, 222, 333, 444]
+    (*outer.inner.c).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

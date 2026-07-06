@@ -134,6 +134,17 @@ fn spawning_with_a_slice_capture_is_rejected() {
 }
 
 #[test]
+fn a_bare_function_bound_to_a_value_calls_in_return_position() {
+    // `g := inc; return g(41)` and `f := id; return f(data)`: a plain top-level
+    // function used as a value lowers to a closure over a null env and a
+    // forwarding thunk, so the call dispatches through the closure path in both
+    // scalar and fat-slice return shapes. Before the func-value lowering the
+    // call was dropped and the return was a bogus `ret { ptr, i64 } 0`, which
+    // clang rejected outright.
+    assert_eq!(run("funcvalue.dusk"), "42\n111\n444\n");
+}
+
+#[test]
 fn using_a_pointer_after_sending_it_moved_is_rejected() {
     let err = check_fails("handoffuse.dusk");
     assert!(err.contains("moved pointer"), "{err}");
@@ -527,6 +538,15 @@ fn an_array_literal_slice_reads_across_a_suspension() {
 }
 
 #[test]
+fn an_array_literal_reassigns_into_a_slice_binding() {
+    // The assignment path adapts an array literal into a slice, materializing a
+    // backing and storing the fat pointer back into the binding's slot. Both
+    // branches then index a valid slice: the reassigned literal sums to 6, the
+    // untouched param slice sums to 60.
+    assert_eq!(run("sliceassign.dusk"), "6\n60\n");
+}
+
+#[test]
 fn per_iteration_boxed_interfaces_carry_distinct_backings() {
     // An async loop boxes a distinct value each iteration and stores it; each box
     // backing is a fresh cool_task_env_alloc, so the stored interfaces do not
@@ -577,6 +597,49 @@ fn an_enum_payload_of_interface_type_is_boxed() {
     // An enum variant whose payload is an interface boxes the concrete struct at
     // the constructor, so the match arm dispatches. 5.
     assert_eq!(run("enum_iface_payload.dusk"), "5\n");
+}
+
+#[test]
+fn an_unqualified_enum_constructor_is_rejected() {
+    // `Some(7)` written without its enum prefix is not a constructor. Sema refuses
+    // the bare form and names the qualified fix `Opt.Some`, before any codegen
+    // path can resolve the variant by its global name and collide with a like-
+    // named function, a stale local out of scope, or an ambiguous generic
+    // instance. The only supported spelling is the enum-qualified one.
+    let err = check_fails("enum_bare_ctor_rejected.dusk");
+    assert!(
+        err.contains("use the qualified form 'Opt.Some' to construct an enum value"),
+        "{err}"
+    );
+    assert_eq!(
+        err.matches("is not a constructor").count(),
+        1,
+        "single diagnostic: {err}"
+    );
+}
+
+#[test]
+fn an_enum_constructor_with_the_wrong_arity_is_rejected() {
+    // `Opt.Some` declares one payload field, so `Opt.Some()` with no argument is
+    // refused at the constructor site, naming the arity, rather than slipping
+    // through as the Unknown the constructor otherwise infers as.
+    let err = check_fails("enum_arity.dusk");
+    assert!(
+        err.contains("'Opt.Some' takes 1 argument(s), but 0 were given"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_enum_constructor_with_a_mistyped_payload_is_rejected() {
+    // `Opt.Some` declares an int64 payload, so `Opt.Some(true)` hands a bool where
+    // the int belongs and is refused at the constructor, rather than constructing
+    // a mistyped value the match arm would read back at the wrong width.
+    let err = check_fails("enum_payloadty.dusk");
+    assert!(
+        err.contains("argument 1 to 'Opt.Some' has the wrong type"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -772,6 +835,41 @@ fn submit_capturing_a_future_is_rejected() {
     );
 }
 
+// The three twins of the future-in-a-container goldens: widening where a future
+// may be stored, passed, or annotated left the guard rails that watch every
+// other future position firing unchanged.
+
+#[test]
+fn a_future_stored_but_never_awaited_is_still_dropped() {
+    // futurefan stores futures in a vector, but a bare async call whose future is
+    // never bound is still discarded before it can be awaited or released.
+    let err = check_fails("futuredrop.dusk");
+    assert!(err.contains("the future from 'one' is never awaited"), "{err}");
+}
+
+#[test]
+fn spawn_capturing_a_relayable_future_is_still_rejected() {
+    // futurearg passes a future to a same-thread relay, but a spawn still cannot
+    // capture one into a worker thread.
+    let err = check_fails("futurespawn.dusk");
+    assert!(
+        err.contains("spawn cannot capture 'f': a future belongs to the event loop thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_frame_viewing_future_element_in_a_container_is_still_rejected() {
+    // A Future<int64[]> stored for a Vector still trips the future-element ban at
+    // its minting site; the container position does not launder a frame-viewing
+    // element.
+    let err = check_fails("futureframe.dusk");
+    assert!(
+        err.contains("a future element cannot contain a slice, closure, or interface value"),
+        "{err}"
+    );
+}
+
 #[test]
 fn async_run_inside_an_async_func_is_rejected() {
     let err = check_fails("asyncruninside.dusk");
@@ -881,6 +979,92 @@ fn a_non_escaping_slice_from_a_param_in_a_tuple_return_checks_ok() {
     check_ok("tuple_sliceparam_ok.dusk");
 }
 
+// Interprocedural escape enforcement (M5). A frame-local view laundered through
+// a call is caught by the escape summary: a call that returns one of its frame
+// arguments is a returns-alias reject, a call that stores one into another
+// argument's place is a flows-into reject. The messages name the arguments.
+const RETURNS_VIEW: &str = "this call may return a view of argument";
+const STORES_VIEW: &str = "view is stored into argument";
+
+#[test]
+fn a_frame_slice_laundered_through_a_passthrough_call_is_rejected() {
+    let err = check_fails("call_passthrough.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_laundered_through_two_hops_is_rejected() {
+    // Only the transitive summary fixpoint sees the escape across f -> g -> id.
+    let err = check_fails("call_twohop.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_wrapped_in_a_tuple_by_a_callee_is_rejected() {
+    // The reject twin of tuple_sliceparam_ok: same tuple wrap, frame-local arg.
+    let err = check_fails("call_tuple.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_through_a_recursive_passthrough_is_rejected() {
+    // Self-recursion: the summary climbs from bottom to returns-argument-0.
+    let err = check_fails("call_recursive.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_through_a_mutually_recursive_passthrough_is_rejected() {
+    // The mutual-recursion cycle converges to returns-argument-0 for both funcs.
+    let err = check_fails("call_mutual.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_through_a_closure_value_call_is_rejected() {
+    // An opaque closure callee gets the conservative TOP: it may return any arg.
+    let err = check_fails("call_closure_callee.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_through_a_func_value_call_is_rejected() {
+    // `f := id; return f(local[0..4])`: the func value dispatches through the
+    // closure path, so the callee is opaque (TOP).
+    let err = check_fails("call_funcvalue.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_into_a_parameter_place_is_rejected() {
+    // The store edge is caught at the call site: the slice flows into the vector
+    // the caller owns through a pointer parameter.
+    let err = check_fails("stash_param.dusk");
+    assert!(err.contains(STORES_VIEW), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_into_a_returned_local_vector_is_rejected() {
+    // The slice is pushed into a local vector, which is then returned; the store
+    // edge that polluted the vector names the escape at the returned pointer.
+    let err = check_fails("stash_vector.dusk");
+    assert!(err.contains(STORES_VIEW), "{err}");
+}
+
+#[test]
+fn a_passthrough_of_a_slice_the_frame_does_not_own_checks_ok() {
+    // The accept side of the interprocedural line: relay returns its PARAMETER
+    // slice, whose backing the caller owns, so the passthrough is not rejected.
+    check_ok("passthrough_ok.dusk");
+}
+
+#[test]
+fn a_frame_view_laundered_through_a_call_but_used_in_frame_checks_ok() {
+    // A frame view returned by a passthrough but consumed within the owning frame
+    // never dangles, so it stays accepted.
+    check_ok("calluse_local.dusk");
+}
+
 #[test]
 fn an_escaping_slice_tuple_returned_by_name_is_rejected() {
     let err = check_fails("esctuple_slice_bind.dusk");
@@ -968,12 +1152,43 @@ fn an_inner_param_slice_shadowing_an_outer_local_array_runs() {
 }
 
 #[test]
-fn reassigning_a_tuple_binding_to_a_clean_value_checks_ok() {
+fn reassigning_a_tuple_binding_to_a_clean_value_runs() {
     // The reassign-to-clean no-over-reject: a mut binding that started escaping is
     // reassigned to a param slice, so the stale flag is cleared and the return is
-    // legal. Checked only, since building a tuple whose member representation
-    // changes across the reassignment is a separate codegen concern.
-    check_ok("tuple_reassign_clean_ok.dusk");
+    // legal. Now built and run too: the surface pass records the binding's slice
+    // tuple storage, so codegen sizes the slot as a slice and the array-literal
+    // initializer and the slice reassignment both store into it. s[0] is 10 from
+    // the param slice, n is the reassigned 9.
+    assert_eq!(run("tuple_reassign_clean_ok.dusk"), "10\n9\n");
+}
+
+#[test]
+fn a_mutable_tuple_with_an_array_literal_member_stores_as_a_slice() {
+    // The narrow mutable-tuple storage class: an unannotated `mut t := ([..], n)`
+    // infers its array-literal member as a slice, since the later `t = (xs, m)`
+    // stores one, so the slot is sized as a slice tuple. Reads the slice member's
+    // element sum and the int member on both sides of the reassignment.
+    assert_eq!(run("muttuple.dusk"), "6\n5\n15\n9\n");
+}
+
+#[test]
+fn the_mutable_tuple_slice_storage_still_rejects_a_frame_escape() {
+    // The storage reshape must not weaken the escape guard: the reshaped binding is
+    // reassigned to another frame-local array tuple and returned, so its slice
+    // member views a dead frame and the return is rejected exactly as before.
+    let err = check_fails("muttuple_escape.dusk");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_mutable_tuple_slice_storage_runs_inside_an_async_body() {
+    // The same class inside an async body, where every local slot is backed by the
+    // task frame arena. The slice tuple slot is sized on the frame and both the
+    // initializer and the reassignment store into it. Sums are 6+5 then 15+9.
+    assert_eq!(run("muttuple_async.dusk"), "11\n24\n");
 }
 
 #[test]
@@ -985,6 +1200,14 @@ fn a_conditional_reassignment_to_an_escaping_tuple_is_rejected() {
 #[test]
 fn a_conditional_re_slice_of_a_local_array_is_rejected() {
     let err = check_fails("flowmerge_reslice_in_if.dusk");
+    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+}
+
+#[test]
+fn a_conditional_reassignment_to_an_array_literal_slice_then_returned_is_rejected() {
+    // The assignment-path array-literal coercion is legal, but the may-join keeps
+    // r's escape flag raised, so returning the frame-local backing is still caught.
+    let err = check_fails("sliceassign_escape.dusk");
     assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
 }
 
@@ -1342,6 +1565,739 @@ fn a_struct_field_holding_a_capturing_lambda_returned_out_of_its_frame_is_reject
     );
 }
 
+// M5 gate false-accept fixes: each family of view-laundering the escape analysis
+// missed, now rejected. The heap-graph launderings (Family A) read a frame view
+// back out of a heap object a store edge polluted; the point fixes catch a
+// loop-carried alias chain, a higher-order element passthrough, a non-literal
+// tuple destructure, a for-loop variable, a re-sliced call result, and a store
+// through a borrowed-parameter pointer.
+
+#[test]
+fn a_frame_view_read_back_out_of_a_vector_is_rejected() {
+    let err = check_fails("escvecget_readback.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn allocating_a_struct_whose_slice_field_views_a_local_is_rejected() {
+    let err = check_fails("escalloc_view.dusk");
+    assert!(
+        err.contains("this returns a pointer to an object that stores a view of the current frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn returning_a_polluted_pointer_through_move_is_rejected() {
+    let err = check_fails("escmove_polluted.dusk");
+    assert!(
+        err.contains("this returns a pointer to an object that stores a view of the current frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn returning_a_polluted_pointer_through_a_passthrough_is_rejected() {
+    let err = check_fails("escptr_passthrough.dusk");
+    assert!(
+        err.contains("this returns a pointer to an object that stores a view of the current frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn storing_a_view_through_a_borrowed_parameter_pointer_is_rejected() {
+    let err = check_fails("escptr_borrow.dusk");
+    assert!(
+        err.contains("a frame view is stored through a pointer that borrows argument 1"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_loop_carried_alias_chain_that_launders_a_frame_view_is_rejected() {
+    let err = check_fails("escloop_carried.dusk");
+    assert!(err.contains("views the current frame"), "{err}");
+}
+
+#[test]
+fn an_intraprocedural_loop_carried_alias_chain_is_rejected() {
+    let err = check_fails("escloop_carried_intra.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn a_struct_wrapping_a_polluted_pointer_field_is_rejected() {
+    let err = check_fails("escholder_ptr.dusk");
+    assert!(err.contains("may outlive this frame"), "{err}");
+}
+
+#[test]
+fn a_map_over_frame_view_elements_with_an_identity_lambda_is_rejected() {
+    let err = check_fails("escmap_identity.dusk");
+    assert!(err.contains("views the current frame"), "{err}");
+}
+
+#[test]
+fn a_fold_returning_a_frame_view_init_is_rejected() {
+    let err = check_fails("escfold_init.dusk");
+    assert!(err.contains("views the current frame"), "{err}");
+}
+
+#[test]
+fn destructuring_a_call_result_that_launders_a_frame_view_is_rejected() {
+    let err = check_fails("escdestructure_call.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn destructuring_a_tuple_binding_holding_a_frame_view_is_rejected() {
+    let err = check_fails("escdestructure_bind.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn a_for_loop_variable_over_a_laundered_frame_view_iterand_is_rejected() {
+    let err = check_fails("escforvar_call.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn a_for_loop_variable_over_a_frame_local_slice_of_slices_is_rejected() {
+    let err = check_fails("escforvar_reslice.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn re_slicing_a_laundered_call_result_is_rejected() {
+    let err = check_fails("escreslice_call.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+// M5 gate round two: the structural unification. Stores route through one
+// abstract-value walk (frame bit, parameter origins, pointer reads all travel
+// every join), parameters seed by type reachability, lambda bodies get the same
+// walk a function does, filter and fold are set-side models, and the spawn
+// capture check consults the flow flags.
+
+#[test]
+fn a_direct_store_of_a_frame_view_into_a_parameter_place_is_rejected() {
+    let err = check_fails("escstore_param.dusk");
+    assert!(err.contains("stored into a place reachable through parameter"), "{err}");
+}
+
+#[test]
+fn a_readback_through_a_struct_wrapped_pointer_param_is_rejected() {
+    let err = check_fails("escstruct_ptr_param.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn a_pointer_readback_stored_into_a_second_parameter_is_rejected() {
+    let err = check_fails("escreadback_store.dusk");
+    assert!(err.contains("view is stored into argument"), "{err}");
+}
+
+#[test]
+fn a_store_through_a_borrow_laundered_by_a_call_is_rejected() {
+    let err = check_fails("escborrow_call.dusk");
+    assert!(err.contains("borrows argument 1"), "{err}");
+}
+
+#[test]
+fn a_store_through_a_borrow_laundered_by_a_destructure_is_rejected() {
+    let err = check_fails("escborrow_destructure.dusk");
+    assert!(err.contains("borrows argument 1"), "{err}");
+}
+
+#[test]
+fn a_map_lambda_aliasing_its_element_through_a_local_is_rejected() {
+    let err = check_fails("escmap_alias.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_map_lambda_laundering_its_element_through_a_call_is_rejected() {
+    let err = check_fails("escmap_launder.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_named_function_mapper_that_returns_its_param_is_rejected() {
+    let err = check_fails("escmap_named.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_map_lambda_wrapping_its_element_in_a_tuple_is_rejected() {
+    let err = check_fails("escmap_tuple.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_foreach_lambda_stashing_its_element_through_a_capture_is_rejected() {
+    let err = check_fails("escforeach_stash.dusk");
+    assert!(err.contains("stored into a place reachable through parameter"), "{err}");
+}
+
+#[test]
+fn a_filter_over_view_elements_is_rejected_regardless_of_predicate() {
+    let err = check_fails("escfilter_elems.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_fold_lambda_returning_its_element_parameter_is_rejected() {
+    let err = check_fails("escfold_element.dusk");
+    assert!(err.contains(RETURNS_VIEW), "{err}");
+}
+
+#[test]
+fn a_polluted_pointer_destructured_out_of_a_tuple_is_rejected() {
+    let err = check_fails("escptr_destructure.dusk");
+    assert!(
+        err.contains("this returns a pointer to an object that stores a view of the current frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_polluted_pointer_returned_through_a_field_projection_is_rejected() {
+    let err = check_fails("escptr_field.dusk");
+    assert!(
+        err.contains("this returns a pointer to an object that stores a view of the current frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn spawning_a_lambda_that_captures_a_polluted_pointer_is_rejected() {
+    let err = check_fails("escspawn_polluted.dusk");
+    assert!(err.contains("spawn cannot capture 'c'"), "{err}");
+}
+
+#[test]
+fn sending_a_polluted_pointer_over_a_channel_is_rejected() {
+    // A channel of pointers passes the element-type ban, but a sent pointer
+    // whose heap object stores a view of the sending frame would dangle in the
+    // receiver, so the send check consults the binding's flow flags, the same
+    // flow a spawn or submit capture is refused for.
+    let err = check_fails("escchan_polluted.dusk");
+    assert!(err.contains("chan_send cannot send 'c'"), "{err}");
+}
+
+#[test]
+fn sending_a_polluted_pointer_through_a_relay_helper_is_rejected() {
+    // The interprocedural twin: the send happens inside a relay(ch, c) helper one
+    // hop from the frame that owns the pointer, so the leaf-site send check cannot
+    // see it. The escape summary records that relay sinks its parameter into a
+    // channel, and the caller is rejected for handing it a polluted pointer, the
+    // store that polluted it naming the site (the u6 hole).
+    let err = check_fails("escchan_helper.dusk");
+    assert!(err.contains("'relay' sends 'c' across a channel"), "{err}");
+}
+
+#[test]
+fn a_helper_that_fuses_a_frame_store_and_a_channel_send_is_rejected() {
+    // The fused twin of escchan_helper: one helper both stashes the caller's slice
+    // into the pointer's heap object and sends that pointer over a channel in the
+    // same body. The store edge and the sink live in one summary, so the call-site
+    // sink check reads the pointer as clean (the store has not raised its flag
+    // yet). The store-edge closure of the sink set lifts the sink to the source
+    // position, so the frame view the caller supplies in that argument is caught.
+    let err = check_fails("escchan_stash_send.dusk");
+    assert!(err.contains("'stash_send' sends 'local' across a channel"), "{err}");
+}
+
+#[test]
+fn sending_a_polluted_pointer_through_a_direct_lambda_call_is_rejected() {
+    // The closure twin of escchan_helper: the send lives inside a lambda bound to
+    // a local, and the caller calls it directly one hop from the frame that owns
+    // the pointer. A lambda carries no computed summary, so the escape pass
+    // records the lambda's own sink set by span and the checker reads it at the
+    // direct call, rejecting the polluted argument the same as a named relay
+    // helper would. Single-fires: only the closure sink check names it.
+    let err = check_fails("escchan_lambda.dusk");
+    assert!(err.contains("'sender' sends 'c' across a channel"), "{err}");
+    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+}
+
+#[test]
+fn sending_a_polluted_pointer_through_an_opaque_higher_order_call_is_rejected() {
+    // The opaque higher-order twin: run(f, c) { f(c) } forwards its pointer
+    // parameter to a function value, and the caller passes a sinking lambda and a
+    // polluted pointer. run sends nothing itself, but calling an opaque function
+    // value may hand the argument to a channel, so run sinks its parameter and the
+    // caller is rejected. The single managed argument leaves the TOP cross-flow no
+    // second place to route through, so the sink relation is the sole catch.
+    let err = check_fails("escchan_hof.dusk");
+    assert!(err.contains("'run' sends 'c' across a channel"), "{err}");
+}
+
+#[test]
+fn a_polluted_pointer_through_a_lambda_reassigned_to_a_sinking_one_is_rejected() {
+    // The value-flow wash the default-deny closes: a mut binding first holds a
+    // clean lambda, then is reassigned to a sinking one and called with a polluted
+    // pointer. The reassignment re-records the new lambda's sink set on the
+    // binding, so the direct call is checked against exactly what it now holds and
+    // the polluted argument is refused, the same reject a direct chan_send earns.
+    let err = check_fails("escchan_reassign.dusk");
+    assert!(err.contains("'s' sends 'c' across a channel"), "{err}");
+    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+}
+
+#[test]
+fn a_polluted_pointer_through_a_lambda_in_a_struct_field_callee_is_rejected() {
+    // A sinking lambda laundered into a struct field and invoked through the field
+    // callee, box.f(c), on a polluted pointer. A field callee is opaque to the
+    // send analysis, so the conservative send-reject fires: dusk cannot see which
+    // argument it hands to a channel, so a polluted managed pointer is refused.
+    let err = check_fails("escchan_field.dusk");
+    assert!(err.contains("this call may send 'c' across a channel"), "{err}");
+    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+}
+
+#[test]
+fn sending_a_polluted_receiver_through_a_method_is_rejected() {
+    // The method-receiver twin of escchan_helper: the channel send lives inside a
+    // method whose hidden first parameter is the by-pointer receiver,
+    // ship(ch) { chan_send(ch, self) }, so the sent value is the receiver itself.
+    // A method call hides that receiver from the leaf and helper send checks (the
+    // callee is a field expression and the receiver is not in the argument list),
+    // so the escape summary computes the method with self as parameter 0 and marks
+    // it a self-sink, and the call c.ship(ch) threads its receiver as effective
+    // argument 0. A pointer whose heap object a store edge polluted with a frame
+    // view is rejected exactly as a direct chan_send(ch, c) is. Single-fires.
+    let err = check_fails("escchan_method.dusk");
+    assert!(err.contains("'ship' sends 'c' across a channel"), "{err}");
+    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+}
+
+#[test]
+fn returning_self_where_a_pointer_is_declared_is_rejected() {
+    // `self` is the receiver value, of the concrete struct type; a bare `self`
+    // loads that value in codegen, so `return self` against a `*Cell` return
+    // hands the struct where the fat pointer belongs. The checker types `self` as
+    // the value and rejects the pointer-position use by name, on the surface pass,
+    // rather than letting the backend fault on the type. Single-fires: the precise
+    // self message suppresses the generic return mismatch that would double it.
+    let err = check_fails("escself_ptr.dusk");
+    assert!(
+        err.contains("cannot use 'self' where a pointer is required"),
+        "{err}"
+    );
+    assert_eq!(
+        err.matches("where a pointer is required").count(),
+        1,
+        "single diagnostic: {err}"
+    );
+}
+
+#[test]
+fn passing_self_by_value_into_a_pointer_method_parameter_is_rejected() {
+    // The method-call argument twin of escself_ptr: `s.grab(self)` hands the
+    // value `self` into `grab`'s `*Cell` parameter. A method call is otherwise
+    // opaque to inference, but the callee's parameters are known from the impl,
+    // so the value-self-in-pointer use earns the same precise message a direct
+    // call and a return already get, rather than a stray backend fault. Single-
+    // fires: only the self-value message, not a doubled generic mismatch.
+    let err = check_fails("escself_methodarg.dusk");
+    assert!(
+        err.contains("cannot use 'self' where a pointer is required"),
+        "{err}"
+    );
+    assert_eq!(
+        err.matches("where a pointer is required").count(),
+        1,
+        "single diagnostic: {err}"
+    );
+}
+
+#[test]
+fn an_impl_on_an_enum_receiver_is_rejected() {
+    // Codegen dispatches a method call only on a struct receiver; a method on an
+    // enum emits no call and a `match self` in its body falls to the non-enum
+    // path whose arms are unconditional, so it would silently yield a wrong
+    // value. Sema rejects the impl on an enum before that lowering is reached,
+    // naming the fix, so the illegal form fails loudly at the source.
+    let err = check_fails("escimpl_enum.dusk");
+    assert!(
+        err.contains("methods on the enum 'Opt' are not supported"),
+        "{err}"
+    );
+}
+
+#[test]
+fn returning_self_by_value_compiles_and_runs() {
+    // The value-return twin of escself_ptr: the method returns `self` where the
+    // return type is `Cell`, the receiver value itself, so codegen loads the
+    // receiver and returns the struct and the call binds a fresh copy. Proves
+    // `return self` stays legal against a value return; only the pointer position
+    // is rejected.
+    assert_eq!(run("selfvalue_ok.dusk"), "7\n");
+}
+
+#[test]
+fn a_polluted_pointer_through_a_lambda_destructured_from_a_tuple_is_rejected() {
+    // A sinking lambda packed into a tuple, destructured back out, and called
+    // through the destructured binding, g(c), on a polluted pointer. A binding
+    // sourced from a tuple destructure is opaque to the send analysis, so the
+    // conservative send-reject refuses the polluted managed pointer argument.
+    let err = check_fails("escchan_tuple.dusk");
+    assert!(err.contains("this call may send 'c' across a channel"), "{err}");
+    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+}
+
+#[test]
+fn a_polluted_pointer_through_a_local_bound_to_a_sinking_module_function_is_rejected() {
+    // The resolvable-fn-bind leaf path: f := relay resolves the local to relay's
+    // known relation, so calling f(ch, c) with a polluted pointer is checked
+    // against relay's sink set and refused exactly as a direct relay(ch, c) is. A
+    // name proven bound to one fixed sinking function is not opaque, but its
+    // precise sink relation still catches the send, one diagnostic, not the
+    // spurious cross-flow the opaque TOP would have added.
+    let err = check_fails("escchan_fnbind.dusk");
+    assert!(err.contains("'f' sends 'c' across a channel"), "{err}");
+    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+}
+
+#[test]
+fn a_polluted_pointer_returned_through_a_match_arm_binder_is_rejected() {
+    let err = check_fails("escptr_match.dusk");
+    assert!(
+        err.contains("this returns a pointer to an object that stores a view of the current frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_frame_view_read_back_through_a_bare_dereference_is_rejected() {
+    let err = check_fails("escderef_slice.dusk");
+    assert!(err.contains("escapes its frame"), "{err}");
+}
+
+#[test]
+fn a_frame_view_stored_through_a_captured_pointer_in_a_lambda_is_rejected() {
+    // A lambda bound to a local stores its parameter through a captured managed
+    // pointer, and the caller invokes it with a view of a frame-local array. The
+    // captured place is not one of the lambda's arguments, so the escape pass
+    // records the capture-flow edge by the lambda's span and the checker raises the
+    // captured binding's flag at the direct call; returning the pointer then dangles.
+    let err = check_fails("esccapture_store.dusk");
+    assert!(
+        err.contains("this returns a pointer to an object that stores a view of the current frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_frame_slice_handed_to_an_opaque_field_lambda_callee_is_rejected() {
+    // The struct-field variant: the capturing lambda is laundered into a struct
+    // field and invoked through the field callee on a bare frame slice. A field
+    // callee is opaque to the escape analysis, so a frame slice handed to it is
+    // refused conservatively, the capture store hidden behind a struct field.
+    let err = check_fails("esccapture_field.dusk");
+    assert!(
+        err.contains("this call may store a view of the current frame beyond it"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_frame_capturing_closure_handed_to_an_opaque_field_lambda_callee_is_rejected() {
+    // The closure variant of esccapture_field: a lambda that captures a frame
+    // local, bad := lambda () { return local[0] }, is handed to a struct-field
+    // lambda callee, box.f(bad), whose body stashes it through a captured managed
+    // pointer, (*h).g = cb. A field callee is opaque to the escape analysis, so a
+    // frame-capturing closure handed to it is refused conservatively, the capture
+    // store hidden behind a struct field the flow model cannot follow. Returning
+    // h then dangles, since (*h).g holds a closure viewing the dead frame.
+    let err = check_fails("esccapture_closure.dusk");
+    assert!(
+        err.contains("this call may store a closure that captures the current frame beyond it"),
+        "{err}"
+    );
+}
+
+// M5 alias-set propagation rejects. A frame view stored through one name of an
+// alias group taints every name in the group, so a later return of a different
+// name is caught. Each names the same returned-pointer escape: the store landed
+// in the heap object the returned pointer reaches, through the alias edge.
+const ALIAS_ESCAPE: &str =
+    "this returns a pointer to an object that stores a view of the current frame";
+
+#[test]
+fn a_frame_slice_stored_through_a_struct_embedded_pointer_is_rejected() {
+    // The direct store: `(*st.c).rows = local[0..4]` where `st` embeds `c`; the
+    // aggregate-embed alias edge carries the raised flag from `st` to `c`.
+    let err = check_fails("escalias_embed.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_ref_alias_is_rejected() {
+    // A `ref q := c` aliases `c`; a store through `q` taints `c`.
+    let err = check_fails("escalias_ref.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_closure_stored_by_an_interface_method_through_the_receiver_is_rejected() {
+    // A method `(*self.h).g = cb` pollutes the object the receiver embeds; the
+    // alias edge from `st` to `h` catches the returned `h`.
+    let err = check_fails("escalias_method.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_closure_stored_by_a_helper_through_a_struct_embedded_pointer_is_rejected() {
+    // A named helper `(*st.h).g = cb` raises `st`; the embed edge taints `h`.
+    let err = check_fails("escalias_helper.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_by_a_helper_through_a_struct_embedded_pointer_is_rejected() {
+    // The slice twin of escalias_helper: `(*st.c).rows = s` taints the embedded c.
+    let err = check_fails("escalias_slice.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_destructured_pointer_binder_is_rejected() {
+    // `t := (c, 1); a, n := t` links `a` to `c` transitively; a store through `a`
+    // taints `c`.
+    let err = check_fails("escalias_destructure.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_ref_alias_chain_is_rejected() {
+    // `ref c := p; ref q := c` resolves transitively; a store through `q` taints p.
+    let err = check_fails("escalias_borrowchain.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_conditionally_reassigned_alias_is_rejected() {
+    // The may-join: `mut q := c; if cnd { q = d }` unions `d` on top of `c`, so a
+    // store through `q` taints both. Returning the first-branch pointer is caught,
+    // which a straight-line replace would wrongly accept.
+    let err = check_fails("escalias_reassign.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_call_result_alias_is_rejected() {
+    // Generation point 5: `d := same(c)` where `same`'s summary returns argument 0
+    // links `d` to `c`; a store through `d` taints `c`.
+    let err = check_fails("escalias_call.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_deeply_nested_embedded_pointer_is_rejected() {
+    // The embed walk descends nested aggregates: `o := Outer { inner: Inner { c:
+    // c } }` links `o` to `c` a layer down, so `(*o.inner.c).rows = local[0..4]`
+    // raises `o` and the edge taints `c`.
+    let err = check_fails("escalias_nested.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_field_projection_rebind_is_rejected() {
+    // Generation point 6a: `x := st.c` reads a managed pointer by value out of a
+    // struct field and joins the root's alias group, so a store through `x`
+    // taints the embedded `c` a later return escapes.
+    let err = check_fails("escalias_proj.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_an_array_index_rebind_is_rejected() {
+    // Generation point 6b: `x := arr[0]` reads a managed pointer by value out of
+    // an array element and joins the array's alias group, so a store through `x`
+    // taints the embedded `c` a later return escapes.
+    let err = check_fails("escalias_index.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_deref_projection_rebind_is_rejected() {
+    // Generation point 6c: `b := alloc(Box { c: c })` embeds `c` in the heap
+    // object, `x := (*b).c` reads the pointer back out and joins the group, so a
+    // store through `x` taints `c` a later return escapes.
+    let err = check_fails("escalias_derefproj.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_generic_field_projection_rebind_is_rejected() {
+    // Generation point 6d: `x := st.c` where `st: Box<*Cell>` reads the managed
+    // pointer out of a GENERIC field whose erased type `T` makes `chain_ty`
+    // resolve to Unknown. The projection gate treats Unknown as a maybe and still
+    // joins the group, so the store through `x` taints the embedded `c` a later
+    // return escapes. The concrete twin is escalias_proj; without the Unknown
+    // widening the erased field read as unmanaged and the store escaped silently.
+    let err = check_fails("escalias_generic.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_generic_deref_projection_rebind_is_rejected() {
+    // Generation point 6e: `x := (*w).inner` where `w: *Wrap<*Cell>` reads the
+    // managed pointer back out of the heap object through a generic field of
+    // erased type `T`, so `chain_ty` resolves to Unknown and the projection gate
+    // joins the group on the maybe. The store through `x` taints `c` a later
+    // return escapes. The concrete twin is escalias_derefproj.
+    let err = check_fails("escalias_genderef.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_name_bound_intermediate_aggregate_is_rejected() {
+    // The generalized embed: `inner := Inner { c: c }; outer := Outer { inner:
+    // inner }` binds the intermediate aggregate to a name before embedding it. The
+    // embed walk links `outer` to the name `inner` (whose type reaches a managed
+    // pointer) and the group reaches `c`, so the projection `x := outer.inner.c`
+    // joins it and a store through `x` taints `c`. The nested-literal twin is
+    // escalias_nested; here the layer is a named binding, which the bare-pointer
+    // embed gate used to walk past.
+    let err = check_fails("escalias_aggbind.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_directly_through_a_name_bound_intermediate_aggregate_is_rejected() {
+    // The direct-store twin of escalias_aggbind: `(*outer.inner.c).rows =
+    // local[0..4]` with no projection binding. The embed edge from `outer` to the
+    // name-bound `inner` still reaches `c`, so the store's root raises the group
+    // and returning `c` is caught.
+    let err = check_fails("escalias_aggdirect.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_two_level_generic_wrapper_is_rejected() {
+    // A managed pointer buried two erased-generic layers deep: `inner: Box<*Cell>`
+    // then `outer: Box<Box<*Cell>>`. The embed walk links `outer` to the name
+    // `inner` because `Box<*Cell>` reaches a managed pointer, and the Unknown-erased
+    // projection `x := outer.c.c` joins the group, so a store through `x` taints
+    // `c`. Both the reaches-managed embed widening and the Unknown projection
+    // widening are needed; either alone misses the two-level case.
+    let err = check_fails("escalias_twolevel.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_struct_returned_by_value_that_shares_a_polluted_pointer_is_rejected() {
+    // A struct copied by value shares the pointer it embeds: `inner := Inner { c:
+    // alloc(...) }` and `outer := Outer { inner: inner }` hold two copies of the
+    // same `*Cell`. A frame view stored through `outer.inner.c` raises `outer` and
+    // the embed edge carries the flag back to `inner`, so returning the `inner`
+    // struct by value hands out a struct whose pointer reaches the dangling view.
+    // Caught here as a fat-value escape on the returned struct.
+    let err = check_fails("escalias_structcopy.dusk");
+    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_an_aggregate_projection_rebind_is_rejected() {
+    // A projection that reads out an intermediate aggregate, not a bare pointer:
+    // `y := outer.inner` binds a concrete `Inner` (not managed, not Unknown), but
+    // `Inner` reaches a managed pointer, so the projection gate links `y` to the
+    // root `outer` and the group reaches `c`. A store through `y.c` taints `c` and
+    // returning `c` is caught. The bare-pointer projection twin is escalias_proj;
+    // this proves the gate widened from is-managed to reaches-managed.
+    let err = check_fails("escalias_aggproj.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_destructured_aggregate_member_is_rejected() {
+    // A destructure binder that takes an intermediate aggregate member, not a bare
+    // pointer: `a, n := (inner, 1)` binds `a` to `Inner`, whose type reaches a
+    // managed pointer, so the destructure links `a` to `inner` and transitively to
+    // `c`. The projection `x := a.c` joins the group and a store through `x` taints
+    // `c`. The bare-pointer destructure twin is escalias_destructure; this proves
+    // the destructure member gate widened from is-managed to reaches-managed, the
+    // same predicate the embed walk and projection gate now share.
+    let err = check_fails("escalias_aggdestructure.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_an_aggregate_member_destructured_from_a_tuple_binding_is_rejected() {
+    // The whole-value twin of escalias_aggdestructure: the aggregate member is
+    // taken through a tuple BINDING, not a tuple literal, so `a, n := t` routes the
+    // no-per-position-expression path. `st := Store { c: c }` embeds `c`, `t := (st,
+    // 7)` links `t` to `st` to `c`, and the binder `a` (a `Store`, whose type
+    // reaches a managed pointer) joins `t`'s whole group through the shared
+    // binding-alias choke. A store through `a.c` taints `c` and returning `c` is
+    // caught. This proves the whole-value binder gate widened from is-managed to
+    // reaches-managed, so an aggregate binder that only buries a pointer joins too;
+    // the accept twin, storing only a scalar, is aliastupledestr_ok.
+    let err = check_fails("escalias_tupledestr.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_match_payload_binder_is_rejected() {
+    // The binding-alias choke reaches every binding-introduction site, not only
+    // the let form: a match payload binder projects the scrutinee's payload, so
+    // `o := Some(c)` embeds `c`, `Some(p)` links `p` to `o` (to `c`), and a store
+    // through `(*p).rows` taints `c`. Returning `c` is caught. The accept twin,
+    // storing only a scalar, is aliasmatch_ok.
+    let err = check_fails("escalias_matchbind.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_for_loop_variable_is_rejected() {
+    // The for-var binding site through the same choke: `arr := [c]` embeds `c`,
+    // iterating `arr[0..1]` binds `p` to an element so `p` aliases the array's
+    // group, and a store through `(*p).rows` taints `c`. Returning `c` is caught.
+    // The accept twin, storing only a scalar, is aliasforvar_ok.
+    let err = check_fails("escalias_forvar.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+#[test]
+fn a_frame_slice_stored_through_a_reassigned_aggregate_is_rejected() {
+    // The Assign site through the same choke, with the reassign join: `mut outer
+    // := Outer { inner: d }` then `outer = Outer { inner: c }` drops the old edge
+    // to `d` and embeds `c`, so a store through `(*outer.inner).rows` taints `c`.
+    // Returning `c` is caught, which the pre-choke Assign path missed by dropping
+    // the group on any aggregate reassign. The accept twin, storing only a scalar,
+    // is aliasassign_ok.
+    let err = check_fails("escalias_assignembed.dusk");
+    assert!(err.contains(ALIAS_ESCAPE), "{err}");
+}
+
+// M5 alias-set documented residual (deferred): an alias buried inside an aggregate
+// returned by a call is not surfaced by the escape summary, so `st := wrap(c)` with
+// `wrap` returning `Store { c: c }` forms no edge from `st` to `c`, and a store
+// through `st.c` then returning `c` is accepted here even though it dangles. This
+// marks the current front-end acceptance boundary; a later milestone that surfaces
+// aggregate-buried aliases will flip it to a reject. It is a check-only marker, not
+// a run golden, since running it would read a dangling view.
+#[test]
+fn an_alias_buried_in_a_returned_aggregate_is_a_documented_residual() {
+    check_ok("escalias_wrap_residual.dusk");
+}
+
+#[test]
+fn a_match_binder_alias_with_only_a_scalar_store_is_accepted() {
+    // The accept twin of escalias_matchbind: the payload binder aliases the
+    // scrutinee's embedded pointer, but storing only a scalar through it raises
+    // no frame-view flag, so the coarse alias link rejects nothing. Now a run
+    // golden: the local-enum construct-and-match codegen path lands the bare
+    // `Some(c)` constructor, so `(*p).n = 42` writes through the copied pointer
+    // and `(*c).n` reads it back as 42. The payload copies rather than aliasing
+    // the enum blob, so no new frame view is minted and the program is accepted.
+    assert_eq!(run("aliasmatch_ok.dusk"), "42\n");
+}
+
 macro_rules! golden {
     ($name:ident, $file:literal, $expected:literal) => {
         #[test]
@@ -1352,6 +2308,125 @@ macro_rules! golden {
 }
 
 golden!(hello, "hello.dusk", "hello, world\n");
+// M5 interprocedural-escape accept goldens: a passthrough of a non-frame slice,
+// and a frame view laundered through a call but consumed in the owning frame.
+golden!(passthrough_ok, "passthrough_ok.dusk", "10\n30\n20\n60\n");
+golden!(calluse_local, "calluse_local.dusk", "111\n222\n333\n444\n");
+// M5 gate no-over-reject accepts: a heap view pushed into a vector and read back
+// is legal, and a frame view laundered through a call inside an async body but
+// only read stays legal. The accept side of the false-accept fixes above.
+golden!(vec_heap_push_ok, "vec_heap_push_ok.dusk", "1\n");
+golden!(async_launder_ok, "async_launder_ok.dusk", "111\n");
+// M5 round-two no-over-reject accepts, the twins of the structural fixes: a
+// heap view stored through a parameter place, a filter over scalars, a fold
+// returning its heap accumulator, a minting map over view elements, and a heap
+// view read back out of a clean vector and returned.
+golden!(storeheap_param_ok, "storeheap_param_ok.dusk", "10\n40\n");
+golden!(filter_scalar_ok, "filter_scalar_ok.dusk", "3\n12\n30\n");
+golden!(foldfresh_ok, "foldfresh_ok.dusk", "9\n9\n");
+golden!(mapfresh_views_ok, "mapfresh_views_ok.dusk", "111\n111\n");
+golden!(vecget_heap_return_ok, "vecget_heap_return_ok.dusk", "10\n40\n");
+golden!(derefheap_ok, "derefheap_ok.dusk", "1\n4\n");
+// M5 gate round-three no-over-reject accepts: a heap-clean pointer sent over a
+// channel (the accept twin of escchan_polluted), and a minting identity map
+// whose fresh scalar array is stored through a parameter place (the store twin
+// of the always-accepted return-position map).
+golden!(chanheap_ok, "chanheap_ok.dusk", "10\n");
+// M5 gate round-four accept twin: a heap-clean pointer sent through a relay(ch, c)
+// helper that sinks its parameter into a channel. The sink relation rejects only a
+// polluted argument (escchan_helper), so a heap-backed cell relays and runs.
+golden!(chanrelay_ok, "chanrelay_ok.dusk", "42\n");
+// M5 method-receiver accept twin of escchan_method: a method fill(s) stores its
+// slice parameter through the by-pointer receiver, and the caller hands it a
+// heap-backed slice, so the receiver stays clean and the pointer sent over the
+// channel carries no frame view. Proves the method-call receiver threading does
+// not over-reject a clean method call and the program runs; a frame-local slice
+// stashed through the same method would pollute the receiver (the unit twin).
+golden!(chanmethod_ok, "chanmethod_ok.dusk", "10\n");
+// M5 gate round-five accept twin: the fused stash-and-send helper handed a
+// heap-backed slice. The sink set's store-edge closure rejects only a frame view
+// in the source position (escchan_stash_send), so a heap slice stashed into the
+// cell and relayed across the channel runs and the receiver reads the heap value.
+golden!(chanstash_heap_ok, "chanstash_heap_ok.dusk", "10\n");
+// M5 alias-set no-over-reject accepts, the twins of the alias-propagation rejects:
+// an embedded heap pointer used only in frame, a member moved into a struct then
+// returned, a struct with an unrelated frame-view sibling field whose raise must
+// not taint the embedded pointer, and a `ref` alias with only a scalar store.
+golden!(aliasembed_ok, "aliasembed_ok.dusk", "1\n");
+golden!(aliasmove_ok, "aliasmove_ok.dusk", "1\n");
+golden!(aliassibling_ok, "aliassibling_ok.dusk", "222\n1\n");
+golden!(aliasref_ok, "aliasref_ok.dusk", "5\n");
+// M5 projection-source no-over-reject accept twin of the projection rejects:
+// `x := st.c` reads a managed pointer out of a struct field and forms the alias
+// link, but storing only a scalar through it raises no frame-view flag, so the
+// in-frame mutation is accepted and runs, printing the value written through the
+// projected alias.
+golden!(aliasproj_ok, "aliasproj_ok.dusk", "42\n");
+// M5 generic-projection no-over-reject accept twin of escalias_generic: `x := st.c`
+// where `st: Box<*Cell>` reads the managed pointer out of an Unknown-erased generic
+// field and forms the alias link on the maybe, but storing only a scalar through it
+// raises no frame-view flag, so the coarse link rejects nothing and the in-frame
+// mutation is accepted and runs, printing the value written through the alias.
+golden!(aliasgen_ok, "aliasgen_ok.dusk", "42\n");
+// M5 generalized-embed no-over-reject accept twin of the two-layer aggregate
+// rejects: a pointer buried through a name-bound intermediate aggregate and used
+// only in frame never dangles. `inner := Inner { c: c }` and `outer := Outer {
+// inner: inner }` link `outer` to `inner` and transitively to `c`, and `x :=
+// outer.inner.c` joins the group, but storing only a scalar through it raises no
+// frame-view flag, so the coarse links reject nothing and the in-frame mutation
+// is accepted and runs, printing the value written through the two-layer alias.
+golden!(aliasagg_ok, "aliasagg_ok.dusk", "42\n");
+// M5 binding-hook-unification accept twins of the for-var and reassign rejects:
+// the loop variable and the reassigned aggregate each alias the embedded pointer
+// through the single binding-alias choke, but storing only a scalar through the
+// alias raises no frame-view flag, so the coarse link rejects nothing and the
+// in-frame mutation runs, printing the value written through the alias. The match
+// twin (aliasmatch_ok) is a check_ok pending the local-enum match codegen path.
+golden!(aliasforvar_ok, "aliasforvar_ok.dusk", "42\n");
+golden!(aliasassign_ok, "aliasassign_ok.dusk", "42\n");
+// M5 destructure binding-source accept twin: an aggregate member destructured from
+// a tuple BINDING (`t := (st, 9); a, n := t`) aliases the pointer `st` buries
+// through the same whole-value binding-alias choke that catches escalias_tupledestr,
+// but storing only a scalar through `a.c` raises no frame-view flag, so the coarse
+// link rejects nothing and the in-frame mutation runs, printing the destructured
+// scalar and the value written through the alias.
+golden!(aliastupledestr_ok, "aliastupledestr_ok.dusk", "9\n42\n");
+// M5 gate round-six accept twin: a heap-clean pointer sent through a direct call
+// of a lambda bound to a local, the closure counterpart of chanrelay_ok. The
+// lambda's recorded sink set rejects only a polluted argument (escchan_lambda),
+// so a heap-backed cell handed to the sinking closure relays and runs.
+golden!(chanlambda_ok, "chanlambda_ok.dusk", "42\n");
+// M5 gate round-seven accept twins of the default-deny reversal: a clean lambda
+// bound to a local sends a heap-clean pointer (escchan_clean_lambda_ok), a clean
+// lambda called with a polluted pointer it only reads is the precision layer that
+// proves an empty sink set accepts (cleanlambda_polluted_ok), a struct-field
+// lambda callee handed a clean pointer proves the reject gates on argument
+// pollution not on the opaque callee shape (fieldcall_ok), and a mut lambda
+// reversed from sinking to clean then called with a polluted pointer proves the
+// reassignment re-records the new empty sink set rather than dropping to opaque
+// (reassign_clean_ok).
+golden!(escchan_clean_lambda_ok, "escchan_clean_lambda_ok.dusk", "42\n");
+golden!(cleanlambda_polluted_ok, "cleanlambda_polluted_ok.dusk", "111\n");
+golden!(fieldcall_ok, "fieldcall_ok.dusk", "42\n");
+golden!(reassign_clean_ok, "reassign_clean_ok.dusk", "111\n");
+golden!(mapcopy_store_ok, "mapcopy_store_ok.dusk", "111\n");
+// M5 gate round-eight accept twins of the capture-store fixes: a lambda whose
+// capture store raises the captured pointer's flag but that pointer is used only
+// in the owning frame, never returned, stays legal (capstore_local_ok), and a
+// heap-backed slice stashed through an opaque struct-field lambda callee proves
+// the opaque store reject gates on argument pollution, not on the callee shape
+// (esccapture_field_ok). The reject twins are esccapture_store and esccapture_field.
+golden!(capstore_local_ok, "capstore_local_ok.dusk", "111\n");
+golden!(esccapture_field_ok, "esccapture_field_ok.dusk", "42\n");
+// M5 gate closure-face accept twins of esccapture_closure: a non-capturing
+// closure handed to an opaque struct-field lambda callee proves the closure
+// reject gates on the argument capturing a frame local, not on the opaque callee
+// shape (closurearg_ok), and a synchronous error handler, e.check(h), invokes its
+// capturing handler in place and never stores it, so the frame-capturing closure
+// idiom is exempted and runs (syncheck_capture_ok). The reject twin is
+// esccapture_closure.
+golden!(closurearg_ok, "closurearg_ok.dusk", "42\n");
+golden!(syncheck_capture_ok, "syncheck_capture_ok.dusk", "7\n0\n");
 golden!(m5, "m5.dusk", "42\n55\n10\n");
 golden!(m6, "m6.dusk", "7\n3\n100\n");
 golden!(m6b, "m6b.dusk", "10\n40\n100\n99\n2\n99\n30\n129\n");
@@ -1360,6 +2435,11 @@ golden!(m7, "m7.dusk", "75\n24\n0\n");
 golden!(m7b, "m7b.dusk", "1\n2\n0\n99\n");
 golden!(m7c, "m7c.dusk", "7\n2.5\n3\n4\n42\n99\n");
 golden!(m7d, "m7d.dusk", "21\n21\n42\n");
+// The qualified variant constructor built and matched in one frame: `Opt.Some(v)`
+// bound-and-matched, passed as a by-value argument, and the nullary `Opt.None`.
+// Proves the tag dispatch and the aggregate arg pass are correct for the sole
+// supported constructor form, the enum-prefixed spelling.
+golden!(enumlocal, "enumlocal.dusk", "99\n7\n42\n");
 golden!(m8, "m8.dusk", "70\n99\n");
 golden!(m8b, "m8b.dusk", "105\n120\n42\n");
 golden!(m8c, "m8c.dusk", "42\n");
@@ -1448,6 +2528,14 @@ golden!(stress_timers, "stress_timers.dusk", "2000\n");
 golden!(stress_tasks, "stress_tasks.dusk", "1000\n");
 golden!(stress_accept, "stress_accept.dusk", "4950\n");
 golden!(stress_pool, "stress_pool.dusk", "49995000\n");
+// A future from a direct async call, once nameable and awaitable only, now
+// crosses into a container, across a function argument, and through an
+// annotation. Ten tasks fan into a vector before any await; a relay hands a
+// future by value and back; an annotated binding and an array literal accept the
+// call the same as an unannotated one.
+golden!(futurefan, "futurefan.dusk", "10\n");
+golden!(futurearg, "futurearg.dusk", "42\n");
+golden!(futureannot, "futureannot.dusk", "3\n");
 
 #[test]
 fn awaiting_a_net_future_outside_an_async_func_is_rejected() {

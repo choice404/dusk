@@ -1,0 +1,27 @@
+// M5 interprocedural escape: a store through a pointer that borrows a parameter.
+// `d := c` copies the borrow of parameter c, and `stash(local, d)` stores a frame
+// view through d into the caller's object. Routing the edge into a local that is
+// never returned would hide it, so the borrowed-parameter alias is named at the
+// store site instead.
+@paradigm procedural
+
+struct Cell { rows: int64[] }
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func fill(c: *Cell) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    d := c
+    stash(local[0..4], d)
+}
+
+func main() -> int32 {
+    seed: int64[1] = [7]
+    c: *Cell = alloc(Cell { rows: seed[0..1] })
+    fill(c)
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

@@ -1,0 +1,23 @@
+// Interprocedural escape (M5): a frame view wrapped in a tuple by the callee.
+// idt wraps its parameter slice in a tuple (s, 5) and returns it, the exact
+// shape tuple_sliceparam_ok relies on being legal for a PARAMETER slice. make
+// builds a frame-local array and returns idt(local[0..4]); the returned tuple
+// carries a slice into make's dying frame. The accept/reject line is the arg
+// source: a parameter slice is legal, this frame-local slice is not.
+@paradigm procedural
+
+func idt(s: int64[]) -> (int64[], int64) {
+    return (s, 5)
+}
+
+func make() -> (int64[], int64) {
+    local: int64[4] = [111, 222, 333, 444]
+    return idt(local[0..4])
+}
+
+func main() -> int32 {
+    s, n := make()
+    println(s[0])
+    println(n)
+    return 0
+}

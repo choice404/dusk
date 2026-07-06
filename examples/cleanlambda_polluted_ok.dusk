@@ -1,0 +1,35 @@
+// Accept, the precision layer: a local bound to a clean lambda, one whose body
+// only reads its pointer parameter and never sends it, is called with a pointer
+// whose heap object a store edge polluted with a view of the current frame. The
+// binding is a known lambda with an empty sink set, so the call is checked
+// against exactly what the lambda does, and reading a frame view still on the
+// stack is legal. This must not be refused as an opaque call: a clean lambda
+// provably does not hand the pointer to a channel, so the polluted pointer stays
+// safe. The view is read while its backing is still live and prints 111.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func demo() -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    s := lambda (x: *Cell) -> void { println((*x).rows[0]) }
+    s(c)
+    free(c)
+}
+
+func main() -> int32 {
+    demo()
+    return 0
+}

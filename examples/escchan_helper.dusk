@@ -1,0 +1,45 @@
+// Compile-fail: the interprocedural twin of escchan_polluted. The send does not
+// happen in the frame that owns the pointer; it happens one hop away, inside a
+// relay(ch, c) helper that forwards its parameter to chan_send. The leaf-site
+// send check cannot see the hop, so the escape summary records that relay sinks
+// its parameter into a channel, and the caller is rejected for handing it a
+// pointer whose heap object a store edge polluted with a view of the sending
+// frame. The receiver would otherwise read a dead frame.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func relay(ch: Channel<*Cell>, c: *Cell) -> void {
+    e := chan_send(ch, c)
+    e.ignore()
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    relay(ch, c)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

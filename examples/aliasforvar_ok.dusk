@@ -1,0 +1,20 @@
+@paradigm procedural
+@paradigm functional
+// The accept twin of escalias_forvar: a for-loop variable that aliases the
+// iterand's embedded pointer, but through which only a SCALAR is stored, is an
+// in-frame mutation, not a frame view. `arr := [c]` embeds `c`, iterating it
+// binds `p` and forms the alias link `p` -> `arr` -> `c`, but `(*p).n = 42`
+// raises no frame-view flag, so nothing pollutes `c`; the pointer stays owned and
+// is freed in this frame, so the program is accepted and runs, printing the value
+// written through the loop-variable alias.
+struct Cell { n: int64 }
+func main() -> int32 {
+    c: *Cell = alloc(Cell { n: 7 })
+    arr: (*Cell)[1] = [c]
+    for p in arr[0..1] {
+        (*p).n = 42
+    }
+    println((*c).n)
+    free(c)
+    return 0
+}

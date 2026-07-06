@@ -1,0 +1,21 @@
+// Accept twin: map mints a fresh heap array whose scalar elements are value
+// copies of a frame-local slice's, so storing the result through a parameter
+// place is safe. The frame-store walk once over-approximated the identity lambda
+// as an element passthrough and rejected it; seeding a scalar parameter with the
+// collection's frame-ness is the bug that fix removes, so this now matches the
+// return-position twin, which was always accepted.
+@paradigm procedural
+@paradigm functional
+
+func fill(dst: int64[][]) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    dst[0] = map(local[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func main() -> int32 {
+    seed: int64[1] = [7]
+    mut rows: int64[][1] = [seed[0..1]]
+    fill(rows[0..1])
+    println(rows[0][0])
+    return 0
+}

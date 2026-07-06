@@ -1,0 +1,25 @@
+@paradigm procedural
+@paradigm functional
+// A named helper that stores a frame-capturing closure through a struct-embedded
+// pointer pollutes the object it points to. `st` wraps `h`, `store_cb` does
+// `(*st.h).g = cb`, so the flow edge raises `st` and the alias edge from `st` to
+// `h` carries it, catching the returned `h`.
+struct Holder { g: () -> int64 }
+struct Store { h: *Holder }
+func store_cb(st: Store, cb: () -> int64) -> void {
+    (*st.h).g = cb
+}
+func mk() -> *Holder {
+    h: *Holder = alloc(Holder { g: lambda () -> int64 { return 0 } })
+    st := Store { h: h }
+    local: int64[4] = [111, 222, 333, 444]
+    bad := lambda () -> int64 { return local[0] }
+    store_cb(st, bad)
+    return h
+}
+func main() -> int32 {
+    h := mk()
+    println((*h).g())
+    free(h)
+    return 0
+}

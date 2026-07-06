@@ -1,0 +1,27 @@
+// Interprocedural escape (M5): a frame view stored into a caller-owned place
+// through a parameter. stash pushes its parameter slice into the vector its
+// pointer parameter names; both are parameters, so nothing local escapes inside
+// stash. fill builds a frame-local array and calls stash(v, local[0..4]); the
+// vector, which fill's caller owns, retains a fat slice into fill's dead frame.
+// The store edge is caught at fill's call site.
+@paradigm procedural
+@import std.vector
+
+func stash(v: *Vector<int64[]>, s: int64[]) -> void {
+    vec_push(v, s)
+}
+
+func fill(v: *Vector<int64[]>) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    stash(v, local[0..4])
+}
+
+func main() -> int32 {
+    v: *Vector<int64[]> = alloc(vec_new())
+    fill(v)
+    got := vec_get(v, 0)
+    println(got[0])
+    vec_free(v)
+    free(v)
+    return 0
+}

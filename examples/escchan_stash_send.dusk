@@ -1,0 +1,44 @@
+// Compile-fail: the fused twin of escchan_helper. One helper both stashes the
+// caller's slice into the pointer's heap object AND sends that pointer over a
+// channel in the same body, so the store edge (arg 3 into arg 2) and the sink
+// (arg 2) live in one summary. The call-site sink check reads the caller state
+// before the callee's store edge raises a flag, so the pointer in the sink
+// position still looks clean there; only the store-edge closure of the sink set
+// catches the frame view in the source position. The escape summary closes sinks
+// backward over flows_into, lifting stash_send's sinks to arguments 2 and 3, so
+// the caller handing a view of its own frame in argument 3 is rejected. The
+// receiver would otherwise read a dead frame.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash_send(ch: Channel<*Cell>, c: *Cell, s: int64[]) -> void {
+    (*c).rows = s
+    e := chan_send(ch, c)
+    e.ignore()
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash_send(ch, c, local[0..4])
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

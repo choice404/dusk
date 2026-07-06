@@ -1,0 +1,21 @@
+// Interprocedural escape (M5): the passthrough is a first-class closure value.
+// pass is a lambda that returns its parameter slice, called as pass(local[0..4]).
+// The call target is an opaque { env, fn } closure, so the callee has no summary
+// and gets the conservative TOP: it may return any argument. make's frame-local
+// backing dies on return, and the returned slice dangles.
+@paradigm procedural
+@paradigm functional
+
+func make() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    pass := lambda (s: int64[]) -> int64[] {
+        return s
+    }
+    return pass(local[0..4])
+}
+
+func main() -> int32 {
+    view := make()
+    println(view[0])
+    return 0
+}

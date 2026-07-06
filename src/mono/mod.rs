@@ -20,19 +20,38 @@ type Env = HashMap<String, Type>;
 /// parameters, its return type, and its span.
 type AsyncSig = (Vec<(String, Type)>, Type, Span);
 
-/// Expands all generics in a module into concrete monomorphic items.
-pub fn expand(module: &Module) -> Module {
-    expand_with_diags(module).0
+/// Storage types for the narrow class of unannotated mutable tuple bindings whose
+/// initializer holds an array-literal member. Typeck infers such a member as a
+/// slice, since a later reassignment may store a slice there, but the initializer
+/// alone shapes the member as a fixed array, so codegen would size the slot from
+/// the array and reject the fat slice a reassignment stores. The surface type pass
+/// records the reconciled tuple type, keyed by the binding's value span, so mono
+/// can stamp it onto `Bind.ty` and drive codegen's annotated-let path, which sizes
+/// the slot as a slice and adapts the array-literal member into it. Only this class
+/// appears here; every other binding keeps its inferred storage untouched.
+pub type MutTupleTypes = HashMap<Span, Type>;
+
+/// Expands all generics in a module into concrete monomorphic items. `muts`
+/// carries the reconciled storage types of the narrow mutable-tuple class the
+/// surface type pass recorded; an empty map leaves every binding's storage as its
+/// initializer shapes it.
+pub fn expand(module: &Module, muts: &MutTupleTypes) -> Module {
+    expand_with_diags(module, muts).0
 }
 
-/// Expands the module and returns both the ground result and the inference
-/// diagnostics from a single run: a type parameter no call site pins down, or an
-/// impl block on a generic type, which expansion would silently default or drop.
-/// Sema expands once through here so it can feed both these diagnostics and the
-/// ground type re-check without expanding twice. Reported so `dusk check` catches
-/// the problem at the source line instead of codegen emitting a wrong program.
-pub fn expand_with_diags(module: &Module) -> (Module, Vec<Diagnostic>) {
-    let mut m = Mono::new(module);
+/// Expands the module and returns the ground result, the inference diagnostics
+/// from a single run (a type parameter no call site pins down, or an impl block
+/// on a generic type, which expansion would silently default or drop), and the
+/// future instantiation table (each mangled `Future$T` name to its ground
+/// element). Sema expands once through here so it can feed the diagnostics, the
+/// ground type re-check, and that re-check's undo of the future mangle without
+/// expanding twice. Reported so `dusk check` catches the problem at the source
+/// line instead of codegen emitting a wrong program.
+pub fn expand_with_diags(
+    module: &Module,
+    muts: &MutTupleTypes,
+) -> (Module, Vec<Diagnostic>, HashMap<String, Type>) {
+    let mut m = Mono::new(module, muts);
     let items = m.run();
     let out = Module {
         paradigms: module.paradigms.clone(),
@@ -40,26 +59,59 @@ pub fn expand_with_diags(module: &Module) -> (Module, Vec<Diagnostic>) {
         monads: module.monads.clone(),
         items,
     };
-    (out, m.diags)
+    (out, m.diags, m.future_table)
 }
+
+/// The instantiation budget the worklist drain may spend before it is declared
+/// non-terminating. A real program's distinct instantiations number in the tens
+/// or hundreds; a runaway generic, one whose expansion requests a strictly
+/// larger instantiation forever, would spin without bound. The ceiling is loose
+/// enough that no legitimate program reaches it and tight enough that the
+/// divergence stops in bounded time with a diagnostic instead of a hang. This
+/// guard is a permanent invariant of the drain, not a workaround for one bug.
+const INSTANTIATION_LIMIT: usize = 10_000;
 
 struct Mono<'a> {
     items: &'a [Item],
     gfuncs: HashMap<String, &'a Func>,
     gstructs: HashMap<String, &'a Struct>,
     genums: HashMap<String, &'a Enum>,
-    fn_ret: HashMap<String, Type>,
+    ifaces: HashSet<String>,
+    // Each non-generic function's declared return, paired with whether it is
+    // async. An async call's runtime result is the `Future<ret>` the task mints,
+    // not the bare `ret` the source spells, so the static typer wraps it before a
+    // later use, a pass to a generic or an await, is resolved against a shape
+    // that disagrees with the value's ground layout.
+    fn_ret: HashMap<String, (Type, bool)>,
     requested: HashSet<String>,
-    worklist: Vec<(String, Vec<Type>)>,
+    // Each queued instantiation carries the span of the site that first requested
+    // it, so a backstop diagnostic, an interface type argument or the
+    // non-termination ceiling, points at real source instead of the file head and
+    // two distinct violations keep distinct spans through the sema dedup.
+    worklist: Vec<(String, Vec<Type>, Span)>,
     out: Vec<Item>,
     diags: Vec<Diagnostic>,
+    // Every `Future<T>` instantiation minted during expansion, its mangled
+    // `Future$T` name mapped to the ground element type `T`. An async call still
+    // types as the surface future, but a `Future<T>` in an annotation, a
+    // parameter, or a container element lowers to this mangled struct, so the
+    // ground type re-check reads this table to restore the future shape and let
+    // the two forms meet. Every entry flows through `enqueue`, the single gate
+    // both a spelled `Future<T>` and a forced async future pass.
+    future_table: HashMap<String, Type>,
+    // The reconciled storage types of the narrow mutable-tuple class, keyed by the
+    // binding's value span, as the surface type pass recorded them. Read only when
+    // a single unannotated mutable binding's value span is present, so no other
+    // binding's storage is touched.
+    mut_tuple_types: &'a MutTupleTypes,
 }
 
 impl<'a> Mono<'a> {
-    fn new(module: &'a Module) -> Self {
+    fn new(module: &'a Module, muts: &'a MutTupleTypes) -> Self {
         let mut gfuncs = HashMap::new();
         let mut gstructs = HashMap::new();
         let mut genums = HashMap::new();
+        let mut ifaces = HashSet::new();
         let mut fn_ret = HashMap::new();
         for item in &module.items {
             match item {
@@ -67,13 +119,16 @@ impl<'a> Mono<'a> {
                     gfuncs.insert(f.name.clone(), f);
                 }
                 Item::Func(f) => {
-                    fn_ret.insert(f.name.clone(), f.ret.clone());
+                    fn_ret.insert(f.name.clone(), (f.ret.clone(), f.is_async));
                 }
                 Item::Struct(s) if !s.generics.is_empty() => {
                     gstructs.insert(s.name.clone(), s);
                 }
                 Item::Enum(e) if !e.generics.is_empty() => {
                     genums.insert(e.name.clone(), e);
+                }
+                Item::Interface(i) => {
+                    ifaces.insert(i.name.clone());
                 }
                 _ => {}
             }
@@ -83,11 +138,14 @@ impl<'a> Mono<'a> {
             gfuncs,
             gstructs,
             genums,
+            ifaces,
             fn_ret,
             requested: HashSet::new(),
             worklist: Vec::new(),
             out: Vec::new(),
             diags: Vec::new(),
+            future_table: HashMap::new(),
+            mut_tuple_types: muts,
         }
     }
 
@@ -99,8 +157,26 @@ impl<'a> Mono<'a> {
         // An async call mints a Future<R> the source never spells, so force one
         // per async function before draining the worklist.
         self.force_future_instances();
-        while let Some((name, args)) = self.worklist.pop() {
-            self.expand_instance(&name, &args);
+        // The drain runs under a hard instantiation budget. A well formed program
+        // requests a bounded, small set of instantiations; a runaway generic,
+        // where each expansion asks for a strictly larger one, would never drain.
+        // The mangled name ceiling in enqueue stops the classic unbounded growth,
+        // but a general budget makes non termination impossible for any shape:
+        // when it is spent the divergence is reported and the drain stops, so the
+        // compiler fails loudly in bounded time instead of hanging.
+        let mut spent = 0usize;
+        while let Some((name, args, span)) = self.worklist.pop() {
+            spent += 1;
+            if spent > INSTANTIATION_LIMIT {
+                self.diags.push(Diagnostic::new(
+                    format!(
+                        "monomorphization did not terminate within {INSTANTIATION_LIMIT} instantiations; a generic is expanding without bound, likely a recursive generic instantiated with an ever growing type argument"
+                    ),
+                    span,
+                ));
+                break;
+            }
+            self.expand_instance(&name, &args, span);
         }
         std::mem::take(&mut self.out)
     }
@@ -110,7 +186,7 @@ impl<'a> Mono<'a> {
     }
 
 
-    fn enqueue(&mut self, name: &str, args: &[Type]) {
+    fn enqueue(&mut self, name: &str, args: &[Type], span: Span) {
         let m = mangle(name, args);
         // Guard against runaway polymorphic recursion, where each instantiation
         // requests a strictly larger one and the worklist never drains. A real
@@ -119,8 +195,34 @@ impl<'a> Mono<'a> {
         if m.len() > 1024 {
             return;
         }
+        // Record every future instantiation, its mangled name mapped to the
+        // ground element, so the ground type re-check can undo the mangle. The
+        // args are already expanded here, so the element is ground. Recorded
+        // before the dedup gate is harmless: the same key maps to the same
+        // element, so a repeat write is idempotent.
+        if name == "Future" && args.len() == 1 {
+            self.future_table.insert(m.clone(), args[0].clone());
+        }
         if self.requested.insert(m) {
-            self.worklist.push((name.to_string(), args.to_vec()));
+            // Backstop: an interface has no single ground layout, so it cannot
+            // stand in for a type parameter a generic is monomorphized over. Sema
+            // already rejects this at the source annotation, but mono is also
+            // driven straight from codegen with no sema in front, so the rule is
+            // enforced here too rather than expanding a shape that has no layout.
+            // Nested burials pass through emit_ty, which enqueues each level, so
+            // checking this instantiation's own arguments is enough. Reported
+            // once per distinct instantiation, inside the dedup gate.
+            for a in args {
+                if let Type::Named(n, _) = a {
+                    if self.ifaces.contains(n) {
+                        self.diags.push(Diagnostic::new(
+                            "an interface cannot be a generic type argument; generics are monomorphized over concrete types",
+                            span,
+                        ));
+                    }
+                }
+            }
+            self.worklist.push((name.to_string(), args.to_vec(), span));
         }
     }
 
@@ -128,13 +230,13 @@ impl<'a> Mono<'a> {
     /// name. Type arguments are lowered through `emit_ty` first so a nested
     /// generic argument mangles the same way it would from a type annotation,
     /// keeping the construction site and the emitted definition in agreement.
-    fn instantiate(&mut self, name: &str, args: &[Type]) -> String {
-        let cargs: Vec<Type> = args.iter().map(|a| self.emit_ty(a)).collect();
-        self.enqueue(name, &cargs);
+    fn instantiate(&mut self, name: &str, args: &[Type], span: Span) -> String {
+        let cargs: Vec<Type> = args.iter().map(|a| self.emit_ty(a, span)).collect();
+        self.enqueue(name, &cargs, span);
         mangle(name, &cargs)
     }
 
-    fn expand_instance(&mut self, name: &str, args: &[Type]) {
+    fn expand_instance(&mut self, name: &str, args: &[Type], span: Span) {
         let mangled = mangle(name, args);
         if let Some(f) = self.gfuncs.get(name).copied() {
             let subst = bind(&f.generics, args);
@@ -147,7 +249,7 @@ impl<'a> Mono<'a> {
                 .iter()
                 .map(|fl| Field {
                     name: fl.name.clone(),
-                    ty: self.emit_field_ty(&fl.ty, &subst),
+                    ty: self.emit_field_ty(&fl.ty, &subst, span),
                 })
                 .collect();
             self.out.push(Item::Struct(Struct {
@@ -168,7 +270,7 @@ impl<'a> Mono<'a> {
                         .iter()
                         .map(|fl| Field {
                             name: fl.name.clone(),
-                            ty: self.emit_field_ty(&fl.ty, &subst),
+                            ty: self.emit_field_ty(&fl.ty, &subst, span),
                         })
                         .collect(),
                 })
@@ -182,37 +284,40 @@ impl<'a> Mono<'a> {
         }
     }
 
-    fn emit_field_ty(&mut self, ty: &Type, subst: &Subst) -> Type {
+    fn emit_field_ty(&mut self, ty: &Type, subst: &Subst, span: Span) -> Type {
         let applied = subst_apply(ty, subst);
         // A struct or enum field that names a Future with a frame-viewing element
-        // is a spell site too; fields carry no span, so the diagnostic points at
-        // the file rather than a column.
-        self.check_future_spell(&applied, Span::new(0, 0));
-        self.emit_ty(&applied)
+        // is a spell site too; the requesting instantiation's span points the
+        // diagnostic at the site that asked for this field rather than the file
+        // head.
+        self.check_future_spell(&applied, span);
+        self.emit_ty(&applied, span)
     }
 
 
-    /// Mangles ground generic references and requests their instantiation.
-    fn emit_ty(&mut self, ty: &Type) -> Type {
+    /// Mangles ground generic references and requests their instantiation. The
+    /// span travels to `enqueue` so a backstop the requested instantiation trips
+    /// points at the requesting site.
+    fn emit_ty(&mut self, ty: &Type, span: Span) -> Type {
         match ty {
             Type::Named(n, args) if !args.is_empty() => {
-                let cargs: Vec<Type> = args.iter().map(|a| self.emit_ty(a)).collect();
+                let cargs: Vec<Type> = args.iter().map(|a| self.emit_ty(a, span)).collect();
                 if self.is_generic(n) {
-                    self.enqueue(n, &cargs);
+                    self.enqueue(n, &cargs, span);
                     Type::Named(mangle(n, &cargs), Vec::new())
                 } else {
                     Type::Named(n.clone(), cargs)
                 }
             }
             Type::Named(n, _) => Type::Named(n.clone(), Vec::new()),
-            Type::Ptr(b) => Type::Ptr(Box::new(self.emit_ty(b))),
-            Type::RawPtr(b) => Type::RawPtr(Box::new(self.emit_ty(b))),
-            Type::Slice(b) => Type::Slice(Box::new(self.emit_ty(b))),
-            Type::Array(b, n) => Type::Array(Box::new(self.emit_ty(b)), *n),
-            Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.emit_ty(x)).collect()),
+            Type::Ptr(b) => Type::Ptr(Box::new(self.emit_ty(b, span))),
+            Type::RawPtr(b) => Type::RawPtr(Box::new(self.emit_ty(b, span))),
+            Type::Slice(b) => Type::Slice(Box::new(self.emit_ty(b, span))),
+            Type::Array(b, n) => Type::Array(Box::new(self.emit_ty(b, span)), *n),
+            Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.emit_ty(x, span)).collect()),
             Type::Func(ps, r) => Type::Func(
-                ps.iter().map(|p| self.emit_ty(p)).collect(),
-                Box::new(self.emit_ty(r)),
+                ps.iter().map(|p| self.emit_ty(p, span)).collect(),
+                Box::new(self.emit_ty(r, span)),
             ),
             Type::Unit => Type::Unit,
             // A hole reaching emit means a do-continuation's element type was never
@@ -222,7 +327,7 @@ impl<'a> Mono<'a> {
             Type::Infer => {
                 self.diags.push(Diagnostic::new(
                     "could not infer the type of this do-continuation; annotate the monad element",
-                    Span::new(0, 0),
+                    span,
                 ));
                 named("int64")
             }
@@ -242,7 +347,7 @@ impl<'a> Mono<'a> {
                     .iter()
                     .map(|fl| Field {
                         name: fl.name.clone(),
-                        ty: self.emit_field_ty(&fl.ty, &Subst::new()),
+                        ty: self.emit_field_ty(&fl.ty, &Subst::new(), Span::new(0, 0)),
                     })
                     .collect();
                 self.out.push(Item::Struct(Struct {
@@ -263,7 +368,7 @@ impl<'a> Mono<'a> {
                             .iter()
                             .map(|fl| Field {
                                 name: fl.name.clone(),
-                                ty: self.emit_field_ty(&fl.ty, &Subst::new()),
+                                ty: self.emit_field_ty(&fl.ty, &Subst::new(), Span::new(0, 0)),
                             })
                             .collect(),
                     })
@@ -368,6 +473,14 @@ impl<'a> Mono<'a> {
         match t {
             Type::Slice(_) | Type::Func(..) => false,
             Type::Named(n, _) if ban_future && n == "Future" => false,
+            // A pointer targets the heap, which outlives the frame, so a slice or
+            // interface value behind it crosses fine. A future is the exception: it
+            // is event-loop-thread property, so a future smuggled behind a pointer,
+            // whether bare or buried in a channel handle like `*Channel<Future<T>>`,
+            // still faults when a foreign thread awaits it. Under the future ban,
+            // hunt the pointee for a buried future and refuse only that; without the
+            // ban a pointer crosses freely, as it does today.
+            Type::Ptr(b) | Type::RawPtr(b) if ban_future => !self.ptr_reaches_future(b, path),
             Type::Array(b, _) => self.crossable(b, ban_future, path),
             Type::Tuple(ts) => ts.iter().all(|x| self.crossable(x, ban_future, path)),
             Type::Named(n, targs) => {
@@ -414,6 +527,64 @@ impl<'a> Mono<'a> {
             // crossing check matters, so it is trivially crossable here.
             Type::Infer => true,
             _ => true,
+        }
+    }
+
+    /// Whether a future is reachable through this type once a pointer has been
+    /// crossed. A future belongs to the event loop thread, so burying one behind a
+    /// managed or raw pointer and carrying it across an async boundary still faults
+    /// when the completer thread awaits it. A slice or interface value behind a
+    /// pointer is fine, so only a future counts here, and the walk descends through
+    /// nested pointers, arrays, tuples, and the type arguments and fields of a
+    /// generic struct or enum. `path` carries the struct and enum names on the
+    /// branch, so a recursive type terminates the same way `crossable` does.
+    fn ptr_reaches_future(&self, t: &Type, path: &HashSet<String>) -> bool {
+        match t {
+            Type::Named(n, _) if n == "Future" => true,
+            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => {
+                self.ptr_reaches_future(b, path)
+            }
+            Type::Tuple(ts) => ts.iter().any(|x| self.ptr_reaches_future(x, path)),
+            Type::Named(n, targs) => {
+                if path.contains(n) {
+                    return false;
+                }
+                let mut child = path.clone();
+                child.insert(n.clone());
+                if targs.iter().any(|x| self.ptr_reaches_future(x, &child)) {
+                    return true;
+                }
+                if let Some(s) = self.gstructs.get(n.as_str()).copied() {
+                    let subst = bind(&s.generics, targs);
+                    return s
+                        .fields
+                        .iter()
+                        .any(|fl| self.ptr_reaches_future(&subst_apply(&fl.ty, &subst), &child));
+                }
+                if let Some(e) = self.genums.get(n.as_str()).copied() {
+                    let subst = bind(&e.generics, targs);
+                    return e.variants.iter().any(|v| {
+                        v.fields
+                            .iter()
+                            .any(|fl| self.ptr_reaches_future(&subst_apply(&fl.ty, &subst), &child))
+                    });
+                }
+                for item in self.items {
+                    match item {
+                        Item::Struct(s) if s.name == *n => {
+                            return s.fields.iter().any(|fl| self.ptr_reaches_future(&fl.ty, &child));
+                        }
+                        Item::Enum(e) if e.name == *n => {
+                            return e.variants.iter().any(|v| {
+                                v.fields.iter().any(|fl| self.ptr_reaches_future(&fl.ty, &child))
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                false
+            }
+            _ => false,
         }
     }
 
@@ -516,12 +687,12 @@ impl<'a> Mono<'a> {
             params.push(Param {
                 using: p.using,
                 name: p.name.clone(),
-                ty: self.emit_ty(&applied),
+                ty: self.emit_ty(&applied, f.span),
             });
         }
         let ret_applied = subst_apply(&f.ret, subst);
         self.check_future_spell(&ret_applied, f.span);
-        let ret = self.emit_ty(&ret_applied);
+        let ret = self.emit_ty(&ret_applied, f.span);
         let body = self.rw_block(&f.body, subst, &mut env, &ret_applied);
         Func {
             exported: f.exported,
@@ -572,16 +743,29 @@ impl<'a> Mono<'a> {
                     (Some(Type::Tuple(ts)), n) if n > 1 && ts.len() == n => Some(ts.clone()),
                     _ => None,
                 };
+                // The reconciled storage type for the narrow mutable-tuple class,
+                // if the surface pass recorded this binding. Present only for a
+                // single unannotated mutable binding whose value is a tuple with an
+                // array-literal member, so no ordinary binding is reshaped.
+                let table_ty: Option<Type> = if l.mutable && l.binds.len() == 1 && l.binds[0].ty.is_none() {
+                    self.mut_tuple_types.get(&l.value.span).cloned()
+                } else {
+                    None
+                };
                 let mut binds = Vec::with_capacity(l.binds.len());
                 for (i, b) in l.binds.iter().enumerate() {
-                    let ty = b.ty.as_ref().map(|t| {
-                        let a = subst_apply(t, subst);
-                        self.emit_ty(&a)
-                    });
+                    let ty = match &b.ty {
+                        Some(t) => {
+                            let a = subst_apply(t, subst);
+                            Some(self.emit_ty(&a, l.value.span))
+                        }
+                        None => table_ty.as_ref().map(|t| self.emit_ty(t, l.value.span)),
+                    };
                     let bt = b
                         .ty
                         .as_ref()
                         .map(|t| subst_apply(t, subst))
+                        .or_else(|| table_ty.clone())
                         .or_else(|| parts.as_ref().map(|p| p[i].clone()))
                         .or_else(|| if l.binds.len() == 1 { vt.clone() } else { None });
                     if let Some(t) = bt {
@@ -709,7 +893,7 @@ impl<'a> Mono<'a> {
                 if let ExprKind::Ident(g) = &base.kind {
                     if self.genums.contains_key(g) && self.enum_has_variant(g, name) {
                         let targs = self.enum_args(g, expected, &[], subst, env, name);
-                        let mg = node(ExprKind::Ident(self.instantiate(g, &targs)), base.span);
+                        let mg = node(ExprKind::Ident(self.instantiate(g, &targs, base.span)), base.span);
                         return node(ExprKind::Field(Box::new(mg), name.clone()), e.span);
                     }
                 }
@@ -752,10 +936,10 @@ impl<'a> Mono<'a> {
                         .map(|p| Param {
                             using: p.using,
                             name: p.name.clone(),
-                            ty: self.emit_ty(&subst_apply(&p.ty, subst)),
+                            ty: self.emit_ty(&subst_apply(&p.ty, subst), e.span),
                         })
                         .collect(),
-                    ret: self.emit_ty(&ret),
+                    ret: self.emit_ty(&ret, e.span),
                     body,
                 })
             }
@@ -768,7 +952,7 @@ impl<'a> Mono<'a> {
                 // awaited slot from. It is left None by the parser and typeck; the
                 // concrete operand type is first known here.
                 let rop = self.rw_expr(op, subst, env, None);
-                let el = self.await_element_ty(op, subst, env).map(|t| self.emit_ty(&t));
+                let el = self.await_element_ty(op, subst, env).map(|t| self.emit_ty(&t, e.span));
                 if el.is_none() {
                     self.diags.push(Diagnostic::new(
                         "the element type of this await could not be inferred; bind the future with an annotation first",
@@ -806,7 +990,7 @@ impl<'a> Mono<'a> {
                     let cargs: Vec<Expr> =
                         args.iter().map(|a| self.rw_expr(a, subst, env, None)).collect();
                     let targs = self.enum_args(g, expected, args, subst, env, v);
-                    let mg = node(ExprKind::Ident(self.instantiate(g, &targs)), base.span);
+                    let mg = node(ExprKind::Ident(self.instantiate(g, &targs, base.span)), base.span);
                     let nc = node(ExprKind::Field(Box::new(mg), v.clone()), callee.span);
                     return ExprKind::Call(Box::new(nc), cargs);
                 }
@@ -820,7 +1004,7 @@ impl<'a> Mono<'a> {
                     // or tuple, is sized correctly in generic code.
                     if subst.contains_key(g) {
                         let ty = subst_apply(&Type::Named(g.clone(), Vec::new()), subst);
-                        return ExprKind::SizeofType(self.emit_ty(&ty));
+                        return ExprKind::SizeofType(self.emit_ty(&ty, args[0].span));
                     }
                 }
             }
@@ -839,7 +1023,7 @@ impl<'a> Mono<'a> {
                     .enumerate()
                     .map(|(i, a)| self.rw_arg(a, gf.params.get(i).map(|p| &p.ty), &inf_full, subst, env))
                     .collect();
-                let mg = node(ExprKind::Ident(self.instantiate(f, &targs)), callee.span);
+                let mg = node(ExprKind::Ident(self.instantiate(f, &targs, callee.span)), callee.span);
                 return ExprKind::Call(Box::new(mg), cargs);
             }
             if f == "alloc" && args.len() == 1 {
@@ -873,7 +1057,7 @@ impl<'a> Mono<'a> {
         if let Some(gs) = self.gstructs.get(name).copied() {
             let (targs, missing) = self.infer_struct_args(gs, fields, expected, subst, env);
             self.report_missing(&missing, name, span);
-            return ExprKind::StructLit(self.instantiate(name, &targs), new_fields);
+            return ExprKind::StructLit(self.instantiate(name, &targs, span), new_fields);
         }
         ExprKind::StructLit(name.to_string(), new_fields)
     }
@@ -1086,8 +1270,21 @@ impl<'a> Mono<'a> {
                             let inf = bind(&gf.generics, &targs);
                             Some(subst_apply(&gf.ret, &inf))
                         }
+                    } else if let Some((ret, is_async)) = self.fn_ret.get(f) {
+                        // An async call's runtime value is the Future the task
+                        // mints, not the declared return the source spells. Typing
+                        // it as Future<ret> keeps a bare-future binding agreeing
+                        // with its ground layout, so a later pass of it to a
+                        // generic instantiates over Future<ret> and the ground
+                        // re-check finds matching types instead of a spurious
+                        // mismatch. A direct await unwraps the Future arm again.
+                        if *is_async {
+                            Some(Type::Named("Future".to_string(), vec![ret.clone()]))
+                        } else {
+                            Some(ret.clone())
+                        }
                     } else {
-                        self.fn_ret.get(f).cloned().or_else(|| builtin_ret(f))
+                        builtin_ret(f)
                     }
                 }
                 ExprKind::Field(base, v) => {
@@ -1193,8 +1390,8 @@ impl<'a> Mono<'a> {
                     span,
                 ));
             }
-            let r = self.emit_ty(&ret);
-            self.enqueue("Future", &[r]);
+            let r = self.emit_ty(&ret, span);
+            self.enqueue("Future", &[r], span);
         }
     }
 }
@@ -1389,7 +1586,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        let out = expand(&m);
+        let out = expand(&m, &MutTupleTypes::new());
         out.items
             .iter()
             .map(|i| match i {
@@ -1475,7 +1672,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        let out = expand(&m);
+        let out = expand(&m, &MutTupleTypes::new());
         for it in &out.items {
             if let Item::Func(f) = it {
                 eprintln!("FUNC {} params={:?} ret={:?}", f.name, f.params, f.ret);
@@ -1558,7 +1755,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        expand_with_diags(&m).1.into_iter().map(|d| d.msg).collect()
+        expand_with_diags(&m, &MutTupleTypes::new()).1.into_iter().map(|d| d.msg).collect()
     }
 
     #[test]
@@ -1651,7 +1848,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        let out = expand(&m);
+        let out = expand(&m, &MutTupleTypes::new());
         fn walk_block(b: &Block) -> Option<(bool, Option<Type>)> {
             b.stmts.iter().find_map(walk_stmt)
         }
@@ -1889,4 +2086,143 @@ mod tests {
         assert!(!n.contains(&"id$int64".to_string()), "wrong int64 monomorph present: {n:?}");
     }
 
+    fn diag_msgs(src: &str) -> Vec<String> {
+        let (t, _) = lex(src);
+        let (m, e) = parse(t);
+        assert!(e.is_empty(), "parse errors: {e:?}");
+        let (_, diags, _) = expand_with_diags(&m, &MutTupleTypes::new());
+        diags.into_iter().map(|d| d.msg).collect()
+    }
+
+    fn raw_diags(src: &str) -> Vec<Diagnostic> {
+        let (t, _) = lex(src);
+        let (m, e) = parse(t);
+        assert!(e.is_empty(), "parse errors: {e:?}");
+        expand_with_diags(&m, &MutTupleTypes::new()).1
+    }
+
+    #[test]
+    fn interface_generic_arg_backstop() {
+        // Sema rejects an interface type argument at the annotation, but mono runs
+        // straight from codegen too, so its own backstop must catch the request.
+        // Here the interface argument is inferred from the field value, a shape the
+        // erased checker walk cannot see, so only the mono backstop fires.
+        let msgs = diag_msgs(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Dog { name: int64 }\n\
+             impl Speaker for Dog { func speak() -> int64 { return self.name } }\n\
+             struct Box<T> { v: T }\n\
+             func main() -> int32 {\n\
+               s: Speaker = Dog { name: 3 }\n\
+               b := Box { v: s }\n\
+               println(b.v.speak())\n\
+               return 0\n\
+             }",
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("an interface cannot be a generic type argument")),
+            "mono must backstop an interface generic argument: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn interface_backstop_points_at_the_requesting_site() {
+        // The backstop diagnostic carries the requesting site's span, not the file
+        // head, so two distinct violations keep distinct spans and the sema dedup
+        // reports both instead of collapsing them.
+        let d = raw_diags(
+            "interface Speaker { speak() -> int64 }\n\
+             struct Dog { name: int64 }\n\
+             impl Speaker for Dog { func speak() -> int64 { return self.name } }\n\
+             struct Box<T> { v: T }\n\
+             func main() -> int32 {\n\
+               s: Speaker = Dog { name: 3 }\n\
+               b := Box { v: s }\n\
+               println(b.v.speak())\n\
+               return 0\n\
+             }",
+        );
+        let backstop = d
+            .iter()
+            .find(|x| x.msg.contains("an interface cannot be a generic type argument"));
+        assert!(backstop.is_some(), "backstop must fire: {d:?}");
+        let s = backstop.unwrap().span;
+        assert_ne!((s.lo, s.hi), (0, 0), "the backstop must point at a real site: {s:?}");
+    }
+
+    #[test]
+    fn async_param_pointer_to_future_rejects() {
+        // A future behind a managed pointer still reaches a foreign thread that
+        // would await it off the loop thread, so the future ban must see through
+        // the pointer at an async boundary.
+        let d = diags(&format!(
+            "{FUTURE_DECL}async func g(p: *Future<int64>) -> int64 {{ return 1 }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+    }
+
+    #[test]
+    fn async_param_pointer_to_channel_of_futures_rejects() {
+        // The future ban reaches through a pointer into a generic handle's type
+        // argument, closing `*Channel<Future<T>>` the same way the bare pointer is
+        // closed.
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct Chan<T> {{ h: int64 }}\n\
+             async func g(p: *Chan<Future<int64>>) -> int64 {{ return 1 }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+    }
+
+    #[test]
+    fn async_param_pointer_to_a_slice_bearing_struct_accepts() {
+        // The pointer future ban is future-only: a pointer to heap data that holds a
+        // slice must still cross, since the pointer targets the heap the generation
+        // check covers.
+        let d = diags(&format!(
+            "{FUTURE_DECL}struct Holder {{ s: int64[] }}\n\
+             async func g(p: *Holder) -> int64 {{ return 1 }}\n\
+             async func amain() -> int64 {{ return 1 }}\n\
+             func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
+        ));
+        assert!(!d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+    }
+
+    #[test]
+    fn instantiation_budget_stops_runaway() {
+        // The drain runs under a hard instantiation budget so no shape can hang the
+        // compiler. Seeding the worklist past the ceiling with entries that expand
+        // to nothing exercises the guard directly: the drain must stop and report
+        // instead of spinning.
+        let (t, _) = lex("func main() -> int32 { return 0 }");
+        let (m, e) = parse(t);
+        assert!(e.is_empty(), "parse errors: {e:?}");
+        let muts = MutTupleTypes::new();
+        let mut mono = Mono::new(&m, &muts);
+        for i in 0..(INSTANTIATION_LIMIT + 5) {
+            mono.worklist
+                .push((format!("Runaway{i}"), Vec::new(), Span::new(i as u32 + 1, i as u32 + 2)));
+        }
+        let _ = mono.run();
+        let limit = mono
+            .diags
+            .iter()
+            .find(|d| d.msg.contains("did not terminate"));
+        assert!(
+            limit.is_some(),
+            "the instantiation budget must stop a runaway drain: {:?}",
+            mono.diags.iter().map(|d| &d.msg).collect::<Vec<_>>()
+        );
+        // The ceiling diagnostic carries the tripping instantiation's span, not the
+        // file head, so distinct runaway sites stay distinct through the sema dedup.
+        assert_ne!(
+            (limit.unwrap().span.lo, limit.unwrap().span.hi),
+            (0, 0),
+            "the non-termination diagnostic must point at a real requesting site"
+        );
+    }
 }

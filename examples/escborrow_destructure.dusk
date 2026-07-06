@@ -1,0 +1,26 @@
+// Compile-fail: a parameter pointer laundered through a tuple destructure. The
+// destructured binder keeps the borrow, so a frame view stored through it
+// names the borrowed parameter.
+@paradigm procedural
+
+struct Cell { rows: int64[] }
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func fill(c: *Cell) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    d, n := (c, 1)
+    println(n)
+    stash(local[0..4], d)
+}
+
+func main() -> int32 {
+    seed: int64[1] = [7]
+    c: *Cell = alloc(Cell { rows: seed[0..1] })
+    fill(c)
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

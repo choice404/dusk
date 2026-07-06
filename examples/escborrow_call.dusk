@@ -1,0 +1,30 @@
+// Compile-fail: a parameter pointer laundered through a passthrough call. The
+// callee's summary says the result reads through its argument, so the binding
+// borrows the parameter and a frame view stored through it is caught the same
+// as a store through the parameter itself.
+@paradigm procedural
+
+struct Cell { rows: int64[] }
+
+func same(p: *Cell) -> *Cell {
+    return p
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func fill(c: *Cell) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    d := same(c)
+    stash(local[0..4], d)
+}
+
+func main() -> int32 {
+    seed: int64[1] = [7]
+    c: *Cell = alloc(Cell { rows: seed[0..1] })
+    fill(c)
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

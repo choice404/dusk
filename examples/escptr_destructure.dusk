@@ -1,0 +1,33 @@
+// Compile-fail: a polluted pointer laundered through a tuple destructure. A
+// managed pointer is a view carrier for the destructure gate, so the binder
+// keeps the flag and returning it is caught.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    t := (c, 1)
+    d, n := t
+    println(n)
+    return d
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

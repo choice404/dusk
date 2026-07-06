@@ -1,0 +1,36 @@
+// Passes a bare future from a direct async call across a function-argument
+// boundary and back. relay takes a Future<int64> by value and returns it, the
+// pass-as-argument and return-a-future forms the checker's ground pass once
+// rejected as an argument-type mismatch because the mangled Future$int64 the
+// parameter lowered to could not meet the surface Future<int64> the call minted.
+// The keyword await in the async body consumes the relayed future on the loop
+// thread, since only the cooperative await cranks an async task to completion; a
+// relay is non-async, so it may hold and hand back a future without becoming a
+// task that would view the caller's frame.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func one() -> int64 {
+    return 42
+}
+
+func relay(x: Future<int64>) -> Future<int64> {
+    return x
+}
+
+async func amain() -> int32 {
+    f := one()
+    g := relay(f)
+    v := await g
+    println(v)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

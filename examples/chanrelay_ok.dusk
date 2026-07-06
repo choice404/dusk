@@ -1,0 +1,43 @@
+// Accept twin of escchan_helper: a relay(ch, c) helper forwards its pointer
+// parameter to chan_send, and the caller hands it a pointer whose heap object
+// holds only heap-backed data. Nothing on the sending frame is stashed into the
+// cell, so the sent pointer carries no frame view and the relay is legal even
+// though relay sinks its parameter into a channel. The receiver reads the value
+// the sender minted on the heap, which outlives the send.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [42, 43, 44, 45]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash_heap(c: *Cell) -> void {
+    (*c).rows = heap4()
+}
+
+func relay(ch: Channel<*Cell>, c: *Cell) -> void {
+    e := chan_send(ch, c)
+    e.ignore()
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    stash_heap(c)
+    relay(ch, c)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

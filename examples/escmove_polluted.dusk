@@ -1,0 +1,32 @@
+// M5 interprocedural escape: a frame view stored through a pointer by a call
+// pollutes the caller's heap object; returning that pointer with the mandatory
+// owner-move form still leaks it. The object starts heap-clean (heap4), so only
+// the store edge pollutes it, and `return move(c)` is a call, not a bare name,
+// so the pointer-return arm inspects the call's summary to catch it.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    return move(c)
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

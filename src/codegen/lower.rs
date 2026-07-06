@@ -17,9 +17,11 @@ use crate::parser::ast::{
     UnOp, While,
 };
 
-/// Compiles a module to LLVM IR text. Generics are monomorphized first.
-pub fn compile(module: &ast::Module) -> String {
-    let expanded = crate::mono::expand(module);
+/// Compiles a module to LLVM IR text. Generics are monomorphized first. `muts`
+/// carries the reconciled storage types of the narrow mutable-tuple class, which
+/// mono stamps onto those bindings so their slots are sized as slices.
+pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> String {
+    let expanded = crate::mono::expand(module, muts);
     let module = &expanded;
     let ctx = Ctx::new(module);
     let mut m = Module::new("dusk", DEFAULT_TRIPLE);
@@ -177,6 +179,35 @@ fn emit_thunk(m: &mut Module, ty: &str, meth: &IMethod, name: &str) {
     m.push_function(format!(
         "define {} {name}({}) {{\n{body}}}",
         meth.ret.ll(),
+        sig.join(", ")
+    ));
+}
+
+/// Emits a forwarding thunk that adapts a bare top-level function to the closure
+/// calling convention, so a plain function name can be used as a `{ env, fn }`
+/// value. The thunk takes a leading env pointer it ignores, then the function's
+/// own parameters, and forwards to the real symbol. It mirrors emit_thunk, the
+/// vtable bridge; dusk functions all return by value (there is no sret), so even
+/// an aggregate `(T, error)` return forwards unchanged.
+fn emit_funcval_thunk(m: &mut Module, name: &str, ret: &CTy, params: &[CTy]) {
+    let mut sig = vec!["ptr %env".to_string()];
+    let mut call_args = Vec::new();
+    for (i, p) in params.iter().enumerate() {
+        sig.push(format!("{} %a{i}", p.ll()));
+        call_args.push(format!("{} %a{i}", p.ll()));
+    }
+    let ca = call_args.join(", ");
+    let mut body = String::from("entry:\n");
+    if matches!(ret, CTy::Void) {
+        body.push_str(&format!("  call void @{name}({ca})\n"));
+        body.push_str("  ret void\n");
+    } else {
+        body.push_str(&format!("  %r = call {} @{name}({ca})\n", ret.ll()));
+        body.push_str(&format!("  ret {} %r\n", ret.ll()));
+    }
+    m.push_function(format!(
+        "define {} @{name}.funcval({}) {{\n{body}}}",
+        ret.ll(),
         sig.join(", ")
     ));
 }
@@ -1761,6 +1792,20 @@ impl<'a> Fb<'a> {
             let v = self.load(&ty, &ptr);
             return Val::new(ty, v);
         }
+        // A bare top-level function name used as a value (`f := id`) is not a
+        // place, so gen_place misses it. Resolve it to a closure `{ env, fn }`
+        // over a null env and a forwarding thunk, the same representation a
+        // lambda gets, so a later `f(x)` dispatches through the closure path.
+        // A local of the same name (a shadow) already resolved above; async
+        // functions have no plain `@name` symbol, so they stay out.
+        if let ExprKind::Ident(name) = &e.kind {
+            if !self.locals.contains_key(name)
+                && self.ctx.fns.contains_key(name)
+                && !self.ctx.async_fns.contains_key(name)
+            {
+                return self.func_value(name);
+            }
+        }
         if let ExprKind::Field(base, field) = &e.kind {
             let bv = self.gen_expr(base);
             match &bv.ty {
@@ -2136,7 +2181,9 @@ impl<'a> Fb<'a> {
         }
     }
 
-    /// Recognizes `Enum.Variant` as an enum constructor reference.
+    /// Recognizes `Enum.Variant` as an enum constructor reference. Only the
+    /// qualified form is a constructor; sema rejects the unqualified `Variant`
+    /// spelling before codegen, so a bare ident never reaches here as a variant.
     fn as_enum_variant(&self, e: &Expr) -> Option<(String, String)> {
         let ExprKind::Field(base, v) = &e.kind else {
             return None;
@@ -3021,6 +3068,29 @@ impl<'a> Fb<'a> {
         Val::new(CTy::Error, err)
     }
 
+    /// Materializes a bare top-level function name as a closure value: a null env
+    /// paired with a forwarding thunk that carries the closure calling convention.
+    /// The value's type is `Closure(params, ret)` drawn from the real lowered
+    /// signature, so a call through it returns exactly what a direct call would.
+    fn func_value(&mut self, name: &str) -> Val {
+        let (ret, params) = self
+            .ctx
+            .fns
+            .get(name)
+            .cloned()
+            .unwrap_or((CTy::Int(64), Vec::new()));
+        if self.m.need_funcval_thunk(name) {
+            emit_funcval_thunk(self.m, name, &ret, &params);
+        }
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {{ ptr, ptr }} undef, ptr null, 0"));
+        let b = self.fresh();
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, ptr }} {a}, ptr @{name}.funcval, 1"
+        ));
+        Val::new(CTy::Closure(params, Box::new(ret)), b)
+    }
+
     fn gen_closure_call(&mut self, cv: &Val, args: &[Expr]) -> Val {
         let vals: Vec<Val> = args.iter().map(|a| self.gen_expr(a)).collect();
         self.invoke_closure(cv, vals)
@@ -3821,7 +3891,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        compile(&m)
+        compile(&m, &crate::mono::MutTupleTypes::new())
     }
 
     #[test]

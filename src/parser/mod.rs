@@ -17,6 +17,14 @@ pub fn parse(tokens: Vec<Token>) -> (Module, Vec<Diagnostic>) {
     Parser::new(tokens).module()
 }
 
+/// The recursion-depth ceiling shared by the expression, type, and block parsers.
+/// It sits far above any nesting a human writes, so a well-formed program never
+/// meets it; it exists only so a pathological input such as `((((...`, `Vec<Vec<...`,
+/// or deeply nested `if` blocks unwinds with a diagnostic instead of overflowing the
+/// call stack. The existing `deep_nested_generic_parses` test threads 400 layers and
+/// must stay clean, so the limit sits comfortably above that.
+const MAX_NESTING: u32 = 500;
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -29,6 +37,13 @@ struct Parser {
     // How many lambda bodies enclose the current position. Only the enclosing
     // async func can suspend, so `await` at depth greater than zero is rejected.
     lambda_depth: u32,
+    // Live nesting depth of the expression, type, and block recursions, kept in
+    // step by `enter_nesting` and its paired decrement so a pathological input
+    // cannot overflow the stack. See `MAX_NESTING`.
+    depth: u32,
+    // Set once the nesting ceiling is crossed, so the depth diagnostic is emitted
+    // a single time rather than once per bailed-out level.
+    hit_depth_limit: bool,
 }
 
 impl Parser {
@@ -40,6 +55,8 @@ impl Parser {
             no_struct: false,
             in_async_fn: false,
             lambda_depth: 0,
+            depth: 0,
+            hit_depth_limit: false,
         }
     }
 
@@ -107,15 +124,48 @@ impl Parser {
         self.errors.push(Diagnostic::new(msg, span));
     }
 
-    /// Guards a nested block loop against a no-progress spin. When the loop body
-    /// consumed no token, the same token would be re-read forever, so emit a
-    /// diagnostic naming the context and bump one token, the discipline the module
-    /// loop already uses. A loop whose body always advances, or that breaks on a
-    /// missing comma, does not need this.
-    fn guard_progress(&mut self, before: usize, ctx: &str) {
+    /// The parser's one progress invariant, shared by every recovery loop. A
+    /// recovery loop is a `while !at(CLOSER) && !at_eof()` loop that keeps going
+    /// on any token rather than breaking on a missing separator; if its body ever
+    /// consumes no token the same token would be re-read forever. Each such loop
+    /// captures `self.pos` at its head and calls this at its tail: on a stall it
+    /// emits a diagnostic naming the context and bumps one token, forcing
+    /// progress, and returns true so a caller may also break. Routing every
+    /// recovery loop through here keeps the invariant in one place instead of a
+    /// hand-copied check per loop. List loops that break on a missing comma
+    /// terminate through that break and must not call this, since a stall there
+    /// can be the separator itself (`Foo<,>`), which the comma path recovers.
+    fn guard_progress(&mut self, before: usize, ctx: &str) -> bool {
         if self.pos == before {
             self.error(format!("unexpected token in {ctx}: {:?}", self.peek()));
             self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Counts one level of expression, type, or block recursion, returning false
+    /// once the nesting ceiling has been crossed. The expression, type, and block
+    /// parsers wrap their recursive bodies in this: a caller that gets false returns
+    /// a placeholder without recursing further, so a deeply nested input unwinds
+    /// cleanly rather than overflowing the stack. Every call always increments and
+    /// is balanced by a single `self.depth -= 1` on the way out, on both the
+    /// accepted and the too-deep path. The diagnostic is emitted only on the first
+    /// crossing, naming the construct (`what` is "expression", "type", or "block")
+    /// and the fix (`fix` is the same noun for expressions and types, and "function"
+    /// for a block, whose nesting is simplified at the enclosing function), so one
+    /// clear error stands in for the flood of bailed-out levels.
+    fn enter_nesting(&mut self, what: &str, fix: &str) -> bool {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            if !self.hit_depth_limit {
+                self.hit_depth_limit = true;
+                self.error(format!("{what} nesting is too deep; simplify the {fix}"));
+            }
+            false
+        } else {
+            true
         }
     }
 
@@ -175,10 +225,7 @@ impl Parser {
             } else if let Some(it) = self.item() {
                 items.push(it);
             }
-            if self.pos == before {
-                self.error(format!("unexpected token {:?}", self.peek()));
-                self.bump();
-            }
+            self.guard_progress(before, "module body");
         }
         (
             Module {
@@ -476,6 +523,7 @@ impl Parser {
         let mut methods = Vec::new();
         self.expect(&TokenKind::LBrace);
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            let before = self.pos;
             if self.at(&TokenKind::Kw(Keyword::Func)) {
                 methods.push(self.func(false, false));
             } else if matches!(self.peek(), TokenKind::Ident(s) if s == "async") {
@@ -491,6 +539,7 @@ impl Parser {
                 self.error("expected a method (func) in impl block");
                 self.bump();
             }
+            self.guard_progress(before, "impl block");
         }
         self.expect(&TokenKind::RBrace);
         Impl { iface, ty, span, methods }
@@ -508,6 +557,7 @@ impl Parser {
         let mut funcs = Vec::new();
         self.expect(&TokenKind::LBrace);
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            let before = self.pos;
             let exported = self.eat(&TokenKind::Kw(Keyword::Export));
             if self.at(&TokenKind::Kw(Keyword::Func)) {
                 let mut f = self.func(exported, false);
@@ -517,12 +567,27 @@ impl Parser {
                 self.error("expected a method (func) in monad block");
                 self.bump();
             }
+            self.guard_progress(before, "monad block");
         }
         self.expect(&TokenKind::RBrace);
         (name, span, funcs)
     }
 
+    /// Depth-guarded entry to the recursive type grammar. Every recursion into a
+    /// nested type re-enters here, so the shared counter bounds the stack. On the
+    /// too-deep path it yields `Type::Unit` as an inert placeholder, never the
+    /// `Infer` hole, which only desugar may construct.
     fn type_(&mut self) -> Type {
+        let ty = if self.enter_nesting("type", "type") {
+            self.type_inner()
+        } else {
+            Type::Unit
+        };
+        self.depth -= 1;
+        ty
+    }
+
+    fn type_inner(&mut self) -> Type {
         // `**T` is a pointer to a pointer. The lexer joins the stars into one
         // `**` token; split the leading `*` off as the outer pointer and let the
         // recursive parse consume the remaining `*`.
@@ -614,7 +679,18 @@ impl Parser {
         val as u64
     }
 
+    /// Depth-guarded entry to the statement grammar. Every control-flow body
+    /// (`if`, `while`, `for`, `match` arm, `do while`) recurses back through here
+    /// as `if_ -> block -> stmt -> if_`, so the shared counter bounds that stack
+    /// alongside the expression and type recursions. On the too-deep path it
+    /// consumes nothing and yields an empty block, exactly as the expression and
+    /// type guards do: the enclosing recovery loop mops up the leftover tokens and
+    /// the stack unwinds cleanly rather than overflowing.
     fn block(&mut self) -> Block {
+        if !self.enter_nesting("block", "function") {
+            self.depth -= 1;
+            return Block { stmts: Vec::new() };
+        }
         let mut stmts = Vec::new();
         self.expect(&TokenKind::LBrace);
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
@@ -622,12 +698,10 @@ impl Parser {
             if let Some(s) = self.stmt() {
                 stmts.push(s);
             }
-            if self.pos == before {
-                self.error(format!("unexpected token in block: {:?}", self.peek()));
-                self.bump();
-            }
+            self.guard_progress(before, "block");
         }
         self.expect(&TokenKind::RBrace);
+        self.depth -= 1;
         Block { stmts }
     }
 
@@ -751,9 +825,33 @@ impl Parser {
         let then = self.block();
         let els = if self.eat(&TokenKind::Kw(Keyword::Else)) {
             if self.at(&TokenKind::Kw(Keyword::If)) {
-                Some(Block {
-                    stmts: vec![Stmt::If(self.if_())],
-                })
+                // An `else if` recurses straight into `if_`, bypassing both block
+                // guards, so a long chain adds a real stack frame per link while the
+                // shared depth stays flat: each `then` block increments and returns
+                // to zero before the next `else if`, so nothing accumulates and the
+                // chain once overflowed the stack. Count the descent here so the
+                // chain unwinds with a diagnostic like any other over-deep nesting.
+                // The `then` block is already charged by `block`, so guarding only
+                // this arm keeps the ceiling from being double-counted for ordinary
+                // nested `if` blocks; the accumulation held across the recursive call
+                // is what bounds the chain. Within each link the condition and `then`
+                // block are parsed before this descent, so at the boundary the inner
+                // condition crosses the ceiling first and the surfaced diagnostic
+                // names the expression, exactly as the deep if-block path does; this
+                // guard is what accumulates the depth to that point. It is charged
+                // like a block, so it reuses the block wording. On the too-deep path
+                // nothing is consumed and an empty else is returned, exactly as the
+                // other guards do: the enclosing block loop mops up the leftover `if`.
+                if !self.enter_nesting("block", "function") {
+                    self.depth -= 1;
+                    Some(Block { stmts: Vec::new() })
+                } else {
+                    let chained = Block {
+                        stmts: vec![Stmt::If(self.if_())],
+                    };
+                    self.depth -= 1;
+                    Some(chained)
+                }
             } else {
                 Some(self.block())
             }
@@ -814,6 +912,14 @@ impl Parser {
     /// Parses the body of a `do` block: a sequence of `name <- expr` binds and
     /// ordinary statements, leaving the trailing `while`, if any, for the caller.
     fn do_block_elems(&mut self) -> (Option<String>, Vec<DoElem>) {
+        // A `do { ... }` body recurses `do_stmt -> do_block_elems -> stmt ->
+        // do_stmt` without passing through `block`, so it needs the same depth
+        // guard: on the too-deep path it consumes nothing and yields an empty
+        // body, letting the enclosing recovery loop mop up the leftover tokens.
+        if !self.enter_nesting("block", "function") {
+            self.depth -= 1;
+            return (None, Vec::new());
+        }
         self.bump();
         // An optional monad name precedes the brace, as in `do Maybe { ... }`.
         let monad = if matches!(self.peek(), TokenKind::Ident(_))
@@ -837,12 +943,10 @@ impl Parser {
             } else if let Some(s) = self.stmt() {
                 elems.push(DoElem::Plain(s));
             }
-            if self.pos == before {
-                self.error(format!("unexpected token in do block: {:?}", self.peek()));
-                self.bump();
-            }
+            self.guard_progress(before, "do block");
         }
         self.expect(&TokenKind::RBrace);
+        self.depth -= 1;
         (monad, elems)
     }
 
@@ -885,17 +989,18 @@ impl Parser {
         let mut arms = Vec::new();
         self.expect(&TokenKind::LBrace);
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
+            let before = self.pos;
             let pat = self.pattern();
             self.expect(&TokenKind::FatArrow);
             let block_body = self.at(&TokenKind::LBrace);
             let body = if block_body {
                 self.block()
             } else if self.at(&TokenKind::Kw(Keyword::Return)) {
-                let before = self.pos;
+                let ret_start = self.pos;
                 match self.stmt() {
                     Some(s) => Block { stmts: vec![s] },
                     None => {
-                        if self.pos == before {
+                        if self.pos == ret_start {
                             self.bump();
                         }
                         Block { stmts: Vec::new() }
@@ -912,6 +1017,7 @@ impl Parser {
             } else if !self.at(&TokenKind::RBrace) {
                 self.expect(&TokenKind::Comma);
             }
+            self.guard_progress(before, "match arm");
         }
         self.expect(&TokenKind::RBrace);
         Match { scrut, arms }
@@ -1035,7 +1141,22 @@ impl Parser {
         }
     }
 
+    /// Depth-guarded entry to the binary-operator layer. Right operands recurse
+    /// through here (`self.bin(rbp)`), so a right-associative chain such as
+    /// `2 ** 2 ** ...` is bounded alongside the paren and prefix recursions. On
+    /// the too-deep path it yields an empty-identifier placeholder, the same inert
+    /// node `primary` uses when it cannot form an expression.
     fn bin(&mut self, min_bp: u8) -> Expr {
+        let e = if self.enter_nesting("expression", "expression") {
+            self.bin_inner(min_bp)
+        } else {
+            node(ExprKind::Ident(String::new()), self.span())
+        };
+        self.depth -= 1;
+        e
+    }
+
+    fn bin_inner(&mut self, min_bp: u8) -> Expr {
         let mut lhs = self.unary();
         loop {
             if self.nl_here() {
@@ -1108,7 +1229,21 @@ impl Parser {
         Some((op, lvl * 2, lvl * 2 + 1))
     }
 
+    /// Depth-guarded entry to the prefix-operator layer. A prefix chain such as
+    /// `----x` or `****x` recurses through here, and every paren, index, and call
+    /// re-enters the expression grammar below it, so counting here bounds those
+    /// stacks too. On the too-deep path it yields an empty-identifier placeholder.
     fn unary(&mut self) -> Expr {
+        let e = if self.enter_nesting("expression", "expression") {
+            self.unary_inner()
+        } else {
+            node(ExprKind::Ident(String::new()), self.span())
+        };
+        self.depth -= 1;
+        e
+    }
+
+    fn unary_inner(&mut self) -> Expr {
         let lo = self.span().lo;
         // `**pp` at a prefix position is deref of deref, not the exponent
         // operator. Split the joined `**` into two `*`: consume one as a deref
@@ -1370,6 +1505,7 @@ fn is_cmp(op: BinOp) -> bool {
 mod tests {
     use super::*;
     use crate::lexer::lex;
+    use std::thread;
 
     fn parse_ok(src: &str) -> Module {
         let (toks, lerr) = lex(src);
@@ -2043,5 +2179,150 @@ mod tests {
             "impl T {\n  async func m() -> int64 { return 1 }\n}",
         );
         assert!(errs.iter().any(|d| d.msg == "a method cannot be async"), "{errs:?}");
+    }
+
+    // Progress invariant. Every recovery loop routes its no-progress case through
+    // `guard_progress`, so a malformed body cannot spin the parser. Each snippet
+    // below lands in a different recovery loop; the call to `parse` returning at
+    // all is the termination proof, and a malformed program must be rejected, not
+    // silently accepted.
+    #[test]
+    fn recovery_loops_terminate_with_diagnostics() {
+        let cases = [
+            "struct S { , , , }",
+            "enum E { , , , }",
+            "interface I { + + + }",
+            "foreign \"C\" { + + + }",
+            "impl T { + + + }",
+            "monad M { + + + }",
+            "func f() -> void { @ @ @ }",
+            "func f() -> void { match x { @ @ @ } }",
+            "func f() -> void { do { @ @ @ } }",
+            "@ @ @ @",
+            "func f() -> Foo<,,,> { return }",
+            "func f(,,,) -> void { return }",
+            "func f() -> void { g(,,,) }",
+            "func f() -> void { x := [,,,] }",
+            "func f() -> (,,,) { return }",
+        ];
+        for src in cases {
+            let errs = parse_errs(src);
+            assert!(!errs.is_empty(), "malformed input silently accepted: {src:?}");
+        }
+    }
+
+    #[test]
+    fn stalled_interface_body_names_its_context() {
+        let errs = parse_errs("interface I { + }");
+        assert!(
+            errs.iter().any(|d| d.msg.contains("unexpected token in interface body")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn stalled_foreign_body_names_its_context() {
+        let errs = parse_errs("foreign \"C\" { + }");
+        assert!(
+            errs.iter().any(|d| d.msg.contains("unexpected token in foreign block")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn stalled_module_body_names_its_context() {
+        let errs = parse_errs("123 456");
+        assert!(
+            errs.iter().any(|d| d.msg.contains("unexpected token in module body")),
+            "{errs:?}"
+        );
+    }
+
+    // A deeply nested generic is a valid, terminating parse: the invariant does
+    // not touch it, and it must stay linear (no per-level rescans). This is the
+    // regression twin for the recovery-loop guards.
+    #[test]
+    fn deep_nested_generic_parses() {
+        let n = 400;
+        let src = format!(
+            "func f() -> {}int{} {{ return }}",
+            "Vec<".repeat(n),
+            ">".repeat(n)
+        );
+        let (toks, _) = lex(&src);
+        let (_m, errs) = parse(toks);
+        assert!(errs.is_empty(), "valid nested generic rejected: {errs:?}");
+    }
+
+    // Recursion-depth ceiling. A pathological deeply nested input once overflowed
+    // the stack (SIGABRT); `enter_nesting` now unwinds it into a diagnostic. The
+    // depth cases below intentionally drive the recursion to the ceiling, which
+    // needs more stack than the small default test-harness thread offers, so they
+    // run on an 8 MiB worker matching the process main thread. The ceiling keeps
+    // the depth bounded, so that worker never overflows.
+    fn parse_big_stack(src: &str) -> Vec<Diagnostic> {
+        let owned = src.to_string();
+        thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let (toks, _lex) = lex(&owned);
+                let (_m, errs) = parse(toks);
+                errs
+            })
+            .expect("spawn parser worker")
+            .join()
+            .expect("parser worker overflowed or panicked")
+    }
+
+    #[test]
+    fn deep_paren_expression_is_rejected_not_crashed() {
+        // Twenty thousand open parens used to overflow the stack; the depth guard
+        // now unwinds them into a single diagnostic that names the fix.
+        let src = format!("func f() -> void {{ x := {}1 }}", "(".repeat(20_000));
+        let errs = parse_big_stack(&src);
+        assert!(
+            errs.iter()
+                .any(|d| d.msg == "expression nesting is too deep; simplify the expression"),
+            "deep parens not reported as too deep: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn deep_type_is_rejected_not_crashed() {
+        // Deeply nested generics recurse through `type_`; the ceiling stops them.
+        let src = format!("func f() -> {}int {{ return }}", "Vec<".repeat(5_000));
+        let errs = parse_big_stack(&src);
+        assert!(
+            errs.iter()
+                .any(|d| d.msg == "type nesting is too deep; simplify the type"),
+            "deep type not reported as too deep: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn deep_right_assoc_operator_chain_is_rejected() {
+        // A long right-associative `**` run recurses through `bin`, not the prefix
+        // or paren paths, so this proves the binary layer is depth-guarded too.
+        let src = format!("func f() -> int64 {{ return {}2 }}", "2 ** ".repeat(20_000));
+        let errs = parse_big_stack(&src);
+        assert!(
+            errs.iter()
+                .any(|d| d.msg == "expression nesting is too deep; simplify the expression"),
+            "deep operator chain not reported as too deep: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn shallow_nesting_is_still_accepted() {
+        // Ten levels of parens, far under the ceiling, parse clean: the guard does
+        // not perturb ordinary nested code.
+        let src = format!(
+            "func f() -> int64 {{ return {}1{} }}",
+            "(".repeat(10),
+            ")".repeat(10)
+        );
+        let (toks, _) = lex(&src);
+        let (_m, errs) = parse(toks);
+        assert!(errs.is_empty(), "shallow nesting spuriously rejected: {errs:?}");
     }
 }

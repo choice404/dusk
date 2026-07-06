@@ -1,0 +1,29 @@
+@paradigm procedural
+@paradigm functional
+// The generic twin of escalias_proj: the field `c` has the erased type `T`, not
+// a concrete `*Cell`, so `chain_ty(st.c)` resolves to Unknown rather than a
+// pointer. The projection gate treats that Unknown as a maybe-managed read and
+// still joins `st`'s alias group, so `x := st.c` aliases `x`, `st`, and `c`. The
+// store `(*x).rows = local[0..4]` raises the group and returning `c` hands the
+// dangling frame view out, which is caught. Without the Unknown widening the
+// erased field would read as unmanaged and the store-through would escape silently.
+struct Cell { rows: int64[] }
+struct Box<T> { c: T }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    st: Box<*Cell> = Box { c: c }
+    x := st.c
+    local: int64[4] = [111, 222, 333, 444]
+    (*x).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

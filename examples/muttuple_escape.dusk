@@ -1,0 +1,19 @@
+@paradigm procedural
+
+// The escape guard still fires across the storage-reshaped binding. t starts with
+// an array-literal member and is reassigned to another frame-local array tuple, so
+// its slice member views this frame's array; returning t propagates the dangling
+// view and is rejected, exactly as before the slot was sized as a slice. The
+// storage fix must not weaken this rejection.
+func mk() -> (int64[], int64) {
+    mut t := ([1, 2, 3], 5)
+    t = ([4, 5, 6], 9)
+    return t
+}
+
+func main() -> int32 {
+    s, n := mk()
+    println(s[0])
+    println(n)
+    return 0
+}

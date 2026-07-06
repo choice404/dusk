@@ -1,0 +1,24 @@
+// Interprocedural escape (M5): a bare top-level func bound to a value, then
+// called in return position. f := id captures the function value; f(local[0..4])
+// dispatches through the closure path, so the callee is opaque (TOP) and may
+// return its argument. make's frame-local backing dies on return. This is the
+// task's literal `f := id; return f(s)` shape, now that the func-value call path
+// lowers correctly.
+@paradigm procedural
+@paradigm functional
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+func make() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    f := id
+    return f(local[0..4])
+}
+
+func main() -> int32 {
+    view := make()
+    println(view[0])
+    return 0
+}

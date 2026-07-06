@@ -1,0 +1,40 @@
+// Accept twin of escchan_stash_send: the same fused stash-and-send helper, but
+// the caller hands it a heap-backed slice, not a view of its own frame. The store
+// into the cell and the send of the pointer are both legal, since nothing the
+// sender minted on its frame crosses the channel. The store-edge closure of the
+// sink set rejects only a frame view in the source position, so a heap slice
+// relays and runs, and the receiver reads the value the sender minted on the heap.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [10, 20, 30, 40]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash_send(ch: Channel<*Cell>, c: *Cell, s: int64[]) -> void {
+    (*c).rows = s
+    e := chan_send(ch, c)
+    e.ignore()
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    payload := heap4()
+    stash_send(ch, c, payload)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

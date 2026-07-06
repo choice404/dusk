@@ -1,0 +1,31 @@
+@paradigm procedural
+@paradigm functional
+// A destructure binder that takes an intermediate aggregate member must join its
+// group. `a, n := (inner, 1)` binds `a` to the `Inner` struct, whose type reaches
+// a managed pointer, so the destructure links `a` to `inner` and transitively to
+// `c`. The projection `x := a.c` joins the group, `(*x).rows = local[0..4]` raises
+// it, and returning `c` hands the dangling frame view out, which is caught. The
+// bare-pointer destructure twin is escalias_destructure; here the member is a
+// name-bound aggregate the bare-pointer gate used to walk past.
+struct Cell { rows: int64[] }
+struct Inner { c: *Cell }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    inner := Inner { c: c }
+    a, n := (inner, 1)
+    println(n)
+    x := a.c
+    local: int64[4] = [111, 222, 333, 444]
+    (*x).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

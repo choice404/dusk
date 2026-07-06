@@ -1,0 +1,27 @@
+@paradigm procedural
+@paradigm functional
+// A frame slice stored through a pointer embedded one layer down inside a nested
+// aggregate must taint that pointer. `o` wraps `Inner { c: c }`, so the embed
+// walk descends the nested struct and aliases `o` to `c`. The store
+// `(*o.inner.c).rows = local[0..4]` raises `o`, the alias edge carries the flag
+// to `c`, and returning `c` hands the dangling frame view out, which is caught.
+struct Cell { rows: int64[] }
+struct Inner { c: *Cell }
+struct Outer { inner: Inner }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    o := Outer { inner: Inner { c: c } }
+    local: int64[4] = [111, 222, 333, 444]
+    (*o.inner.c).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

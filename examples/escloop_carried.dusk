@@ -1,0 +1,34 @@
+// M5 interprocedural escape: a two-step alias chain that only closes on the
+// second loop iteration. launder ends up returning argument 0 (out == s after two
+// turns), so a frame-local array laundered through it dangles. The summary walk
+// replays the loop body to a fixpoint, so the loop-carried alias is seen.
+@paradigm procedural
+@paradigm functional
+
+func launder(s: int64[], t: int64[]) -> int64[] {
+    mut out := t
+    mut tmp := t
+    mut i := 0
+    while i < 2 {
+        out = tmp
+        tmp = s
+        i = i + 1
+    }
+    return out
+}
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return launder(local[0..4], heap4())
+}
+
+func main() -> int32 {
+    view := mk()
+    println(view[0])
+    return 0
+}

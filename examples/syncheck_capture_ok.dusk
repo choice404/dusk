@@ -1,0 +1,20 @@
+// Accept and run: a synchronous error handler, e.check(h), invokes its closure
+// argument in place and never stores it, so a handler that captures a frame local
+// is safe. The error method callee keys no method summary, so without the sync-
+// handler exemption it would fall to the conservative opaque reject and refuse
+// this capturing handler. Here e.check(lambda { println(n) }) captures the frame
+// local n, runs the handler once against the live error, and prints 7 then 0.
+@paradigm procedural
+@paradigm functional
+
+func fail() -> (int64, error) {
+    return (0, error { message: "boom" })
+}
+
+func main() -> int32 {
+    n: int64 = 7
+    v, e := fail()
+    e.check(lambda (er: error) -> void { println(n) })
+    println(v)
+    return 0
+}

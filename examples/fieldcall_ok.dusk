@@ -1,0 +1,29 @@
+// Accept twin of escchan_field: a lambda packed into a struct field and invoked
+// through the field callee, box.f(c), on a pointer whose heap object holds only
+// heap-backed data. A field callee is opaque to the send analysis, so the
+// conservative send-reject would fire on a polluted argument, but this pointer
+// carries no frame view, so the opaque call is legal and runs. This proves the
+// default-deny gates on the argument's pollution, not on the opaque callee shape
+// alone: a clean pointer through a field callee is accepted.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+struct Sender { f: (*Cell) -> void }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [42, 43, 44, 45]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func demo() -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    box := Sender { f: lambda (x: *Cell) -> void { println((*x).rows[0]) } }
+    box.f(c)
+    free(c)
+}
+
+func main() -> int32 {
+    demo()
+    return 0
+}

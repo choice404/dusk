@@ -1,0 +1,33 @@
+// Accept twin of escchan_reassign/escchan_field: a lambda bound to a local sends
+// its pointer parameter over a channel, and the caller calls it directly with a
+// pointer whose heap object holds only heap-backed data. The binding is a known
+// lambda whose recorded sink set is checked precisely, and nothing on the sending
+// frame was stashed into the cell, so the sent pointer carries no frame view and
+// the send is legal. The receiver reads the value the sender minted on the heap,
+// which outlives the send.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { n: int64 }
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { n: 42 })
+    sender := lambda (x: *Cell) -> void {
+        e := chan_send(ch, x)
+        e.ignore()
+    }
+    sender(move(c))
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).n)
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

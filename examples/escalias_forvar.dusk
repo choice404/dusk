@@ -1,0 +1,29 @@
+@paradigm procedural
+@paradigm functional
+// A frame slice stored through a for-loop variable must taint the pointer the
+// iterand carries. `arr := [c]` embeds `c`, iterating `arr[0..1]` binds `p` to an
+// element so `p` aliases the array's group (to `c`), and `(*p).rows = local[0..4]`
+// pollutes the heap object `c` points to. The binding-alias choke links the loop
+// variable to the iterand the same way a `p := <iter>[i]` element read does, so
+// the raised flag reaches `c` and returning it is caught. The accept twin
+// (aliasforvar_ok) stores only a scalar.
+struct Cell { rows: int64[] }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    arr: (*Cell)[1] = [c]
+    local: int64[4] = [111, 222, 333, 444]
+    for p in arr[0..1] {
+        (*p).rows = local[0..4]
+    }
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

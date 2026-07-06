@@ -1,7 +1,7 @@
 //! Source spans and diagnostics.
 
 /// A half open byte range `lo..hi` into a single source file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Span {
     pub lo: u32,
     pub hi: u32,

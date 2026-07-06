@@ -1,0 +1,18 @@
+// M5 interprocedural escape: fold's result can be its init argument verbatim when
+// the folding function returns the accumulator, so a frame-view init walks out.
+// The folding function here returns acc unchanged, and acc is seeded from a
+// frame-local array slice, so the fold result views a dead frame.
+@paradigm procedural
+@paradigm functional
+
+func mk() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    nums: int64[2] = [1, 2]
+    return fold(nums[0..2], local[0..4], lambda (acc: int64[], x: int64) -> int64[] { return acc })
+}
+
+func main() -> int32 {
+    view := mk()
+    println(view[0])
+    return 0
+}

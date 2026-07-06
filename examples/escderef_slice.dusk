@@ -1,0 +1,17 @@
+// Compile-fail: a frame view read back out through a bare pointer dereference.
+// alloc heap-copies the slice descriptor, but the descriptor still points at
+// the frame-local array, so `return *p` dangles once the frame is reclaimed.
+// The bare-deref arm of the value walk carries the flag out.
+@paradigm procedural
+
+func mk() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    p: *(int64[]) = alloc(local[0..4])
+    return *p
+}
+
+func main() -> int32 {
+    v := mk()
+    println(v[0])
+    return 0
+}

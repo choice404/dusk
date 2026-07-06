@@ -1,0 +1,35 @@
+// Compile-fail: the struct-field variant of esccapture_store. A lambda that
+// stores its parameter through a captured pointer is laundered into a struct
+// field, box := Box { f: lambda (s) { (*c).rows = s } }, and invoked through the
+// field callee, box.f(local[0..4]), on a view of a frame-local array. A field
+// callee is opaque to the escape analysis: dusk cannot see the captured place it
+// stores into, so a bare frame slice handed to it is refused conservatively, the
+// capture store the argument-to-argument flow model cannot follow through a
+// closure hidden behind a struct field.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+struct Box { f: (int64[]) -> void }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    box := Box { f: lambda (s: int64[]) -> void {
+        (*c).rows = s
+    } }
+    local: int64[4] = [111, 222, 333, 444]
+    box.f(local[0..4])
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

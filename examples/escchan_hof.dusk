@@ -1,0 +1,49 @@
+// Compile-fail: the opaque higher-order twin. run(f, c) { f(c) } forwards its
+// pointer parameter to an opaque function value, and the caller passes a sinking
+// lambda for f beside a pointer whose heap object a store edge polluted with a
+// view of the sending frame. run's own body sends nothing, but calling an opaque
+// function value may hand the argument to a channel, so run sinks its pointer
+// parameter, and the caller is rejected for the polluted argument. The single
+// managed argument leaves the TOP cross-flow no second place to route through,
+// so the sink relation is the only thing that catches it.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func run(f: (*Cell) -> void, c: *Cell) -> void {
+    f(c)
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    sender := lambda (x: *Cell) -> void {
+        e := chan_send(ch, x)
+        e.ignore()
+    }
+    run(sender, c)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

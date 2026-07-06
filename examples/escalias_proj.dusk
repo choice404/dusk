@@ -1,0 +1,27 @@
+@paradigm procedural
+@paradigm functional
+// A managed pointer read by value out of a struct field aliases the object that
+// field belongs to. `st` embeds `c`, and `x := st.c` reads the pointer back out,
+// joining `st`'s alias group so `x`, `st`, and `c` all share it. The store
+// `(*x).rows = local[0..4]` raises the group, and returning `c` hands the
+// dangling frame view out, which is caught through the projection alias edge.
+struct Cell { rows: int64[] }
+struct Store { c: *Cell }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    st := Store { c: c }
+    x := st.c
+    local: int64[4] = [111, 222, 333, 444]
+    (*x).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

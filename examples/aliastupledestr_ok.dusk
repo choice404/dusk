@@ -1,0 +1,22 @@
+@paradigm procedural
+@paradigm functional
+// The accept twin of escalias_tupledestr: a destructure binder that takes an
+// aggregate member through a tuple BINDING aliases the pointer it buries, but a
+// SCALAR stored through it is an in-frame mutation, not a frame view. `st := Store
+// { c: c }` embeds `c`, `t := (st, 9)` and `a, n := t` link `a` to `t` to `c`, but
+// `(*a.c).n = 42` raises no frame-view flag, so nothing pollutes `c`; the pointer
+// stays owned and is freed in this frame, so the program is accepted and runs,
+// printing the destructured scalar and the value written through the alias.
+struct Cell { n: int64 }
+struct Store { c: *Cell }
+func main() -> int32 {
+    c: *Cell = alloc(Cell { n: 7 })
+    st := Store { c: c }
+    t := (st, 9)
+    a, n := t
+    println(n)
+    (*a.c).n = 42
+    println((*c).n)
+    free(c)
+    return 0
+}

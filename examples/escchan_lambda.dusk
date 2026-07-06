@@ -1,0 +1,45 @@
+// Compile-fail: the closure twin of escchan_helper. The send happens inside a
+// lambda bound to a local, sender := lambda (x: *Cell) { chan_send(ch, x) }, and
+// the caller calls it directly, sender(c), one hop from the frame that owns the
+// pointer. A lambda carries no computed summary the interprocedural sink check
+// could read, so the summary walk records the lambda's own sink set keyed by its
+// span, and the checker reads it at the direct call to reject a pointer whose
+// heap object a store edge polluted with a view of the sending frame. The
+// receiver would otherwise read a dead frame.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    sender := lambda (x: *Cell) -> void {
+        e := chan_send(ch, x)
+        e.ignore()
+    }
+    sender(c)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

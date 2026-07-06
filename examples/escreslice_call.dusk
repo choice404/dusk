@@ -1,0 +1,20 @@
+// M5 interprocedural escape: re-slicing a laundered call result. id(local[0..4])
+// returns a frame view, and [0..2] re-slices it; the re-slice base is a call, not
+// an array-typed or flagged binding, so the range-slice base falls to the general
+// escape check to catch the frame-local backing.
+@paradigm procedural
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+func mk() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return id(local[0..4])[0..2]
+}
+
+func main() -> int32 {
+    v := mk()
+    println(v[0])
+    return 0
+}

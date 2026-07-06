@@ -1,0 +1,23 @@
+// M5 interprocedural escape: a frame view pushed into a vector and read back out
+// with vec_get still views the frame. vec_get reads through its pointer
+// parameter, so the read-back slice carries the pushed frame view, and returning
+// it dangles. The reads-through summary catches it; pushing a heap view is fine
+// (see vec_heap_push_ok).
+@paradigm procedural
+@import std.vector
+
+func mk() -> int64[] {
+    v: *Vector<int64[]> = alloc(vec_new())
+    local: int64[4] = [111, 222, 333, 444]
+    vec_push(v, local[0..4])
+    got := vec_get(v, 0)
+    vec_free(v)
+    free(v)
+    return got
+}
+
+func main() -> int32 {
+    view := mk()
+    println(view[0])
+    return 0
+}

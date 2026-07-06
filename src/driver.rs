@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::codegen;
+use crate::mono::MutTupleTypes;
 use crate::parser::ast::Module;
 
 /// Paths produced by a build.
@@ -13,11 +14,18 @@ pub struct BuildArtifacts {
 }
 
 /// Compiles a checked module to IR, links it with the runtime, returns artifacts.
-pub fn build_module(module: &Module, out_dir: &Path, stem: &str) -> Result<BuildArtifacts, String> {
+/// `muts` carries the reconciled storage types of the narrow mutable-tuple class,
+/// which codegen stamps onto those bindings so their slots are sized as slices.
+pub fn build_module(
+    module: &Module,
+    muts: &MutTupleTypes,
+    out_dir: &Path,
+    stem: &str,
+) -> Result<BuildArtifacts, String> {
     std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
     let ll = out_dir.join(format!("{stem}.ll"));
     let bin = out_dir.join(stem);
-    let ir = codegen::compile(module);
+    let ir = codegen::compile(module, muts);
     std::fs::write(&ll, &ir).map_err(|e| format!("write {}: {e}", ll.display()))?;
     let rt = runtime_sources();
     let mut inputs: Vec<&Path> = vec![ll.as_path()];

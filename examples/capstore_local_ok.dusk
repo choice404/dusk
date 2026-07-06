@@ -1,0 +1,32 @@
+// Accept and run: the local-use twin of esccapture_store. The same lambda stores
+// its parameter through the captured pointer c, setter(local[0..4]), which raises
+// c's escape flag, but c is never returned, sent, or spawned: it is read back in
+// this frame while the backing array is still alive, then freed. A capture store
+// only raises a flag, so a purely local use stays legal, exactly as a frame view
+// laundered into a local through a named helper does. The read sees 111.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func use_local() -> int64 {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    setter := lambda (s: int64[]) -> void {
+        (*c).rows = s
+    }
+    local: int64[4] = [111, 222, 333, 444]
+    setter(local[0..4])
+    first: int64 = (*c).rows[0]
+    free(c)
+    return first
+}
+
+func main() -> int32 {
+    println(use_local())
+    return 0
+}

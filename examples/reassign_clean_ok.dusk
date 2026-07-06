@@ -1,0 +1,43 @@
+// Accept twin of escchan_reassign, the re-record proof: a mut binding first holds
+// a sinking lambda, then is reassigned to a clean one that only reads its pointer
+// parameter, and is called with a pointer whose heap object a store edge polluted
+// with a view of the sending frame. The reassignment re-records the new lambda's
+// empty sink set on the binding, so the direct call is checked against exactly
+// what it now holds and the read is legal: the clean lambda never sends, so the
+// polluted pointer stays safe. This must not fall back to the opaque send-reject,
+// which would fire if the reassignment merely dropped the record. Prints 111.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    mut s := lambda (x: *Cell) -> void {
+        e := chan_send(ch, x)
+        e.ignore()
+    }
+    s = lambda (x: *Cell) -> void { println((*x).rows[0]) }
+    s(c)
+    free(c)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

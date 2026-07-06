@@ -1,0 +1,24 @@
+// Interprocedural escape (M5): a frame view pushed into a local vector, which is
+// then returned. mk allocates a local vector, slices a frame-local array, and
+// pushes the slice into the vector; vec_push's summary records that argument 2
+// flows into argument 1 (the vector), so the vector local is marked as holding a
+// frame view. Returning the vector pointer would carry the dangling view out, so
+// the return is rejected and named at the store.
+@paradigm procedural
+@import std.vector
+
+func mk() -> *Vector<int64[]> {
+    v: *Vector<int64[]> = alloc(vec_new())
+    local: int64[4] = [111, 222, 333, 444]
+    vec_push(v, local[0..4])
+    return v
+}
+
+func main() -> int32 {
+    v := mk()
+    got := vec_get(v, 0)
+    println(got[0])
+    vec_free(v)
+    free(v)
+    return 0
+}

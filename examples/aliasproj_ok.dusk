@@ -1,0 +1,18 @@
+@paradigm procedural
+// The accept twin of the projection rejects: reading a managed pointer out of a
+// struct field and storing a SCALAR through it is an in-frame mutation, not a
+// frame view. `x := st.c` forms the alias link `x` -> `c`, but `(*x).n = 42`
+// raises no frame-view flag, so nothing pollutes `c`. The pointer stays owned
+// and is freed in this frame, so the program is accepted and runs, printing the
+// value written through the projected alias.
+struct Cell { n: int64 }
+struct Store { c: *Cell }
+func main() -> int32 {
+    c: *Cell = alloc(Cell { n: 7 })
+    st := Store { c: c }
+    x := st.c
+    (*x).n = 42
+    println((*c).n)
+    free(c)
+    return 0
+}

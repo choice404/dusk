@@ -1,0 +1,38 @@
+// A bare top-level function bound to a value, then called in RETURN position.
+// The binding carries no capture, so it lowers to a closure `{ env, fn }` over a
+// null env and a forwarding thunk, and the call dispatches through the same
+// indirect path a lambda does. Two return shapes are exercised: a scalar int64
+// and a fat slice int64[]. Before the func-value lowering the call was dropped
+// and the return was a bogus literal 0, which clang rejected.
+@paradigm procedural
+@paradigm functional
+
+func inc(x: int64) -> int64 {
+    return x + 1
+}
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+// Scalar return form: g is a func value; g(41) is returned directly.
+func scalar() -> int64 {
+    g := inc
+    return g(41)
+}
+
+// Slice return form: f is a func value; f(data) is returned directly. The
+// backing lives in the caller, so the returned view stays valid.
+func viewer(data: int64[]) -> int64[] {
+    f := id
+    return f(data)
+}
+
+func main() -> int32 {
+    println(scalar())
+    buf: int64[4] = [111, 222, 333, 444]
+    view := viewer(buf[0..4])
+    println(view[0])
+    println(view[3])
+    return 0
+}

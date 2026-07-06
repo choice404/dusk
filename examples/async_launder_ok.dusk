@@ -1,0 +1,28 @@
+// M5 no-over-reject inside an async body: a frame view laundered through a call
+// and CONSUMED in the frame that owns it. legal slices a frame-local array,
+// launders it through id, and reads element 0 while local is still alive, then
+// returns a scalar. Nothing escapes, so it must check, build, and run.
+@paradigm procedural
+@import std.async.loop
+@import std.async.time
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+async func legal() -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    v := id(local[0..4])
+    t := sleep_async(1)
+    x := await t
+    return v[0] + x
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    r := async_run(legal())
+    println(r)
+    loop_free()
+    return 0
+}

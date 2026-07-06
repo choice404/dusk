@@ -1,0 +1,30 @@
+@paradigm procedural
+@paradigm functional
+// A struct value returned by value carries the buried pointer its embed shares.
+// `inner := Inner { c: alloc(...) }` holds a fresh heap `Cell`, and dusk copies a
+// struct by value, so `outer := Outer { inner: inner }` holds a second copy of the
+// same `*Cell`; the embed walk links `outer` to the name `inner`, whose type
+// reaches a managed pointer. The store `(*outer.inner.c).rows = local[0..4]`
+// raises `outer` and the edge carries the flag back to `inner`, so returning the
+// `inner` struct by value hands out a struct whose pointer reaches the dangling
+// frame view, which is caught.
+struct Cell { rows: int64[] }
+struct Inner { c: *Cell }
+struct Outer { inner: Inner }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> Inner {
+    inner := Inner { c: alloc(Cell { rows: heap4() }) }
+    outer := Outer { inner: inner }
+    local: int64[4] = [111, 222, 333, 444]
+    (*outer.inner.c).rows = local[0..4]
+    return inner
+}
+func main() -> int32 {
+    got := mk()
+    println((*got.c).rows[0])
+    free(got.c)
+    return 0
+}

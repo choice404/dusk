@@ -1,0 +1,28 @@
+@paradigm procedural
+@paradigm functional
+// The accept twin of escalias_matchbind: a match payload binder that aliases the
+// scrutinee's embedded pointer, but through which only a SCALAR is stored, is an
+// in-frame mutation, not a frame view. `o := Opt.Some(c)` embeds `c`, `Some(p)`
+// forms the alias link `p` -> `o` -> `c`, but `(*p).n = 42` raises no frame-view
+// flag, so nothing pollutes `c`; the pointer stays owned and is freed in this
+// frame, so the program is accepted. A run golden: the local-enum construct-and-
+// match path lands the qualified `Opt.Some(c)` constructor, the payload copies
+// into the enum blob, and `p` is a copy of that pointer, so `(*p).n = 42` reads
+// back as 42.
+struct Cell { n: int64 }
+enum Opt { Some(c: *Cell), None }
+func mk() -> int64 {
+    c: *Cell = alloc(Cell { n: 7 })
+    o := Opt.Some(c)
+    match o {
+        Some(p) => { (*p).n = 42 }
+        None => {}
+    }
+    r := (*c).n
+    free(c)
+    return r
+}
+func main() -> int32 {
+    println(mk())
+    return 0
+}

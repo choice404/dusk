@@ -1,0 +1,49 @@
+// Accept twin of escchan_method on the method-flow path: a method fill(s) stores
+// its slice parameter through the by-pointer receiver, self.rows = s, and the
+// caller hands it a heap-backed slice. The escape summary records the store edge
+// from the parameter into the receiver (self as parameter 0), and the call
+// c.fill(heap4()) applies it with a clean source, so the receiver stays clean and
+// the pointer sent over the channel carries no frame view. The receiver thread
+// reads the heap value the sender minted, which outlives the send. This is the
+// runnable clean-receiver control: a frame-local slice stashed through the same
+// method would pollute the receiver and reject the later send (the unit twin).
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+interface Fillable {
+    fill(s: int64[]) -> void
+}
+
+impl Fillable for Cell {
+    func fill(s: int64[]) -> void {
+        self.rows = s
+    }
+}
+
+func heap4() -> int64[] {
+    seed: int64[4] = [10, 20, 30, 40]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    c.fill(heap4())
+    e := chan_send(ch, c)
+    e.ignore()
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

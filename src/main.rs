@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use dusk::analyze;
+use dusk::{analyze, Analysis};
 use dusk::{driver, lexer, parser, prescan};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -123,11 +123,11 @@ fn cmd_check(path: Option<&String>) -> ExitCode {
     let Some((path, _)) = read_src(path, "check") else {
         return ExitCode::FAILURE;
     };
-    let (module, errs) = analyze(&path);
+    let (analysis, errs) = analyze(&path);
     for e in &errs {
         eprintln!("{e}");
     }
-    if errs.is_empty() && module.is_some() {
+    if errs.is_empty() && analysis.is_some() {
         println!("ok: {path}");
         ExitCode::SUCCESS
     } else {
@@ -135,13 +135,14 @@ fn cmd_check(path: Option<&String>) -> ExitCode {
     }
 }
 
-/// Runs the front end. Prints diagnostics; returns the module only when clean.
-fn front_end(path: &str) -> Option<parser::ast::Module> {
-    let (module, errs) = analyze(path);
+/// Runs the front end. Prints diagnostics; returns the checked program only when
+/// clean, so the build path has both the module and its mutable-tuple table.
+fn front_end(path: &str) -> Option<Analysis> {
+    let (analysis, errs) = analyze(path);
     for e in &errs {
         eprintln!("{e}");
     }
-    module
+    analysis
 }
 
 fn stem_of(path: &str) -> String {
@@ -157,11 +158,11 @@ fn cmd_build(path: Option<&String>) -> ExitCode {
     let Some((path, _)) = read_src(path, "build") else {
         return ExitCode::FAILURE;
     };
-    let Some(module) = front_end(&path) else {
+    let Some(analysis) = front_end(&path) else {
         return ExitCode::FAILURE;
     };
     let out = PathBuf::from("target").join("dusk-out");
-    match driver::build_module(&module, &out, &stem_of(&path)) {
+    match driver::build_module(&analysis.module, &analysis.mut_tuple_types, &out, &stem_of(&path)) {
         Ok(art) => {
             println!("[dusk] {}", art.bin.display());
             ExitCode::SUCCESS
@@ -179,11 +180,16 @@ fn cmd_run(path: Option<&String>, prog_args: &[String]) -> ExitCode {
     let Some((path, _)) = read_src(path, "run") else {
         return ExitCode::FAILURE;
     };
-    let Some(module) = front_end(&path) else {
+    let Some(analysis) = front_end(&path) else {
         return ExitCode::FAILURE;
     };
     let out = PathBuf::from("target").join("dusk-out");
-    let art = match driver::build_module(&module, &out, &stem_of(&path)) {
+    let art = match driver::build_module(
+        &analysis.module,
+        &analysis.mut_tuple_types,
+        &out,
+        &stem_of(&path),
+    ) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("[dusk] {e}");

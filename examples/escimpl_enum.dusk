@@ -1,0 +1,36 @@
+// Compile-fail: an `impl` whose receiver type is an enum. Sema accepts the impl
+// and checks a `match self` body cleanly, but codegen dispatches a method call
+// only on a struct receiver: `o.flip()` would emit no call, and the `match self`
+// inside would fall to the non-enum path whose arms are unconditional, so the
+// method would silently yield a wrong value with no diagnostic.
+//
+// Methods on an enum are rejected here, naming the fix (a struct receiver), so
+// the broken lowering is never reached. When codegen learns enum-receiver
+// dispatch this guard lifts.
+@paradigm procedural
+@paradigm oop
+
+enum Opt { Some(v: int64), None }
+
+interface Flip {
+    flip() -> Opt
+}
+
+impl Flip for Opt {
+    func flip() -> Opt {
+        match self {
+            Some(v) => return Opt.None,
+            None    => return Opt.Some(1),
+        }
+    }
+}
+
+func main() -> int32 {
+    o := Opt.Some(7)
+    f := o.flip()
+    match f {
+        Some(v) => println(v),
+        None    => println(-1),
+    }
+    return 0
+}

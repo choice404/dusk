@@ -1,0 +1,25 @@
+// Compile-fail: a method returns `self` where a `*Cell` is declared. `self` is
+// the receiver value, of the concrete struct type the impl names; codegen passes
+// the receiver by pointer and loads the value for a bare `self`, so `return self`
+// against a `*Cell` return would hand the struct where the fat pointer belongs
+// and the backend would fault on the type. The checker types `self` as the value
+// and rejects the pointer-position use by name, so the fix (return the value, or
+// return a heap-owned pointer) is spelled at the source instead of surfacing as a
+// stray backend error. The value-return twin, selfvalue_ok, compiles and runs.
+@paradigm procedural
+@paradigm oop
+struct Cell { n: int64 }
+interface Idable {
+    id() -> *Cell
+}
+impl Idable for Cell {
+    func id() -> *Cell {
+        return self
+    }
+}
+func main() -> int32 {
+    c := Cell { n: 5 }
+    p := c.id()
+    println((*p).n)
+    return 0
+}

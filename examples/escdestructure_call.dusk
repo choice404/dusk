@@ -1,0 +1,22 @@
+// M5 interprocedural escape: destructuring the tuple result of a laundering call.
+// idt returns (its slice argument, 5), so the first binder aliases the frame view
+// passed in; a bare tuple-literal destructure was handled, but a call result is
+// not a literal, so each view-carrying binder inherits the call's frame-view flag.
+@paradigm procedural
+
+func idt(s: int64[]) -> (int64[], int64) {
+    return (s, 5)
+}
+
+func mk() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    a, n := idt(local[0..4])
+    println(n)
+    return a
+}
+
+func main() -> int32 {
+    v := mk()
+    println(v[0])
+    return 0
+}

@@ -1,0 +1,32 @@
+// M5 intraprocedural twin of the loop-carried escape: the same two-step alias
+// chain inside one function. out picks up the frame view fv only on the second
+// iteration (out = tmp; tmp = fv), so a single pass would miss it; the loop body
+// replays to a fixpoint under suppressed diagnostics, then reports once.
+@paradigm procedural
+@paradigm functional
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    fv := local[0..4]
+    h := heap4()
+    mut out := h
+    mut tmp := h
+    mut i := 0
+    while i < 2 {
+        out = tmp
+        tmp = fv
+        i = i + 1
+    }
+    return out
+}
+
+func main() -> int32 {
+    view := mk()
+    println(view[0])
+    return 0
+}

@@ -1,0 +1,35 @@
+@paradigm procedural
+@paradigm functional
+// A conditional reassign of an aliasing pointer is a may-join: `mut q := c` links
+// `q` to `c` (to `a`), and `if cnd { q = d }` unions `d` (to `b`) on top without
+// dropping the old edge, since `q` may still hold `c`. A frame slice stored
+// through `q` then taints both `a` and `b`, so the returned `a` is caught. A
+// straight-line replace would wrongly drop the `a` edge and accept the return.
+struct Cell { rows: int64[] }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func store_rows(c: *Cell, s: int64[]) -> void {
+    (*c).rows = s
+}
+func mk(cnd: bool) -> *Cell {
+    a: *Cell = alloc(Cell { rows: heap4() })
+    b: *Cell = alloc(Cell { rows: heap4() })
+    ref c := a
+    ref d := b
+    mut q := c
+    local: int64[4] = [111, 222, 333, 444]
+    if cnd {
+        q = d
+    }
+    store_rows(q, local[0..4])
+    free(b)
+    return a
+}
+func main() -> int32 {
+    a := mk(false)
+    println((*a).rows[0])
+    free(a)
+    return 0
+}

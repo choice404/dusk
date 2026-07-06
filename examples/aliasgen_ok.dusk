@@ -1,0 +1,21 @@
+@paradigm procedural
+// The accept twin of the generic-projection reject: reading a managed pointer
+// out of a GENERIC struct field whose element type erases to Unknown and storing
+// a SCALAR through it is an in-frame mutation, not a frame view. `x := st.c`
+// forms the alias link `x` -> `c` through the Unknown-erased projection gate (a
+// concrete `Box.c: *Cell` would gate on the pointer type, a generic `Box<T>.c`
+// gates on the maybe), but `(*x).n = 42` raises no frame-view flag, so nothing
+// pollutes `c`. The pointer stays owned and freed in this frame, so the coarse
+// link rejects nothing: the program is accepted and runs, printing the value
+// written through the projected alias.
+struct Cell { n: int64 }
+struct Box<T> { c: T }
+func main() -> int32 {
+    c: *Cell = alloc(Cell { n: 7 })
+    st: Box<*Cell> = Box { c: c }
+    x := st.c
+    (*x).n = 42
+    println((*c).n)
+    free(c)
+    return 0
+}

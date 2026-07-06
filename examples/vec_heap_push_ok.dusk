@@ -1,0 +1,24 @@
+// M5 no-over-reject: pushing a HEAP view into a vector and returning the vector
+// is legal, and reading the pushed element back with vec_get stays legal too. The
+// reads-through relation checks the caller's argument, so a heap-backed object
+// read back the same way as escvecget_readback stays clean.
+@paradigm procedural
+@paradigm functional
+@import std.vector
+
+func mk() -> *Vector<int64[]> {
+    v: *Vector<int64[]> = alloc(vec_new())
+    seed: int64[4] = [1, 2, 3, 4]
+    h := map(seed[0..4], lambda (x: int64) -> int64 { return x })
+    vec_push(v, h)
+    return v
+}
+
+func main() -> int32 {
+    v := mk()
+    got := vec_get(v, 0)
+    println(got[0])
+    vec_free(v)
+    free(v)
+    return 0
+}

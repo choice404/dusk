@@ -1,0 +1,27 @@
+@paradigm procedural
+@paradigm functional
+// A `ref` alias of a managed pointer aliases it: a frame slice stored through
+// `q` (a ref of `c`) pollutes the object `c` points to, so returning `c` carries
+// the dangling view out. The alias edge from `q` to `c` propagates the flag the
+// helper's store edge raised on `q`.
+struct Cell { rows: int64[] }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func store_rows(c: *Cell, s: int64[]) -> void {
+    (*c).rows = s
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    ref q := c
+    local: int64[4] = [111, 222, 333, 444]
+    store_rows(q, local[0..4])
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

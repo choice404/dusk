@@ -1,0 +1,22 @@
+// Compile-fail twin of futureannot: a future may now be stored in a container,
+// but its element still may not view a frame. A Future<int64[]> carries a slice,
+// which would dangle in the awaiter once the completing frame is gone, so the
+// future-element ban fires at the minting site even though the future is bound
+// for a Vector<Future<int64[]>>. The new container position does not launder an
+// element the ban already refuses.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.vector
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    v: *Vector<Future<int64[]>> = alloc(vec_new())
+    f: Future<int64[]> = future_new()
+    vec_push(v, f)
+    vec_free(v)
+    free(v)
+    loop_free()
+    return 0
+}

@@ -1,0 +1,45 @@
+// Compile-fail: a sinking lambda is packed into a struct field, box := Sender {
+// f: lambda (x) { chan_send(ch, x) } }, and invoked through the field callee,
+// box.f(c), on a pointer whose heap object a store edge polluted with a view of
+// the sending frame. A field callee is opaque to the send analysis: dusk cannot
+// see which argument it may hand to a channel, so a polluted managed pointer in
+// any argument position is refused conservatively, the case a lambda laundered
+// into a struct literal would otherwise wash past the by-name sink check.
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+struct Sender { f: (*Cell) -> void }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    box := Sender { f: lambda (x: *Cell) -> void {
+        e := chan_send(ch, x)
+        e.ignore()
+    } }
+    box.f(c)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

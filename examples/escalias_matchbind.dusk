@@ -1,0 +1,31 @@
+@paradigm procedural
+@paradigm functional
+// A frame slice stored through a match payload binder must taint the pointer the
+// scrutinee carries. `o := Opt.Some(c)` makes the enum value embed `c`, the arm
+// pattern `Some(p)` projects that payload so `p` aliases the scrutinee's group
+// (to `c`), and `(*p).rows = local[0..4]` pollutes the heap object `c` points to.
+// The binding-alias choke links the payload binder to the scrutinee the same way
+// a `p := <scrut>` projection does, so the raised flag reaches `c` and returning
+// it is caught. The accept twin (aliasmatch_ok) stores only a scalar.
+struct Cell { rows: int64[] }
+enum Opt { Some(c: *Cell), None }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    o := Opt.Some(c)
+    local: int64[4] = [111, 222, 333, 444]
+    match o {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

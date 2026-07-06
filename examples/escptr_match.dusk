@@ -1,0 +1,37 @@
+// Compile-fail: a polluted pointer returned through a match arm binder. An arm
+// binder projects the scrutinee's payload, so it inherits the scrutinee's
+// escape flags the same way a destructured tuple binder does, and returning it
+// is caught.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+enum Slot { Hold(c: *Cell), Empty }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    s := Slot.Hold(c)
+    match s {
+        Hold(d) => { return d }
+        Empty => { }
+    }
+    return alloc(Cell { rows: heap4() })
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

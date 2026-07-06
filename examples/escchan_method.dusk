@@ -1,0 +1,55 @@
+// Compile-fail: the method-receiver twin of escchan_helper. The channel send
+// lives inside a method whose hidden first parameter is the by-pointer receiver,
+// ship(ch) { chan_send(ch, self) }, so the sent value is the receiver itself. A
+// method call hides that receiver from the leaf and helper send checks: the
+// callee is a field expression, not a bare name, and the receiver never sits in
+// the argument list. The escape summary computes the method with self as
+// parameter 0 and records that it sinks that parameter into a channel, and the
+// call c.ship(ch) threads its receiver as effective argument 0, so a pointer
+// whose heap object a store edge polluted with a view of the sending frame is
+// rejected exactly as a direct chan_send(ch, c) would be.
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+interface Sendable {
+    ship(ch: Channel<*Cell>) -> void
+}
+
+impl Sendable for Cell {
+    func ship(ch: Channel<*Cell>) -> void {
+        e := chan_send(ch, self)
+        e.ignore()
+    }
+}
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func send_one(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    c.ship(ch)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    send_one(ch)
+    c, re := chan_recv(ch)
+    re.ignore()
+    println((*c).rows[0])
+    free(c)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

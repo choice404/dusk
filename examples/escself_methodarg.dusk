@@ -1,0 +1,45 @@
+// Compile-fail: a method passes its value `self` as an argument to another
+// method whose parameter is `*Cell`. `self` is the receiver value, of the
+// concrete struct type the impl names; codegen loads that value for a bare
+// `self`, so `s.grab(self)` into a `*Cell` parameter would hand the struct
+// where the fat pointer belongs and the backend would fault on the type.
+//
+// The direct-call and return positions already reject a value `self` in a
+// pointer slot; this is the method-call argument twin. A method call is
+// otherwise opaque to inference (its return types as Unknown), but the callee's
+// parameters are known from the impl, so the value-self use is caught here with
+// the same precise message, naming the fix (grab a heap-owned pointer), rather
+// than surfacing as a stray backend error.
+@paradigm procedural
+@paradigm oop
+
+struct Cell { n: int64 }
+struct Sink { last: int64 }
+
+interface Grabby {
+    grab(p: *Cell) -> void
+}
+
+impl Grabby for Sink {
+    func grab(p: *Cell) -> void {
+        self.last = (*p).n
+    }
+}
+
+interface Pushy {
+    push_into(s: Sink) -> void
+}
+
+impl Pushy for Cell {
+    func push_into(s: Sink) -> void {
+        s.grab(self)
+    }
+}
+
+func main() -> int32 {
+    c := Cell { n: 7 }
+    k := Sink { last: 0 }
+    c.push_into(k)
+    println(k.last)
+    return 0
+}

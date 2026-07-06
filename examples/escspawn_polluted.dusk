@@ -1,0 +1,35 @@
+// Compile-fail: a task lambda captures a managed pointer whose heap object
+// stores a view of the spawning frame. The capture check consults the
+// binding's flow flags, not only its type, so the thread cannot be handed a
+// pointer through which it would read this frame dead.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func fire() -> thread {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    t, e := spawn(lambda () -> void {
+        println((*c).rows[0])
+    })
+    e.ignore()
+    return t
+}
+
+func main() -> int32 {
+    t := fire()
+    je := join(t)
+    je.ignore()
+    return 0
+}

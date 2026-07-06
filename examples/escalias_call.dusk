@@ -1,0 +1,29 @@
+@paradigm procedural
+@paradigm functional
+// A call whose summary returns one of its pointer arguments aliases the result to
+// that argument: `d := same(c)` links `d` to `c`, so a frame slice stored through
+// `d` taints `c` and the returned `c` is caught (generation point 5).
+struct Cell { rows: int64[] }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func same(c: *Cell) -> *Cell {
+    return c
+}
+func store_rows(c: *Cell, s: int64[]) -> void {
+    (*c).rows = s
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    d := same(c)
+    local: int64[4] = [111, 222, 333, 444]
+    store_rows(d, local[0..4])
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

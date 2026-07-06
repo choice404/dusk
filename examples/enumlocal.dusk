@@ -1,0 +1,39 @@
+// Local-enum construct-and-match through the qualified constructor. `Opt.Some(v)`
+// names its variant with the enum prefix, the sole supported constructor form:
+// the unqualified `Some(v)` is refused by sema, so every construction site names
+// its enum. Three shapes exercise the path: a payload constructor bound to a
+// local and matched, a payload constructor passed straight as a value argument,
+// and a nullary constructor. Each prints a value that only the correct tag
+// dispatch and a faithful payload copy can produce.
+@paradigm procedural
+
+enum Opt {
+    Some(v: int64),
+    None,
+}
+
+func unwrap_or(o: Opt, d: int64) -> int64 {
+    match o {
+        Some(v) => return v,
+        None    => return d,
+    }
+}
+
+func main() -> int32 {
+    // Construct into a local, then match: dispatch must reach Some and bind the
+    // payload copy, not fall through both arms.
+    o := Opt.Some(99)
+    match o {
+        Some(p) => println(p),
+        None    => println(0),
+    }
+
+    // Construct as a by-value argument: the aggregate must pass as a real %Opt
+    // SSA value, not an integer constant with an aggregate type.
+    println(unwrap_or(Opt.Some(7), -1))
+
+    // Nullary construct as an argument: tag 1, no payload, the default arm.
+    println(unwrap_or(Opt.None, 42))
+
+    return 0
+}

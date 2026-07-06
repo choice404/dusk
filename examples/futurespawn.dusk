@@ -1,0 +1,31 @@
+// Compile-fail twin of futurearg: a future now crosses a plain function-argument
+// boundary, but a spawn still cannot capture one. A future belongs to the event
+// loop thread, so a completer thread carries only the raw handle words, never the
+// typed future; capturing it into a spawned lambda is rejected unchanged. Passing
+// a future to a same-thread relay is not the same crossing as handing it to a
+// worker thread.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func one() -> int64 {
+    return 1
+}
+
+func use_it(x: Future<int64>) -> void {
+    x.ignore()
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f := one()
+    t, s := spawn(lambda () -> void {
+        use_it(f)
+    })
+    s.ignore()
+    je := join(t)
+    je.ignore()
+    loop_free()
+    return 0
+}

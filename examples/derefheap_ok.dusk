@@ -1,0 +1,24 @@
+// Accept twin of escderef_slice: a heap-backed slice read back through a bare
+// dereference is legal, since its backing outlives the frame. The bare-deref
+// arm gates on the pointer binding's flow flag, which a heap init never sets.
+@paradigm procedural
+@paradigm functional
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> int64[] {
+    p: *(int64[]) = alloc(heap4())
+    r := *p
+    free(p)
+    return r
+}
+
+func main() -> int32 {
+    v := mk()
+    println(v[0])
+    println(v[3])
+    return 0
+}

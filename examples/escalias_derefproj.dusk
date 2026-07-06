@@ -1,0 +1,29 @@
+@paradigm procedural
+@paradigm functional
+// A managed pointer read by value through a dereferenced allocation aliases the
+// pointer that allocation embeds. `b := alloc(Box { c: c })` allocates a heap
+// object holding `c`, so the binding aliases `b` to `c`; `x := (*b).c` reads the
+// pointer back out and joins the group. The store `(*x).rows = local[0..4]`
+// raises `c`, and returning `c` hands the dangling frame view out through the
+// deref projection alias edge, which is caught.
+struct Cell { rows: int64[] }
+struct Box { c: *Cell }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    b: *Box = alloc(Box { c: c })
+    x := (*b).c
+    local: int64[4] = [111, 222, 333, 444]
+    (*x).rows = local[0..4]
+    free(b)
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

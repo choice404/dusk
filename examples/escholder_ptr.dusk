@@ -1,0 +1,28 @@
+// M5 interprocedural escape: a polluted managed pointer wrapped in a struct
+// literal on return. Holder's field is a *Cell whose object holds a frame view
+// stored through it by a call, so returning Holder { c: c } carries the dangling
+// view out. The struct-field escape gate follows a pointer field, not just a
+// slice or closure field.
+@paradigm procedural
+
+struct Cell { rows: int64[] }
+struct Holder { c: *Cell }
+
+func stash(s: int64[], c: *Cell) -> void {
+    (*c).rows = s
+}
+
+func mk() -> Holder {
+    seed: int64[1] = [7]
+    c: *Cell = alloc(Cell { rows: seed[0..1] })
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    return Holder { c: c }
+}
+
+func main() -> int32 {
+    h := mk()
+    println((*h.c).rows[0])
+    free(h.c)
+    return 0
+}

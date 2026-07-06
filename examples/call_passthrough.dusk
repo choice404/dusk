@@ -1,0 +1,21 @@
+// Interprocedural escape (M5): a frame-local slice laundered through a plain
+// passthrough call and returned. id returns its parameter, which is legal on its
+// own, but make slices a frame-local array and returns id(local[0..4]); the
+// backing dies on return. The intraprocedural checker cannot trace the call
+// result back to the local, so the interprocedural summary must catch it.
+@paradigm procedural
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+func make() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return id(local[0..4])
+}
+
+func main() -> int32 {
+    view := make()
+    println(view[0])
+    return 0
+}

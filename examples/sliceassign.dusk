@@ -1,0 +1,25 @@
+// An array-literal-to-slice coercion on the assignment path. r is inferred as a
+// param slice, then a conditional reassigns it to a slice viewing a fresh array
+// literal. The literal's backing is materialized and the fat pointer stored back
+// into r's slot, so both branches index a valid slice. r never escapes the
+// frame, only its element sum returns, so the reassignment is legal.
+@paradigm procedural
+func pick(xs: int64[], c: bool) -> int64 {
+    mut r := xs
+    if c {
+        r = [1, 2, 3]
+    }
+    mut sum := 0
+    mut i := 0
+    while i < 3 {
+        sum = sum + r[i]
+        i = i + 1
+    }
+    return sum
+}
+func main() -> int32 {
+    data: int64[3] = [10, 20, 30]
+    println(pick(data[0..3], true))
+    println(pick(data[0..3], false))
+    return 0
+}

@@ -1,0 +1,31 @@
+// No-over-reject (M5): a passthrough of a slice the frame does not own is legal.
+// relay is a two-hop passthrough that returns its PARAMETER slice, whose backing
+// the caller owns, so its return checks clean even though the summary records it
+// returns argument 0. main feeds it a slice it owns and a fresh heap slice, and
+// both survive every read. The accept side of the interprocedural escape line:
+// only a FRAME-LOCAL argument makes a passthrough dangle.
+@paradigm procedural
+@paradigm functional
+
+func id(s: int64[]) -> int64[] {
+    return s
+}
+
+func relay(s: int64[]) -> int64[] {
+    return id(s)
+}
+
+func main() -> int32 {
+    data: int64[3] = [10, 20, 30]
+    // Param-backed passthrough, consumed in the frame that owns the backing.
+    r := relay(data[0..3])
+    println(r[0])
+    println(r[2])
+    // Heap-backed passthrough: map mints a fresh heap slice, so laundering it
+    // through id keeps it heap-backed and safe.
+    doubled := map(data[0..3], lambda (x: int64) -> int64 { return x * 2 })
+    h := id(doubled)
+    println(h[0])
+    println(h[2])
+    return 0
+}

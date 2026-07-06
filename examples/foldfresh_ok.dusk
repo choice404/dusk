@@ -1,0 +1,23 @@
+// Accept twin of escfold_element: a fold over frame-view elements whose lambda
+// returns its heap-backed accumulator leaks neither the collection nor the
+// frame; only the seed's own backing decides, and it is heap here.
+@paradigm procedural
+@paradigm functional
+
+func heap2() -> int64[] {
+    seed: int64[2] = [9, 9]
+    return map(seed[0..2], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> int64[] {
+    a: int64[2] = [111, 222]
+    pair: int64[][2] = [a[0..2], a[0..2]]
+    return fold(pair[0..2], heap2(), lambda (acc: int64[], x: int64[]) -> int64[] { return acc })
+}
+
+func main() -> int32 {
+    v := mk()
+    println(v[0])
+    println(v[1])
+    return 0
+}

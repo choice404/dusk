@@ -1,0 +1,20 @@
+// M5 interprocedural escape: alloc heap-copies its initializer and hands back a
+// pointer to it, so a struct literal whose slice field views the current frame
+// walks the dangling view out through the returned pointer. The alloc summary
+// aliases argument 0, so a frame-view field is caught while a heap one is clean.
+@paradigm procedural
+
+struct Cell { rows: int64[] }
+
+func mk() -> *Cell {
+    local: int64[4] = [111, 222, 333, 444]
+    c: *Cell = alloc(Cell { rows: local[0..4] })
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}
