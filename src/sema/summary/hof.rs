@@ -236,6 +236,9 @@ impl FnState<'_> {
         let (sum, caps) = self.s.transfer_lambda(&syn, self.summaries);
         self.lambda_returns.insert(span, sum.returns_alias.union(sum.reads_through));
         self.lambda_sinks.insert(span, sum.sinks);
+        // The collect subset rides beside the full sink set, so a direct call of a
+        // local bound to a minting lambda names the mint, not a channel.
+        self.lambda_collect_sinks.insert(span, sum.collect_sinks);
         // A parameter's view stored through a captured binding is an escape edge
         // the argument-to-argument store model cannot see, since the captured
         // place is not one of the lambda's arguments. Record it against the

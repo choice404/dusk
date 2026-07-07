@@ -108,6 +108,13 @@ pub struct EscapeSummary {
     pub flows_into: Vec<(u8, u8)>,
     pub reads_through: ParamSet,
     pub sinks: ParamSet,
+    /// The subset of `sinks` whose outliving sink is a `collector<T>` mint rather
+    /// than a channel send. Both cross the frame boundary the same way, so the
+    /// enforcement rejects a polluted argument in either position; this subset
+    /// only selects the diagnostic wording, so a collect sink names the mint and a
+    /// channel sink names the send. Kept a subset of `sinks` at every step, so the
+    /// pre-existing full-set closure and propagation are unchanged.
+    pub collect_sinks: ParamSet,
 }
 
 /// Everything the escape pass computes for the enforcement step. `fns` is the
@@ -152,6 +159,11 @@ pub struct EscapeInfo {
     pub fns: HashMap<String, EscapeSummary>,
     pub lambda_returns: HashMap<Span, ParamSet>,
     pub lambda_sinks: HashMap<Span, ParamSet>,
+    /// The subset of each lambda literal's `lambda_sinks` whose sink is a
+    /// `collector<T>` mint rather than a channel send, keyed by the same span. The
+    /// checker reads this beside `lambda_sinks` at a direct call of a lambda-bound
+    /// local so a collect-minting closure's reject names the mint, not a channel.
+    pub lambda_collect_sinks: HashMap<Span, ParamSet>,
     pub frame_stores: Vec<(Span, u8)>,
     pub lambda_capture_flows: HashMap<Span, Vec<(u8, String)>>,
     pub method_summaries: HashMap<(String, String), EscapeSummary>,
@@ -191,12 +203,14 @@ struct Summarizer {
 pub fn compute(module: &Module) -> EscapeInfo {
     let s = Summarizer::new(module);
     let fns = s.solve(module);
-    let (lambda_returns, lambda_sinks, frame_stores, lambda_capture_flows) = s.collect(module, &fns);
+    let (lambda_returns, lambda_sinks, lambda_collect_sinks, frame_stores, lambda_capture_flows) =
+        s.collect(module, &fns);
     let method_summaries = s.method_summaries(module, &fns);
     EscapeInfo {
         fns,
         lambda_returns,
         lambda_sinks,
+        lambda_collect_sinks,
         frame_stores,
         lambda_capture_flows,
         method_summaries,
@@ -338,11 +352,13 @@ impl Summarizer {
     ) -> (
         HashMap<Span, ParamSet>,
         HashMap<Span, ParamSet>,
+        HashMap<Span, ParamSet>,
         Vec<(Span, u8)>,
         HashMap<Span, Vec<(u8, String)>>,
     ) {
         let mut lambda_returns = HashMap::new();
         let mut lambda_sinks = HashMap::new();
+        let mut lambda_collect_sinks = HashMap::new();
         let mut frame_stores: Vec<(Span, u8)> = Vec::new();
         let mut lambda_capture_flows = HashMap::new();
         for item in &module.items {
@@ -352,6 +368,7 @@ impl Summarizer {
                     summaries,
                     &mut lambda_returns,
                     &mut lambda_sinks,
+                    &mut lambda_collect_sinks,
                     &mut frame_stores,
                     &mut lambda_capture_flows,
                 ),
@@ -362,6 +379,7 @@ impl Summarizer {
                             summaries,
                             &mut lambda_returns,
                             &mut lambda_sinks,
+                            &mut lambda_collect_sinks,
                             &mut frame_stores,
                             &mut lambda_capture_flows,
                         );
@@ -372,7 +390,7 @@ impl Summarizer {
         }
         frame_stores.sort_unstable_by_key(|&(s, j)| (s.lo, s.hi, j));
         frame_stores.dedup();
-        (lambda_returns, lambda_sinks, frame_stores, lambda_capture_flows)
+        (lambda_returns, lambda_sinks, lambda_collect_sinks, frame_stores, lambda_capture_flows)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -382,12 +400,14 @@ impl Summarizer {
         summaries: &HashMap<String, EscapeSummary>,
         lambda_returns: &mut HashMap<Span, ParamSet>,
         lambda_sinks: &mut HashMap<Span, ParamSet>,
+        lambda_collect_sinks: &mut HashMap<Span, ParamSet>,
         frame_stores: &mut Vec<(Span, u8)>,
         lambda_capture_flows: &mut HashMap<Span, Vec<(u8, String)>>,
     ) {
-        let (lr, ls, fs, cf) = self.transfer_collect(f, summaries);
+        let (lr, ls, lcs, fs, cf) = self.transfer_collect(f, summaries);
         lambda_returns.extend(lr);
         lambda_sinks.extend(ls);
+        lambda_collect_sinks.extend(lcs);
         frame_stores.extend(fs);
         lambda_capture_flows.extend(cf);
     }
@@ -542,6 +562,7 @@ pub(crate) fn builtin_summary(name: &str) -> Option<EscapeSummary> {
             flows_into: Vec::new(),
             reads_through: ParamSet::default(),
             sinks: ParamSet::default(),
+            collect_sinks: ParamSet::default(),
         }),
         // alloc(v) heap-copies its initializer and hands back a pointer to it. The
         // pointer aliases the initializer, so a struct literal whose fat field
@@ -554,6 +575,7 @@ pub(crate) fn builtin_summary(name: &str) -> Option<EscapeSummary> {
             flows_into: Vec::new(),
             reads_through: ParamSet::default(),
             sinks: ParamSet::default(),
+            collect_sinks: ParamSet::default(),
         }),
         "free" | "print" | "println" | "printerr" | "sizeof" | "alloc_bytes"
         | "ptr_add" | "map" | "filter" | "reduce" | "fold" | "foreach" | "debug_alloc"

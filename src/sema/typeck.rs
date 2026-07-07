@@ -56,6 +56,7 @@ fn run_pass(
     tc.method_summaries = escape.method_summaries.clone();
     tc.lambda_returns = escape.lambda_returns.clone();
     tc.lambda_sinks = escape.lambda_sinks.clone();
+    tc.lambda_collect_sinks = escape.lambda_collect_sinks.clone();
     tc.lambda_capture_flows = escape.lambda_capture_flows.clone();
     // Every direct store of a frame view into a place reachable through a
     // parameter, found by the summary walk: the view dies with the frame no
@@ -145,6 +146,17 @@ enum CrossFail {
 enum CalleeEsc {
     Known(EscapeSummary),
     Top,
+}
+
+/// A lambda-bound local's recorded sink sets. `sinks` is every parameter the
+/// bound lambda hands to an outliving sink, `collect` the subset handed to a
+/// `collector<T>` mint rather than a channel. A direct call of the name rejects a
+/// polluted argument in any sink position; the subset only selects the wording,
+/// so a collect sink names the mint and a channel sink names the send.
+#[derive(Clone, Copy, Default)]
+struct LambdaSinkBind {
+    sinks: ParamSet,
+    collect: ParamSet,
 }
 
 struct TypeChecker {
@@ -286,13 +298,18 @@ struct TypeChecker {
     // interprocedural send the leaf-site check cannot see through a closure.
     // Empty on the ground pass.
     lambda_sinks: HashMap<Span, ParamSet>,
+    // The subset of each lambda literal's `lambda_sinks` whose sink is a collector
+    // mint rather than a channel send, keyed by the same span. Read beside
+    // `lambda_sinks` so a minting closure's reject names the mint. Empty on the
+    // ground pass.
+    lambda_collect_sinks: HashMap<Span, ParamSet>,
     // Local bindings that hold a lambda literal, mapped to that lambda's sink
     // set (empty for a clean lambda), scope-stacked so a shadow masks an outer
     // binding. A direct call of such a name is checked against the recorded set,
     // the closure counterpart of the named-helper sink check; the entry also
     // marks the binding as a known lambda, not an opaque callee the conservative
     // send-reject would refuse. Populated on the surface pass only.
-    lambda_sink_binds: Vec<HashMap<String, ParamSet>>,
+    lambda_sink_binds: Vec<HashMap<String, LambdaSinkBind>>,
     // Each lambda literal's capture-flow edge set, keyed by its expression span:
     // the lambda's own parameter indices paired with the captured binding name
     // each flows into, from the summary module's synthetic lambda walk. A lambda
@@ -379,6 +396,7 @@ impl TypeChecker {
             method_params: HashMap::new(),
             lambda_returns: HashMap::new(),
             lambda_sinks: HashMap::new(),
+            lambda_collect_sinks: HashMap::new(),
             lambda_sink_binds: Vec::new(),
             lambda_capture_flows: HashMap::new(),
             lambda_capture_binds: Vec::new(),
@@ -1468,6 +1486,15 @@ impl TypeChecker {
                 "this collects a pointer to an object that stores a view of the current frame; the collected block outlives the frame".to_string(),
                 s,
             );
+        } else if let Some((s, _)) = self.call_frame_origin(arg) {
+            // A collected call result that returns a view of a frame argument is
+            // an outliving collect, not a return; the shared slice/closure
+            // reporters would name a return here, so the mint site words it as a
+            // collect directly, matching the pointer message above.
+            self.emit_escape(
+                "this collects a value that views the current frame; the collected block outlives the frame".to_string(),
+                s,
+            );
         } else if esc_s {
             self.report_slice_escape(arg);
         } else {
@@ -2498,8 +2525,8 @@ impl TypeChecker {
                     // opaque conservative send-reject, since dusk can no longer see
                     // what the name now holds.
                     if let ExprKind::Lambda(_) = &rhs.kind {
-                        let ps = self.lambda_sinks.get(&rhs.span).copied().unwrap_or_default();
-                        self.rebind_lambda_sink(dst, ps);
+                        let bind = self.lambda_sink_bind_of(rhs.span);
+                        self.rebind_lambda_sink(dst, bind);
                         let cf = self.lambda_capture_flows.get(&rhs.span).cloned().unwrap_or_default();
                         self.rebind_lambda_capture(dst, cf);
                     } else {
@@ -2867,9 +2894,9 @@ impl TypeChecker {
             // the leaf-frame send check never treats as an opaque callee. Keyed by
             // the lambda expression's span, the summary walk's handle on the literal.
             if let ExprKind::Lambda(_) = &l.value.kind {
-                let ps = self.lambda_sinks.get(&l.value.span).copied().unwrap_or_default();
+                let bind = self.lambda_sink_bind_of(l.value.span);
                 if let Some(scope) = self.lambda_sink_binds.last_mut() {
-                    scope.insert(b.name.clone(), ps);
+                    scope.insert(b.name.clone(), bind);
                 }
                 // The lambda's capture-flow edges ride the binding the same way,
                 // so a direct call of the name raises each captured binding's flag
@@ -3539,24 +3566,57 @@ impl TypeChecker {
             if !(self.is_esc_slice(&root) || self.is_esc_closure(&root)) {
                 continue;
             }
-            if let Some((pspan, i, k)) = self.flow_prov.get(&root).copied() {
-                self.emit_escape(
-                    format!(
-                        "'{cname}' sends '{root}' across a channel, but argument {}'s view was stored into argument {} here, leaving '{root}' viewing the sending frame; move the backing to the heap",
-                        i + 1,
-                        k + 1
-                    ),
-                    pspan,
-                );
-            } else {
-                self.emit_escape(
-                    format!(
-                        "'{cname}' sends '{root}' across a channel, but it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data"
-                    ),
-                    call_span,
-                );
-            }
+            let prov = self.flow_prov.get(&root).copied();
+            self.emit_sink_reject(cname, &root, sum.collect_sinks.contains(j), prov, call_span);
         }
+    }
+
+    /// Emits the interprocedural sink reject for a polluted argument `root` handed
+    /// to callee `cname` in a sink position. `collect` selects the wording: a
+    /// `collector<T>` mint names the collect and the block the value outlives, a
+    /// channel send names the send and the receiver, since either outliving sink
+    /// dangles the frame view the same way. The store edge that polluted the
+    /// argument names its site when one is recorded, else the call site is blamed.
+    /// The escape decision is made before this; only the message differs.
+    fn emit_sink_reject(
+        &mut self,
+        cname: &str,
+        root: &str,
+        collect: bool,
+        prov: Option<(Span, u8, u8)>,
+        call_span: Span,
+    ) {
+        let (msg, span) = match (collect, prov) {
+            (false, Some((pspan, i, k))) => (
+                format!(
+                    "'{cname}' sends '{root}' across a channel, but argument {}'s view was stored into argument {} here, leaving '{root}' viewing the sending frame; move the backing to the heap",
+                    i + 1,
+                    k + 1
+                ),
+                pspan,
+            ),
+            (false, None) => (
+                format!(
+                    "'{cname}' sends '{root}' across a channel, but it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data"
+                ),
+                call_span,
+            ),
+            (true, Some((pspan, i, k))) => (
+                format!(
+                    "'{cname}' collects '{root}', but argument {}'s view was stored into argument {} here, leaving '{root}' viewing the frame; move the backing to the heap",
+                    i + 1,
+                    k + 1
+                ),
+                pspan,
+            ),
+            (true, None) => (
+                format!(
+                    "'{cname}' collects '{root}', but it holds a view of the frame, which the collected value outlives; move the backing to the heap"
+                ),
+                call_span,
+            ),
+        };
+        self.emit_escape(msg, span);
     }
 
     /// The concrete receiver type of a method call, peeling any managed or raw
@@ -3631,15 +3691,26 @@ impl TypeChecker {
         self.apply_flow_edges(&sum.flows_into, &eff, call_span);
     }
 
-    /// The recorded sink set of a local bound to a sinking lambda, from the
+    /// The recorded sink sets of a local bound to a sinking lambda, from the
     /// innermost scope that binds the name, so a shadow masks an outer binding.
-    fn lambda_sink_bind(&self, name: &str) -> Option<ParamSet> {
+    fn lambda_sink_bind(&self, name: &str) -> Option<LambdaSinkBind> {
         for scope in self.lambda_sink_binds.iter().rev() {
-            if let Some(ps) = scope.get(name) {
-                return Some(*ps);
+            if let Some(b) = scope.get(name) {
+                return Some(*b);
             }
         }
         None
+    }
+
+    /// The sink sets a lambda literal at `span` carries, the full set and its
+    /// collect subset, read together so the binding remembers which sink flavor to
+    /// name at a later direct call. A clean lambda yields an empty pair, which
+    /// still marks the binding a known lambda.
+    fn lambda_sink_bind_of(&self, span: Span) -> LambdaSinkBind {
+        LambdaSinkBind {
+            sinks: self.lambda_sinks.get(&span).copied().unwrap_or_default(),
+            collect: self.lambda_collect_sinks.get(&span).copied().unwrap_or_default(),
+        }
     }
 
     /// The closure counterpart of `check_call_sinks`: a direct call of a local
@@ -3658,10 +3729,10 @@ impl TypeChecker {
         let ExprKind::Ident(cname) = &callee.kind else {
             return;
         };
-        let Some(sinks) = self.lambda_sink_bind(cname) else {
+        let Some(bind) = self.lambda_sink_bind(cname) else {
             return;
         };
-        for j in sinks.to_vec() {
+        for j in bind.sinks.to_vec() {
             let Some(arg) = args.get(j as usize) else {
                 continue;
             };
@@ -3671,23 +3742,8 @@ impl TypeChecker {
             if !(self.is_esc_slice(&root) || self.is_esc_closure(&root)) {
                 continue;
             }
-            if let Some((pspan, i, k)) = self.flow_prov.get(&root).copied() {
-                self.emit_escape(
-                    format!(
-                        "'{cname}' sends '{root}' across a channel, but argument {}'s view was stored into argument {} here, leaving '{root}' viewing the sending frame; move the backing to the heap",
-                        i + 1,
-                        k + 1
-                    ),
-                    pspan,
-                );
-            } else {
-                self.emit_escape(
-                    format!(
-                        "'{cname}' sends '{root}' across a channel, but it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data"
-                    ),
-                    call_span,
-                );
-            }
+            let prov = self.flow_prov.get(&root).copied();
+            self.emit_sink_reject(cname, &root, bind.collect.contains(j), prov, call_span);
         }
     }
 
@@ -3699,16 +3755,23 @@ impl TypeChecker {
     /// still be its prior lambda: a conditional reversal to a sinking lambda then
     /// sinks, and a conditional reversal to a clean one cannot prove the prior
     /// lambda gone. A name with no prior record starts one in the current scope.
-    fn rebind_lambda_sink(&mut self, name: &str, ps: ParamSet) {
+    fn rebind_lambda_sink(&mut self, name: &str, bind: LambdaSinkBind) {
         let conditional = self.branch_depth > 0;
         for scope in self.lambda_sink_binds.iter_mut().rev() {
             if let Some(existing) = scope.get_mut(name) {
-                *existing = if conditional { existing.union(ps) } else { ps };
+                *existing = if conditional {
+                    LambdaSinkBind {
+                        sinks: existing.sinks.union(bind.sinks),
+                        collect: existing.collect.union(bind.collect),
+                    }
+                } else {
+                    bind
+                };
                 return;
             }
         }
         if let Some(scope) = self.lambda_sink_binds.last_mut() {
-            scope.insert(name.to_string(), ps);
+            scope.insert(name.to_string(), bind);
         }
     }
 

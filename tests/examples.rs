@@ -2703,11 +2703,13 @@ fn collecting_a_pointer_to_a_frame_slice_is_rejected() {
 fn passing_a_frame_view_into_a_minting_helper_is_rejected() {
     // The interprocedural mint-sink: mk mints its pointer parameter, so it is an
     // outliving sink on that parameter, and a caller handing it a pointer whose
-    // pointee stores a frame view is refused at the call. Reuses the channel-sink
-    // machinery, so the diagnostic wording is shared; the assertion pins the
-    // frame-view core, not the mechanism word.
+    // pointee stores a frame view is refused at the call. The mint reject is
+    // collect-flavored, not channel-flavored, so it names the collect and the
+    // block the value outlives.
     let err = check_fails("collectorptrhelper_fail.dusk");
-    assert!(err.contains("holds a view of the sending frame"), "{err}");
+    assert!(err.contains("holds a view of the frame"), "{err}");
+    assert!(err.contains("collects"), "{err}");
+    assert!(!err.contains("channel"), "collect reject must not mention a channel: {err}");
 }
 
 #[test]
@@ -2937,9 +2939,12 @@ fn a_closure_capturing_a_buried_frame_view_pointer_parameter_is_rejected() {
     // The interprocedural closure-capture sink: a minting helper captures its
     // pointer parameter, and a caller buries a frame view behind its pointee. The
     // closure mint records a sink on the captured pointer, so the caller is caught
-    // one hop up, matching the plain and slice kinds.
+    // one hop up, matching the plain and slice kinds. The reject is collect
+    // flavored, naming the collect rather than a channel.
     let err = check_fails("collectorcapparam_fail.dusk");
-    assert!(err.contains("holds a view of the sending frame"), "{err}");
+    assert!(err.contains("holds a view of the frame"), "{err}");
+    assert!(err.contains("collects"), "{err}");
+    assert!(!err.contains("channel"), "collect reject must not mention a channel: {err}");
 }
 
 #[test]

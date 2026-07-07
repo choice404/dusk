@@ -80,6 +80,7 @@ impl Summarizer {
     ) -> (
         HashMap<Span, ParamSet>,
         HashMap<Span, ParamSet>,
+        HashMap<Span, ParamSet>,
         Vec<(Span, u8)>,
         HashMap<Span, Vec<(u8, String)>>,
     ) {
@@ -87,7 +88,13 @@ impl Summarizer {
         st.block(&f.body);
         st.frame_stores.sort_unstable_by_key(|&(s, j)| (s.lo, s.hi, j));
         st.frame_stores.dedup();
-        (st.lambda_returns, st.lambda_sinks, st.frame_stores, st.lambda_capture_flows)
+        (
+            st.lambda_returns,
+            st.lambda_sinks,
+            st.lambda_collect_sinks,
+            st.frame_stores,
+            st.lambda_capture_flows,
+        )
     }
 }
 
@@ -132,6 +139,11 @@ pub(super) struct FnState<'a> {
     /// closure over the store edges (a parameter that flows into a sunk one) is
     /// applied once at `finish`, so the emitted summary is store-edge closed.
     pub(super) sinks: ParamSet,
+    /// The subset of `sinks` whose sink is a `collector<T>` mint rather than a
+    /// channel send. Accumulated in lockstep with `sinks` and closed over the same
+    /// store edges at `finish`, so it stays a subset. It changes nothing about the
+    /// escape decision, only which diagnostic wording the checker picks.
+    pub(super) collect_sinks: ParamSet,
     /// The return sink stack of the lambda bodies being walked inline. A
     /// `return` inside a lambda is the lambda's value, not the function's, so it
     /// joins the innermost sink instead of `returns_alias`/`reads_through`.
@@ -148,6 +160,11 @@ pub(super) struct FnState<'a> {
     /// argument in a sink position, the send the leaf-site check cannot see
     /// through a closure. Kept by the collection pass alongside `lambda_returns`.
     pub(super) lambda_sinks: HashMap<Span, ParamSet>,
+    /// The subset of each lambda literal's `lambda_sinks` whose sink is a
+    /// `collector<T>` mint rather than a channel send, keyed by the same span. The
+    /// checker reads it beside `lambda_sinks` to pick the collect wording for a
+    /// minting closure's reject.
+    pub(super) lambda_collect_sinks: HashMap<Span, ParamSet>,
     /// Direct stores of a frame-local view into a place reachable through a
     /// parameter: the store site's span and the parameter index. Such a view
     /// outlives the frame unconditionally, so the checker reports each one.
@@ -212,9 +229,11 @@ impl<'a> FnState<'a> {
             flows_into: Vec::new(),
             reads_through: ParamSet::default(),
             sinks: ParamSet::default(),
+            collect_sinks: ParamSet::default(),
             lambda_rets: Vec::new(),
             lambda_returns: HashMap::new(),
             lambda_sinks: HashMap::new(),
+            lambda_collect_sinks: HashMap::new(),
             frame_stores: Vec::new(),
             capture_flows: Vec::new(),
             lambda_capture_flows: HashMap::new(),
@@ -230,11 +249,16 @@ impl<'a> FnState<'a> {
         // one body does both (`evil(ch, c, s) { (*c).rows = s; chan_send(ch,
         // c) }`), which the pre-call sink check cannot otherwise see.
         let sinks = close_sinks_over_flows(self.sinks, &self.flows_into);
+        // The collect subset rides the same store-edge closure, so a parameter
+        // that flows into a collect sink is itself a collect sink; closing it with
+        // the same edges keeps it a subset of the full `sinks`.
+        let collect_sinks = close_sinks_over_flows(self.collect_sinks, &self.flows_into);
         EscapeSummary {
             returns_alias: self.returns_alias,
             flows_into: self.flows_into,
             reads_through: self.reads_through,
             sinks,
+            collect_sinks,
         }
     }
 
@@ -267,7 +291,7 @@ impl<'a> FnState<'a> {
     /// and the frame-store count are included, so a loop inside a lambda body
     /// converges on those too.
     #[allow(clippy::type_complexity)]
-    fn loop_state(&self) -> (Vec<(String, (bool, u64, u64))>, u64, usize, u64, (bool, u64, u64), usize, u64) {
+    fn loop_state(&self) -> (Vec<(String, (bool, u64, u64))>, u64, usize, u64, (bool, u64, u64), usize, u64, u64) {
         let mut env: Vec<(String, (bool, u64, u64))> = self
             .env
             .iter()
@@ -287,6 +311,7 @@ impl<'a> FnState<'a> {
             sink,
             self.frame_stores.len(),
             self.sinks.0,
+            self.collect_sinks.0,
         )
     }
 
@@ -504,7 +529,7 @@ impl<'a> FnState<'a> {
                     _ => true,
                 };
                 if sink {
-                    self.record_chan_sink(v);
+                    self.record_collect_sink(v);
                 }
                 AbsVal::default()
             }
@@ -676,7 +701,14 @@ impl<'a> FnState<'a> {
         // relation up a chain of relaying helpers (relay2 -> relay -> chan_send).
         for j in sum.sinks.iter() {
             if let Some(v) = argvals.get(j as usize) {
-                self.sinks = self.sinks.union(v.origins.union(v.reads));
+                let ps = v.origins.union(v.reads);
+                self.sinks = self.sinks.union(ps);
+                // Carry the sink flavor up the chain: a caller relaying an
+                // argument into a callee's collect sink sinks it as a collect too,
+                // so the reject one hop up still names the mint.
+                if sum.collect_sinks.contains(j) {
+                    self.collect_sinks = self.collect_sinks.union(ps);
+                }
             }
         }
         r
@@ -690,6 +722,17 @@ impl<'a> FnState<'a> {
     /// need not enter the summary.
     fn record_chan_sink(&mut self, sent: AbsVal) {
         self.sinks = self.sinks.union(sent.origins.union(sent.reads));
+    }
+
+    /// Records that a `collector<T>` mint hands its value to a collected block the
+    /// frame outlives, the same outliving escape a channel send is. It enters the
+    /// full sink set exactly as a channel sink does, so the enforcement is
+    /// identical, and additionally the collect subset, so the checker names the
+    /// mint rather than a channel at the reject.
+    fn record_collect_sink(&mut self, sent: AbsVal) {
+        let ps = sent.origins.union(sent.reads);
+        self.sinks = self.sinks.union(ps);
+        self.collect_sinks = self.collect_sinks.union(ps);
     }
 
     /// The TOP summary of an unknown callee: it may return any argument, may
