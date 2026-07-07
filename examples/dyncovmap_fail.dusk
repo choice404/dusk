@@ -1,0 +1,37 @@
+// FIX-A backstop: the HIGH repro. A heap slice minted by `map` erases its element
+// type in the checker, so neither the direct-call nor the interface-receiver
+// covariance guard can see the concrete `Sq` element, and the slice dodges the
+// escape reject because it is heap owned. This once reached the codegen backstop
+// as a Rust panic (exit 101) on a program `dusk check` accepted; the backstop is
+// now a clean, named build error (exit 1), so the miss is loud, never a silent
+// miscompile.
+@paradigm oop
+@paradigm procedural
+@paradigm functional
+
+interface Shape { area() -> int64 }
+interface Summer { total(shapes: Shape[]) -> int64 }
+
+struct Sq { s: int64 }
+impl Shape for Sq { func area() -> int64 { return self.s * self.s } }
+
+struct Calc { base: int64 }
+impl Summer for Calc {
+    func total(shapes: Shape[]) -> int64 {
+        mut sum: int64 = 0
+        mut i: int64 = 0
+        while i < shapes.len {
+            sum = sum + shapes[i].area()
+            i = i + 1
+        }
+        return sum
+    }
+}
+
+func main() -> int32 {
+    sqs: Sq[2] = [Sq { s: 3 }, Sq { s: 4 }]
+    hs := map(sqs[0..2], lambda (x: Sq) -> Sq { return x })
+    s: Summer = Calc { base: 0 }
+    println(s.total(hs))
+    return 0
+}

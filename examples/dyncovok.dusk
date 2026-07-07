@@ -1,0 +1,37 @@
+// FIX-A accept: the covariance guard on a dynamic-dispatch argument does not
+// over-reject a genuine slice of interfaces. `run` calls the interface method
+// `total` with a real `Shape[]`, the same element the parameter declares, so no
+// reinterpretation happens and the guard stays silent. A method call through an
+// interface receiver still trips the separate, conservative escape guard when the
+// slice views the sending frame, so this stays a clean-check accept rather than a
+// run: the point is that covariance itself accepts the same-type slice.
+@paradigm oop
+@paradigm procedural
+
+interface Shape { area() -> int64 }
+interface Summer { total(shapes: Shape[]) -> int64 }
+
+struct Sq { s: int64 }
+impl Shape for Sq { func area() -> int64 { return self.s * self.s } }
+
+struct Calc { base: int64 }
+impl Summer for Calc {
+    func total(shapes: Shape[]) -> int64 {
+        mut sum: int64 = 0
+        mut i: int64 = 0
+        while i < shapes.len {
+            sum = sum + shapes[i].area()
+            i = i + 1
+        }
+        return sum
+    }
+}
+
+func run(s: Summer, shapes: Shape[]) -> int64 {
+    return s.total(shapes)
+}
+
+func main() -> int32 {
+    println(0)
+    return 0
+}

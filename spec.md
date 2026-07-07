@@ -1,8 +1,14 @@
 # dusk Language Specification
 
-## Status, 0.1.0 baseline with 0.2.x additions
+## Status, 0.5.4 surface
 
-This is the language reference for dusk. The sections below describe the 0.1.0 core. The 0.2.x line layers memory safety on top, so where this document says strings are immutable, pointers are a single kind, or memory safety is debug only, the current language differs. It has a growable `StringBuilder` with concatenation, a split between a managed `*T` and a raw `*raw T` or `*void`, and a default generational heap that checks every managed dereference, faulting on a use after free or a double free.
+This is the language reference for dusk. It describes the language as of 0.5.4: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, and Unicode strings with the `rune` primitive. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
+
+### The bootstrap freeze
+
+The surface described in this spec is frozen as of 0.5.4 for the bootstrap. The releases from 0.6.x through 0.9.x change the compiler, not the language, as dusk is rewritten in itself, so a program that compiles against this spec keeps compiling across that line without a source change. Three kinds of work stay live during the freeze: diagnostics can improve, the standard library can grow, and a soundness fix can land, since none of those change the surface a correct program relies on. New surface resumes only after 1.0.0.
+
+The one exception is a soundness hole. A hole found during the bootstrap may force a surface change to close it, and when that happens the change is named in the changelog of the release that makes it.
 
 ---
 
@@ -150,17 +156,15 @@ If no `@paradigm` directive is present, the file defaults to procedural.
 | int16   | 2 bytes | signed 16 bit integer              |
 | int32   | 4 bytes | signed 32 bit integer              |
 | int64   | 8 bytes | signed 64 bit integer              |
-| uint8   | 1 byte  | unsigned 8 bit integer             |
-| uint16  | 2 bytes | unsigned 16 bit integer            |
-| uint32  | 4 bytes | unsigned 32 bit integer            |
-| uint64  | 8 bytes | unsigned 64 bit integer            |
 | float32 | 4 bytes | 32 bit floating point              |
 | float64 | 8 bytes | 64 bit floating point              |
 | bool    | 1 byte  | true or false                      |
 | char    | 1 byte  | single ASCII character             |
 | rune    | 4 bytes | a Unicode scalar value             |
-| string  | fat ptr | built in string type (see Strings) |
+| string  | one ptr | built in string type (see Strings) |
 | error   | builtin | built in error type (see Errors)   |
+
+The unsigned integer type names, `uint8`, `uint16`, `uint32`, and `uint64`, and the `u` literal suffixes are reserved, not yet part of the surface. The signed widths cover it until after 1.0.0, and naming an unsigned type is rejected at check, `unsigned integers are reserved; use the signed widths`.
 
 ### Type Inference
 
@@ -182,16 +186,16 @@ Inference uses these defaults.
 
 - Integer literals become `int64`.
 - Float literals become `float64`.
-- For other types such as `uint8` or `float32`, use a literal suffix or an annotation.
+- For other types such as `float32`, use a literal suffix or an annotation.
 
 Numeric widths never mix silently. Arithmetic, comparison, assignment, and argument passing take operands of one width, so an `int32` next to an `int64` is a compile error rather than a truncation. A bare literal adapts to the width beside it, and a literal that cannot fit its annotated width is rejected.
 
 Literal suffixes select a non default type without an annotation.
 
 ```text
-a := 5u8        // uint8
-b := 3.14f32    // float32
-c := 200u64     // uint64
+a := 3.14f32    // float32
+b := 5i8        // int8
+c := 200i16     // int16
 ```
 
 ### Strings
@@ -202,7 +206,7 @@ A string is a pointer to a NUL terminated buffer of `char`, a read only view tha
 s: string = "hello"   // a pointer to the NUL terminated bytes
 ```
 
-- A string value is immutable. The growable `StringBuilder` in `std.string`, added in 0.2.0, builds and concatenates strings on the heap.
+- A string value is immutable. Indexing a string, `s[i]`, is a read and stays legal; an index assignment, `s[i] = c`, is rejected at check, `a string is immutable; build a new one with a StringBuilder`, since the bytes live in read only storage. The growable `StringBuilder` in `std.string`, added in 0.2.0, builds and concatenates strings on the heap.
 - A string's length is found by scanning to the NUL, which `std.string`'s `str_len` does. The NUL keeps a string view compatible with C and the foreign interface.
 - The `cstr` builtin reinterprets a NUL terminated `*char` buffer as a string at no runtime cost.
 
@@ -251,7 +255,7 @@ The `\u{...}` escape names a Unicode scalar by its hex codepoint, 1 to 6 hex dig
 Two aggregate forms hold a sequence of a single element type `T`.
 
 - Fixed array `T[N]`. `N` elements stored inline. The size is known at compile time. Stack allocated like any value, passed by value as a copy.
-- Slice `T[]`. A fat pointer `{ ptr: *T, len: int64 }` that views a contiguous run of elements without owning them. Same shape as `string`, which is effectively `char[]`.
+- Slice `T[]`. A fat pointer `{ ptr: *T, len: int64 }` that views a contiguous run of elements without owning them. A `string` is conceptually a `char[]`, though it keeps the leaner one word, NUL terminated form the Strings section describes rather than this two word shape.
 
 ```text
 xs: int32[4] = [1, 2, 3, 4]   // fixed array, 16 bytes inline
@@ -275,7 +279,7 @@ mut y: int32 = 5   // mutable, can be reassigned
 
 Function scope restriction on mutability.
 
-A mutable variable is only mutable within the function it was declared in. Nested function definitions and closures can read it but cannot mutate it.
+A mutable variable is only mutable within the function it was declared in. A lambda created inside that function can read it but cannot mutate it. The language has lambdas, not nested function declarations, so there is no inner `func` to reach back and write the outer local.
 
 Immutability covers projections. An element or field store, `xs[i] = v` or `p.x = v`, needs its root binding declared `mut`, the same as the bare `xs = v` form. A store through a pointer dereference or through a slice writes the buffer the binding views, not the binding, so it is governed by the pointee's rules instead.
 
@@ -284,14 +288,14 @@ func outer() -> void {
     mut x: int32 = 5
     x = 10             // allowed, same function
 
-    func inner() -> void {
-        x = 15         // COMPILE ERROR, x not mutable in this scope
+    bump := lambda () -> void {
+        x = 15         // COMPILE ERROR, x not mutable inside a lambda
         y := x + 1     // allowed, reading x is fine
     }
 }
 ```
 
-Scope here means the declaring function body. Ordinary blocks in the same function, such as loop bodies and `if` branches, can mutate the variable. Only nested function definitions and closures lose mutation rights. So `mut x = 0` followed by a `for` loop that runs `x = x + 1` is allowed, while mutating `x` from inside a nested `inner()` is not. This forces explicit data passing into inner scopes and prevents hidden state mutation through closures.
+Scope here means the declaring function body. Ordinary blocks in the same function, such as loop bodies and `if` branches, can mutate the variable. Only a lambda body loses mutation rights. So `mut x = 0` followed by a `for` loop that runs `x = x + 1` is allowed, while mutating `x` from inside a lambda is not. This forces explicit data passing into inner scopes and prevents hidden state mutation through closures.
 
 ### Pointers
 
@@ -349,7 +353,7 @@ func area(s: Shape) -> float64 {
 - Generic sum types are written `Maybe<T>`. They are monomorphized at compile time.
 - Layout is a tag (the smallest integer that fits the variant count) plus storage for the largest variant's payload.
 
-A variant is constructed through the enum qualified form, `Shape.Circle(2.0)`, the same qualifier a `match` arm reads back against. The bare form, `Circle(2.0)`, is not a constructor and is rejected, `use the qualified form 'Shape.Circle' to construct an enum value; the unqualified variant name is not a constructor`, naming the fix rather than resolving the variant by its global name and risking a collision with a like named function or a stale local of the same name still in scope. A constructor's argument count and each payload's type are checked against the variant's declaration: `Shape.Circle()` with no argument, and `Shape.Rect(1.0, true)` against a `float64` second field, are each rejected at the constructor site rather than left to surface later as an unrelated mismatch once the value is read back.
+A variant is constructed through the enum qualified form, `Shape.Circle(2.0)`. A `match` pattern reads the other way: an arm names the variant bare, `Circle(r)`, not qualified, since the scrutinee's own type already fixes which enum the arm belongs to. So construction is qualified and a pattern is bare, and the two never share a spelling. The bare form in construction position, `Circle(2.0)`, is not a constructor and is rejected, `use the qualified form 'Shape.Circle' to construct an enum value; the unqualified variant name is not a constructor`, naming the fix rather than resolving the variant by its global name and risking a collision with a like named function or a stale local of the same name still in scope. A constructor's argument count and each payload's type are checked against the variant's declaration: `Shape.Circle()` with no argument, and `Shape.Rect(1.0, true)` against a `float64` second field, are each rejected at the constructor site rather than left to surface later as an unrelated mismatch once the value is read back. A literal payload must fit the field's declared width the same way an annotation's right hand side must: a constructor handing an `int8` field a literal too large for eight bits is rejected at the constructor, `literal <n> does not fit in 8 bits`, the identical bounds rule `x: int8 = 300` faces.
 
 A generic enum's empty variant, `Opt.None` on `enum Opt<T> { Some(v: T), None }`, carries no payload to read its type parameter from, so something around it has to pin `T` instead. The surrounding expected type does the pinning: a struct literal field, a call argument at a non generic parameter, an assignment's declared type, and an array element each thread their own grounded type down as the constructor's expected, instantiating `T` there rather than falling back to any default. A `Opt.None` sitting nowhere an expected type reaches it, an unannotated `:=` binding among them, is rejected by name, `cannot infer the type parameter 'T' for 'Opt'; add an annotation that pins it`, instead of silently defaulting the parameter to `int64` and later dying inside `clang` on a width it never actually had.
 
@@ -393,7 +397,7 @@ Shifts sit between `&` and `+`, and the bitwise trio nests `|` loosest, `^` in t
 
 ### Exponent
 
-`**` is right associative. An integer base and exponent lower to `cool_pow_i64`, repeated squaring in `uint64_t` so the wraparound matches the plain `mul` codegen already emits; `0 ** 0` is `1`, the same convention Rust's `pow` uses. A negative integer exponent is meaningless for an integer result and aborts with the named fault `fatal: negative exponent in integer '**'` rather than returning a wrong value. A float base or exponent lowers to the LLVM `pow` intrinsic at the operand's width.
+`**` is right associative. An integer base and exponent lower to `cool_pow_i64`, repeated squaring in `uint64_t` so the wraparound matches the plain `mul` codegen already emits; `0 ** 0` is `1`, the same convention Rust's `pow` uses. A negative integer exponent is meaningless for an integer result. A constant negative exponent is rejected at check, `'**' on integers needs a nonnegative exponent`, before any code is emitted; a dynamic exponent that turns out negative at runtime keeps the named fault `fatal: negative exponent in integer '**'` rather than returning a wrong value. A float base or exponent lowers to the LLVM `pow` intrinsic at the operand's width.
 
 ### Pipe
 
@@ -507,9 +511,9 @@ In debug builds the standard allocator tracks live allocations and detects three
 
 - Leaks. Heap not freed by program or scope end.
 - Double free. Freeing an already freed pointer.
-- Use after free. Dereferencing a freed pointer. Freed memory is overwritten with a trapping poison value.
+- Use after free. Freed memory is overwritten with a poison pattern so a stale read is visibly wrong rather than plausibly valid.
 
-These are debug build diagnostics, not language guarantees. Release builds omit the tracking for speed.
+The leak and double free counters report at exit. These are debug build diagnostics, not language guarantees, and the poison pattern only makes a stale read conspicuous; it does not trap. The sound use after free and double free guarantee is the generational heap's, the default allocator, whose generation check faults at the dereference itself, not the debug allocator's poison. Release builds omit the tracking for speed.
 
 ### Safety
 
@@ -543,11 +547,13 @@ A collected block carries the same sixteen byte header a generational block carr
 - **Closure.** `collector<F>(lambda ...)`, `F` a function type. The lambda's environment is built on the collected heap instead of the frame or the generational heap a plain closure would use, so the closure keeps working after the frame that wrote it has returned.
 - **Slice.** `collector<U[]>(e)`. The backing is deep copied onto the collected heap, one level, so a slice into a frame local array becomes a legal source: the copy severs the view from the frame that built it. This kind is legal only when `U` is immortal safe (below); a slice of slices, a slice of closures, or a slice of interfaces is rejected, since the one level copy immortalizes the outer buffer and nothing an element of it points at in turn.
 
-**Minting is escape neutral.** A collected value is not a frame view: its block sits on a heap that outlives every frame, so a `collector<T>` value returns cleanly, bare or embedded in a tuple, struct, or array, exactly like any other clean value. The mint itself, though, is an outliving sink the same escape check already runs on a `return`: an argument to `collector<T>(e)` that carries a frame view, a slice into a local array, a closure over a frame local, or a managed pointer whose pointee a store has already tainted, is rejected at the mint, since collecting it would copy that view onto a heap the view's own backing does not outlive. The closure kind carries the matching capture rule: every capture in a `collector<F>(lambda ...)` must itself be immortal safe, a scalar, a managed pointer, a string, a nested `collector<..>`, or an aggregate of those, and a managed pointer capture whose pointee already stores a frame view is rejected even though the pointer itself is immortal safe, since the view it points at is not.
+**Minting is escape neutral.** A collected value is not a frame view: its block sits on a heap that outlives every frame, so a `collector<T>` value returns cleanly, bare or embedded in a tuple, struct, or array, exactly like any other clean value. The mint itself, though, is an outliving sink the same escape check already runs on a `return`: an argument to `collector<T>(e)` that carries a frame view, a closure over a frame local or a managed pointer whose pointee a store has already tainted, is rejected at the mint, since collecting it would copy that view onto a heap the view's own backing does not outlive. The one exception is a slice source: `collector<U[]>(e)` deep copies the backing onto the collected heap, so a slice into a frame local array is a legal argument there, the copy severing the view from the frame that built it, exactly as the slice kind above describes. The closure kind carries the matching capture rule: every capture in a `collector<F>(lambda ...)` must itself be immortal safe, a scalar, a managed pointer, a string, a nested `collector<..>`, or an aggregate of those, and a managed pointer capture whose pointee already stores a frame view is rejected even though the pointer itself is immortal safe, since the view it points at is not.
 
 **No `free`, no `move`, no `ref`.** A collected value is never freed, moved, or borrowed with `ref`; all three are compile errors, `a collected value is not freed; the collector reclaims it` among them. Passing or storing a collected value copies it by value, the same rule an ordinary managed pointer or scalar follows: there is no ownership to transfer, because there is no explicit release to hand off. Reclamation happens only when a collection finds no root reaching the block.
 
 **Thread confinement.** The collector is single mutator: it runs only on the one thread it anchors to the first time a collected block is minted or a collection is forced, in practice the thread that runs `main`, since the collector's root scan walks that thread's stack and no other. A collected value is only sound to hold on that same thread, and the checker enforces the confinement at compile time rather than leaving it to an off thread runtime abort. Rejected outright: a `Channel<collector<T>>`, since a same thread channel's ring buffer sits outside every root the collector scans; a `spawn` or `submit` capture of a collector value, since a worker thread's private environment is the same kind of unrooted store; boxing a collector value into an interface, since the boxed payload would need to travel wherever the interface value travels; and a managed pointer whose pointee reaches a collector value across any of those same crossings. Allowed: a `Future<collector<T>>` and an async func that returns a collector value, since a future completes on the loop thread and `async_run` is that same anchor thread's own bridge into the loop; and a same thread container, `Vector<collector<T>>` among them, since the container's backing buffer is itself a generational block the collector's registry already scans as a root.
+
+The confinement checks a value that is directly a `collector<T>`, not a struct that merely carries one as a field. Boxing a struct with a collected field into an interface is allowed: an interface value is itself barred from crossing a `spawn`, a `submit`, or a channel, so the collected field behind it can never reach another thread, and confinement holds transitively without a separate check on the field. The direct case, boxing a bare `collector<T>` value into an interface, stays rejected, `a collected value cannot be boxed into an interface; it stays on the main thread`. That reject is a deferred boxing path rather than a confinement rule: a bare collected payload has no stable home in an interface's fat pointer yet, and lifting the limit is later work, not a hole in the thread rule.
 
 **`collector` is a contextual reserved word.** `collector<` starting a type or an expression position is read as the start of a `collector<T>` type or a `collector<T>(e)` mint. A named binding called `collector` compared against something else, `collector < n`, still parses as an identifier: the parser looks far enough ahead to tell the two shapes apart before it commits to either reading, so naming a variable `collector` stays legal everywhere outside that one ambiguous shape.
 
@@ -555,7 +561,7 @@ A collected block carries the same sixteen byte header a generational block carr
 
 **Cost and collection.** A mint is one allocation on the collected heap. Collection is amortized: it runs automatically once the byte debt since the last collection crosses a threshold that doubles with the live set, at whichever mint trips it, and a program can force one directly through `gc_collect`. The scan is conservative: every word on the anchor thread's stack between a collection point and the thread's high water mark, every collected reference reachable through the generational heap's own live registry, and every root region the async substrate registers for a task frame or a closure environment, is read as a possible pointer and, where it lands inside a live collected block, keeps that block and everything it in turn reaches. A conservative scan only over retains: a stray word that merely looks like a pointer keeps a block alive one collection longer than it needed to, never the reverse. This is mark and sweep, not moving: a collected block never relocates, so a raw address into one stays valid across a collection for as long as the block itself stays live. A precise, moving collector is not this one. dusk's build passes no optimization flag to `clang`, and the collector depends on that: its root scan brackets the anchor thread's stack under the frame layout the unoptimized build guarantees, where a local variable keeps a stack home a register allocator could otherwise remove.
 
-`std.memory.collector` wraps the collector's control and gauges: `gc_collect` forces a collection now, and `gc_live_blocks`, `gc_live_bytes`, and `gc_collections` read its counters. It does not offer a `Collector` type implementing `Allocator`. The `Allocator` interface hands back an untyped `*void`, which would erase the `collector<T>` tracking the checker relies on to keep a collected reference confined to its anchor thread, so a collected block routed through the allocator seam could cross a channel or a spawn boundary as a bare pointer with no diagnostic and be swept while a worker thread still held it. Closing that hole needs the checker to track whether a value is collected through the allocator seam itself, and is left for later work; the typed `collector<T>` mint stays the one checked surface for collected memory.
+`std.memory.collector` wraps the collector's control and gauges: `gc_collect` forces a collection now, and `gc_live_blocks`, `gc_live_bytes`, and `gc_collections` read its counters. It does not offer a `Collector` type implementing `Allocator`. The `Allocator` interface hands back an untyped `*void`, which would erase the `collector<T>` tracking the checker relies on to keep a collected reference confined to its anchor thread, so a collected block routed through the allocator seam could cross a channel or a spawn boundary as a bare pointer with no diagnostic and be swept while a worker thread still held it. Closing that hole needs the checker to track whether a value is collected through the allocator seam itself, and is left for later work; the typed `collector<T>` mint stays the one checked surface for collected memory. A function parameter declared with an undeclared type name is itself rejected at check, `unknown type '<name>'; no type of that name is declared or imported`, so a phantom `Collector` parameter written to probe for a collector allocator type is a compile error rather than a silently accepted unknown.
 
 ### The `main` Function
 
@@ -634,7 +640,7 @@ Lambdas are first class values and are the argument form for functional builtins
 doubled := map(nums, lambda (n: int64) -> int64 { return n * 2 })
 ```
 
-Capture rule. A lambda can read variables from outer scopes, captured by immutable copy. It cannot mutate them. This is the same rule that applies to nested function definitions. The copy is taken when the lambda is created. There is no capture by reference, which matches the absence of an address of operator and pass by value everywhere.
+Capture rule. A lambda can read variables from outer scopes, captured by immutable copy. It cannot mutate them. The copy is taken when the lambda is created. There is no capture by reference, which matches the absence of an address of operator and pass by value everywhere.
 
 ```text
 factor := 3
@@ -645,7 +651,7 @@ triple := lambda (n: int64) -> int64 { return n * factor }   // reads factor by 
 
 ## Object Oriented Concepts
 
-Available when `@paradigm oop` is declared.
+Available when `@paradigm oop` is declared. Both an `interface` declaration and an `impl` block require the directive: a file that declares either without `@paradigm oop` is rejected during paradigm gating, the same way a functional builtin is rejected without `@paradigm functional`. Structs are the one exception here, ungated and available in every paradigm, since a struct is plain data rather than an OOP construct.
 
 ### Interfaces
 
@@ -702,8 +708,10 @@ Available when `@paradigm functional` is declared.
 | map      | applies a function to each element of a collection |
 | filter   | filters a collection by a predicate                |
 | reduce   | reduces a collection to a single value             |
-| fold     | fold left or right over a collection               |
+| fold     | fold left over a collection                        |
 | foreach  | iterates over a collection for side effects        |
+
+`fold` is a left fold only, `fold(xs, init, lambda (acc, x) -> ...)`, threading the accumulator from the initial value forward through the collection; there is no right folding form. Each builtin's argument count is checked: `fold` takes exactly three arguments and `map`, `filter`, `reduce`, and `foreach` take two, so a stray extra argument is rejected, `fold takes 3 argument(s)`, rather than silently ignored.
 
 These take lambdas, which capture outer variables by immutable copy (see Lambdas).
 
@@ -711,14 +719,19 @@ These take lambdas, which capture outer variables by immutable copy (see Lambdas
 
 The `monad` keyword declares a special interface type that enforces monadic structure. The compiler verifies that the required operations are present. Do notation is available when `@paradigm functional` is declared. The `monad` keyword belongs to the functional paradigm.
 
-A monad must implement a unit operation that wraps a value and a `bind` operation that chains computations.
+A monad block must define both a `unit` operation that wraps a value and a `bind` operation that chains computations. A block missing either is rejected at parse, `a monad block must define both 'bind' and 'unit'`. The type parameters live on those two functions, not on the block header, so the header names the monad bare, `monad Maybe`, and `bind` and `unit` carry their own generics.
 
 ```text
-monad Maybe<T> {
-    some(value: T) -> Maybe<T>;
-    none() -> Maybe<T>;
-    bind(f: (T) -> Maybe<U>) -> Maybe<U>;
-    unwrap() -> (T, error);
+monad Maybe {
+    export func unit<T>(x: T) -> Maybe<T> {
+        return Maybe.Some(x)
+    }
+    export func bind<T, U>(m: Maybe<T>, f: (T) -> Maybe<U>) -> Maybe<U> {
+        match m {
+            Some(a) => return f(a),
+            None    => return Maybe.None,
+        }
+    }
 }
 ```
 
@@ -732,7 +745,7 @@ The standard library ships these monads through import.
 | Result<T, E> | success or a typed failure                               |
 | List<T>      | the list monad (planned, not yet in the tree)            |
 
-This program unwraps a `Maybe` and prints the value.
+This program builds a `Maybe` and prints the value it carries.
 
 ```text
 @paradigm functional
@@ -741,13 +754,14 @@ This program unwraps a `Maybe` and prints the value.
 @import std.io
 
 func main() -> int32 {
-    m: Maybe<int32> = maybe.some(54)
-    result, e := m.unwrap()
-    e.check(lambda (err: error) -> void { std.io.printerr(err) })
+    m: Maybe<int32> = Maybe.Some(54)
+    result := unwrap_or(m, 0)
     std.io.println(result)
     return 0
 }
 ```
+
+A `Maybe` is constructed through the qualified `Maybe.Some` and `Maybe.None` forms, the same as any other enum, and read back with `match` or a helper like `unwrap_or`. A method call on an enum value, `m.unwrap()`, is rejected, `'unwrap' is not defined; methods on the enum 'Maybe' are not supported, match on it instead`, since only struct receivers dispatch a method; the monad's `bind` and `unit` are plain functions the `do` desugar calls, not methods on the value.
 
 Do notation requires `@paradigm functional`. A `do Name { ... }` block names the monad it desugars against, so several monads coexist in one file; a bare `do { ... }` desugars against the plain top level names `bind` and `unit` instead of a namespaced pair, a shape none of the shipped monads export, so name the monad in practice. A do block is a sequence of `name <- expr` binds followed by one final expression, evaluated top to bottom, with no `return` inside it.
 
@@ -810,7 +824,7 @@ func main() -> int32 {
 }
 ```
 
-Because the thunk and every step it captures live on the collected heap, a chain outlives the frame that built it and survives a collection forced between build and force; the escape check treats the mint the same as any other collected value, so a chain built from steps that only capture immortal safe data (a scalar, a managed pointer, a string, a nested collector) is accepted, while a step that would capture a frame local slice or an uncollected closure is rejected at the mint, naming the capture. `IO<T>` inherits collector confinement: a value of it cannot cross a `spawn` or `submit` capture, a channel, or an interface box, since the suspended environment behind its thunk is only ever rooted on the anchor thread. `IO<T>` does not exist for `void`; an effect that returns nothing yields `bool` instead, `io_print` and `io_println` among them.
+Because the thunk and every step it captures live on the collected heap, a chain outlives the frame that built it and survives a collection forced between build and force; the escape check treats the mint the same as any other collected value, so a chain built from steps that only capture immortal safe data (a scalar, a managed pointer, a string, a nested collector) is accepted, while a step that would capture a frame local slice or an uncollected closure is rejected at the mint, naming the capture. `IO<T>` inherits collector confinement: a value of it cannot cross a `spawn` or `submit` capture, a channel, or an interface box, since the suspended environment behind its thunk is only ever rooted on the anchor thread. The shipped `IO` helpers yield `IO<bool>` rather than `IO<void>`, `io_print` and `io_println` among them, because `void` carries no value for `bind` to thread through a chain. Hand constructing an `IO<void>` is not banned at the language level, since `IO<T>` is an ordinary generic struct; `run` merely forces its thunk and yields nothing. The helpers pick `bool` so an effect still returns a value a `do IO { ... }` chain can carry.
 
 **Migration note.** Before 0.5.3, `run` minted a future and offloaded the carried value to a pool worker, so a program using it had to bring the loop and the pool up first and tear them down after the last `run`. That contract is gone: `run` now forces its thunk directly on the calling thread, and a program that still calls `loop_init` or `pool_start` around an `IO` chain for no other reason no longer needs to.
 
@@ -889,7 +903,7 @@ e.check(lambda (err: error) -> void {
 
 ### Every Error Must Be Handled
 
-The tuple return is destructured at the call site. Both values must be bound to named variables. The error binding must be used. Using an error means one of three things.
+The tuple return is destructured at the call site. Both values must be bound to named variables. Binding the whole pair to one name, `r := x.pop_back()`, is rejected, `a fallible result must be destructured; bind the value and the error`, naming `v, e := f()` as the fix, so the error can never hide unread inside an aggregate. The error binding must be used. Using an error means one of three things.
 
 - inspecting it with `exists()` (usually followed by control flow),
 - handling it with `check(...)`,
@@ -1161,7 +1175,7 @@ return await f          // propagation: forwards the awaited tuple whole
 
 The void discard form is rejected when the awaited element is not void: `'await f' discards a value; bind it, as in v, e := await f`. When the awaited future's element is itself a tuple, such as the `(int64, error)` a fallible async func returns, a matching arity destructure binds each member directly instead of the value plus error pair, and a mismatched name count is rejected: `await destructures this future into {n} values, but {m} names are bound`. The error word of a two bind await is a pending error like any other and falls under the ordinary must handle rule: left unhandled it is `the error '<name>' is never handled; inspect it with exists, handle it with check, or discard it with ignore`.
 
-`await` only suspends inside an async func body, and only directly inside it, never inside a lambda literal created there: a lambda has no task frame of its own to suspend. Outside an async context, or inside a lambda, a leading `await` not written as the plain call `await(f)` is rejected: `'await' is only legal inside an async func`. Under `defer`, which runs at completion and can never suspend, a leading `await` is rejected the same way: `'await' cannot appear under defer; a defer runs at completion and cannot suspend`. `await` composes with every statement shape a value can sit in: inside a `while`, an `if`, a `for` over a named fixed array, and a `match` arm reading its payload after the await, each survives the resume because the loop counter, the array's data pointer, length, and index, and the match payload are all frame slots, reloaded on the resume edge rather than kept in a register the suspension bypassed.
+`await` only suspends inside an async func body, and only directly inside it, never inside a lambda literal created there: a lambda has no task frame of its own to suspend. Outside an async context a leading `await` not written as the plain call `await(f)` is rejected, `'await' is only legal inside an async func`. Inside a lambda created within an async body the reject names the lambda directly, `a lambda cannot await; only the enclosing async func can suspend`, since only the enclosing async func has a task frame to suspend and the lambda has none of its own. Under `defer`, which runs at completion and can never suspend, a leading `await` is rejected the same way: `'await' cannot appear under defer; a defer runs at completion and cannot suspend`. `await` composes with every statement shape a value can sit in: inside a `while`, an `if`, a `for` over a named fixed array, and a `match` arm reading its payload after the await, each survives the resume because the loop counter, the array's data pointer, length, and index, and the match payload are all frame slots, reloaded on the resume edge rather than kept in a register the suspension bypassed.
 
 Ordinary rules keep applying underneath the keyword: `move(p)` into an awaited call still kills the mover's name at compile time, so touching `p` after `v := await consume(move(p))` is `use of a moved pointer` exactly as it would be with no await in the way.
 
@@ -1211,9 +1225,9 @@ An async call is one frame allocation, the task header plus the dusk visible fra
 
 A future belongs to the event loop thread. A completer running on another thread, a pool worker or a spawned thread, never captures the typed `Future<T>` handle: capturing one is rejected wherever it would cross, a spawned lambda's captures and a submitted lambda's captures alike, since a heap copied environment would carry the typed handle off the thread that owns it. Instead the completer carries the future's two raw words, its handle and its generation, lifted out before the spawn or the submit, and completes through `complete_raw`, the completer surface built for exactly this crossing. `complete` and `complete_raw` are otherwise identical: exactly one completion wins and a late loser is refused and dropped, whether it arrives before or after the awaiter consumes the future.
 
-#### The pumping doctrine
+#### The pumping rule
 
-Inside an async body the only way to wait on a future is `await`; nothing inside an async body may call the loop's blocking `await`, `await_timeout`, or `try_poll` primitives directly on some other future to pump it manually, since that would park the one thread the whole loop cranks on, and every other task, timer, and completion behind it, on a wait the keyword layer already has a name for. A pumped await that stalls the only crank thread does not hang silently; it converts a stuck task into the same named idle fatal an ordinary deadlocked await produces, since from the loop's own gauges the thread is simply gone.
+Inside an async body the only way to wait on a future is `await`. Calling the loop's blocking `await`, `await_timeout`, or `try_poll` primitives directly inside an async func is a compile error, `'<name>' pumps the event loop and cannot be called inside an async func; use the await statement`, since pumping one by hand would park the one thread the whole loop cranks on, and every other task, timer, and completion behind it, on a wait the keyword layer already has a name for. The reject is direct only: a sync helper that pumps, reached through an arbitrary call graph the checker cannot see into, is left to the runtime, where a pumped await that stalls the only crank thread does not hang silently but converts the stuck task into the same named idle fatal an ordinary deadlocked await produces, since from the loop's own gauges the thread is simply gone.
 
 #### Migration from 0.4.0 and 0.4.1
 

@@ -20,7 +20,10 @@ use crate::parser::ast::{
 /// Compiles a module to LLVM IR text. Generics are monomorphized first. `muts`
 /// carries the reconciled storage types of the narrow mutable-tuple class, which
 /// mono stamps onto those bindings so their slots are sized as slices.
-pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> String {
+pub fn compile(
+    module: &ast::Module,
+    muts: &crate::mono::MutTupleTypes,
+) -> Result<String, String> {
     let expanded = crate::mono::expand(module, muts);
     let module = &expanded;
     let ctx = Ctx::new(module);
@@ -135,7 +138,15 @@ pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> Strin
         }
     }
     emit_vtables(&mut m, &ctx);
-    m.render()
+    // A lowering that could not produce sound IR recorded a fault instead of
+    // aborting. Surface the accumulated faults as one build error so the module
+    // never links; the render is discarded. This is the backstop for a sema
+    // covariance sink a construct slipped past (an element type erased before the
+    // guard could see it), keeping every such miss a clean, named build error.
+    if !m.errors().is_empty() {
+        return Err(m.errors().join("\n"));
+    }
+    Ok(m.render())
 }
 
 /// Emits one vtable constant per `impl Iface for Type`, plus a thunk per slot
@@ -1224,11 +1235,20 @@ impl<'a> Fb<'a> {
                 || matches!(**src_elem, CTy::Unknown)
                 || matches!(**target_elem, CTy::Unknown);
             if !same && matches!(**target_elem, CTy::Iface(_)) {
-                panic!(
-                    "slice covariance from a slice of '{}' to a slice of interface '{}' is not supported; it cannot be reinterpreted without reboxing",
+                // A sema covariance sink should have rejected this. When one is
+                // missed (an element type erased to Unknown before it, so the
+                // guard could not see the concrete element), record a clean build
+                // diagnostic and poison the value rather than aborting the process.
+                // A whole-slice reinterpret cannot be reboxed soundly, so the
+                // module must not link; the poison keeps IR generation going only
+                // far enough to collect the diagnostic. This is the permanent net:
+                // any missed sink is a loud, named build error, never a miscompile.
+                self.m.error(format!(
+                    "cannot pass a slice of '{}' as a slice of interface '{}'; a slice of concrete values cannot be reinterpreted as a slice of interfaces",
                     ty_name(src_elem),
                     ty_name(target_elem)
-                );
+                ));
+                return Val::new(target.clone(), "zeroinitializer".to_string());
             }
         }
         let op = self.coerce(&v.ty, &v.op, target);
@@ -2068,6 +2088,12 @@ impl<'a> Fb<'a> {
                 CTy::Array(_, n) if field == "len" => {
                     return Val::new(CTy::Int(64), n.to_string());
                 }
+                // `e.message` reads the error's one field through the same null
+                // guarded lowering as `e.toString()`; sema has already rejected
+                // every other field name on an error.
+                CTy::Error if field == "message" => {
+                    return self.error_to_string(&bv);
+                }
                 _ => {}
             }
         }
@@ -2643,6 +2669,16 @@ impl<'a> Fb<'a> {
             ExprKind::Unary(UnOp::Neg, x) | ExprKind::Unary(UnOp::BitNot, x) => self.static_ty(x),
             ExprKind::Call(f, _) => match &f.kind {
                 ExprKind::Ident(n) => self.ctx.fns.get(n).map(|(r, _)| r.clone()).unwrap_or(CTy::Unknown),
+                // A builtin error method resolves its return width here so a match
+                // whose every arm tail is `e.toString()` sizes as a string, not the
+                // i64 fallback that would store a pointer through an integer slot.
+                ExprKind::Field(base, mname) if matches!(self.static_ty(base), CTy::Error) => {
+                    match mname.as_str() {
+                        "toString" => CTy::RawPtr(Box::new(CTy::Char)),
+                        "exists" => CTy::Bool,
+                        _ => CTy::Unknown,
+                    }
+                }
                 _ => CTy::Unknown,
             },
             ExprKind::Field(base, name) => match self.static_ty(base) {
@@ -2652,6 +2688,10 @@ impl<'a> Fb<'a> {
                     "len" => CTy::Int(64),
                     _ => CTy::Unknown,
                 },
+                // `e.message` reads as the same string type `e.toString()` yields,
+                // matching the gen_load lowering so a match over message reads sizes
+                // its result slot as a pointer.
+                CTy::Error if name == "message" => CTy::RawPtr(Box::new(CTy::Char)),
                 _ => CTy::Unknown,
             },
             ExprKind::Index(base, _) => match self.static_ty(base) {
@@ -2856,6 +2896,20 @@ impl<'a> Fb<'a> {
         Some(Val::new(ret, d))
     }
 
+    /// Reads an error's message as a string. The empty error's message pointer
+    /// is null; the read promises a string, so it hands back the empty string
+    /// instead of a null that would crash the C printers. This is the one
+    /// lowering for both `e.toString()` and the `e.message` field read, so the
+    /// two can never diverge.
+    fn error_to_string(&mut self, ev: &Val) -> Val {
+        let empty = self.m.cstring("");
+        let isnull = self.fresh();
+        self.line(&format!("{isnull} = icmp eq ptr {}, null", ev.op));
+        let s = self.fresh();
+        self.line(&format!("{s} = select i1 {isnull}, ptr {empty}, ptr {}", ev.op));
+        Val::new(CTy::RawPtr(Box::new(CTy::Char)), s)
+    }
+
     /// Lowers the builtin methods on `error`: exists, toString, check, ignore.
     /// An error is a message pointer, null when there is no error.
     fn gen_error_method(&mut self, ev: &Val, mname: &str, args: &[Expr]) -> Option<Val> {
@@ -2865,17 +2919,7 @@ impl<'a> Fb<'a> {
                 self.line(&format!("{d} = icmp ne ptr {}, null", ev.op));
                 Some(Val::new(CTy::Bool, d))
             }
-            "toString" => {
-                // The empty error's message pointer is null; toString promises a
-                // string, so it hands back the empty string instead of a null
-                // that would crash the C printers.
-                let empty = self.m.cstring("");
-                let isnull = self.fresh();
-                self.line(&format!("{isnull} = icmp eq ptr {}, null", ev.op));
-                let s = self.fresh();
-                self.line(&format!("{s} = select i1 {isnull}, ptr {empty}, ptr {}", ev.op));
-                Some(Val::new(CTy::RawPtr(Box::new(CTy::Char)), s))
-            }
+            "toString" => Some(self.error_to_string(ev)),
             "ignore" => Some(Val::new(CTy::Void, "")),
             "check" => {
                 let cv = self.gen_expr(args.first()?);
@@ -4131,7 +4175,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        compile(&m, &crate::mono::MutTupleTypes::new())
+        compile(&m, &crate::mono::MutTupleTypes::new()).expect("codegen error")
     }
 
     #[test]
@@ -4532,7 +4576,7 @@ mod tests {
         // size: int8 -> 1, int64 -> 8.
         let out = ir(
             "func sz<T>(x: T) -> int64 { return sizeof(T) }\n\
-             func main() -> int32 {\n  println(sz(5u8))\n  println(sz(5))\n  return 0\n}",
+             func main() -> int32 {\n  println(sz(5i8))\n  println(sz(5))\n  return 0\n}",
         );
         assert!(out.contains("getelementptr i8, ptr null, i64 1"), "{out}");
         assert!(out.contains("getelementptr i64, ptr null, i64 1"), "{out}");

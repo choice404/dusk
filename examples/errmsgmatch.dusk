@@ -1,0 +1,28 @@
+// FIX-C: a match expression whose every arm tail reads an error's message must
+// size its result slot as a string. codegen's static type walk now knows both
+// `e.message` and `e.toString()` are strings, so the match no longer falls back
+// to the int64 default and stores a pointer through an integer slot, which clang
+// rejected. Prints the message the taken arm yields.
+@paradigm procedural
+
+enum Pick { A, B }
+
+func classify(n: int64) -> (int64, error) {
+    if n < 0 {
+        return (0, error { message: "negative" })
+    }
+    return (n, error {})
+}
+
+func main() -> int32 {
+    v, e := classify(-1)
+    println(v)
+    p := Pick.A
+    msg := match p {
+        A => e.message,
+        B => e.toString(),
+    }
+    e.ignore()
+    println(msg)
+    return 0
+}

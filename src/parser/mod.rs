@@ -555,12 +555,14 @@ impl Parser {
         self.bump();
         let name = self.ident();
         let mut funcs = Vec::new();
+        let mut methods = Vec::new();
         self.expect(&TokenKind::LBrace);
         while !self.at(&TokenKind::RBrace) && !self.at_eof() {
             let before = self.pos;
             let exported = self.eat(&TokenKind::Kw(Keyword::Export));
             if self.at(&TokenKind::Kw(Keyword::Func)) {
                 let mut f = self.func(exported, false);
+                methods.push(f.name.clone());
                 f.name = format!("{name}.{}", f.name);
                 funcs.push(f);
             } else {
@@ -570,6 +572,17 @@ impl Parser {
             self.guard_progress(before, "monad block");
         }
         self.expect(&TokenKind::RBrace);
+        // A monad is the (unit, bind) pair, and a `do Name { ... }` block desugars
+        // to calls of both. A block that defines only one of them would leave the
+        // missing operation to resolve to nothing at the desugar site, so require
+        // both here, at the monad's keyword, where the whole block is in view.
+        let has = |m: &str| methods.iter().any(|n| n == m);
+        if !has("bind") || !has("unit") {
+            self.errors.push(Diagnostic::new(
+                "a monad block must define both 'bind' and 'unit'",
+                span,
+            ));
+        }
         (name, span, funcs)
     }
 
@@ -2168,6 +2181,22 @@ mod tests {
         let Item::Func(f) = &m.items[0] else { panic!() };
         assert!(f.is_async, "async func must set is_async");
         assert_eq!(f.name, "g");
+    }
+
+    #[test]
+    fn monad_block_missing_bind_is_rejected() {
+        let e = parse_errs(
+            "monad M {\n  func unit(x: int64) -> int64 { return x }\n}\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("must define both 'bind' and 'unit'")), "{e:?}");
+    }
+
+    #[test]
+    fn complete_monad_block_parses() {
+        let e = parse_errs(
+            "monad M {\n  func bind(x: int64, f: (int64) -> int64) -> int64 { return f(x) }\n  func unit(x: int64) -> int64 { return x }\n}\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(e.is_empty(), "{e:?}");
     }
 
     #[test]

@@ -317,6 +317,17 @@ impl Resolver {
                 for a in args {
                     if is_sizeof {
                         if let ExprKind::Ident(n) = &a.kind {
+                            // The reserved unsigned names are refused even as a
+                            // sizeof argument, with the same diagnostic a type
+                            // annotation earns, rather than falling through to an
+                            // opaque undefined-name message.
+                            if is_reserved_uint(n) {
+                                self.errors.push(Diagnostic::new(
+                                    "unsigned integers are reserved; use the signed widths",
+                                    a.span,
+                                ));
+                                continue;
+                            }
                             if is_type_name(n)
                                 || self.globals.contains(n)
                                 || self.cur_generics.contains(n)
@@ -366,6 +377,8 @@ impl Resolver {
 }
 
 /// Whether a name is a builtin primitive type, accepted as a `sizeof` argument.
+/// The unsigned widths are absent on purpose: they are reserved, caught by
+/// `is_reserved_uint` before this runs.
 fn is_type_name(n: &str) -> bool {
     matches!(
         n,
@@ -373,10 +386,6 @@ fn is_type_name(n: &str) -> bool {
             | "int16"
             | "int32"
             | "int64"
-            | "uint8"
-            | "uint16"
-            | "uint32"
-            | "uint64"
             | "float32"
             | "float64"
             | "bool"
@@ -386,6 +395,12 @@ fn is_type_name(n: &str) -> bool {
             | "void"
             | "thread"
     )
+}
+
+/// The reserved unsigned integer type names, refused wherever a type name is
+/// accepted until real unsigned support lands.
+fn is_reserved_uint(n: &str) -> bool {
+    matches!(n, "uint8" | "uint16" | "uint32" | "uint64")
 }
 
 fn item_name(item: &Item) -> Option<&str> {

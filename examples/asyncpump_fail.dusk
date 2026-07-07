@@ -1,0 +1,19 @@
+// Spec audit: try_poll and await_timeout pump the reactor until a future
+// resolves. An async func already runs on the event loop thread, so calling one
+// from inside re-enters the loop and deadlocks; the await statement is the
+// sanctioned suspension there. This uses try_poll; await_timeout is rejected the
+// same way.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func worker() -> int64 {
+    f: Future<int64> = future_new()
+    v, e := try_poll(f)
+    e.ignore()
+    return v
+}
+
+func main() -> int32 {
+    return 0
+}

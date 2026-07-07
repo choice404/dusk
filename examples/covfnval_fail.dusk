@@ -1,0 +1,22 @@
+// FIX-D backstop: a function value's call is indirect, so its parameter type is
+// erased and the checker cannot see the slice-of-interface element. Passing a
+// slice of concrete structs there reaches the codegen covariance backstop, which
+// is now a clean, named build error (exit 1) rather than a Rust panic (exit 101).
+// The permanent net: any covariance sink a checker cannot see stays loud, not a
+// silent miscompile.
+@paradigm oop
+@paradigm procedural
+
+interface Shape { area() -> int64 }
+struct Sq { s: int64 }
+impl Shape for Sq { func area() -> int64 { return self.s * self.s } }
+
+func take(xs: Shape[]) -> int64 { return xs[0].area() }
+
+func main() -> int32 {
+    sqs: Sq[2] = [Sq { s: 3 }, Sq { s: 4 }]
+    v := sqs[0..2]
+    f := take
+    println(f(v))
+    return 0
+}

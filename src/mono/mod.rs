@@ -1880,14 +1880,12 @@ fn unify(pat: &Type, concrete: &Type, params: &HashSet<String>, out: &mut Subst)
 }
 
 fn int_lit_ty(suffix: &Option<String>) -> &'static str {
+    // Only the signed suffixes reach mono; the unsigned ones are reserved and the
+    // lexer rejects them, so there is no `u*` arm to map here.
     match suffix.as_deref() {
         Some("i8") => "int8",
-        Some("u8") => "uint8",
         Some("i16") => "int16",
-        Some("u16") => "uint16",
         Some("i32") => "int32",
-        Some("u32") => "uint32",
-        Some("u64") => "uint64",
         _ => "int64",
     }
 }

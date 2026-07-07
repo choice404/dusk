@@ -1,0 +1,18 @@
+// FIX-D reject: a slice of concrete structs as an element of an array of slices
+// of interface. The outer array literal is exempt from the whole-slice reject,
+// but the covariance guard descends into each element, so the buried `Sq[]` at
+// the `Shape[]` element is caught at check (exit 1), not the codegen backstop.
+@paradigm oop
+@paradigm procedural
+
+interface Shape { area() -> int64 }
+struct Sq { s: int64 }
+impl Shape for Sq { func area() -> int64 { return self.s * self.s } }
+
+func main() -> int32 {
+    sqs: Sq[2] = [Sq { s: 3 }, Sq { s: 4 }]
+    v := sqs[0..2]
+    grid: Shape[][1] = [v]
+    println(grid[0].len)
+    return 0
+}

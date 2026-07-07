@@ -4,9 +4,9 @@
 //! syntax are gated against the file's `@paradigm` directives. The functional
 //! builtins (map, filter, reduce, fold, foreach) and do notation require
 //! `functional`. The procedural keywords (while, for, mut) require `procedural`.
-//! An `interface` declaration requires `oop`. A file with no directive defaults
-//! to procedural, so a gated construct in a file that never declares its
-//! paradigm is rejected with a clear error.
+//! An `interface` declaration and an `impl` block both require `oop`. A file with
+//! no directive defaults to procedural, so a gated construct in a file that never
+//! declares its paradigm is rejected with a clear error.
 
 use std::collections::HashSet;
 
@@ -46,6 +46,7 @@ pub fn check(module: &Module) -> Vec<Diagnostic> {
         match item {
             Item::Func(f) => g.block(&f.body),
             Item::Impl(im) => {
+                g.need_oop(&format!("the impl of '{}'", im.ty), im.span);
                 for m in &im.methods {
                     g.block(&m.body);
                 }
@@ -346,5 +347,21 @@ mod tests {
             "interface Foo {\n  bar() -> void\n}\nfunc main() -> int32 { return 0 }",
         );
         assert!(e.iter().any(|d| d.msg.contains("oop paradigm")), "{e:?}");
+    }
+
+    #[test]
+    fn non_oop_impl_rejected() {
+        let e = errs(
+            "@paradigm procedural\nstruct P { x: int64 }\nimpl P {\n  func g() -> int64 { return self.x }\n}\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("oop paradigm")), "{e:?}");
+    }
+
+    #[test]
+    fn oop_impl_ok() {
+        let e = errs(
+            "@paradigm procedural\n@paradigm oop\nstruct P { x: int64 }\nimpl P {\n  func g() -> int64 { return self.x }\n}\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(e.is_empty(), "{e:?}");
     }
 }

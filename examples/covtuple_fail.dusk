@@ -1,0 +1,20 @@
+// FIX-D reject: a slice of concrete structs buried in a tuple member cannot be
+// reinterpreted as a slice of interfaces any more than at the top level. The
+// covariance guard descends the tuple literal so the buried `Sq[]` at the
+// `Shape[]` member is a clean diagnostic (exit 1), not the codegen backstop.
+@paradigm oop
+@paradigm procedural
+
+interface Shape { area() -> int64 }
+struct Sq { s: int64 }
+impl Shape for Sq { func area() -> int64 { return self.s * self.s } }
+
+func main() -> int32 {
+    sqs: Sq[2] = [Sq { s: 3 }, Sq { s: 4 }]
+    v := sqs[0..2]
+    t: (Shape[], int64) = (v, 1)
+    a, b := t
+    println(a.len)
+    println(b)
+    return 0
+}

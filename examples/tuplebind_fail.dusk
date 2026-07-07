@@ -1,0 +1,21 @@
+// Spec audit: a call returning a `(value, error)` tuple carries a must-handle
+// obligation on the error. Binding the whole tuple to one name buries the error
+// where nothing can handle it, so the whole-tuple bind of a fallible call is
+// rejected in favor of the destructure that binds the error to its own name.
+@paradigm procedural
+
+func fail() -> (int64, error) {
+    return (7, error { message: "boom" })
+}
+
+func take(t: (int64, error)) -> int64 {
+    v, e := t
+    e.ignore()
+    return v
+}
+
+func main() -> int32 {
+    p := fail()
+    println(take(p))
+    return 0
+}

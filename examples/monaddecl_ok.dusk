@@ -1,0 +1,24 @@
+// Accept twin of monaddecl_fail: a monad block that defines both unit and bind
+// is complete, so a `do Box` block threads through it and yields a value.
+@paradigm functional
+
+struct Box<T> { v: T }
+
+monad Box {
+    export func bind<A, B>(m: Box<A>, f: (A) -> Box<B>) -> Box<B> {
+        return f(m.v)
+    }
+    export func unit<A>(x: A) -> Box<A> {
+        return Box { v: x }
+    }
+}
+
+func main() -> int32 {
+    r := do Box {
+        a <- Box { v: 3 }
+        b <- Box { v: 4 }
+        a + b
+    }
+    println(r.v)
+    return 0
+}

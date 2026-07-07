@@ -14,6 +14,12 @@ pub struct Module {
     strings: std::collections::HashMap<String, String>,
     lambda_count: u32,
     funcval_thunks: std::collections::HashSet<String>,
+    // Codegen-time errors a sema sink should have caught but did not. A lowering
+    // that cannot produce sound IR for a construct records the fault here and
+    // emits a poison placeholder rather than aborting the process, so the whole
+    // module still renders and `compile` can surface a clean build diagnostic
+    // instead of a Rust panic. Empty on every well-formed program.
+    errors: Vec<String>,
 }
 
 impl Module {
@@ -29,7 +35,20 @@ impl Module {
             strings: std::collections::HashMap::new(),
             lambda_count: 0,
             funcval_thunks: std::collections::HashSet::new(),
+            errors: Vec::new(),
         }
+    }
+
+    /// Record a codegen-time fault (an unsound construct a sema sink missed). The
+    /// caller emits a poison placeholder and keeps going; `compile` reports the
+    /// accumulated faults as a build error.
+    pub fn error(&mut self, msg: String) {
+        self.errors.push(msg);
+    }
+
+    /// The codegen-time faults recorded so far, in emission order.
+    pub fn errors(&self) -> &[String] {
+        &self.errors
     }
 
     /// Returns a fresh unique index for naming a lifted lambda function.

@@ -1,0 +1,29 @@
+// FIX-A reject: a method call through an interface-typed receiver runs the same
+// slice-covariance guard as a concrete-receiver or direct call. The receiver is
+// erased to an opaque value in the checker, so its interface name is recovered
+// from the annotated binding to look up the method's parameter types. Passing a
+// slice of concrete 'Sq' where the method expects a slice of interface 'Shape' is
+// a clean diagnostic (exit 1), not the codegen backstop panic (exit 101) this
+// dynamic-dispatch path used to reach.
+@paradigm oop
+@paradigm procedural
+
+interface Shape { area() -> int64 }
+interface Summer { total(shapes: Shape[]) -> int64 }
+
+struct Sq { s: int64 }
+impl Shape for Sq { func area() -> int64 { return self.s * self.s } }
+
+struct Calc { base: int64 }
+impl Summer for Calc {
+    func total(shapes: Shape[]) -> int64 { return shapes[0].area() }
+}
+
+func go(s: Summer, arr: Sq[]) -> int64 {
+    return s.total(arr)
+}
+
+func main() -> int32 {
+    println(0)
+    return 0
+}

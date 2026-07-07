@@ -1,0 +1,23 @@
+// M2: reading `e.message` yields the error's message string, lowered through the
+// same null-guarded path as `e.toString()`. Reading the field is not handling, so
+// the error is still discharged with ignore(). The empty error's null message
+// pointer reads back as the empty string, not a null the C printers would crash on.
+@paradigm procedural
+
+func fail() -> (int64, error) {
+    return (0, error { message: "boom" })
+}
+
+func main() -> int32 {
+    v, e := fail()
+    println(v)
+    println("{}", e.message)
+    s: string = e.message
+    println(s)
+    e.ignore()
+
+    empty := error {}
+    empty.ignore()
+    println("{}", empty.message)
+    return 0
+}

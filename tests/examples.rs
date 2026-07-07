@@ -93,6 +93,10 @@ fn check_fails(example: &str) -> String {
 fn bare_call_to_imported_private_name_is_rejected() {
     let err = check_fails("privacy_bare.dusk");
     assert!(err.contains("undefined name 'helper'"), "{err}");
+    // The diagnostic carries a caret under the offending source line, not just
+    // a line:col header.
+    assert!(err.contains("println(helper())"), "missing source line: {err}");
+    assert!(err.contains("^~~~~~"), "missing caret run: {err}");
 }
 
 #[test]
@@ -1601,6 +1605,119 @@ fn a_slice_of_interface_passed_as_a_slice_of_interface_runs() {
 }
 
 #[test]
+fn a_slice_of_structs_at_a_method_arg_of_interface_is_rejected() {
+    // M3: the method-arg site now runs the same covariance guard as a direct call,
+    // so this reject lands as a clean diagnostic (exit 1) instead of the codegen
+    // backstop panic (exit 101) this slice-value path used to reach.
+    let err = check_fails("methcov_fail.dusk");
+    assert!(
+        err.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_array_literal_at_a_method_arg_of_interface_runs() {
+    // The accept twin: an array literal at a slice-of-interface method argument
+    // boxes each element into a fat pointer, a real slice of interfaces.
+    assert_eq!(run("methcov_ok.dusk"), "25\n");
+}
+
+#[test]
+fn an_unknown_field_on_an_error_is_rejected() {
+    // M2: an error carries only `message`; any other field is rejected in sema
+    // rather than silently lowered to a zero.
+    let err = check_fails("errmessage_field_fail.dusk");
+    assert!(
+        err.contains("error has no field 'code'; it carries only 'message'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_slice_of_structs_at_an_interface_receiver_method_is_rejected() {
+    // FIX-A: a dynamic-dispatch call recovers its erased interface receiver's name
+    // to run the covariance guard, so a slice of concrete structs at an interface
+    // method's slice-of-interface parameter is a clean diagnostic, not the codegen
+    // backstop panic (exit 101) this path used to reach.
+    let err = check_fails("dyncovfail.dusk");
+    assert!(
+        err.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_same_type_slice_at_an_interface_receiver_method_checks_clean() {
+    // The accept twin: the covariance guard does not over-reject a genuine
+    // slice-of-interface at an interface method. (A run is blocked by the separate,
+    // conservative escape guard on interface calls, so this is a clean-check accept.)
+    check_ok("dyncovok.dusk");
+}
+
+#[test]
+fn a_map_laundered_slice_at_an_interface_method_faults_cleanly() {
+    // FIX-A backstop, the HIGH repro: a heap slice from `map` erases its element
+    // type, so no checker sink can see the concrete element, and the slice dodges
+    // escape. The construct that `dusk check` accepts must not panic at codegen;
+    // the covariance backstop is now a clean, named build error (exit 1), not a
+    // Rust panic (exit 101).
+    let (_out, err, ok) = run_raw("dyncovmap_fail.dusk");
+    assert!(!ok, "expected a build fault, got a clean run");
+    assert!(
+        err.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn assigning_to_an_errors_message_is_rejected() {
+    // FIX-B: an error's message is a read-only pointer with no writable place, so
+    // `e.message = ...` has no store to lower; sema refuses it rather than letting
+    // codegen silently drop the write.
+    let err = check_fails("errmsgassign_fail.dusk");
+    assert!(
+        err.contains("an error's message is read only; build a new error instead"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_slice_of_structs_in_a_tuple_member_of_interface_is_rejected() {
+    // FIX-D: the covariance guard descends a tuple literal, so a slice of concrete
+    // structs at a slice-of-interface tuple member is caught at check.
+    let err = check_fails("covtuple_fail.dusk");
+    assert!(
+        err.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_slice_of_structs_as_an_array_of_slices_element_is_rejected() {
+    // FIX-D: the covariance guard descends an array literal element by element, so
+    // a slice of concrete structs at a slice-of-interface array element is caught.
+    let err = check_fails("covarr_fail.dusk");
+    assert!(
+        err.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_slice_of_structs_at_a_function_value_argument_faults_cleanly() {
+    // FIX-D backstop: a function value's call is indirect, so its parameter type is
+    // erased and the checker cannot see the slice-of-interface element. The codegen
+    // covariance backstop is now a clean, named build error (exit 1), not a panic.
+    let (_out, err, ok) = run_raw("covfnval_fail.dusk");
+    assert!(!ok, "expected a build fault, got a clean run");
+    assert!(
+        err.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_do_over_a_struct_with_no_monad_block_is_rejected() {
     // F-M1's generic `bind`/`unit` only exist once a type opts in with a
     // `monad Name { ... }` block; `do Foo { ... }` over a plain generic struct
@@ -2663,6 +2780,15 @@ golden!(fdexhaust_accept, "fdexhaust_accept.dusk", "too many open files\nok\n");
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");
+// Reading `e.message` yields the error's message string through the same
+// null-guarded lowering as `e.toString()`. Two reads (a format hole and a string
+// binding) print "boom"; the empty error's null message reads back as the empty
+// string, so its branch prints a blank line rather than crashing the C printers.
+golden!(errmessage, "errmessage.dusk", "0\nboom\nboom\n\n");
+// FIX-C: a match whose arm tails read an error's message sizes its result slot as
+// a string, so the match no longer stores a pointer through an int64 slot. The
+// taken arm yields the message; the sibling reads through toString.
+golden!(errmsgmatch, "errmsgmatch.dusk", "0\nnegative\n");
 golden!(privacy, "privacy.dusk", "1\n2\n");
 golden!(bitops, "bitops.dusk", "8\n14\n6\n-13\n255\n-1\n48\n");
 golden!(shifts, "shifts.dusk", "8\n10\n-4\n-1\n4611686018427387904\n8\n-128\n");
@@ -3535,4 +3661,124 @@ fn an_unpinned_result_ctor_is_diagnosed() {
         err.contains("cannot infer the type parameter 'T' for 'Result'"),
         "{err}"
     );
+}
+
+// 0.5.4 M4: three pinned regressions, no compiler change behind them.
+
+#[test]
+fn generic_struct_over_an_interface_argument_rejects_in_bounded_time() {
+    // `Box<Speaker>` used to hang the checker (a mono worklist loop), closed in
+    // 0.5.0. Pinned here so a regression shows up as a failing test, not a
+    // multi-minute hang: check_fails itself is bounded by the process exiting.
+    let err = check_fails("ifacetarg_fail.dusk");
+    assert!(
+        err.contains("an interface cannot be a generic type argument"),
+        "{err}"
+    );
+}
+
+golden!(
+    genfieldarr,
+    "genfieldarr.dusk",
+    "2\n"
+);
+
+#[test]
+fn do_over_a_private_imported_monad_is_undefined_not_silently_bound() {
+    // privmonad_lib.dusk exports its struct W but keeps bind and unit private;
+    // a `do W { ... }` here must reach the renamed, private pair, so it is
+    // undefined, not the wrong bind silently accepted.
+    let err = check_fails("privmonad_fail.dusk");
+    assert!(err.contains("undefined name 'W.bind'"), "{err}");
+    assert!(err.contains("undefined name 'W.unit'"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Spec-audit fixes (0.5.4): each rejects an illegal form the checker used to
+// accept, paired with a twin that proves the legal form still works.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enum_constructor_payload_literal_out_of_range_is_rejected() {
+    let err = check_fails("ctorfit_fail.dusk");
+    assert!(err.contains("literal 4294967297 does not fit in 32 bits"), "{err}");
+}
+
+golden!(ctorfit_ok, "ctorfit_ok.dusk", "2147483647\n127\n");
+
+#[test]
+fn assigning_to_a_string_element_is_rejected() {
+    let err = check_fails("stridxassign_fail.dusk");
+    assert!(err.contains("a string is immutable"), "{err}");
+    assert!(err.contains("StringBuilder"), "{err}");
+}
+
+golden!(stridxread_ok, "stridxread_ok.dusk", "104\n");
+
+#[test]
+fn a_parameter_of_an_undeclared_type_is_rejected() {
+    let err = check_fails("usingphantom_fail.dusk");
+    assert!(err.contains("unknown type 'Collector'"), "{err}");
+}
+
+// The accept twin is the shipped allocator example, which uses a real `using`
+// parameter of a declared type and runs cleanly.
+golden!(usingphantom_accept, "allocator.dusk", "24\n");
+
+#[test]
+fn binding_a_whole_fallible_tuple_is_rejected() {
+    let err = check_fails("tuplebind_fail.dusk");
+    assert!(err.contains("a fallible result must be destructured"), "{err}");
+}
+
+golden!(tuplebind_ok, "tuplebind_ok.dusk", "7\n");
+
+#[test]
+fn an_impl_without_the_oop_paradigm_is_rejected() {
+    let err = check_fails("implgate_fail.dusk");
+    assert!(err.contains("requires the oop paradigm"), "{err}");
+}
+
+#[test]
+fn a_monad_block_missing_bind_or_unit_is_rejected() {
+    let err = check_fails("monaddecl_fail.dusk");
+    assert!(err.contains("must define both 'bind' and 'unit'"), "{err}");
+}
+
+golden!(monaddecl_ok, "monaddecl_ok.dusk", "7\n");
+
+#[test]
+fn a_method_call_on_an_enum_value_is_rejected() {
+    let err = check_fails("enummethod_fail.dusk");
+    assert!(err.contains("methods on the enum 'Maybe' are not supported"), "{err}");
+}
+
+golden!(enummethod_ok, "enummethod_ok.dusk", "1\n");
+
+#[test]
+fn a_functional_builtin_with_the_wrong_arity_is_rejected() {
+    let err = check_fails("foldarity_fail.dusk");
+    assert!(err.contains("fold takes 3 argument(s), but 4 were given"), "{err}");
+}
+
+golden!(foldarity_ok, "foldarity_ok.dusk", "6\n");
+
+#[test]
+fn an_unsigned_integer_type_name_is_reserved() {
+    let err = check_fails("uinttype_fail.dusk");
+    assert!(err.contains("unsigned integers are reserved"), "{err}");
+}
+
+#[test]
+fn an_unsigned_integer_literal_suffix_is_reserved() {
+    let err = check_fails("uintsuffix_fail.dusk");
+    assert!(err.contains("unsigned integers are reserved"), "{err}");
+}
+
+golden!(uintsigned_ok, "uintsigned_ok.dusk", "5\n7\n");
+
+#[test]
+fn a_loop_pumping_call_inside_an_async_func_is_rejected() {
+    let err = check_fails("asyncpump_fail.dusk");
+    assert!(err.contains("pumps the event loop and cannot be called inside an async func"), "{err}");
 }

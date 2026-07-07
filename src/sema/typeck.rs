@@ -196,7 +196,13 @@ struct TypeChecker {
     // is Unknown after fix, so the spawn capture check reads this record to
     // reject capturing an interface value, whose data pointer may sit in the
     // spawning frame.
-    iface_binds: Vec<HashSet<String>>,
+    iface_binds: Vec<HashMap<String, String>>,
+    // Bindings initialized from an enum constructor, per scope, mapped to the enum
+    // they name. A `m := Opt.Some(1)` local types as Unknown (enum locals are not
+    // yet ground-typed), so a stray method call `m.foo()` would slip past the
+    // enum-receiver reject that keys on a `Ty::Named` enum type. This side table
+    // recovers the enum for exactly that reject.
+    enum_binds: Vec<HashMap<String, String>>,
     // Bindings annotated with a slice-of-interface type, per scope, mapped to
     // their unfixed slice type. A later assignment of a slice of concrete structs
     // is the covariance error the fixed table cannot see, so the raw type is kept.
@@ -284,6 +290,12 @@ struct TypeChecker {
     // opaque (infer returns Unknown) and the backend faults on the struct where a
     // fat pointer belongs. Populated on both passes from the impl declarations.
     method_params: HashMap<(String, String), Vec<Ty>>,
+    // The lowered parameter types of each interface method, keyed by the interface
+    // name and the method name. An interface-typed receiver names the interface,
+    // not a concrete impl, so its method call misses `method_params`; this table
+    // lets the same slice-covariance guard fire on a dynamic-dispatch argument.
+    // Stored unfixed, so a slice-of-interface parameter keeps its interface name.
+    iface_method_params: HashMap<(String, String), Vec<Ty>>,
     // Each lambda literal's self-alias set, keyed by its expression span: the
     // lambda's own parameter indices whose views or pointees may reach its
     // return value, decided by the summary module's abstract walk. The
@@ -376,6 +388,7 @@ impl TypeChecker {
             raw_sigs: HashMap::new(),
             embed_fields: HashMap::new(),
             iface_binds: Vec::new(),
+            enum_binds: Vec::new(),
             slice_iface_elem: Vec::new(),
             esc_closures: Vec::new(),
             esc_slices: Vec::new(),
@@ -395,6 +408,7 @@ impl TypeChecker {
             summaries: HashMap::new(),
             method_summaries: HashMap::new(),
             method_params: HashMap::new(),
+            iface_method_params: HashMap::new(),
             lambda_returns: HashMap::new(),
             lambda_sinks: HashMap::new(),
             lambda_collect_sinks: HashMap::new(),
@@ -426,6 +440,17 @@ impl TypeChecker {
                         .map(|m| (m.name.clone(), m.params.len()))
                         .collect();
                     self.iface_methods.insert(i.name.clone(), methods);
+                    // Record each interface method's unfixed parameter types so a
+                    // dynamic-dispatch call site can run the slice-covariance guard,
+                    // the same as a concrete impl call. An interface is non-generic
+                    // over its own type parameters here, so lower against the
+                    // interface's generic set.
+                    let gens: HashSet<String> = i.generics.iter().cloned().collect();
+                    for m in &i.methods {
+                        let params = m.params.iter().map(|p| lower(&p.ty, &gens)).collect();
+                        self.iface_method_params
+                            .insert((i.name.clone(), m.name.clone()), params);
+                    }
                 }
                 Item::Enum(e) => {
                     if e.name == "rune" {
@@ -590,7 +615,31 @@ impl TypeChecker {
                     }
                 }
                 Item::Foreign(fb) => self.check_foreign(fb),
-                _ => {}
+                // Struct fields, enum payloads, and interface method signatures
+                // carry types too, so the reserved unsigned names are refused here
+                // as well as in function signatures and bindings. These AST nodes
+                // hold no span, so the diagnostic points at the module the same way
+                // the interface paradigm gate does.
+                Item::Struct(s) => {
+                    for fld in &s.fields {
+                        self.reject_reserved_uint(&fld.ty, Span::new(0, 0));
+                    }
+                }
+                Item::Enum(e) => {
+                    for v in &e.variants {
+                        for fld in &v.fields {
+                            self.reject_reserved_uint(&fld.ty, Span::new(0, 0));
+                        }
+                    }
+                }
+                Item::Interface(i) => {
+                    for m in &i.methods {
+                        for p in &m.params {
+                            self.reject_reserved_uint(&p.ty, Span::new(0, 0));
+                        }
+                        self.reject_reserved_uint(&m.ret, Span::new(0, 0));
+                    }
+                }
             }
         }
     }
@@ -637,9 +686,11 @@ impl TypeChecker {
         let empty = HashSet::new();
         for ff in &fb.funcs {
             for p in &ff.params {
+                self.reject_reserved_uint(&p.ty, fb.span);
                 let ty = self.fix(lower(&p.ty, &empty));
                 self.check_foreign_ty(&ty, &ff.name, fb.span);
             }
+            self.reject_reserved_uint(&ff.ret, fb.span);
             let ret = self.fix(lower(&ff.ret, &empty));
             self.check_foreign_ty(&ret, &ff.name, fb.span);
         }
@@ -736,8 +787,11 @@ impl TypeChecker {
         // no ground shape to expand.
         for p in &f.params {
             self.reject_iface_targ(&p.ty, f.span);
+            self.reject_reserved_uint(&p.ty, f.span);
+            self.reject_unknown_param_type(&p.ty, f.span);
         }
         self.reject_iface_targ(&f.ret, f.span);
+        self.reject_reserved_uint(&f.ret, f.span);
         if f.is_async {
             self.check_async_sig(f);
         } else if matches!(&self.cur_ret, Ty::Named(n) if self.ifaces.contains(n)) {
@@ -773,8 +827,10 @@ impl TypeChecker {
                 self.declare_own(&p.name, Own::Borrow);
             }
             let raw = lower(&p.ty, &self.cur_generics);
-            if matches!(&raw, Ty::Named(n) if self.ifaces.contains(n)) {
-                self.declare_iface_bind(&p.name);
+            if let Ty::Named(n) = &raw {
+                if self.ifaces.contains(n) {
+                    self.declare_iface_bind(&p.name, n);
+                }
             }
             // An error parameter carries the same must-handle obligation a
             // let-bound error does: the callee that receives it must inspect it
@@ -960,12 +1016,109 @@ impl TypeChecker {
         }
     }
 
+    /// Rejects a use of a reserved unsigned integer name anywhere in a type
+    /// annotation. The `uint8`..`uint64` names are parsed and would lower to the
+    /// same width as their signed twin, so every operation on one, printing, a
+    /// comparison, a divide, runs the signed path and yields a wrong value with no
+    /// diagnostic. They are reserved until real unsigned support lands, so a type
+    /// that names one is refused up front. Recurses through pointers, slices,
+    /// arrays, tuples, functions, the collector wrapper, and generic arguments so
+    /// a buried `Box<uint8>` or `uint8[]` is caught the same as a bare annotation.
+    fn reject_reserved_uint(&mut self, t: &Type, span: Span) {
+        match t {
+            Type::Named(n, args) => {
+                if matches!(n.as_str(), "uint8" | "uint16" | "uint32" | "uint64") {
+                    self.err("unsigned integers are reserved; use the signed widths", span);
+                }
+                for a in args {
+                    self.reject_reserved_uint(a, span);
+                }
+            }
+            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => {
+                self.reject_reserved_uint(b, span)
+            }
+            Type::Tuple(ts) => {
+                for x in ts {
+                    self.reject_reserved_uint(x, span);
+                }
+            }
+            Type::Func(ps, r) => {
+                for p in ps {
+                    self.reject_reserved_uint(p, span);
+                }
+                self.reject_reserved_uint(r, span);
+            }
+            Type::Collector(b) => self.reject_reserved_uint(b, span),
+            Type::Unit | Type::Infer => {}
+        }
+    }
+
+    /// Rejects a parameter type that names a type the module does not define. A
+    /// parameter is materialized in codegen, a `using` parameter allocates a frame
+    /// slot for it, so a phantom named type like `Collector` (never declared)
+    /// lowers to an unsized slot and clang aborts with `Cannot allocate unsized
+    /// type`. Every other type position either has a value to check the annotation
+    /// against or never reaches the backend, so this walk is scoped to parameters,
+    /// where an unused, undeclared type otherwise slips straight through. A
+    /// generic parameter in scope, a primitive, `Future`, and any declared struct,
+    /// enum, or interface are all known; anything else is refused. Surface pass
+    /// only: mono mangles names, so the ground pass would misread a valid slot.
+    fn reject_unknown_param_type(&mut self, t: &Type, span: Span) {
+        if self.types_only {
+            return;
+        }
+        match t {
+            Type::Named(n, args) => {
+                if !self.is_known_type_name(n) {
+                    self.err(
+                        format!("unknown type '{n}'; no type of that name is declared or imported"),
+                        span,
+                    );
+                }
+                for a in args {
+                    self.reject_unknown_param_type(a, span);
+                }
+            }
+            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => {
+                self.reject_unknown_param_type(b, span)
+            }
+            Type::Tuple(ts) => {
+                for x in ts {
+                    self.reject_unknown_param_type(x, span);
+                }
+            }
+            Type::Func(ps, r) => {
+                for p in ps {
+                    self.reject_unknown_param_type(p, span);
+                }
+                self.reject_unknown_param_type(r, span);
+            }
+            Type::Collector(b) => self.reject_unknown_param_type(b, span),
+            Type::Unit | Type::Infer => {}
+        }
+    }
+
+    /// Whether a type name is one the checker knows: a primitive (which lowers to
+    /// a non-`Named` type), the one-shot `Future`, a generic parameter in scope, or
+    /// a declared struct, enum, or interface. The reserved unsigned names read as
+    /// known here so they earn the precise reserved diagnostic from
+    /// `reject_reserved_uint` rather than a bare unknown-type message.
+    fn is_known_type_name(&self, n: &str) -> bool {
+        n == "Future"
+            || !matches!(named_ty(n), Ty::Named(_))
+            || self.cur_generics.contains(n)
+            || self.structs.contains_key(n)
+            || self.enums.contains_key(n)
+            || self.ifaces.contains(n)
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.owns.push(HashMap::new());
         self.muts.push(HashSet::new());
         self.err_binds.push(HashMap::new());
-        self.iface_binds.push(HashSet::new());
+        self.iface_binds.push(HashMap::new());
+        self.enum_binds.push(HashMap::new());
         self.slice_iface_elem.push(HashMap::new());
         self.esc_closures.push(HashMap::new());
         self.esc_slices.push(HashMap::new());
@@ -980,6 +1133,7 @@ impl TypeChecker {
         self.owns.pop();
         self.muts.pop();
         self.iface_binds.pop();
+        self.enum_binds.pop();
         self.slice_iface_elem.pop();
         self.esc_closures.pop();
         self.esc_slices.pop();
@@ -1019,14 +1173,38 @@ impl TypeChecker {
     }
 
     /// Records a binding annotated with an interface type in the current scope.
-    fn declare_iface_bind(&mut self, name: &str) {
+    fn declare_iface_bind(&mut self, name: &str, iface: &str) {
         if let Some(scope) = self.iface_binds.last_mut() {
-            scope.insert(name.to_string());
+            scope.insert(name.to_string(), iface.to_string());
         }
     }
 
     fn is_iface_bind(&self, name: &str) -> bool {
-        self.iface_binds.iter().rev().any(|s| s.contains(name))
+        self.iface_binds.iter().rev().any(|s| s.contains_key(name))
+    }
+
+    fn declare_enum_bind(&mut self, name: &str, en: &str) {
+        if let Some(scope) = self.enum_binds.last_mut() {
+            scope.insert(name.to_string(), en.to_string());
+        }
+    }
+
+    /// The enum a binding was initialized from through a constructor, when it
+    /// names one. An enum local types as Unknown, so this recovers the enum for
+    /// the enum-receiver method reject.
+    fn enum_bind_name(&self, name: &str) -> Option<String> {
+        self.enum_binds.iter().rev().find_map(|s| s.get(name).cloned())
+    }
+
+    /// The interface a binding was annotated with, when it names one. The receiver
+    /// of a method call is fixed to Unknown in scope (interfaces erase for the
+    /// value passes), so this recovers the interface name a dynamic-dispatch call
+    /// needs to look up its method's parameter types for the covariance guard.
+    fn iface_bind_name(&self, name: &str) -> Option<String> {
+        self.iface_binds
+            .iter()
+            .rev()
+            .find_map(|s| s.get(name).cloned())
     }
 
     fn is_esc_closure(&self, name: &str) -> bool {
@@ -1756,6 +1934,15 @@ impl TypeChecker {
             if self.payload_iface_exempt(p) {
                 continue;
             }
+            // A literal payload ranges against the variant's declared width the
+            // same way an annotated binding does, so `E.Has(4294967297)` at an
+            // int32 payload is rejected here rather than silently truncating in
+            // codegen. Reaches the generic-pin case too: once mono grounds a
+            // `Opt<int32>.Some(lit)`, the second type pass runs this with the
+            // pinned width.
+            if let Some(arg) = args.get(i) {
+                self.check_int_fits(arg, p);
+            }
             if !compatible(p, a) {
                 let s = args.get(i).map(|x| x.span).unwrap_or(span);
                 self.err(format!("argument {} to '{disp}.{v}' has the wrong type", i + 1), s);
@@ -2340,6 +2527,29 @@ impl TypeChecker {
                 );
                 return;
             }
+            // An error is a single message pointer with no writable place, so
+            // `e.message = ...` has no store to lower; codegen would silently drop
+            // it. Reading the message is fine, but the field is read only.
+            if matches!(self.chain_ty(base), Ty::Error) {
+                self.err(
+                    "an error's message is read only; build a new error instead",
+                    lhs.span,
+                );
+                return;
+            }
+        }
+        // A string is an immutable byte view, so `s[0] = 'H'` has no writable
+        // element; codegen would store into read-only memory and fault. Reject
+        // the element store and name the builder as the fix. Reading `s[0]` is
+        // untouched, since only an assignment target reaches here.
+        if let ExprKind::Index(base, idx) = &lhs.kind {
+            if !matches!(idx.kind, ExprKind::Range(..)) && matches!(self.chain_ty(base), Ty::Str) {
+                self.err(
+                    "a string is immutable; build a new one with a StringBuilder",
+                    lhs.span,
+                );
+                return;
+            }
         }
         if let Some((root, span)) = self.value_chain_root(lhs) {
             if root != "self" && !self.is_mutable(&root) {
@@ -2379,6 +2589,9 @@ impl TypeChecker {
                     .get(&s)
                     .and_then(|(_, fs)| fs.iter().find(|(n, _)| n == fname).map(|(_, t)| t.clone()))
                     .unwrap_or(Ty::Unknown),
+                // The one field an error carries; matches `infer`, so a projection
+                // chain reads `e.message` as the string it is.
+                Ty::Error if fname == "message" => Ty::Str,
                 _ => Ty::Unknown,
             },
             ExprKind::Index(base, idx) => {
@@ -2488,10 +2701,12 @@ impl TypeChecker {
             _ => return,
         };
         let val = if neg { -(v as i128) } else { v as i128 };
-        // Signedness is not tracked yet, so accept the union of the signed and
-        // unsigned ranges for the width; a value outside both cannot be right.
+        // The signed widths are the only integer widths on the surface: the
+        // unsigned names are reserved (see reject_reserved_uint), so a literal
+        // ranges against the signed bounds for its width, `int8` accepting
+        // -128..127 and rejecting 128, which would silently wrap to -128.
         let lo = -(1i128 << (w - 1));
-        let hi = (1i128 << w) - 1;
+        let hi = (1i128 << (w - 1)) - 1;
         if val < lo || val > hi {
             self.err(format!("literal {val} does not fit in {w} bits"), e.span);
         }
@@ -2804,6 +3019,24 @@ impl TypeChecker {
             );
         }
         if l.binds.len() == 1 {
+            // A fallible function returns a `(value, error)` tuple, and the error
+            // carries the must-handle obligation only when it is bound to its own
+            // name. Binding the whole tuple to one name buries the error inside a
+            // value that is never an `error`, so the obligation is silently lost:
+            // `p := fail()` then handles nothing. Require the destructure that
+            // binds the value and the error separately. Narrowed to a direct call
+            // result: a tuple literal the program builds by hand keeps each error
+            // member's own binding obligation, so it is not swept up here. Surface
+            // pass only, like the rest of the must-handle rule.
+            if !self.types_only
+                && matches!(&l.value.kind, ExprKind::Call(callee, _) if self.variant_name(callee).is_none())
+                && matches!(&vt, Ty::Tuple(ts) if ts.iter().any(|t| matches!(t, Ty::Error)))
+            {
+                self.err(
+                    "a fallible result must be destructured; bind the value and the error, as in `v, e := f()`",
+                    l.value.span,
+                );
+            }
             let b = &l.binds[0];
             let ty = match &b.ty {
                 Some(t) => {
@@ -2812,14 +3045,17 @@ impl TypeChecker {
                     // is refused at the annotation before its request reaches the
                     // monomorphizer.
                     self.reject_iface_targ(t, l.value.span);
+                    self.reject_reserved_uint(t, l.value.span);
                     // The annotation with the interface name intact, so binding a
                     // struct to an interface checks its impl instead of emitting
                     // a reference to a vtable that does not exist.
                     let raw = lower(t, &self.cur_generics);
                     self.check_conformance(&raw, &vt, l.value.span);
-                    self.check_slice_covariance(&raw, &vt, &l.value, l.value.span);
-                    if matches!(&raw, Ty::Named(n) if self.ifaces.contains(n)) {
-                        self.declare_iface_bind(&b.name);
+                    self.check_covariance_deep(&raw, &vt, &l.value, l.value.span);
+                    if let Ty::Named(n) = &raw {
+                        if self.ifaces.contains(n) {
+                            self.declare_iface_bind(&b.name, n);
+                        }
                     }
                     // Remember a slice-of-interface binding so a later assignment
                     // of a slice of concrete structs is caught as covariance.
@@ -2840,6 +3076,18 @@ impl TypeChecker {
                 None => harden(vt.clone()),
             };
             self.declare(&b.name, ty.clone());
+            // A binding whose initializer is a qualified enum constructor names an
+            // enum value even though its checked type is Unknown. Record the enum
+            // so a stray method call on the binding is rejected.
+            if let ExprKind::Call(callee, _) = &l.value.kind {
+                if let ExprKind::Field(cbase, _) = &callee.kind {
+                    if let ExprKind::Ident(en) = &cbase.kind {
+                        if self.enums.contains_key(en) && self.variant_name(callee).is_some() {
+                            self.declare_enum_bind(&b.name, en);
+                        }
+                    }
+                }
+            }
             if l.mutable {
                 self.declare_mut(&b.name);
             }
@@ -2954,6 +3202,7 @@ impl TypeChecker {
             let ty = match &b.ty {
                 Some(t) => {
                     self.reject_iface_targ(t, l.value.span);
+                    self.reject_reserved_uint(t, l.value.span);
                     self.lower(t)
                 }
                 None => harden(pt.clone()),
@@ -4295,6 +4544,20 @@ impl TypeChecker {
                         e.span,
                     );
                 }
+                // An error carries exactly one field, `message`, the string the
+                // spec names. Reading it is not handling, so it never discharges
+                // the must-handle obligation; the type is Str either way. Any
+                // other field name is a clear error rather than a silent zero.
+                if let Ty::Error = tx {
+                    if name == "message" {
+                        return Ty::Str;
+                    }
+                    self.err(
+                        format!("error has no field '{name}'; it carries only 'message'"),
+                        e.span,
+                    );
+                    return Ty::Str;
+                }
                 Ty::Unknown
             }
             ExprKind::Index(x, i) => {
@@ -4433,8 +4696,10 @@ impl TypeChecker {
             return;
         }
         let val = v as i128;
+        // Signed bounds for the width; the unsigned suffixes are reserved and
+        // rejected in the lexer, so only the signed widths reach here.
         let lo = -(1i128 << (w - 1));
-        let hi = (1i128 << w) - 1;
+        let hi = (1i128 << (w - 1)) - 1;
         if val < lo || val > hi {
             self.err(format!("literal {val} does not fit in {w} bits"), span);
         }
@@ -4444,8 +4709,38 @@ impl TypeChecker {
         // Method call syntax. The builtin `error` methods have known types; every
         // other method call stays permissive and returns Unknown for now.
         if let ExprKind::Field(base, mname) = &f.kind {
-            let is_error = matches!(self.infer(base), Ty::Error);
+            let base_ty = self.infer(base);
+            let is_error = matches!(base_ty, Ty::Error);
             let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
+            // A method call on an enum value, `m.unwrap()`, has no dispatch:
+            // methods on an enum are rejected at the impl (see the Item::Impl
+            // guard), so the receiver names an enum with no methods at all. Without
+            // this the call falls through to the permissive Unknown return and
+            // codegen emits a zero, printing a wrong value. A qualified constructor
+            // `Opt.Some(..)` names the enum *type*, not a value, so it is exempted
+            // by the base-is-enum-name guard and handled by the constructor arm.
+            let base_is_enum_name =
+                matches!(&base.kind, ExprKind::Ident(n) if self.enums.contains_key(n));
+            // The receiver's enum either shows in its checked type (a parameter or
+            // field typed as the enum) or, for an Unknown-typed enum local, in the
+            // enum-bind side table populated at its constructor.
+            let recv_enum = match &base_ty {
+                Ty::Named(en) if self.enums.contains_key(en) => Some(en.clone()),
+                _ => match &base.kind {
+                    ExprKind::Ident(n) => self.enum_bind_name(n),
+                    _ => None,
+                },
+            };
+            if let Some(en) = recv_enum {
+                if !base_is_enum_name {
+                    let disp = en.split('$').next().unwrap_or(&en);
+                    self.err(
+                        format!("'{mname}' is not defined; methods on the enum '{disp}' are not supported, match on it instead"),
+                        f.span,
+                    );
+                    return Ty::Unknown;
+                }
+            }
             // A qualified enum constructor, `Opt.Some(args)`. Check its argument
             // count and payload types against the variant's declaration, and run
             // the slice-of-interface covariance guard on each payload, so a wrong
@@ -4472,11 +4767,36 @@ impl TypeChecker {
             // rewrites a lambda into a mint only at a direct top-level call, never a
             // method argument, so a bare lambda would lower to a stack environment
             // typed as a collector and dangle. Point at the explicit mint.
-            if let Some(tname) = self.receiver_type_name(base) {
-                if let Some(params) = self.method_params.get(&(tname, mname.clone())).cloned() {
+            // A concrete receiver names its struct through `chain_ty`; an
+            // interface-typed receiver is fixed to Unknown in scope, so recover its
+            // interface name from the annotated-binding record instead.
+            let recv_name = self.receiver_type_name(base).or_else(|| match &base.kind {
+                ExprKind::Ident(n) => self.iface_bind_name(n),
+                _ => None,
+            });
+            if let Some(tname) = recv_name {
+                // A concrete receiver keys `method_params`; an interface receiver
+                // keys `iface_method_params`. Either table stores unfixed parameter
+                // types, so a slice-of-interface parameter still carries its
+                // interface name for the covariance guard below.
+                let params = self
+                    .method_params
+                    .get(&(tname.clone(), mname.clone()))
+                    .or_else(|| self.iface_method_params.get(&(tname, mname.clone())))
+                    .cloned();
+                if let Some(params) = params {
                     for (i, p) in params.iter().enumerate() {
                         if let Some(arg) = args.get(i) {
                             self.self_value_in_ptr_position(arg, p);
+                            // method_params keeps the unfixed parameter type, so a
+                            // slice-of-interface param still names the interface. A
+                            // slice of concrete structs passed there cannot be
+                            // reinterpreted whole; reject it here, mirroring the
+                            // direct-call site, so it never reaches the codegen
+                            // backstop panic.
+                            if let Some(aty) = arg_tys.get(i) {
+                                self.check_slice_covariance(p, aty, arg, arg.span);
+                            }
                             if matches!(p, Ty::Collector(inner) if matches!(&**inner, Ty::Func(..)))
                                 && matches!(&arg.kind, ExprKind::Lambda(_))
                             {
@@ -4529,6 +4849,22 @@ impl TypeChecker {
             if name == "chan_send" || name == "chan_try_send" {
                 self.check_chan_send_flow(name, args);
             }
+            // The three loop-pumping stdlib functions crank the reactor until a
+            // future resolves. An async func already runs on the event loop
+            // thread, so calling one from inside re-enters the loop and deadlocks.
+            // The suspension keyword `await` is the sanctioned form there and
+            // parses to a distinct node, so only these bare stdlib calls reach
+            // here. Mirrors the async_run-in-async reject; surface direct calls
+            // only, an indirect sync helper that pumps is left to doctrine.
+            if self.in_async
+                && !self.is_local(name)
+                && matches!(name.as_str(), "await" | "await_timeout" | "try_poll")
+            {
+                self.err(
+                    format!("'{name}' pumps the event loop and cannot be called inside an async func; use the await statement"),
+                    f.span,
+                );
+            }
             if !self.sigs.contains_key(name) {
                 // An unqualified variant name is not a constructor. `Some(x)` must
                 // be written `Opt.Some(x)`; rejecting the bare form here, before
@@ -4551,6 +4887,24 @@ impl TypeChecker {
                         }
                         return Ty::Unknown;
                     }
+                }
+                // The functional builtins take a fixed shape: a collection and a
+                // function, plus a seed for fold. Codegen reads exactly those
+                // operands and ignores any surplus, so a stray extra argument
+                // sails past inference and lowers to invalid IR. Range the arity
+                // here so the miscount is a diagnostic, not a backend fault.
+                if matches!(name.as_str(), "map" | "filter" | "reduce" | "fold" | "foreach") {
+                    let want = if name == "fold" { 3 } else { 2 };
+                    if args.len() != want {
+                        self.err(
+                            format!("{name} takes {want} argument(s), but {} were given", args.len()),
+                            f.span,
+                        );
+                    }
+                    for a in args {
+                        self.infer(a);
+                    }
+                    return Ty::Unknown;
                 }
                 if let Some(ty) = builtin_ret(name) {
                     for a in args {
@@ -4772,6 +5126,13 @@ impl TypeChecker {
                     if !compatible(p, a) && !self.self_value_in_ptr_position(&args[i], p) {
                         self.err(format!("argument {} has the wrong type", i + 1), args[i].span);
                     }
+                    // A function-value call is indirect, so the direct-call
+                    // interface-preserving `raw_sigs` check below never runs for it.
+                    // When the callee's parameter type still names an interface
+                    // element, run the covariance guard here so a slice of concrete
+                    // structs at a function value's slice-of-interface parameter is
+                    // caught rather than reaching the codegen backstop.
+                    self.check_slice_covariance(p, a, &args[i], args[i].span);
                 }
                 // The fixed parameter types lower an interface to Unknown, so they
                 // accept any value. The unfixed signature keeps the interface name,
@@ -4954,6 +5315,41 @@ impl TypeChecker {
                 format!("cannot pass a slice of '{concrete}' as a slice of interface '{iface}'; a slice of concrete values cannot be reinterpreted as a slice of interfaces"),
                 span,
             );
+        }
+    }
+
+    /// The covariance guard, descended through a tuple or array/slice literal so a
+    /// slice-of-concrete buried one level down, a tuple member (`(v, 1)` at
+    /// `(Shape[], int64)`) or an array-of-slices element (`[v]` at `Shape[][1]`),
+    /// is caught at the same annotated binding the top-level check covers. The
+    /// literal's own element expressions carry the sub-values, so each pairs with
+    /// its annotated element type; the outer array-literal exemption still holds
+    /// because the recursion looks at the buried slice element, not the whole
+    /// literal. A non-literal value falls straight through to the top-level check.
+    fn check_covariance_deep(&mut self, expected: &Ty, actual: &Ty, value: &Expr, span: Span) {
+        match (expected, actual) {
+            (Ty::Tuple(ets), Ty::Tuple(ats)) => {
+                if let ExprKind::Tuple(vals) = &value.kind {
+                    for (i, (et, at)) in ets.iter().zip(ats).enumerate() {
+                        if let Some(sub) = vals.get(i) {
+                            self.check_covariance_deep(et, at, sub, sub.span);
+                        }
+                    }
+                    return;
+                }
+                self.check_slice_covariance(expected, actual, value, span);
+            }
+            (Ty::Array(et, _) | Ty::Slice(et), Ty::Array(_, _) | Ty::Slice(_)) => {
+                if let ExprKind::Array(vals) = &value.kind {
+                    for sub in vals {
+                        let at = self.chain_ty(sub);
+                        self.check_covariance_deep(et, &at, sub, sub.span);
+                    }
+                    return;
+                }
+                self.check_slice_covariance(expected, actual, value, span);
+            }
+            _ => self.check_slice_covariance(expected, actual, value, span),
         }
     }
 
@@ -6320,6 +6716,70 @@ mod tests {
     }
 
     #[test]
+    fn signed_int8_bound_rejects_128_accepts_127() {
+        let bad = errs("func f() -> void {\n  x: int8 = 128\n  println(x)\n}");
+        assert!(bad.iter().any(|d| d.msg.contains("does not fit in 8 bits")), "{bad:?}");
+        let good = errs("func f() -> void {\n  x: int8 = 127\n  println(x)\n}");
+        assert!(good.is_empty(), "{good:?}");
+    }
+
+    #[test]
+    fn enum_constructor_payload_ranges_against_its_width() {
+        let e = errs(
+            "enum E { Has(v: int32), Nope }\nfunc f() -> void {\n  e := E.Has(4294967297)\n  match e { Has(v) => println(v), Nope => println(0) }\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("does not fit in 32 bits")), "{e:?}");
+    }
+
+    #[test]
+    fn a_parameter_of_an_undeclared_type_is_rejected() {
+        let e = errs("func work(c: Collector) -> int64 { return 0 }");
+        assert!(e.iter().any(|d| d.msg.contains("unknown type 'Collector'")), "{e:?}");
+    }
+
+    #[test]
+    fn a_reserved_unsigned_type_in_a_parameter_is_rejected() {
+        let e = errs("func work(c: uint8) -> int64 { return 0 }");
+        assert!(e.iter().any(|d| d.msg.contains("unsigned integers are reserved")), "{e:?}");
+    }
+
+    #[test]
+    fn binding_a_whole_fallible_tuple_is_rejected() {
+        let bad = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\nfunc f() -> void {\n  p := fail()\n  sink(p)\n}\nfunc sink(t: (int64, error)) -> void { }",
+        );
+        assert!(bad.iter().any(|d| d.msg.contains("must be destructured")), "{bad:?}");
+        let good = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\nfunc f() -> void {\n  v, e := fail()\n  e.ignore()\n  println(v)\n}",
+        );
+        assert!(good.is_empty(), "{good:?}");
+    }
+
+    #[test]
+    fn a_method_on_an_enum_local_is_rejected() {
+        let e = errs(
+            "enum Maybe { Just(v: int64), Nothing }\nfunc f() -> void {\n  m := Maybe.Just(5)\n  println(m.unwrap())\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("methods on the enum 'Maybe' are not supported")), "{e:?}");
+    }
+
+    #[test]
+    fn a_functional_builtin_arity_is_ranged() {
+        let e = errs(
+            "func f() -> void {\n  xs: int64[3] = [1, 2, 3]\n  r := fold(xs[0..3], 0, lambda (a: int64, x: int64) -> int64 { return a + x }, 9)\n  println(r)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("fold takes 3 argument(s)")), "{e:?}");
+    }
+
+    #[test]
+    fn a_loop_pumping_call_in_an_async_func_is_rejected() {
+        let e = errs(
+            "async func w() -> int64 {\n  f: Future<int64> = future_new()\n  v, e := try_poll(f)\n  e.ignore()\n  return v\n}\nfunc main() -> int32 { return 0 }",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("pumps the event loop")), "{e:?}");
+    }
+
+    #[test]
     fn returning_an_array_literal_as_a_slice_is_rejected() {
         let e = errs("func make() -> int64[] { return [1, 2, 3] }");
         assert!(e.iter().any(|d| d.msg.contains("escapes its frame")), "{e:?}");
@@ -6428,6 +6888,75 @@ mod tests {
              func f() -> void {\n  v, e := fail()\n  println(v)\n  println(e)\n}",
         );
         assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn reading_the_message_field_does_not_handle_the_error() {
+        // `e.message` reads the string out of the error but does not inspect,
+        // check, or discard it, so the must-handle obligation stays pending.
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func f() -> void {\n  v, e := fail()\n  println(v)\n  s := e.message\n  println(s)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn reading_the_message_field_typechecks_as_a_string() {
+        // With the error separately discharged, `e.message` binds to a string.
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func f() -> void {\n  v, e := fail()\n  println(v)\n  s: string = e.message\n  println(s)\n  e.ignore()\n}",
+        );
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn an_unknown_field_on_an_error_is_rejected() {
+        // An error carries only `message`; any other field name is a clear
+        // error rather than a silent zero from codegen.
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func f() -> void {\n  v, e := fail()\n  println(v)\n  n := e.code\n  println(n)\n  e.ignore()\n}",
+        );
+        assert!(
+            e.iter().any(|d| d.msg == "error has no field 'code'; it carries only 'message'"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn assigning_to_an_error_message_is_rejected() {
+        // An error's message has no writable place; the store would be silently
+        // dropped in codegen, so the write is refused. FIX-B.
+        let e = errs(
+            "func f() -> void {\n  mut e := error { message: \"x\" }\n  e.message = \"y\"\n  e.ignore()\n}",
+        );
+        assert!(
+            e.iter().any(|d| d.msg == "an error's message is read only; build a new error instead"),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn a_slice_of_structs_at_an_interface_receiver_method_is_rejected() {
+        // FIX-A: an interface-typed receiver is fixed to Unknown in scope, but its
+        // interface name is recovered from the binding record to run the covariance
+        // guard, so a slice of concrete structs at the method's slice-of-interface
+        // parameter is caught at check.
+        let e = errs(
+            "interface Shape { area() -> int64 }\n\
+             interface Summer { total(shapes: Shape[]) -> int64 }\n\
+             struct Sq { s: int64 }\n\
+             impl Shape for Sq { func area() -> int64 { return self.s } }\n\
+             struct Calc { b: int64 }\n\
+             impl Summer for Calc { func total(shapes: Shape[]) -> int64 { return shapes[0].area() } }\n\
+             func go(s: Summer, arr: Sq[]) -> int64 { return s.total(arr) }",
+        );
+        assert!(
+            e.iter().any(|d| d.msg.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'")),
+            "{e:?}"
+        );
     }
 
     #[test]

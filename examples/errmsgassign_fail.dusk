@@ -1,0 +1,14 @@
+// FIX-B reject: an error is a single message pointer with no writable place, so
+// `e.message = ...` has no store to lower and codegen would silently drop it.
+// M2 made `.message` a well-typed string place on both sides, so the assignment
+// looked type-correct; sema now refuses the write. Reading the field stays fine
+// (errmessage covers that); only the store is refused.
+@paradigm procedural
+
+func main() -> int32 {
+    mut e := error { message: "boom" }
+    e.message = "swapped"
+    e.ignore()
+    println(e.message)
+    return 0
+}

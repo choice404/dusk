@@ -1,0 +1,30 @@
+// M3 accept: the legal boxed path through the same slice-of-interface method
+// signature. An array literal at the argument boxes each element into a fat
+// pointer as it coerces (the (Slice, Array) adapt arm), so it is a real slice of
+// interfaces, not a reinterpreted slice of concrete values. Must build and run.
+@paradigm oop
+@paradigm procedural
+
+interface Shape { area() -> int64 }
+
+struct Sq { s: int64 }
+impl Shape for Sq { func area() -> int64 { return self.s * self.s } }
+
+struct Calc { base: int64 }
+impl Calc {
+    func total(shapes: Shape[]) -> int64 {
+        mut sum: int64 = 0
+        mut i: int64 = 0
+        while i < shapes.len {
+            sum = sum + shapes[i].area()
+            i = i + 1
+        }
+        return sum
+    }
+}
+
+func main() -> int32 {
+    c := Calc { base: 0 }
+    println(c.total([Sq { s: 3 }, Sq { s: 4 }]))
+    return 0
+}

@@ -160,7 +160,9 @@ impl<'a> Lexer<'a> {
         let body = self.text(start);
         let suffix = self.suffix();
         if let Some(s) = &suffix {
-            if !valid_suffix(s) {
+            if reserved_suffix(s) {
+                self.error("unsigned integers are reserved; use the signed widths", start);
+            } else if !valid_suffix(s) {
                 self.error(format!("unknown literal suffix '{s}'"), start);
             }
         }
@@ -516,6 +518,14 @@ fn valid_suffix(s: &str) -> bool {
     )
 }
 
+/// The reserved unsigned integer suffixes. They parse as valid tokens so the
+/// width table stays whole, but they name unsigned widths dusk does not yet
+/// implement: every operation would run the signed path and yield a wrong value,
+/// so a literal that spells one is refused here rather than silently truncated.
+fn reserved_suffix(s: &str) -> bool {
+    matches!(s, "u8" | "u16" | "u32" | "u64")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,9 +687,9 @@ mod tests {
     #[test]
     fn int_suffix_and_range() {
         assert_eq!(
-            kinds("5u8 1..3"),
+            kinds("5i8 1..3"),
             vec![
-                TokenKind::Int { val: 5, suffix: Some("u8".into()) },
+                TokenKind::Int { val: 5, suffix: Some("i8".into()) },
                 TokenKind::Int { val: 1, suffix: None },
                 TokenKind::DotDot,
                 TokenKind::Int {
@@ -689,6 +699,17 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn unsigned_suffix_is_reserved() {
+        for src in ["5u8", "5u16", "5u32", "5u64"] {
+            let (_, errs) = lex(src);
+            assert!(
+                errs.iter().any(|d| d.msg.contains("unsigned integers are reserved")),
+                "{src} should be reserved: {errs:?}"
+            );
+        }
     }
 
     #[test]

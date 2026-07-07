@@ -2,6 +2,80 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.5.4
+
+Polish and freeze. This release finishes up 0.5: it closes an audit of the spec against the compiler, sharpens the diagnostics a program actually reads, downgrades the last covariance panic to a named build error, and declares the bootstrap freeze in the spec. No new language surface lands. The changes are a batch of spec drift fixes, a handful of behavior corrections where the checker was quietly wrong, and a permanent ledger folding every deferral recorded from 0.5.0 through 0.5.3 into one accounted list. Suite 458 unit (up from 434), 545 golden (up from 511), 13 parser termination, clippy clean.
+
+Caret diagnostics.
+
+- A diagnostic now renders three lines, the header, the offending source line, and a caret run underneath it, instead of the bare header alone, so the reader sees where in the line the error sits without counting columns. The caret span is measured in Unicode scalar columns rather than bytes, so a caret under a line that holds `中` or `😀` lands on the character rather than drifting off by the extra encoded bytes, and a zero width span still draws a single `^` so every diagnostic points somewhere.
+
+`e.message`, a behavior fix.
+
+- Reading `e.message` used to lower to a silent zero. It now reads through the same null guarded lowering `e.toString()` uses: a real error yields its message string, and the empty error's null message pointer reads as `""` rather than a garbage word. `message` is read only, so `e.message = "..."` is rejected, `an error's message is read only; build a new error instead`, and any field name other than `message` on an error is rejected, `error has no field '<name>'; it carries only 'message'`. A `match` arm whose tail read an error's message once mistyped that arm; the arm tail typing is corrected alongside the read.
+
+Slice covariance, a panic downgraded to a build error, a behavior change.
+
+- A slice of a concrete struct and a slice of an interface share the `{ ptr, len }` shape, so reinterpreting one as the other reads every element as a boxed interface and corrupts memory. The sema covariance sink that rejects it, `cannot pass a slice of '<concrete>' as a slice of interface '<iface>'`, now fires in the positions it used to miss: a method argument and an interface receiver, a tuple element, an array element, and a function value argument, so the check no longer stops at a plain function call.
+- Where a concrete element type was erased to the unknown type before the sink could see it, codegen used to reach an unreachable path and abort the compiler with a process panic, exit 101. The codegen backstop now records the same named build error and poisons the value with a `zeroinitializer` instead, so the module fails to link with a clean diagnostic rather than crashing the compiler. The permanent net is that any missed sink is a loud, named build error, never a miscompile.
+
+The audit hardening batch.
+
+Ten checks the surface audit surfaced, each a drift the spec claimed the compiler did not enforce or a hole the checker left open. Several are behavior changes, marked.
+
+- **Constructor payload literal fit, a behavior change.** An enum constructor's payload literal is now ranged against the field's declared width the same way an annotation's right hand side is, so `Tag.V(300)` at an `int8` field is rejected, `literal 300 does not fit in 8 bits`, instead of silently truncating, and the signed bounds apply the same way.
+- **String index assignment rejected, a behavior change.** `s[i] = c` on a string is now rejected, `a string is immutable; build a new one with a StringBuilder`, since the bytes live in read only storage; reading `s[i]` stays legal.
+- **Phantom parameter type rejected, a behavior change.** A function parameter declared with an undeclared type name is now rejected, `unknown type '<name>'; no type of that name is declared or imported`, closing a path where an unused, undeclared type slipped straight through, a phantom `Collector` parameter among them.
+- **Whole fallible tuple bind rejected, a behavior change.** Binding a fallible call's `(T, error)` result to a single name is now rejected, `a fallible result must be destructured; bind the value and the error`, so the error can never hide unread inside the pair.
+- **impl and interface paradigm gate.** Both an `interface` declaration and an `impl` block now require `@paradigm oop`, gated the same way a functional builtin needs `@paradigm functional`. A struct stays ungated across every paradigm, since it is plain data.
+- **Monad block validated.** A `monad` block missing either `bind` or `unit` is now rejected at parse, `a monad block must define both 'bind' and 'unit'`, and a block without `@paradigm functional` is rejected during gating, `monad block requires the functional paradigm`.
+- **Enum method call rejected, a behavior change.** A method call on an enum value, `m.unwrap()`, is now rejected, `'<name>' is not defined; methods on the enum '<Enum>' are not supported, match on it instead`, since only struct receivers dispatch a method.
+- **Functional builtin arity checked.** `fold` takes exactly three arguments and `map`, `filter`, `reduce`, and `foreach` take two; a stray extra argument is now rejected, `fold takes 3 argument(s)`, rather than ignored.
+- **Unsigned integers removed, reserved, a behavior change.** The unsigned integer type names `uint8` through `uint64` and the `u` literal suffixes are reserved rather than usable; naming one is rejected, `unsigned integers are reserved; use the signed widths`. The signed widths cover the surface until after 1.0.0.
+- **Async loop pumping rejected, a behavior change.** Calling the loop's blocking `await`, `await_timeout`, or `try_poll` primitives directly inside an async func is now a compile error, `'<name>' pumps the event loop and cannot be called inside an async func; use the await statement`, since pumping one by hand parks the only thread the loop cranks on. The reject is direct only; an indirect pump through a sync helper the checker cannot see into still falls to the runtime idle fatal.
+
+The kqueue runbook.
+
+- The BSD and macOS reactor backend `reactor_kqueue.c`, written against the poller seam but never compiled or run on this Linux host, gains a bring up runbook in `docs/kqueue.md` for the person who runs it on a kqueue platform. The honest status is unchanged: the backend reads clean and is statically reviewed, but it stays unverified until a BSD or macOS runner compiles and exercises the full reactor, net, and stress matrix and pins the one documented divergence, a close while armed then reused descriptor.
+
+The bootstrap freeze.
+
+- The spec's status chapter now declares the bootstrap freeze. The surface described there is frozen as of 0.5.4: the 0.6.x through 0.9.x line changes the compiler as dusk is rewritten in itself, not the language, so a program that compiles against this spec keeps compiling across the bootstrap with no source change. Three kinds of work stay live under the freeze, a diagnostic can improve, the standard library can grow, and a soundness fix can land, since none of the three change the surface a correct program relies on. New surface resumes only after 1.0.0. The one exception is a soundness hole that forces a surface change to close it, and when that happens the change is named in the changelog of the release that makes it.
+
+The permanent ledger.
+
+Every deferral the 0.5.0 through 0.5.3 line recorded, folded into one accounted list and sorted by where each one now stands.
+
+Fixed in this release.
+
+- `e.message` reading a silent zero, now the null guarded string read that `toString` already used.
+- The slice covariance codegen panic, now a named build error and a poisoned value rather than a process abort.
+- The ten audit items above, each a drift the spec claimed or a hole the checker left open, closed and pinned by a golden or a unit test.
+
+Closed earlier, now pinned.
+
+- A generic instantiated over an interface type argument, rejected outright since the 0.5.0 ledger rather than hanging the compiler, with the instantiation ceiling backing a bounded reject.
+- A scalar typed array field, sized correctly in codegen so a field read no longer disagrees with the slot the frame reserved.
+- A monad block missing `bind` or `unit`, or written without `@paradigm functional`, now a loud reject rather than a silent miss.
+
+Permanent by design.
+
+- The empty source `do` element defaults its width consistently over an underdetermined program, a deterministic default rather than a reject, since resolving it needs an analysis of the source carrier's own bind body.
+- An async func cannot take or return a `Future<T>`, since a future belongs to the event loop thread and taking one by value would let it cross into a task frame.
+- No `Collector` type implementing `Allocator` ships, withheld, since the allocator interface's untyped `*void` would erase the `collector<T>` tracking the checker relies on to keep a collected reference on its anchor thread.
+- `Either` has no `monad Either { ... }` block, since a `unit` would have to pick a free `Left` and there is no canonical one; the plain helpers are the surface.
+- The `IO` helpers yield `IO<bool>` rather than `IO<void>`, since `void` carries no value for `bind` to thread through a chain; hand constructing an `IO<void>` is not banned, `run` just forces it and yields nothing.
+- A multi statement lambda in some argument positions still infers its return type weakly; an explicit return type annotation on the lambda resolves it.
+
+Carried into the bootstrap.
+
+- An alias buried inside an aggregate a call returns is not yet surfaced: `wrap(c)` returning `Store{c: c}` forms no edge from the binding back to the pointer argument, so a store through the returned field and a separate later use of the pointer can read clean when the two name the same view.
+- A nested enum variant's payload is not yet alias linked to the binding that built it, safe today only because a locally constructed enum copies its payload rather than aliasing the argument; the two alias gaps close together the day enum payloads alias instead of copy.
+- The kqueue backend is unverified on BSD or macOS until a runner exercises it.
+- The enum method depth couples to local enum ground typing, so extending it waits on that path.
+- Conservative collection over retains, so a live byte count read through `gc_live_bytes` is an upper bound, never an under count.
+- The build passes no optimization flag to `clang`, a collector root scan dependency rather than a speed choice; adding one is a soundness change that must land with a precise root map.
+
 ## 0.5.3
 
 The stdlib. This release rebuilds `IO<T>` as a true lazy monad, ships `std.functional.result` and `std.logging`, rounds out the `Maybe` and `Either` helper surfaces, and closes two soundness gaps the stdlib work exposed: a class of generic constructor calls that used to default silently or die inside `clang`, and a must handle launder through an `error` parameter that used to let an obligation end quietly. Suite 434 unit (up from 418), 511 golden (up from 477, 34 of them new for this release), 13 parser termination, clippy clean.
