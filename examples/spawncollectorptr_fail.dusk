@@ -1,0 +1,22 @@
+@paradigm procedural
+
+// Compile-fail: a spawned thread captures a pointer to a collector. A managed
+// pointer usually captures fine, backstopped by the generation check, but a
+// collected value stays on the main thread: its block is reachable only from the
+// anchor-side roots the collector scans, never the worker stack, so the worker
+// copies the collected ref off the pointer and the block is swept while the task
+// still holds it, a confirmed use after free. The accept twin is spawnptrscalar_ok,
+// capturing a pointer to a plain scalar cell.
+func main() -> int32 {
+    c := collector<int64>(777)
+    p := alloc(c)
+    t, e := spawn(lambda () -> void {
+        local := *p
+        println(*local)
+    })
+    e.ignore()
+    je := join(t)
+    je.ignore()
+    free(p)
+    return 0
+}

@@ -1,0 +1,19 @@
+@paradigm procedural
+
+// A slice collector deep copies one level of elements, so its element must be
+// immortal safe. A slice of slices is not: the outer copy immortalizes the row
+// pointers but leaves each inner fat pointer viewing the frame, which a
+// one-level copy cannot reach. The mint is rejected. The accept twin is
+// collector<int64[]>, whose scalar element is copied whole (collectorslice).
+func mk(rows: int64[][]) -> collector<int64[][]> {
+    return collector<int64[][]>(rows)
+}
+
+func main() -> int32 {
+    a: int64[2] = [1, 2]
+    b: int64[2] = [3, 4]
+    rows := [a[0..2], b[0..2]]
+    c := mk(rows)
+    println(c[0][0])
+    return 0
+}

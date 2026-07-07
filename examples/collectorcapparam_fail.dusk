@@ -1,0 +1,29 @@
+@paradigm procedural
+
+// The interprocedural closure-capture sink. hold mints a closure capturing its
+// pointer parameter q. Inside hold, q has no view flags (it is a parameter), so
+// the mint-site capture rule sees it clean. But a caller can bury a frame view
+// behind q's pointee, which the collected closure then carries out. The closure
+// mint records a sink on the captured pointer, so the caller passing a buried
+// pointer is caught one hop up. The accept twin is collectorcapparamok.
+struct Inner {
+    s: int64[],
+}
+
+func hold(q: *Inner) -> collector<() -> int64> {
+    return collector<() -> int64>(lambda () -> int64 {
+        return (*q).s[0]
+    })
+}
+
+func mk() -> collector<() -> int64> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    return hold(p)
+}
+
+func main() -> int32 {
+    t := mk()
+    println(t())
+    return 0
+}

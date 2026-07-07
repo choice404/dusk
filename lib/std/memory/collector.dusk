@@ -1,0 +1,41 @@
+// std.memory.collector: control and gauges for the collected heap. The collected
+// heap is a conservative mark and sweep region beside the generational heap,
+// minted through the collector<T> type. These wrappers force a collection and
+// read its counters. The collector runs on the main thread only, the thread it is
+// confined to; a collection asked for off that thread is fatal.
+//
+// A Collector that implements Allocator is intentionally not provided here. The
+// Allocator interface hands back an untyped *void, which erases the collector<T>
+// tracking the checker relies on to confine collected references to the main
+// thread. Routing collected blocks through it would let a channel or spawn store a
+// collected pointer with no diagnostic, then a collection would sweep it while
+// live. The typed collector<T> mint is the checked surface for collected memory.
+
+@paradigm procedural
+
+foreign "C" {
+    func cool_gc_collect() -> void
+    func cool_gc_live_blocks() -> int64
+    func cool_gc_live_bytes() -> int64
+    func cool_gc_collections() -> int64
+}
+
+// Forces one full mark and sweep of the collected heap now. Main thread only.
+export func gc_collect() -> void {
+    cool_gc_collect()
+}
+
+// The number of collected blocks currently live. A gauge, read at any point.
+export func gc_live_blocks() -> int64 {
+    return cool_gc_live_blocks()
+}
+
+// The total payload bytes across the live collected blocks. A gauge.
+export func gc_live_bytes() -> int64 {
+    return cool_gc_live_bytes()
+}
+
+// The count of collections run since the program started. Monotonic.
+export func gc_collections() -> int64 {
+    return cool_gc_collections()
+}

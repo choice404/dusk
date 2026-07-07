@@ -128,6 +128,11 @@ pub enum Type {
     Array(Box<Type>, u64),
     Tuple(Vec<Type>),
     Func(Vec<Type>, Box<Type>),
+    /// A collected wrapper `collector<T>`. Its runtime rep is a managed `*T`, a
+    /// fat `{ptr, gen}` whose block lives on the collected heap the collector
+    /// reclaims. Deref and field projection mirror `*T` with the same generation
+    /// check; the value is escape neutral and never freed or moved.
+    Collector(Box<Type>),
     Unit,
     /// A type hole produced only by desugar, for the open continuation lambdas of
     /// a `do` over a generic monad, and resolved only by mono's per-site
@@ -273,6 +278,11 @@ pub enum ExprKind {
     /// `sizeof(T)` over a type parameter is substituted to its concrete type, so
     /// composite types such as slices and tuples are sized correctly.
     SizeofType(Type),
+    /// `collector<T>(value)`, the minting expression: it evaluates `value`,
+    /// stores it in a freshly minted collected block, and yields a `collector<T>`
+    /// fat value. `ty` is the element type `T` the value checks against and the
+    /// block is sized for; `arg` is the value stored.
+    Collect { ty: Type, arg: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +415,7 @@ pub fn collect_expr(e: &Expr, used: &mut Vec<String>, bound: &mut HashSet<String
         }
         ExprKind::Match(m) => collect_match(m, used, bound),
         ExprKind::Await(op, _) => collect_expr(op, used, bound),
+        ExprKind::Collect { arg, .. } => collect_expr(arg, used, bound),
         _ => {}
     }
 }

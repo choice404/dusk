@@ -351,6 +351,9 @@ impl Resolver {
             // The awaited operand is a use of its future binding, so an
             // unawaited future would still trip the unused variable rule.
             ExprKind::Await(op, _) => self.expr(op),
+            // The minted value is a use of its subexpression; the element type is
+            // validated by the type pass, so resolve only walks the value.
+            ExprKind::Collect { arg, .. } => self.expr(arg),
             ExprKind::Do(_, binds) => {
                 for b in binds {
                     self.expr(&b.expr);

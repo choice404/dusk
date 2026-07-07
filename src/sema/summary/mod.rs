@@ -434,6 +434,9 @@ impl Summarizer {
             // managed `*T` or a `*raw T` points at the heap or the FFI layer, and
             // the managed-pointer escape is covered by the generation backstop.
             Type::Ptr(_) | Type::RawPtr(_) => false,
+            // A collector's block lives on the collected heap, which outlives the
+            // frame, so a collector value never views it: escape neutral.
+            Type::Collector(_) => false,
             Type::Named(n, _) => {
                 if n == "Future" {
                     return false;
@@ -505,6 +508,9 @@ impl Summarizer {
                 }
                 false
             }
+            // A collector aliases nothing: its backing is a fresh collected block,
+            // not a managed pointer the alias-group rules track.
+            Type::Collector(_) => false,
             Type::Func(..) | Type::Unit | Type::Infer => false,
         }
     }

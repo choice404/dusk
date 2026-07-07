@@ -193,6 +193,8 @@ impl Gate {
             ExprKind::Match(m) => self.match_(m),
             // async is paradigm agnostic; the gate only walks into the operand.
             ExprKind::Await(op, _) => self.expr(op),
+            // The collector mint is paradigm agnostic; only the value is walked.
+            ExprKind::Collect { arg, .. } => self.expr(arg),
             ExprKind::Int(..)
             | ExprKind::Float(..)
             | ExprKind::Str(_)

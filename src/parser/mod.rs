@@ -647,12 +647,31 @@ impl Parser {
         if name == "void" {
             return Type::Unit;
         }
+        // `collector<T>` is a wrapper type, not an ordinary generic. It is
+        // contextual: only `collector` immediately followed by `<` names the
+        // wrapper, so a type named `collector` used bare stays an ordinary name.
+        if name == "collector" && self.at(&TokenKind::Lt) {
+            return Type::Collector(Box::new(self.collector_type_arg()));
+        }
         let args = if self.at(&TokenKind::Lt) {
             self.type_args()
         } else {
             Vec::new()
         };
         Type::Named(name, args)
+    }
+
+    /// Parses the `< T >` element of a `collector<T>`, taking exactly one type. A
+    /// missing or surplus argument is a diagnostic naming the one type form.
+    fn collector_type_arg(&mut self) -> Type {
+        let args = self.type_args();
+        match args.len() {
+            1 => args.into_iter().next().unwrap(),
+            _ => {
+                self.error("collector takes one element type: collector<T>");
+                args.into_iter().next().unwrap_or(Type::Unit)
+            }
+        }
     }
 
     fn type_args(&mut self) -> Vec<Type> {
@@ -1418,6 +1437,19 @@ impl Parser {
                         );
                     }
                 }
+                // `collector<T>(value)` is the minting expression. It is
+                // contextual: `collector` mints only when a balanced `<T>`
+                // immediately followed by `(` proves the mint shape, so a value
+                // named `collector` compared with `<`, as in `collector < n`,
+                // stays an ordinary identifier. The newline guard keeps a
+                // `collector` at a line end from joining a `<` on the next line.
+                if name == "collector"
+                    && self.at(&TokenKind::Lt)
+                    && !self.nl_here()
+                    && self.collector_mint_ahead()
+                {
+                    return self.collect_mint(span);
+                }
                 if !self.no_struct && self.at(&TokenKind::LBrace) {
                     self.struct_lit(name, span)
                 } else {
@@ -1430,6 +1462,87 @@ impl Parser {
                 node(ExprKind::Ident(String::new()), span)
             }
         }
+    }
+
+    /// Non-destructive lookahead deciding whether `collector <` opens a mint,
+    /// `collector<T>(value)`, or a comparison, `collector < expr`. A mint has a
+    /// balanced angle-bracket type immediately followed by `(`; a comparison
+    /// reaches an operator, a brace, a literal, or a statement boundary before the
+    /// angles close. `self.pos` sits at the `<`. It only peeks, never consuming or
+    /// rewriting a token, so a misjudged comparison re-parses cleanly, unlike a
+    /// speculative parse that would split a joined `>>` in place.
+    fn collector_mint_ahead(&self) -> bool {
+        let mut i = self.pos;
+        let mut depth: i32 = 0;
+        let end = (self.pos + 128).min(self.toks.len());
+        while i < end {
+            match &self.toks[i].kind {
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(
+                            self.toks.get(i + 1).map(|t| &t.kind),
+                            Some(TokenKind::LParen)
+                        );
+                    }
+                }
+                // A joined `>>` closes two nested levels at once, as in
+                // `collector<Vec<int>>(x)`. It closes the mint only when it lands
+                // exactly on depth zero and a `(` follows.
+                TokenKind::Shr => {
+                    depth -= 2;
+                    if depth <= 0 {
+                        return depth == 0
+                            && matches!(
+                                self.toks.get(i + 1).map(|t| &t.kind),
+                                Some(TokenKind::LParen)
+                            );
+                    }
+                }
+                // The tokens a type argument list can contain: names, nested
+                // angles handled above, commas, pointer stars, array brackets,
+                // function-type parens and arrows, and an array length.
+                TokenKind::Ident(_)
+                | TokenKind::Comma
+                | TokenKind::Star
+                | TokenKind::StarStar
+                | TokenKind::LBracket
+                | TokenKind::RBracket
+                | TokenKind::LParen
+                | TokenKind::RParen
+                | TokenKind::Arrow
+                | TokenKind::Int { .. } => {}
+                // Anything else, an operator, a brace, a literal, or a keyword,
+                // ends the would-be type, so this is a comparison, not a mint.
+                _ => return false,
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Parses `collector<T>(value)` in expression position, the minting form. The
+    /// element type is parsed like the wrapper type, then exactly one value
+    /// argument follows in parentheses. A missing paren or a wrong argument count
+    /// is a diagnostic naming the one value form.
+    fn collect_mint(&mut self, start: Span) -> Expr {
+        let ty = self.collector_type_arg();
+        let arg = if self.eat(&TokenKind::LParen) {
+            let args = self.with_struct(|p| p.expr_list(&TokenKind::RParen));
+            self.expect(&TokenKind::RParen);
+            if args.len() != 1 {
+                self.error("collector takes one value: collector<T>(value)");
+            }
+            args.into_iter()
+                .next()
+                .unwrap_or_else(|| node(ExprKind::Ident(String::new()), start))
+        } else {
+            self.error("collector takes one value: collector<T>(value)");
+            node(ExprKind::Ident(String::new()), start)
+        };
+        let span = Span::new(start.lo, self.prev_hi());
+        node(ExprKind::Collect { ty, arg: Box::new(arg) }, span)
     }
 
     fn struct_lit(&mut self, name: String, start: Span) -> Expr {

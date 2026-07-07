@@ -54,6 +54,15 @@ pub fn build_demo(out_dir: &Path) -> Result<BuildArtifacts, String> {
 /// `bin`. `-pthread` rides along for toolchains older than glibc 2.34, where
 /// pthreads is not yet folded into libc. `-lm` links the math library, which the
 /// float `**` operator needs since it lowers to the `pow` intrinsic.
+///
+/// No optimization flag is passed, and the collector depends on that. Its
+/// conservative root scan brackets the stack between a collection point and the
+/// anchor slot at the top of main's frame, which holds only under the default
+/// unoptimized frame layout where a local keeps a stack home. An optimization
+/// flag could keep a root only in a register the scan does not reach, or elide
+/// the frame pointer so the register spill misses it. Adding `-O` here is a
+/// collector soundness change, not a speed knob, and must move in lockstep with
+/// a precise root map in codegen.
 fn link(inputs: &[&Path], bin: &Path) -> Result<(), String> {
     let mut cmd = Command::new("clang");
     for input in inputs {
@@ -91,6 +100,7 @@ fn runtime_sources() -> Vec<PathBuf> {
     let rt = crate::home::asset_dir("runtime");
     vec![
         rt.join("runtime.c"),
+        rt.join("collect.c"),
         rt.join("thread.c"),
         rt.join("async.c"),
         rt.join("reactor.c"),

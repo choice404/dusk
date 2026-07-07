@@ -1,0 +1,40 @@
+@paradigm procedural
+
+// The closure-collector widenings. A bare lambda literal at a collector<F>
+// parameter is minted by the mono rewrite into an explicit mint, so the caller
+// writes the lambda directly and its environment still lands on the collected
+// heap. In the other direction a collector<F> value passes where a plain F is
+// expected: its rep is the closure, so it dispatches unchanged.
+
+// A closure-collector parameter, called after storing it.
+func hold(t: collector<() -> int64>) -> int64 {
+    return t()
+}
+
+// A plain function parameter, fed a collector<F> value.
+func call_it(f: () -> int64) -> int64 {
+    return f()
+}
+
+func mint(base: int64) -> collector<() -> int64> {
+    return collector<() -> int64>(lambda () -> int64 {
+        return base
+    })
+}
+
+func main() -> int32 {
+    // Bare lambda literal at a collector parameter: mono mints it. The lambda
+    // captures a frame-local scalar, so the mint puts the environment on the
+    // collected heap and the value survives the call into hold.
+    n := 6
+    a := hold(lambda () -> int64 {
+        return n + 1
+    })
+    println(a)
+
+    // A collector<F> value where a plain F is expected: the widening the other
+    // way, no mint, the closure dispatches directly.
+    t := mint(35)
+    println(call_it(t))
+    return 0
+}

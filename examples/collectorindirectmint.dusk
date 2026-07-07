@@ -1,0 +1,28 @@
+@paradigm procedural
+
+// The accept twin of collectorindirectlam_fail. An explicit mint fed to an
+// indirect call works: the mint runs before the call, so the collector value g
+// receives holds an environment already on the collected heap. A forced
+// collection between the mint and the call keeps it.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+func hold(t: collector<() -> int64>) -> int64 {
+    return t()
+}
+
+func run_it() -> int64 {
+    g := hold
+    n := 5
+    c := collector<() -> int64>(lambda () -> int64 {
+        return n
+    })
+    cool_gc_collect()
+    return g(c)
+}
+
+func main() -> int32 {
+    println(run_it())
+    return 0
+}

@@ -1,0 +1,28 @@
+@paradigm procedural
+
+// The slice-kind twin of collectorptrview_fail. The element Cell reaches a
+// managed pointer whose pointee stores a frame-view slice. The deep copy
+// immortalizes the outer pointer array but not each pointee, so (*cells[0].p).s
+// dangles once mk returns. The buried-view guard looks past the outer frame slice
+// at the tainted pointer and rejects. The accept twin is collectorslicecell,
+// whose pointees are heap owned.
+struct Inner {
+    s: int64[],
+}
+
+struct Cell {
+    p: *Inner,
+}
+
+func mk() -> collector<Cell[]> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    cells: Cell[1] = [Cell { p: p }]
+    return collector<Cell[]>(cells)
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c[0].p).s[0])
+    return 0
+}

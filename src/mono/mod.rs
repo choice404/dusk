@@ -83,6 +83,11 @@ struct Mono<'a> {
     // later use, a pass to a generic or an await, is resolved against a shape
     // that disagrees with the value's ground layout.
     fn_ret: HashMap<String, (Type, bool)>,
+    // Each non-generic function's declared parameter types, so a lambda literal
+    // at a closure-collector parameter can be minted into an explicit
+    // collector<F>(lambda) node the same way the generic path does through
+    // rw_arg. Only this widening reads it.
+    fn_params: HashMap<String, Vec<Type>>,
     requested: HashSet<String>,
     // Each queued instantiation carries the span of the site that first requested
     // it, so a backstop diagnostic, an interface type argument or the
@@ -113,6 +118,7 @@ impl<'a> Mono<'a> {
         let mut genums = HashMap::new();
         let mut ifaces = HashSet::new();
         let mut fn_ret = HashMap::new();
+        let mut fn_params = HashMap::new();
         for item in &module.items {
             match item {
                 Item::Func(f) if !f.generics.is_empty() => {
@@ -120,6 +126,10 @@ impl<'a> Mono<'a> {
                 }
                 Item::Func(f) => {
                     fn_ret.insert(f.name.clone(), (f.ret.clone(), f.is_async));
+                    fn_params.insert(
+                        f.name.clone(),
+                        f.params.iter().map(|p| p.ty.clone()).collect(),
+                    );
                 }
                 Item::Struct(s) if !s.generics.is_empty() => {
                     gstructs.insert(s.name.clone(), s);
@@ -140,6 +150,7 @@ impl<'a> Mono<'a> {
             genums,
             ifaces,
             fn_ret,
+            fn_params,
             requested: HashSet::new(),
             worklist: Vec::new(),
             out: Vec::new(),
@@ -319,6 +330,7 @@ impl<'a> Mono<'a> {
                 ps.iter().map(|p| self.emit_ty(p, span)).collect(),
                 Box::new(self.emit_ty(r, span)),
             ),
+            Type::Collector(b) => Type::Collector(Box::new(self.emit_ty(b, span))),
             Type::Unit => Type::Unit,
             // A hole reaching emit means a do-continuation's element type was never
             // pinned by per-site inference. Report it and fall back to a ground
@@ -438,9 +450,21 @@ impl<'a> Mono<'a> {
             return;
         }
         let Some(t) = targs.first() else { return };
-        if !self.chan_element_ok(t, &HashSet::new()) {
+        // A channel carries its element to another thread, so a collected value is
+        // refused; a future completes on the loop thread the value was minted on,
+        // so a collector rides it fine. Both still refuse a frame-viewing element.
+        let ok = if chan {
+            self.chan_element_ok(t, &HashSet::new())
+        } else {
+            self.crossable(t, false, true, &HashSet::new())
+        };
+        if !ok {
             let msg = if chan {
-                "a channel element cannot contain a slice, closure, or interface value; a view of the sending thread's frame would dangle in the receiver; send heap owned data instead"
+                if !self.crossable(t, false, true, &HashSet::new()) {
+                    "a channel element cannot contain a slice, closure, or interface value; a view of the sending thread's frame would dangle in the receiver; send heap owned data instead"
+                } else {
+                    "a collected value stays on the main thread; it cannot cross through a channel to another thread"
+                }
             } else {
                 "a future element cannot contain a slice, closure, or interface value; a view of the completing thread's frame would dangle in the awaiter; send heap owned data instead"
             };
@@ -449,19 +473,25 @@ impl<'a> Mono<'a> {
     }
 
     /// Whether a channel element may cross a thread boundary by copy: it must not
-    /// view the sending frame. The future-carrying flag is off, since a channel
-    /// element is not itself a future.
+    /// view the sending frame, and it must not be a collected value, which stays
+    /// on the main thread. The future-carrying flag is off, since a channel
+    /// element is not itself a future, and the collector-allow flag is off, since
+    /// a channel carries its element to another thread.
     fn chan_element_ok(&self, t: &Type, path: &HashSet<String>) -> bool {
-        self.crossable(t, false, path)
+        self.crossable(t, false, false, path)
     }
 
     /// Whether a value of this concrete type may cross a boundary that outlives
     /// the frame it was built in: an async call, an await result, a spawn/submit
     /// capture, or a channel send. A slice, closure, or interface value can view
     /// that frame; with `ban_future` a future is refused too, since a future is
-    /// event-loop-thread property. The walk substitutes concrete type arguments
-    /// into generic struct and enum fields, so a burial behind a type parameter,
-    /// which the checker's erased walk cannot see, is caught here.
+    /// event-loop-thread property. With `allow_collector` off a collected value is
+    /// refused, since it stays on the main thread and a channel or spawn capture
+    /// would carry it off that thread; the flag is on for an async parameter,
+    /// return, or future element, which complete on the loop thread the value was
+    /// minted on. The walk substitutes concrete type arguments into generic struct
+    /// and enum fields, so a burial behind a type parameter, which the checker's
+    /// erased walk cannot see, is caught here.
     ///
     /// `path` is the set of struct and enum names on the branch from the root to
     /// the current node. A name already on the path is a recursive reference and
@@ -469,52 +499,72 @@ impl<'a> Mono<'a> {
     /// mangled name grows without bound. Each descent gets its own path copy, so a
     /// sibling instantiation of the same generic with a different, non-crossable
     /// argument is judged on its own and never masked by a crossable sibling.
-    fn crossable(&self, t: &Type, ban_future: bool, path: &HashSet<String>) -> bool {
+    fn crossable(&self, t: &Type, ban_future: bool, allow_collector: bool, path: &HashSet<String>) -> bool {
         match t {
             Type::Slice(_) | Type::Func(..) => false,
+            // A collected value stays on the anchor thread. A channel or spawn
+            // capture carries it off that thread, so it is refused there. A future
+            // element, or an async parameter or return, completes on the loop
+            // thread the value was minted on, so the collector rides it fine; its
+            // backing is immortal, so the inner never needs the frame-view walk.
+            Type::Collector(_) => allow_collector,
             Type::Named(n, _) if ban_future && n == "Future" => false,
             // A pointer targets the heap, which outlives the frame, so a slice or
-            // interface value behind it crosses fine. A future is the exception: it
-            // is event-loop-thread property, so a future smuggled behind a pointer,
-            // whether bare or buried in a channel handle like `*Channel<Future<T>>`,
-            // still faults when a foreign thread awaits it. Under the future ban,
-            // hunt the pointee for a buried future and refuse only that; without the
-            // ban a pointer crosses freely, as it does today.
-            Type::Ptr(b) | Type::RawPtr(b) if ban_future => !self.ptr_reaches_future(b, path),
-            Type::Array(b, _) => self.crossable(b, ban_future, path),
-            Type::Tuple(ts) => ts.iter().all(|x| self.crossable(x, ban_future, path)),
+            // interface value behind it crosses fine. Two payloads still refuse to
+            // cross even behind a pointer. A future is event-loop-thread property,
+            // so one smuggled behind a pointer, bare or buried in a channel handle
+            // like `*Channel<Future<T>>`, still faults when a foreign thread awaits
+            // it. A collected value stays on the anchor thread: its block is only
+            // reachable from the anchor stack, the gen registry, and the registered
+            // regions the scan covers, never a worker stack, so a collected ref
+            // carried behind a pointer to another thread is swept while that worker
+            // still holds it. Hunt the pointee for whichever the caller bans and
+            // refuse only that; a pointer with neither crosses freely.
+            Type::Ptr(b) | Type::RawPtr(b) => {
+                if ban_future && self.ptr_reaches_future(b, path) {
+                    false
+                } else {
+                    allow_collector || !self.ptr_reaches_collector(b, path)
+                }
+            }
+            Type::Array(b, _) => self.crossable(b, ban_future, allow_collector, path),
+            Type::Tuple(ts) => ts.iter().all(|x| self.crossable(x, ban_future, allow_collector, path)),
             Type::Named(n, targs) => {
                 if path.contains(n) {
                     return true;
                 }
                 let mut child = path.clone();
                 child.insert(n.clone());
-                if !targs.iter().all(|x| self.crossable(x, ban_future, &child)) {
+                if !targs.iter().all(|x| self.crossable(x, ban_future, allow_collector, &child)) {
                     return false;
                 }
                 if let Some(s) = self.gstructs.get(n.as_str()).copied() {
                     let subst = bind(&s.generics, targs);
-                    return s
-                        .fields
-                        .iter()
-                        .all(|fl| self.crossable(&subst_apply(&fl.ty, &subst), ban_future, &child));
+                    return s.fields.iter().all(|fl| {
+                        self.crossable(&subst_apply(&fl.ty, &subst), ban_future, allow_collector, &child)
+                    });
                 }
                 if let Some(e) = self.genums.get(n.as_str()).copied() {
                     let subst = bind(&e.generics, targs);
                     return e.variants.iter().all(|v| {
-                        v.fields
-                            .iter()
-                            .all(|fl| self.crossable(&subst_apply(&fl.ty, &subst), ban_future, &child))
+                        v.fields.iter().all(|fl| {
+                            self.crossable(&subst_apply(&fl.ty, &subst), ban_future, allow_collector, &child)
+                        })
                     });
                 }
                 for item in self.items {
                     match item {
                         Item::Struct(s) if s.name == *n => {
-                            return s.fields.iter().all(|fl| self.crossable(&fl.ty, ban_future, &child));
+                            return s
+                                .fields
+                                .iter()
+                                .all(|fl| self.crossable(&fl.ty, ban_future, allow_collector, &child));
                         }
                         Item::Enum(e) if e.name == *n => {
                             return e.variants.iter().all(|v| {
-                                v.fields.iter().all(|fl| self.crossable(&fl.ty, ban_future, &child))
+                                v.fields
+                                    .iter()
+                                    .all(|fl| self.crossable(&fl.ty, ban_future, allow_collector, &child))
                             });
                         }
                         Item::Interface(i) if i.name == *n => return false,
@@ -588,6 +638,65 @@ impl<'a> Mono<'a> {
         }
     }
 
+    /// Whether a collector is reachable through this type once a pointer has been
+    /// crossed. A collected value stays on the anchor thread, so burying one behind
+    /// a managed or raw pointer and carrying it to another thread through a channel
+    /// or a spawn capture still leaves its block reachable only from anchor-side
+    /// roots the scan covers, never the worker stack, so the block is swept while
+    /// the worker holds the pointer. The walk descends through nested pointers,
+    /// arrays, slices, tuples, and the type arguments and fields of a generic struct
+    /// or enum. `path` carries the struct and enum names on the branch, so a
+    /// recursive type terminates the same way `ptr_reaches_future` does.
+    fn ptr_reaches_collector(&self, t: &Type, path: &HashSet<String>) -> bool {
+        match t {
+            Type::Collector(_) => true,
+            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => {
+                self.ptr_reaches_collector(b, path)
+            }
+            Type::Tuple(ts) => ts.iter().any(|x| self.ptr_reaches_collector(x, path)),
+            Type::Named(n, targs) => {
+                if path.contains(n) {
+                    return false;
+                }
+                let mut child = path.clone();
+                child.insert(n.clone());
+                if targs.iter().any(|x| self.ptr_reaches_collector(x, &child)) {
+                    return true;
+                }
+                if let Some(s) = self.gstructs.get(n.as_str()).copied() {
+                    let subst = bind(&s.generics, targs);
+                    return s
+                        .fields
+                        .iter()
+                        .any(|fl| self.ptr_reaches_collector(&subst_apply(&fl.ty, &subst), &child));
+                }
+                if let Some(e) = self.genums.get(n.as_str()).copied() {
+                    let subst = bind(&e.generics, targs);
+                    return e.variants.iter().any(|v| {
+                        v.fields
+                            .iter()
+                            .any(|fl| self.ptr_reaches_collector(&subst_apply(&fl.ty, &subst), &child))
+                    });
+                }
+                for item in self.items {
+                    match item {
+                        Item::Struct(s) if s.name == *n => {
+                            return s.fields.iter().any(|fl| self.ptr_reaches_collector(&fl.ty, &child));
+                        }
+                        Item::Enum(e) if e.name == *n => {
+                            return e.variants.iter().any(|v| {
+                                v.fields.iter().any(|fl| self.ptr_reaches_collector(&fl.ty, &child))
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Reports a future spelled with an element that could view a frame, wherever
     /// its type appears: a binding annotation, a parameter, a field, or a return.
     /// future_new and future_wrap already guard the mint site, but a hand-built or
@@ -596,7 +705,9 @@ impl<'a> Mono<'a> {
     fn check_future_spell(&mut self, t: &Type, span: Span) {
         match t {
             Type::Named(n, targs) if n == "Future" && targs.len() == 1 => {
-                if !self.crossable(&targs[0], false, &HashSet::new()) {
+                // A future completes on the loop thread its element was minted on,
+                // so a collected element rides it; only a frame view is refused.
+                if !self.crossable(&targs[0], false, true, &HashSet::new()) {
                     self.diags.push(Diagnostic::new(
                         "a future element cannot contain a slice, closure, or interface value; a view of the completing thread's frame would dangle in the awaiter; send heap owned data instead",
                         span,
@@ -623,6 +734,7 @@ impl<'a> Mono<'a> {
                 }
                 self.check_future_spell(r, span);
             }
+            Type::Collector(b) => self.check_future_spell(b, span),
             Type::Unit => {}
             Type::Infer => {}
         }
@@ -649,11 +761,15 @@ impl<'a> Mono<'a> {
                 continue;
             }
             if let Some(t) = env.get(&c) {
-                if !self.crossable(t, true, &HashSet::new()) {
-                    self.diags.push(Diagnostic::new(
-                        format!("{name} cannot capture '{c}': it holds a slice, closure, interface value, or future that would view the spawning frame"),
-                        span,
-                    ));
+                // A spawn or submit carries the capture to another thread, so a
+                // collected value is refused along with a frame-viewing one.
+                if !self.crossable(t, true, false, &HashSet::new()) {
+                    let msg = if self.crossable(t, true, true, &HashSet::new()) {
+                        format!("{name} cannot capture '{c}': a collected value stays on the main thread; it cannot cross to another thread")
+                    } else {
+                        format!("{name} cannot capture '{c}': it holds a slice, closure, interface value, or future that would view the spawning frame")
+                    };
+                    self.diags.push(Diagnostic::new(msg, span));
                 }
             }
         }
@@ -961,6 +1077,17 @@ impl<'a> Mono<'a> {
                 }
                 ExprKind::Await(Box::new(rop), el)
             }
+            ExprKind::Collect { ty, arg } => {
+                // Ground the element type so codegen sizes the collected block,
+                // and rewrite the value against it, mirroring the `sizeof(T)`
+                // substitution. A generic element becomes concrete here.
+                let ground = subst_apply(ty, subst);
+                let rarg = self.rw_expr(arg, subst, env, Some(&ground));
+                ExprKind::Collect {
+                    ty: self.emit_ty(&ground, e.span),
+                    arg: Box::new(rarg),
+                }
+            }
             other => other.clone(),
         };
         node(kind, e.span)
@@ -1037,6 +1164,27 @@ impl<'a> Mono<'a> {
             }
         }
         let c = self.rw_expr(callee, subst, env, None);
+        // A non-generic function's declared parameter types let a lambda literal at
+        // a closure-collector parameter be minted, the same widening the generic
+        // path does through rw_arg. Every other argument keeps its plain rewrite,
+        // so only the lambda-into-collector case changes shape.
+        if let ExprKind::Ident(fname) = &callee.kind {
+            if let Some(params) = self.fn_params.get(fname).cloned() {
+                let a: Vec<Expr> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| match (params.get(i), &x.kind) {
+                        (Some(Type::Collector(inner)), ExprKind::Lambda(_))
+                            if matches!(&**inner, Type::Func(..)) =>
+                        {
+                            self.rw_collect_lambda(x, inner, subst, env)
+                        }
+                        _ => self.rw_expr(x, subst, env, None),
+                    })
+                    .collect();
+                return ExprKind::Call(Box::new(c), a);
+            }
+        }
         let a = args.iter().map(|x| self.rw_expr(x, subst, env, None)).collect();
         ExprKind::Call(Box::new(c), a)
     }
@@ -1135,31 +1283,62 @@ impl<'a> Mono<'a> {
         subst: &Subst,
         env: &Env,
     ) -> Expr {
-        if let ExprKind::Lambda(l) = &arg.kind {
+        if let ExprKind::Lambda(_) = &arg.kind {
             if let Some(Type::Func(pdecl, rdecl)) = decl {
-                let params = l
-                    .params
-                    .iter()
-                    .enumerate()
-                    .map(|(j, lp)| Param {
-                        using: lp.using,
-                        name: lp.name.clone(),
-                        ty: pdecl
-                            .get(j)
-                            .map(|pt| subst_apply(pt, inf_full))
-                            .unwrap_or_else(|| lp.ty.clone()),
-                    })
-                    .collect();
-                let patched = crate::parser::ast::Lambda {
-                    params,
-                    ret: subst_apply(rdecl, inf_full),
-                    body: l.body.clone(),
-                };
-                let e = node(ExprKind::Lambda(patched), arg.span);
-                return self.rw_expr(&e, subst, env, None);
+                let fty = Type::Func(pdecl.clone(), rdecl.clone());
+                let ground = subst_apply(&fty, inf_full);
+                return self.rw_lambda_pinned(arg, &ground, subst, env);
+            }
+            // A lambda literal where a closure collector is declared is minted:
+            // rewrite it against the wrapped function type, then wrap it in an
+            // explicit collector<F>(lambda) Collect so codegen mints its
+            // environment on the collected heap. This is the one widening INTO a
+            // collector, matching the surface pass's lambda-only acceptance.
+            if let Some(Type::Collector(inner)) = decl {
+                if matches!(&**inner, Type::Func(..)) {
+                    let ground = subst_apply(inner, inf_full);
+                    return self.rw_collect_lambda(arg, &ground, subst, env);
+                }
             }
         }
         self.rw_expr(arg, subst, env, None)
+    }
+
+    /// Rewrites a lambda literal with its parameter and return types pinned from a
+    /// concrete function type, the type-annotation flow codegen sizes captures and
+    /// results from. The body is rewritten under the caller's substitution.
+    fn rw_lambda_pinned(&mut self, arg: &Expr, fty: &Type, subst: &Subst, env: &Env) -> Expr {
+        let (ExprKind::Lambda(l), Type::Func(pdecl, rdecl)) = (&arg.kind, fty) else {
+            return self.rw_expr(arg, subst, env, None);
+        };
+        let params = l
+            .params
+            .iter()
+            .enumerate()
+            .map(|(j, lp)| Param {
+                using: lp.using,
+                name: lp.name.clone(),
+                ty: pdecl.get(j).cloned().unwrap_or_else(|| lp.ty.clone()),
+            })
+            .collect();
+        let patched = crate::parser::ast::Lambda {
+            params,
+            ret: (**rdecl).clone(),
+            body: l.body.clone(),
+        };
+        let e = node(ExprKind::Lambda(patched), arg.span);
+        self.rw_expr(&e, subst, env, None)
+    }
+
+    /// The closure-collector widening: rewrites a lambda literal pinned to the
+    /// wrapped function type `fty`, then wraps it in an explicit
+    /// collector<F>(lambda) mint. `fty` is already ground, so the emitted collector
+    /// element sizes the collected environment. This is the single path the mono
+    /// rewrite hands codegen, so the widening and the explicit mint lower alike.
+    fn rw_collect_lambda(&mut self, arg: &Expr, fty: &Type, subst: &Subst, env: &Env) -> Expr {
+        let lam = self.rw_lambda_pinned(arg, fty, subst, env);
+        let cty = self.emit_ty(fty, arg.span);
+        node(ExprKind::Collect { ty: cty, arg: Box::new(lam) }, arg.span)
     }
 
     fn infer_struct_args(
@@ -1238,7 +1417,7 @@ impl<'a> Mono<'a> {
                     self.static_ty(x, subst, env)
                 }
                 crate::parser::ast::UnOp::Deref => match self.static_ty(x, subst, env)? {
-                    Type::Ptr(b) => Some(*b),
+                    Type::Ptr(b) | Type::Collector(b) => Some(*b),
                     _ => None,
                 },
             },
@@ -1322,6 +1501,9 @@ impl<'a> Mono<'a> {
                     Some(named(name))
                 }
             }
+            ExprKind::Collect { ty, .. } => {
+                Some(Type::Collector(Box::new(subst_apply(ty, subst))))
+            }
             _ => None,
         }
     }
@@ -1377,14 +1559,16 @@ impl<'a> Mono<'a> {
             // checker already rejects the direct cases, so this only fires on a
             // burial in an otherwise clean program.
             for (pname, pty) in &params {
-                if !self.crossable(pty, true, &HashSet::new()) {
+                // A collected value rides an async parameter: the task runs on the
+                // loop thread the value was minted on, and its backing is immortal.
+                if !self.crossable(pty, true, true, &HashSet::new()) {
                     self.diags.push(Diagnostic::new(
                         format!("an async func cannot take '{pname}': it holds a slice, closure, interface value, or future that would view the caller's frame, which the task outlives"),
                         span,
                     ));
                 }
             }
-            if !self.crossable(&ret, true, &HashSet::new()) {
+            if !self.crossable(&ret, true, true, &HashSet::new()) {
                 self.diags.push(Diagnostic::new(
                     "an async func cannot return a slice, closure, interface value, or future that would outlive the task frame it views",
                     span,
@@ -1447,6 +1631,7 @@ fn mentions(ty: &Type, names: &HashSet<String>) -> bool {
         Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => mentions(b, names),
         Type::Tuple(xs) => xs.iter().any(|x| mentions(x, names)),
         Type::Func(ps, r) => ps.iter().any(|p| mentions(p, names)) || mentions(r, names),
+        Type::Collector(b) => mentions(b, names),
         Type::Unit => false,
         Type::Infer => false,
     }
@@ -1487,6 +1672,7 @@ fn subst_apply(ty: &Type, subst: &Subst) -> Type {
             ps.iter().map(|p| subst_apply(p, subst)).collect(),
             Box::new(subst_apply(r, subst)),
         ),
+        Type::Collector(b) => Type::Collector(Box::new(subst_apply(b, subst))),
         Type::Unit => Type::Unit,
         Type::Infer => Type::Infer,
     }
@@ -1515,6 +1701,11 @@ fn unify(pat: &Type, concrete: &Type, params: &HashSet<String>, out: &mut Subst)
         },
         Type::Array(pb, _) => {
             if let Type::Array(cb, _) = concrete {
+                unify(pb, cb, params, out);
+            }
+        }
+        Type::Collector(pb) => {
+            if let Type::Collector(cb) = concrete {
                 unify(pb, cb, params, out);
             }
         }
@@ -1569,6 +1760,7 @@ pub(crate) fn flat(ty: &Type) -> String {
             let parts: Vec<String> = ps.iter().map(flat).collect();
             format!("$f{}${}${}", ps.len(), parts.join("$"), flat(r))
         }
+        Type::Collector(b) => format!("$c${}", flat(b)),
         Type::Unit => "$void".to_string(),
         // Poison: a hole should never reach mangling, since emit_ty reports it and
         // analyze fails first. The token keeps flat total if it ever slips through.

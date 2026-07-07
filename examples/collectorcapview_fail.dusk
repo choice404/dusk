@@ -1,0 +1,20 @@
+@paradigm procedural
+
+// A collected closure minting rule: every capture must be immortal safe. Here the
+// lambda captures s, a frame-view slice into a local array, and the collected
+// environment outlives mk's frame, so the captured fat pointer would dangle. The
+// mint is rejected, naming the capture. The accept twin captures a collector
+// typed slice (collectorcapok) or a scalar (collectorthunk) instead.
+func mk() -> collector<() -> int64> {
+    a: int64[3] = [1, 2, 3]
+    s := a[0..2]
+    return collector<() -> int64>(lambda () -> int64 {
+        return s[0]
+    })
+}
+
+func main() -> int32 {
+    t := mk()
+    println(t())
+    return 0
+}

@@ -14,6 +14,12 @@ static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void cool_gen_fault(void);
 
+/* The collector's free guard. A collected address must never enter the
+   generational free list, so both free paths consult this first and no op on a
+   collected pointer. Defined in collect.c; on a program that never mints a
+   collected block it returns 0 without taking any lock. */
+extern int cool_gc_is_collected(void *p);
+
 /* print writes the value with no newline, println appends one. The builtins
    print and println in the language map to the matching pair per value type. A
    null string prints as empty rather than crashing, since the language's empty
@@ -66,6 +72,11 @@ void *cool_alloc(size_t n) {
 }
 
 void cool_free(void *p) {
+    // A collected address is owned by the collector, not libc; freeing one here
+    // would hand a live collected block back to the allocator.
+    if (cool_gc_is_collected(p)) {
+        return;
+    }
     free(p);
 }
 
@@ -146,6 +157,81 @@ static void *cool_gen_free_ptr[COOL_GEN_FREE_MAX];
 static int64_t cool_gen_free_sz[COOL_GEN_FREE_MAX];
 static int cool_gen_free_n = 0;
 
+/* Live block registry. One entry per currently handed out generational payload,
+   with its payload size, so the collector can scan every live generational
+   block as a root region. Every alloc inserts and every free removes, both
+   under the heap lock, keeping exactly one entry per payload. The collector
+   copies a snapshot under the lock and scans it released, so a block another
+   thread frees mid scan is still mapped, parked not returned, and reads only
+   over retain. */
+static void **cool_reg_ptr = NULL;
+static int64_t *cool_reg_size = NULL;
+static int64_t cool_reg_n = 0;
+static int64_t cool_reg_cap = 0;
+
+/* Inserts a payload with the heap lock held. Growth failure is out of memory,
+   fatal, since dropping an entry would under root the collector and free a
+   still reachable block. */
+static void cool_reg_add_locked(void *p, int64_t size) {
+    if (cool_reg_n == cool_reg_cap) {
+        int64_t ncap = cool_reg_cap ? cool_reg_cap * 2 : 128;
+        void **np = realloc(cool_reg_ptr, (size_t)ncap * sizeof(void *));
+        int64_t *ns = realloc(cool_reg_size, (size_t)ncap * sizeof(int64_t));
+        if (!np || !ns) {
+            fflush(stdout);
+            fputs("fatal: out of memory\n", stderr);
+            abort();
+        }
+        cool_reg_ptr = np;
+        cool_reg_size = ns;
+        cool_reg_cap = ncap;
+    }
+    cool_reg_ptr[cool_reg_n] = p;
+    cool_reg_size[cool_reg_n] = size;
+    cool_reg_n++;
+}
+
+/* Removes a payload with the heap lock held, scanning from the end so a last in
+   first out free, the common defer pattern, resolves in one step. A swap remove
+   keeps the table dense. A payload not present is a no op. */
+static void cool_reg_remove_locked(void *p) {
+    for (int64_t i = cool_reg_n - 1; i >= 0; i--) {
+        if (cool_reg_ptr[i] == p) {
+            cool_reg_n--;
+            cool_reg_ptr[i] = cool_reg_ptr[cool_reg_n];
+            cool_reg_size[i] = cool_reg_size[cool_reg_n];
+            return;
+        }
+    }
+}
+
+/* Copies the live registry for the collector. Allocates both arrays, which the
+   caller frees, and returns the count. Taken under the heap lock so the copy is
+   consistent, then released before the collector scans it. */
+int64_t cool_gen_registry_snapshot(void ***ptrs, int64_t **sizes) {
+    pthread_mutex_lock(&cool_heap_lock);
+    int64_t n = cool_reg_n;
+    void **pp = malloc((size_t)(n > 0 ? n : 1) * sizeof(void *));
+    int64_t *ss = malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
+    if (!pp || !ss) {
+        // A short snapshot would drop roots and let the collector sweep a block
+        // still reachable through a generational block, so an incomplete
+        // snapshot is fatal rather than an empty root set the sweep proceeds on.
+        free(pp);
+        free(ss);
+        pthread_mutex_unlock(&cool_heap_lock);
+        fflush(stdout);
+        fputs("fatal: out of memory\n", stderr);
+        abort();
+    }
+    memcpy(pp, cool_reg_ptr, (size_t)n * sizeof(void *));
+    memcpy(ss, cool_reg_size, (size_t)n * sizeof(int64_t));
+    pthread_mutex_unlock(&cool_heap_lock);
+    *ptrs = pp;
+    *sizes = ss;
+    return n;
+}
+
 void *cool_gen_alloc(int64_t size) {
     pthread_mutex_lock(&cool_heap_lock);
     for (int i = 0; i < cool_gen_free_n; i++) {
@@ -154,6 +240,7 @@ void *cool_gen_alloc(int64_t size) {
             cool_gen_free_n--;
             cool_gen_free_ptr[i] = cool_gen_free_ptr[cool_gen_free_n];
             cool_gen_free_sz[i] = cool_gen_free_sz[cool_gen_free_n];
+            cool_reg_add_locked(p, size);
             pthread_mutex_unlock(&cool_heap_lock);
             return p;
         }
@@ -166,7 +253,11 @@ void *cool_gen_alloc(int64_t size) {
     int64_t *hdr = (int64_t *)base;
     hdr[0] = size;
     __atomic_store_n(&hdr[1], 1, __ATOMIC_SEQ_CST);
-    return base + COOL_GEN_HDR;
+    void *p = base + COOL_GEN_HDR;
+    pthread_mutex_lock(&cool_heap_lock);
+    cool_reg_add_locked(p, size);
+    pthread_mutex_unlock(&cool_heap_lock);
+    return p;
 }
 
 /* The retire path with the heap lock already held. */
@@ -185,6 +276,7 @@ static void cool_gen_free_locked(void *p) {
     int64_t *gen = (int64_t *)((char *)p - 8);
     __atomic_fetch_add(gen, 1, __ATOMIC_SEQ_CST);
     int64_t *size = (int64_t *)((char *)p - COOL_GEN_HDR);
+    cool_reg_remove_locked(p);
     if (cool_gen_free_n < COOL_GEN_FREE_MAX) {
         cool_gen_free_ptr[cool_gen_free_n] = p;
         cool_gen_free_sz[cool_gen_free_n] = *size;
@@ -196,6 +288,11 @@ void cool_gen_free(void *p) {
     if (!p) {
         return;
     }
+    // A collected address is reclaimed by the collector's sweep, never parked on
+    // the generational free list, so retiring one here is a no op.
+    if (cool_gc_is_collected(p)) {
+        return;
+    }
     pthread_mutex_lock(&cool_heap_lock);
     cool_gen_free_locked(p);
     pthread_mutex_unlock(&cool_heap_lock);
@@ -205,7 +302,15 @@ void cool_gen_free(void *p) {
    section, copying `n` payload bytes out first while the block is still live.
    join uses this so two threads joining copies of one handle cannot both pass
    the check and double retire: the loser sees the bumped generation under the
-   same lock and faults. A mismatch never returns. */
+   same lock and faults. A mismatch never returns.
+
+   This carries no collected free guard, unlike cool_gen_free and cool_free.
+   Only join records, generational blocks, flow here, so a collected address
+   never reaches it. It is the adjacent variant slot: if a collected block could
+   ever be retired this way, the guard would have to run before the heap lock is
+   taken, since the guard takes the collector lock and the lock order is
+   collector then heap. Guarding it here now, with no caller, would only invite
+   that inversion, so it stays unguarded until a caller needs it. */
 int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n) {
     if (!p) {
         return 1;

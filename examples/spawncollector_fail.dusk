@@ -1,0 +1,16 @@
+@paradigm procedural
+
+// Compile-fail: a spawned thread captures a collector. A collected value stays
+// on the main thread; a spawned frame runs on another thread, so the capture is
+// refused. The accept twin is a spawn capturing a managed pointer or a scalar,
+// which the generation check backstops across the thread boundary.
+func main() -> int32 {
+    c := collector<int64>(5)
+    t, e := spawn(lambda () -> void {
+        println(*c)
+    })
+    e.ignore()
+    je := join(t)
+    je.ignore()
+    return 0
+}

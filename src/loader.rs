@@ -299,6 +299,7 @@ fn shift_expr(e: &mut Expr, base: u32) {
         ExprKind::Lambda(l) => shift_block(&mut l.body, base),
         ExprKind::Match(m) => shift_match(m, base),
         ExprKind::Await(op, _) => shift_expr(op, base),
+        ExprKind::Collect { arg, .. } => shift_expr(arg, base),
         ExprKind::Do(_, binds) => {
             for b in binds {
                 shift_expr(&mut b.expr, base);
@@ -460,6 +461,7 @@ fn fold_expr(e: &mut Expr, ctx: &mut FoldCtx) {
         ExprKind::Lambda(l) => fold_block(&mut l.body, ctx),
         ExprKind::Match(m) => fold_match(m, ctx),
         ExprKind::Await(op, _) => fold_expr(op, ctx),
+        ExprKind::Collect { arg, .. } => fold_expr(arg, ctx),
         ExprKind::Do(_, binds) => {
             for b in binds {
                 fold_expr(&mut b.expr, ctx);

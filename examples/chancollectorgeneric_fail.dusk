@@ -1,0 +1,18 @@
+@paradigm procedural
+@import std.concurrent.channel
+
+// Compile-fail: a generic channel wrapper instantiated at a pointer to a
+// collector. The erased checker cannot see the burial, but the monomorphizer
+// substitutes the concrete element and the crossing check refuses a collector
+// reached behind the pointer, at the wrapper's own mint. The accept twin is
+// chanptrscalar_ok. This proves the ban follows a collector through a generic
+// instantiation, not only a spelled-out element type.
+func mkchan<T>(n: int64) -> Channel<T> {
+    return chan_new(n)
+}
+
+func main() -> int32 {
+    ch: Channel<*collector<int64>> = mkchan(4)
+    chan_free(ch)
+    return 0
+}

@@ -1,0 +1,17 @@
+@paradigm procedural
+@import std.concurrent.channel
+
+// Compile-fail: a channel of collectors. A collected value stays on the main
+// thread, but a channel carries its element to another thread, where the parked
+// value would sit in the channel ring, unrooted, and be swept while live. The
+// element type is refused at the mint. The accept twin is a channel of managed
+// pointers, chanheap_ok, whose heap objects the collector still roots.
+func main() -> int32 {
+    ch: Channel<collector<int64>> = chan_new(4)
+    c := collector<int64>(5)
+    e := chan_send(ch, c)
+    e.ignore()
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

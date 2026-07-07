@@ -1,0 +1,15 @@
+@paradigm procedural
+@import std.concurrent.channel
+
+// Compile-fail: a channel of pointers to collectors. A managed pointer usually
+// crosses a thread freely, its heap object covered by the generation check, but
+// a collected value stays on the main thread: its block is reachable only from
+// anchor-side roots the collector scans, never a worker stack, so a collected
+// ref carried behind a pointer to the receiver is swept while the receiver still
+// holds it. The element type is refused at the mint. The accept twin is
+// chanptrscalar_ok, a channel of pointers to plain scalar cells.
+func main() -> int32 {
+    ch: Channel<*collector<int64>> = chan_new(4)
+    chan_free(ch)
+    return 0
+}

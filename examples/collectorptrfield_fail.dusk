@@ -1,0 +1,26 @@
+@paradigm procedural
+
+// The struct-embed shape of collectorptrview_fail: the frame view sits one struct
+// layer down, behind a managed pointer field. Minting the struct into a collected
+// block that outlives the frame still dangles the slice, so it is refused, the
+// same as the rejected `return h`.
+struct Inner {
+    s: int64[],
+}
+
+struct Holder {
+    p: *Inner,
+}
+
+func mk() -> collector<Holder> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    h := Holder { p: p }
+    return collector<Holder>(h)
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*(*c).p).s[0])
+    return 0
+}

@@ -1,0 +1,24 @@
+@paradigm procedural
+
+// The interprocedural shape of the mint-sink: mk mints its pointer parameter into
+// a collected block that outlives the frame, so mk is an outliving sink on its
+// parameter. A caller that hands it a pointer whose pointee stores a frame view is
+// refused at the call, one hop up, the same discipline a channel-sending helper
+// carries. The accept twin is a clean heap pointer passed to the same helper.
+struct Inner {
+    s: int64[],
+}
+
+func mk(p: *Inner) -> collector<*Inner> {
+    return collector<*Inner>(p)
+}
+
+func caller() -> collector<*Inner> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    return mk(p)
+}
+
+func main() -> int32 {
+    return 0
+}

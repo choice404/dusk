@@ -1,0 +1,23 @@
+@paradigm procedural
+@import std.concurrent.channel
+
+// Accept twin of the pointer-to-collector channel fails: a channel of pointers
+// to a cell that holds only a scalar. No collector is reachable through the
+// pointer, so the crossing check leaves it alone and the send crosses freely,
+// backstopped by the generation check. Proves the pointer-reaches-collector ban
+// is not over-wide: an ordinary managed pointer still crosses a channel.
+struct Cell { v: int64 }
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    c: *Cell = alloc(Cell { v: 9 })
+    e := chan_send(ch, move(c))
+    e.ignore()
+    r, re := chan_recv(ch)
+    re.ignore()
+    println((*r).v)
+    free(r)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

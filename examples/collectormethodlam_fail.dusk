@@ -1,0 +1,38 @@
+@paradigm procedural
+
+// A bare lambda at a method's closure-collector parameter. The mono rewrite mints
+// a lambda into a collector only at a direct top-level call, never a method
+// argument, so a bare lambda here would lower to a stack environment typed as a
+// collector and dangle once the building frame is gone. It is rejected, pointing
+// at the explicit mint. The accept twin is collectormethodmint.
+struct Holder {
+    t: collector<() -> int64>,
+}
+
+impl Holder {
+    func attach(u: collector<() -> int64>) -> void {
+        self.t = u
+    }
+    func fire() -> int64 {
+        return self.t()
+    }
+}
+
+func mkzero() -> collector<() -> int64> {
+    return collector<() -> int64>(lambda () -> int64 { return 0 })
+}
+
+func build() -> Holder {
+    n := 43
+    mut h := Holder { t: mkzero() }
+    h.attach(lambda () -> int64 {
+        return n
+    })
+    return h
+}
+
+func main() -> int32 {
+    h := build()
+    println(h.fire())
+    return 0
+}

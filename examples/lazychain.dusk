@@ -1,0 +1,45 @@
+@paradigm procedural
+
+// A hand-rolled lazy chain of collected thunks, the shape lazy IO will lower to.
+// Each step captures the previous collected thunk through a struct-of-collector
+// parameter and an increment scalar, both immortal safe, and forces nothing until
+// the end. A forced collection before the single force proves the whole chain is
+// rooted: every collected environment is reachable, transitively, through the
+// last thunk on the stack, so the sweep keeps them all and the forced value is
+// exact.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+struct Thunk {
+    run: collector<() -> int64>,
+}
+
+func leaf(seed: int64) -> Thunk {
+    return Thunk {
+        run: collector<() -> int64>(lambda () -> int64 {
+            return seed
+        }),
+    }
+}
+
+func step(prev: Thunk, add: int64) -> Thunk {
+    return Thunk {
+        run: collector<() -> int64>(lambda () -> int64 {
+            return prev.run() + add
+        }),
+    }
+}
+
+func main() -> int32 {
+    a := leaf(1)
+    b := step(a, 10)
+    c := step(b, 100)
+
+    // Sweep before the single force. The chain is unforced, so the only roots
+    // are the collected environments held through c on the stack.
+    cool_gc_collect()
+
+    println(c.run())
+    return 0
+}

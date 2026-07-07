@@ -1,0 +1,32 @@
+@paradigm procedural
+
+// The accept twin of collectorcapparam_fail. hold mints a closure capturing its
+// pointer parameter, and the caller passes a pointer to a heap-clean object. The
+// pointee outlives the frame on the managed heap, so the sink does not fire and
+// the closure is sound: a forced collection keeps the environment and the pointee.
+// Proves the interprocedural closure sink is not a blanket reject.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+struct Inner {
+    v: int64,
+}
+
+func hold(q: *Inner) -> collector<() -> int64> {
+    return collector<() -> int64>(lambda () -> int64 {
+        return (*q).v
+    })
+}
+
+func mk() -> collector<() -> int64> {
+    p := alloc(Inner { v: 77 })
+    return hold(p)
+}
+
+func main() -> int32 {
+    t := mk()
+    cool_gc_collect()
+    println(t())
+    return 0
+}

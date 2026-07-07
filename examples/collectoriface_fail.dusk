@@ -1,0 +1,32 @@
+@paradigm procedural
+@paradigm oop
+
+// An interface value is a { data, vtable } fat pointer whose data may sit in the
+// frame, so it is not immortal safe: boxing a concrete value into an interface
+// can capture a frame view. A collector over an interface element is rejected.
+// The accept twin is collector over the concrete type, or over a managed pointer
+// to it (collectorptr).
+interface Speaker {
+    speak() -> int64
+}
+
+struct Dog {
+    n: int64,
+}
+
+impl Speaker for Dog {
+    func speak() -> int64 {
+        return self.n
+    }
+}
+
+func mk(s: Speaker) -> collector<Speaker> {
+    return collector<Speaker>(s)
+}
+
+func main() -> int32 {
+    d := Dog { n: 7 }
+    c := mk(d)
+    println((*c).speak())
+    return 0
+}

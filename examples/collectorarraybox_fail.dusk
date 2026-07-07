@@ -1,0 +1,28 @@
+@paradigm procedural
+@paradigm oop
+
+// Compile-fail: a collector boxed into an interface at an array literal element.
+// An array literal boxes each element as it coerces, so a collected value at an
+// interface element is refused the same as any other interface box. The reject
+// walks the array element type, so it fires per element. The accept twin,
+// collectorfieldconcrete_ok, boxes a concrete implementer.
+interface Speaker {
+    speak() -> int64
+}
+
+struct Dog {
+    n: int64,
+}
+
+impl Speaker for Dog {
+    func speak() -> int64 {
+        return self.n
+    }
+}
+
+func main() -> int32 {
+    c := collector<int64>(5)
+    arr: Speaker[1] = [c]
+    println(arr[0].speak())
+    return 0
+}

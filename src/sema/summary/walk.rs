@@ -480,6 +480,34 @@ impl<'a> FnState<'a> {
                 self.eval(op);
                 AbsVal::default()
             }
+            // A mint hands its value to a collected block that outlives the frame,
+            // the same shape a channel send hands its element across a thread
+            // boundary. Record the sink so a caller passing a frame-view-polluted
+            // argument into a minting helper is caught one hop up, closed over the
+            // store edges like every other sink. The block itself is a fresh root,
+            // so the minted value aliases nothing.
+            //
+            // A closure mint copies its captures into the collected environment, so
+            // the lambda's abstract value already carries each captured parameter's
+            // origins and pointee reads; recording it sinks exactly the managed and
+            // view captures, so a caller burying a frame view behind a captured
+            // pointer parameter is caught one hop up. A scalar capture carries no
+            // provenance and self-limits. A slice mint deep copies its element
+            // storage, so a frame-view source does not outlive and records no sink,
+            // unless the element reaches a managed pointer whose pointee the copy
+            // leaves untouched: a buried view then outlives, so the sink fires for
+            // that case. The plain kind always sinks its value.
+            ExprKind::Collect { ty, arg } => {
+                let v = self.eval(arg);
+                let sink = match ty {
+                    Type::Slice(elem) => self.s.reaches_managed_ptr(elem),
+                    _ => true,
+                };
+                if sink {
+                    self.record_chan_sink(v);
+                }
+                AbsVal::default()
+            }
             ExprKind::Do(_, binds) => {
                 for b in binds {
                     self.eval(&b.expr);
@@ -743,7 +771,7 @@ impl<'a> FnState<'a> {
                 }
             }
             ExprKind::Unary(UnOp::Deref, p) => match self.chain_ty(p) {
-                Type::Ptr(inner) | Type::RawPtr(inner) => *inner,
+                Type::Ptr(inner) | Type::RawPtr(inner) | Type::Collector(inner) => *inner,
                 _ => Type::Infer,
             },
             _ => Type::Infer,

@@ -1,0 +1,16 @@
+@paradigm procedural
+@import std.concurrent.channel
+
+// Compile-fail: a channel of pointers to a struct that buries a collector. The
+// reach walk descends through the pointer into the struct field, so a collected
+// value hidden behind `*Cell` is caught the same as a bare `*collector`. A
+// collected value stays on the main thread and would be swept while the receiver
+// holds the pointer. The accept twin is chanptrscalar_ok, whose cell holds only
+// a scalar.
+struct Cell { c: collector<int64> }
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    chan_free(ch)
+    return 0
+}

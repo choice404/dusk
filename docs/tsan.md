@@ -69,3 +69,46 @@ Run both through the same rebuild, link, and twenty iteration loop as
 `reactorsum` above; `stress_accept` touches `std.async.net`, whose TCP shims
 live in `runtime/reactor.c` already, so no extra runtime file joins the four
 already listed.
+
+## The collector and one benign read
+
+`runtime/collect.c` joins the link line for every program. Add it to the
+`clang` command above beside `runtime.c`, and add `runtime/reactor_epoll.c`,
+which the four file list here predates.
+
+The collected heap has one deliberate cross thread read that a strict tool will
+flag. A collection scans the live generational block registry as a root region.
+It copies that registry under the heap lock, releases the lock, then scans the
+copied payloads with the lock released, so an allocation or a free on another
+thread does not block behind the whole scan. While it scans, another thread may
+be writing one of those payloads, a future record a completer thread is filling
+being the plain case. That read races the write in the C11 sense.
+
+It is benign by construction. A generational block is never returned to libc; a
+freed block is parked on the size matched free list and stays mapped, so the
+scan reads live memory, never a fault. The bytes it reads are only tested as
+candidate pointers, so a stale or half written word at worst names a collected
+block that is then over retained for one cycle, which is safe. This is not
+suppressed. `gcprobe`, the floor's smoke probe, is single threaded and runs TSan
+clean with no report.
+
+## Coverage for the 0.5.1 collector
+
+The confinement rule keeps a collected value on the main thread: it may not
+cross a channel or a spawn or submit capture to another thread. A collected
+block is therefore only ever written on the main thread, so the cross thread
+scan read above races only a non collector payload, a future record a pool
+worker completes being the plain case, never a collector's block. That is why
+the two async collector goldens run TSan clean rather than surfacing the read.
+
+- `gcasync`, three collectors held across one suspension in a task frame, a
+  collection forced on each side of the await.
+- `gcstress`, two hundred async tasks each holding a collector across a timer,
+  with collections interleaved through the read back.
+
+Build these with `-O0`, not the `-O1` the recipe above uses. The conservative
+root scan brackets the stack between a collection point and the anchor, and the
+native driver passes no optimization flag for exactly this reason, so a collector
+golden must match it or the scan may miss a spilled root. Add `runtime/collect.c`
+and `runtime/reactor_epoll.c` to the link line. Twenty iterations of each were
+clean, expected stdout and exit code 0 every time, no `WARNING: ThreadSanitizer`.

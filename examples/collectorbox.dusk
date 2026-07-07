@@ -1,0 +1,35 @@
+@paradigm procedural
+
+struct Point {
+    x: int64,
+    y: int64,
+}
+
+// A collector minted in one frame outlives it: the block lives on the collected
+// heap, so the caller reads it after this frame is gone.
+func make() -> collector<Point> {
+    return collector<Point>(Point { x: 3, y: 4 })
+}
+
+func main() -> int32 {
+    // Plain scalar mint, read back through the deref.
+    n := collector<int64>(10)
+    println(*n)
+
+    // Struct mint: field read, then field store, both through the deref.
+    c := collector<Point>(Point { x: 1, y: 2 })
+    println((*c).x)
+    println((*c).y)
+    (*c).x = 30
+    println((*c).x)
+
+    // A copy is a second fat value viewing the same collected block.
+    d := c
+    println((*d).x)
+
+    // Cross frame return: the block minted in make survives the return.
+    p := make()
+    println((*p).x)
+    println((*p).y)
+    return 0
+}

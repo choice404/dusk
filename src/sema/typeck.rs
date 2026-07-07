@@ -111,6 +111,11 @@ enum Ty {
     /// tracked here even though the `Future<T>` struct erases it at runtime, so
     /// awaits and the event-loop capture rules can reason about the element.
     Future(Box<Ty>),
+    /// A collected wrapper `collector<T>`. Its runtime rep is a managed `*T`, but
+    /// it is not owned and not a frame view: freeing, moving, or `ref`-aliasing it
+    /// is rejected, and returning it never escapes. Deref and field projection
+    /// mirror `*T`, with the same generation check.
+    Collector(Box<Ty>),
     Unknown,
 }
 
@@ -510,6 +515,7 @@ impl TypeChecker {
                 Box::new(self.fix(*r)),
             ),
             Ty::Future(b) => Ty::Future(Box::new(self.fix(*b))),
+            Ty::Collector(b) => Ty::Collector(Box::new(self.fix(*b))),
             other => other,
         }
     }
@@ -652,6 +658,11 @@ impl TypeChecker {
                     if let Some(idx) = declared.iter().position(|(dn, _)| dn == fname) {
                         if let Some(raw) = raw_fields.get(idx) {
                             self.check_slice_covariance(&raw.clone(), vty, fexpr, fexpr.span);
+                            // The declared field type keeps its interface name here,
+                            // so boxing a collected value into an interface field is
+                            // refused with a clean diagnostic rather than reaching
+                            // codegen as a fat-rep mismatch.
+                            self.reject_collector_iface_box(&raw.clone(), vty, fexpr.span);
                         }
                     }
                 }
@@ -849,6 +860,7 @@ impl TypeChecker {
                 Box::new(self.unmangle(*r)),
             ),
             Ty::Future(b) => Ty::Future(Box::new(self.unmangle(*b))),
+            Ty::Collector(b) => Ty::Collector(Box::new(self.unmangle(*b))),
             other => other,
         }
     }
@@ -896,6 +908,7 @@ impl TypeChecker {
                 }
                 self.reject_iface_targ(r, span);
             }
+            Type::Collector(b) => self.reject_iface_targ(b, span),
             Type::Unit | Type::Infer => {}
         }
     }
@@ -1425,6 +1438,144 @@ impl TypeChecker {
                 self.structs.contains_key(n) || self.enums.contains_key(n) || self.ifaces.contains(n)
             }
             Ty::Array(e, _) => self.member_carries_view(e),
+            _ => false,
+        }
+    }
+
+    /// The escape check a `collector<T>(value)` mint runs. A mint is an outliving
+    /// sink: the collected block escapes the frame just as a return does, so a
+    /// frame view carried by the minted value, or stored behind a minted pointer's
+    /// pointee, dangles once the frame is gone. It reuses the same `value_escape`
+    /// and flow-provenance walk the `Ty::Ptr` return arm uses, so a bare polluted
+    /// pointer, a struct embedding one, and a laundered call result all classify
+    /// the same way. Surface only, like every escape check; the type-shape guard
+    /// `ty_reaches_view` and the ground re-check cover the mislowering and
+    /// laundering directions. `elem` is the element type, so a pointer element
+    /// earns the pointer message and a struct or slice element the view message.
+    fn check_collect_escape(&mut self, arg: &Expr, elem: &Ty, span: Span) {
+        if self.types_only {
+            return;
+        }
+        let (esc_s, esc_c) = self.value_escape(arg);
+        if !esc_s && !esc_c {
+            return;
+        }
+        if let Some((s, i, j)) = self.value_flow_prov(arg) {
+            self.emit_flow_escape(s, i, j);
+        } else if matches!(elem, Ty::Ptr(_)) {
+            let s = self.call_frame_origin(arg).map(|(sp, _)| sp).unwrap_or(span);
+            self.emit_escape(
+                "this collects a pointer to an object that stores a view of the current frame; the collected block outlives the frame".to_string(),
+                s,
+            );
+        } else if esc_s {
+            self.report_slice_escape(arg);
+        } else {
+            self.report_closure_escape(arg);
+        }
+    }
+
+    /// The capture rule a `collector<F>` mint runs. The minted environment lives
+    /// on the collected heap and outlives the frame, so a capture that views a
+    /// frame would dangle once the frame is gone. A capture is rejected on either
+    /// of two grounds. First, its type must be immortal safe: a scalar, a managed
+    /// pointer the registry roots, a string, a nested `collector<..>`, or an
+    /// aggregate of those. A view-reaching type that is not itself collector typed,
+    /// a slice, closure, or interface, fails, the negation of `ty_reaches_view`,
+    /// so a collector-typed capture whose element the wrapper reads as safe passes.
+    /// Second, a managed pointer capture whose pointee stores a frame view escapes
+    /// through the environment just as the plain mint's escape walk catches, so the
+    /// same per-binding view flags gate it: `p := alloc(Inner { s: local[0..n] })`
+    /// captured here dangles the buried slice exactly as returning `p` would. Both
+    /// grounds name the binding so the fix is clear: collect it first, or capture
+    /// heap owned data. A generic-typed capture reads `Unknown` and passes on the
+    /// surface, and the ground re-check catches it once mono grounds the type; the
+    /// flow ground is surface only, like every escape check. A capture-free lambda
+    /// has nothing to check.
+    fn check_collect_captures(&mut self, arg: &Expr, span: Span) {
+        let ExprKind::Lambda(l) = &arg.kind else {
+            self.err(
+                "a collected closure must be a lambda literal written at the mint",
+                arg.span,
+            );
+            return;
+        };
+        for n in self.spawn_lambda_captures(l) {
+            let t = self.lookup(&n);
+            let mut seen = HashSet::new();
+            let type_views = self.ty_reaches_view(&t, &mut seen);
+            // A bare Ident's escape is exactly its two per-binding view flags, so a
+            // managed pointer whose pointee was tainted with a frame view is caught
+            // here without walking the value again. Surface only.
+            let flow_views =
+                !self.types_only && (self.is_esc_slice(&n) || self.is_esc_closure(&n));
+            if type_views || flow_views {
+                self.err(
+                    format!(
+                        "cannot collect a closure that captures '{n}': it may view a frame; collect '{n}' first or capture heap owned data"
+                    ),
+                    span,
+                );
+            }
+        }
+    }
+
+    /// Whether a slice-collector source reaches a managed pointer whose pointee
+    /// stores a frame view. The deep copy immortalizes the element storage but not
+    /// what each managed pointer points at, so a tainted pointee still dangles.
+    /// The outer slice or array being a frame view is not the concern, the copy
+    /// fixes that, so this looks only at the buried pointers: a binding or a
+    /// projection of one hands its alias group, the pointers the binding choke
+    /// linked in, and a literal source is walked for the pointers it embeds. A
+    /// group member that is a managed pointer and carries a view flag is a tainted
+    /// pointee. Surface only, like every escape check; the alias group and the view
+    /// flags are not tracked on the ground pass.
+    fn slice_source_buries_view(&self, arg: &Expr) -> bool {
+        if self.types_only {
+            return false;
+        }
+        let mut ptrs: Vec<String> = Vec::new();
+        if let Some(root) = store_root(arg) {
+            ptrs.extend(self.alias_group(&root));
+        } else {
+            self.collect_embedded(arg, &mut ptrs);
+        }
+        ptrs.iter().any(|m| {
+            is_managed(&self.lookup(m)) && (self.is_esc_slice(m) || self.is_esc_closure(m))
+        })
+    }
+
+    /// Whether a value of this type can carry a frame-local view, so minting it
+    /// into a collected block would copy a fat pointer whose backing dies with the
+    /// frame. A slice or a closure is a view directly; an interface value carries
+    /// a data pointer that may sit in the frame; a struct, enum, tuple, or array
+    /// reaches one through a field, payload, member, or element. A managed `*T`
+    /// does not: its block is a root the collector scans, not a frame view, so it
+    /// is allowed, and a `*raw T` is the honor-system FFI layer and never counts.
+    /// An unresolved generic hole reads as `false` here: the surface pass leaves a
+    /// `collector<T>` element `Unknown`, and the ground re-check sees the concrete
+    /// element and rejects then, exactly as the free/move/ref laundering closure
+    /// does. The struct and enum walk reads the unfixed `embed_fields`, so an
+    /// interface field is seen where the fixed table would erase it to `Unknown`.
+    /// `seen` breaks recursive type cycles.
+    fn ty_reaches_view(&self, t: &Ty, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Ty::Slice(_) | Ty::Func(..) => true,
+            Ty::Ptr(_) | Ty::RawPtr(_) => false,
+            Ty::Array(e, _) => self.ty_reaches_view(e, seen),
+            Ty::Tuple(ts) => ts.iter().any(|x| self.ty_reaches_view(x, seen)),
+            Ty::Named(n) => {
+                if self.ifaces.contains(n) {
+                    return true;
+                }
+                if !seen.insert(n.clone()) {
+                    return false;
+                }
+                match self.embed_fields.get(n).cloned() {
+                    Some(fs) => fs.iter().any(|f| self.ty_reaches_view(f, seen)),
+                    None => false,
+                }
+            }
             _ => false,
         }
     }
@@ -2180,7 +2331,7 @@ impl TypeChecker {
                 }
             }
             ExprKind::Unary(UnOp::Deref, p) => match self.chain_ty(p) {
-                Ty::Ptr(inner) | Ty::RawPtr(inner) => *inner,
+                Ty::Ptr(inner) | Ty::RawPtr(inner) | Ty::Collector(inner) => *inner,
                 _ => Ty::Unknown,
             },
             _ => Ty::Unknown,
@@ -2584,6 +2735,15 @@ impl TypeChecker {
             return;
         }
         let vt = self.infer(&l.value);
+        // A collected value is not owned, so a `ref` alias of one is meaningless:
+        // copy it directly. Fires on both passes so a `collector<T>` laundered
+        // through a generic is still caught once mono makes it concrete.
+        if l.is_ref && matches!(vt, Ty::Collector(_)) {
+            self.err(
+                "a collected value is not borrowed with ref; copy it directly",
+                l.value.span,
+            );
+        }
         if l.binds.len() == 1 {
             let b = &l.binds[0];
             let ty = match &b.ty {
@@ -3197,6 +3357,8 @@ impl TypeChecker {
             let t = self.lookup(c);
             let mut seen = HashSet::new();
             let mut fseen = HashSet::new();
+            let mut cseen = HashSet::new();
+            let reaches_collector = self.ptr_reaches_collector(&t, &mut cseen);
             if self.ptr_reaches_future(&t, &mut fseen) {
                 // A future is loop-thread property; a completer thread carries
                 // the raw handle words, not the typed future. The reach walk
@@ -3204,6 +3366,16 @@ impl TypeChecker {
                 // into the frame names this same reason, not the slice rule.
                 self.err(
                     format!("{name} cannot capture '{c}': a future belongs to the event loop thread"),
+                    args[0].span,
+                );
+            } else if reaches_collector {
+                // A collected value stays on the main thread; a spawned frame
+                // lives on another thread, so the capture is refused with its own
+                // reason rather than the frame-view one. The reach walk sees a
+                // collector behind a pointer too, so a `*collector<T>` or a pointer
+                // to a struct that holds one names this same reason.
+                self.err(
+                    format!("{name} cannot capture '{c}': a collected value stays on the main thread; it cannot cross to another thread"),
                     args[0].span,
                 );
             } else if !self.spawn_capturable(&t, &mut seen) || self.is_iface_bind(c) {
@@ -3798,16 +3970,24 @@ impl TypeChecker {
             // raw handle words instead, so a typed future is not a capturable
             // value.
             Ty::Future(_) => false,
+            // A collected value stays on the main thread; a spawn or submit would
+            // carry it into another thread's frame, so it is not capturable.
+            Ty::Collector(_) => false,
             Ty::Slice(_) | Ty::Func(..) => false,
             // A pointer targets the heap, which the generation check covers, so a
             // slice or interface value behind it is fine to copy into a spawned
-            // frame. A future is the exception: it is event-loop-thread property,
-            // so a future smuggled behind a pointer still faults when the completer
-            // thread awaits it. Hunt the pointee for a buried future and refuse
-            // only that, leaving every other pointer capturable.
+            // frame. Two payloads are the exception. A future is event-loop-thread
+            // property, so one smuggled behind a pointer still faults when the
+            // completer thread awaits it. A collected value stays on the main
+            // thread: its block is reachable only from anchor-side roots the scan
+            // covers, never the worker stack, so a collected ref carried behind a
+            // pointer into the task is swept while the task still holds it. Hunt
+            // the pointee for either and refuse only that, leaving every other
+            // pointer capturable.
             Ty::Ptr(b) | Ty::RawPtr(b) => {
                 let mut fseen = HashSet::new();
-                !self.ptr_reaches_future(b, &mut fseen)
+                let mut cseen = HashSet::new();
+                !self.ptr_reaches_future(b, &mut fseen) && !self.ptr_reaches_collector(b, &mut cseen)
             }
             Ty::Array(e, _) => self.spawn_capturable(e, seen),
             Ty::Tuple(ts) => ts.iter().all(|x| self.spawn_capturable(x, seen)),
@@ -3846,6 +4026,35 @@ impl TypeChecker {
                 }
                 match self.embed_fields.get(n).cloned() {
                     Some(fs) => fs.iter().any(|f| self.ptr_reaches_future(f, seen)),
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a collector is reachable through this type once a pointer is crossed.
+    /// A collected value stays on the main thread, so smuggling one behind a managed
+    /// or raw pointer into a spawned frame leaves its block reachable only from
+    /// anchor-side roots the scan covers, never the worker stack, so it is swept
+    /// while the task holds the pointer. A collector value in hand is caught by the
+    /// direct arm of `spawn_capturable`; this walk finds one behind a pointer,
+    /// through nested pointers, arrays, tuples, and struct fields. `seen` breaks
+    /// recursive type cycles. A generic burial the erased walk cannot see is caught
+    /// again at mono, the same second layer the future reach walk takes.
+    fn ptr_reaches_collector(&self, t: &Ty, seen: &mut HashSet<String>) -> bool {
+        match t {
+            Ty::Collector(_) => true,
+            Ty::Ptr(b) | Ty::RawPtr(b) | Ty::Slice(b) | Ty::Array(b, _) => {
+                self.ptr_reaches_collector(b, seen)
+            }
+            Ty::Tuple(ts) => ts.iter().any(|x| self.ptr_reaches_collector(x, seen)),
+            Ty::Named(n) => {
+                if !seen.insert(n.clone()) {
+                    return false;
+                }
+                match self.embed_fields.get(n).cloned() {
+                    Some(fs) => fs.iter().any(|f| self.ptr_reaches_collector(f, seen)),
                     None => false,
                 }
             }
@@ -4053,6 +4262,71 @@ impl TypeChecker {
                 Ty::Unknown
             }
             ExprKind::SizeofType(_) => Ty::Int(64),
+            // `collector<T>(e)` mints a collected block. The value checks against
+            // the element type T, and the result is a `collector<T>`. Deref and
+            // field projection then mirror `*T`.
+            ExprKind::Collect { ty, arg } => {
+                let inner = self.lower(ty);
+                let at = self.infer(arg);
+                if !compatible(&inner, &at) {
+                    self.err(
+                        "the collected value's type does not match the collector element type",
+                        arg.span,
+                    );
+                }
+                self.check_int_fits(arg, &inner);
+                // The kind of element picks the soundness check. A slice element
+                // is deep copied onto the collected heap, so a frame-view source
+                // is legal; only its own element must be immortal safe, since a
+                // one-level copy does not immortalize a nested fat pointer. A
+                // function element mints a fresh collected environment, so every
+                // capture must be immortal safe. Any other element is the plain
+                // kind: it copies its value into the collected block, so a view it
+                // reaches by shape is rejected and a pointer whose pointee views a
+                // frame is caught by the escape walk. The unfixed element is walked
+                // so an interface survives, and every check runs on both passes so
+                // a view laundered through a generic is caught once mono grounds it.
+                let unfixed = lower(ty, &self.cur_generics);
+                match &unfixed {
+                    Ty::Slice(u) => {
+                        let mut seen = HashSet::new();
+                        if self.ty_reaches_view(u, &mut seen) {
+                            self.err(
+                                "a collected slice's element cannot itself hold a slice, function, or interface; collect the inner view first",
+                                e.span,
+                            );
+                        } else if self.ty_reaches_managed(u)
+                            && self.slice_source_buries_view(arg)
+                        {
+                            // The deep copy immortalizes the element storage but not
+                            // each pointee, so an element reaching a managed pointer
+                            // whose pointee stores a frame view still dangles once the
+                            // frame is gone. The outer slice being a frame view is
+                            // fine, the copy fixes that, so this looks past it at the
+                            // buried pointers the source reaches and only rejects a
+                            // tainted one. A scalar or scalar-struct element reaches no
+                            // managed pointer, so the common slice kind skips this and
+                            // its frame-view source stays legal.
+                            self.err(
+                                "a collected slice element holds a pointer to an object that stores a view of the current frame; the collected block outlives the frame, so heap own the pointee or collect it first",
+                                e.span,
+                            );
+                        }
+                    }
+                    Ty::Func(..) => self.check_collect_captures(arg, e.span),
+                    _ => {
+                        let mut seen = HashSet::new();
+                        if self.ty_reaches_view(&unfixed, &mut seen) {
+                            self.err(
+                                "a collected value cannot hold a slice, function, or interface; collect a scalar, a pointer, or a struct of those",
+                                e.span,
+                            );
+                        }
+                        self.check_collect_escape(arg, &inner, e.span);
+                    }
+                }
+                Ty::Collector(Box::new(inner))
+            }
         }
     }
 
@@ -4097,12 +4371,24 @@ impl TypeChecker {
             // the callee's parameters are known from the impl. Passing a value
             // `self` into a `*T` parameter hands the struct where a fat pointer
             // belongs; catch it here with the same precise self-value message a
-            // direct call earns, rather than leaving a stray backend fault.
+            // direct call earns, rather than leaving a stray backend fault. A bare
+            // lambda at a closure-collector parameter is rejected here too: mono
+            // rewrites a lambda into a mint only at a direct top-level call, never a
+            // method argument, so a bare lambda would lower to a stack environment
+            // typed as a collector and dangle. Point at the explicit mint.
             if let Some(tname) = self.receiver_type_name(base) {
                 if let Some(params) = self.method_params.get(&(tname, mname.clone())).cloned() {
                     for (i, p) in params.iter().enumerate() {
                         if let Some(arg) = args.get(i) {
                             self.self_value_in_ptr_position(arg, p);
+                            if matches!(p, Ty::Collector(inner) if matches!(&**inner, Ty::Func(..)))
+                                && matches!(&arg.kind, ExprKind::Lambda(_))
+                            {
+                                self.err(
+                                    "a bare lambda cannot become a closure collector at a method argument; write the mint explicitly: collector<F>(lambda ...)",
+                                    arg.span,
+                                );
+                            }
                         }
                     }
                 }
@@ -4237,6 +4523,18 @@ impl TypeChecker {
                     // move(x) transfers ownership; its value and type are x's, and
                     // the source binding is invalidated so a later use is rejected.
                     let t = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                    // A collected value is not owned, so there is nothing to move.
+                    // Fires on both passes so a `collector<T>` laundered through a
+                    // generic is still caught once mono makes it concrete.
+                    if matches!(t, Ty::Collector(_)) {
+                        if let Some(a) = args.first() {
+                            self.err(
+                                "a collected value is not owned; copy it directly",
+                                a.span,
+                            );
+                        }
+                        return t;
+                    }
                     if let Some(a) = args.first() {
                         if let ExprKind::Ident(src) = &a.kind {
                             if !self.types_only
@@ -4257,7 +4555,15 @@ impl TypeChecker {
                     // pointer parameter, is rejected; its owner frees it instead.
                     if let Some(a) = args.first() {
                         let t = self.infer(a);
-                        if is_managed(&t) {
+                        // A collected value is reclaimed by the collector, never
+                        // freed. Fires on both passes so a `collector<T>` laundered
+                        // through a generic is caught once mono makes it concrete.
+                        if matches!(t, Ty::Collector(_)) {
+                            self.err(
+                                "a collected value is not freed; the collector reclaims it",
+                                a.span,
+                            );
+                        } else if is_managed(&t) {
                             if let ExprKind::Ident(p) = &a.kind {
                                 if !self.types_only
                                     && matches!(self.own_of(p), Some(Own::Borrow))
@@ -4278,11 +4584,24 @@ impl TypeChecker {
         // through the value-position inference of its ident, so an async function
         // called at the call site types as its future instead of tripping the
         // guard that forbids using its name as a value.
-        let callee = match &f.kind {
-            ExprKind::Ident(name) if self.sigs.contains_key(name) && !self.is_local(name) => {
-                self.lookup(name)
+        let direct_toplevel = matches!(
+            &f.kind,
+            ExprKind::Ident(name) if self.sigs.contains_key(name) && !self.is_local(name)
+        );
+        let callee = if direct_toplevel {
+            match &f.kind {
+                ExprKind::Ident(name) => self.lookup(name),
+                _ => unreachable!(),
             }
-            _ => self.infer(f),
+        } else {
+            self.infer(f)
+        };
+        // A closure collector is called through the function it wraps: unwrap it
+        // so `collector<F>` dispatches exactly as an `F` value does. Codegen sees
+        // the same closure rep, so no unwrap is needed there.
+        let callee = match callee {
+            Ty::Collector(inner) if matches!(&*inner, Ty::Func(..)) => *inner,
+            other => other,
         };
         let arg_tys: Vec<Ty> = args.iter().map(|a| self.infer(a)).collect();
         if let Ty::Func(params, ret) = callee {
@@ -4293,6 +4612,40 @@ impl TypeChecker {
                 );
             } else {
                 for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
+                    // A lambda literal where a closure collector is expected is
+                    // minted by the mono rewrite into an explicit
+                    // collector<F>(lambda) node, so accept it here and enforce the
+                    // capture rule now, exactly as the explicit mint would. Only a
+                    // lambda literal widens: a non-lambda value stays a plain
+                    // mismatch, so nothing can skip the mint that immortalizes the
+                    // environment. The lambda's own function type is checked against
+                    // the collector's wrapped type so a wrong signature still fails.
+                    // The widening is only accepted where mono can mint, a direct
+                    // top-level function call; an indirect callee (a function value,
+                    // a parameter, a field, or a call result) is not rewritten, so a
+                    // bare lambda there would lower to a stack environment typed as a
+                    // collector and dangle. Reject it and point at the explicit mint.
+                    if let Ty::Collector(inner) = p {
+                        if matches!(&**inner, Ty::Func(..))
+                            && matches!(&args[i].kind, ExprKind::Lambda(_))
+                        {
+                            if !direct_toplevel {
+                                self.err(
+                                    "a bare lambda cannot become a closure collector through an indirect call; write the mint explicitly: collector<F>(lambda ...)",
+                                    args[i].span,
+                                );
+                                continue;
+                            }
+                            if !compatible(inner, a) {
+                                self.err(
+                                    format!("argument {} has the wrong type", i + 1),
+                                    args[i].span,
+                                );
+                            }
+                            self.check_collect_captures(&args[i], args[i].span);
+                            continue;
+                        }
+                    }
                     // A `chan_send(ch, self)` into a `Channel<*T>` earns the precise
                     // self-value message; only when that does not apply does the
                     // generic argument mismatch fire.
@@ -4366,7 +4719,44 @@ impl TypeChecker {
     /// struct implements it. Only fires when both sides are known by name, an
     /// interface expected and a concrete struct given, so an Unknown or a generic
     /// stays permissive.
+    /// Rejects boxing a collected value into an interface, wherever the coercion
+    /// happens: an argument, a binding, a return, a struct field, or an array,
+    /// slice, or tuple element. An interface value is a { data, vtable } fat pointer
+    /// that can ride a channel or a spawn capture off the main thread, and a
+    /// collected value stays on the main thread, so the boxing is refused, which
+    /// also closes the shape mismatch between the two fat reps before it reaches
+    /// codegen. `expected` must be the unfixed type, so the interface name survives
+    /// the fix that erases it to Unknown. The walk descends aggregates element by
+    /// element, matching how each is boxed one element at a time.
+    fn reject_collector_iface_box(&mut self, expected: &Ty, actual: &Ty, span: Span) {
+        match (expected, actual) {
+            (Ty::Named(iface), _)
+                if self.ifaces.contains(iface) && matches!(actual, Ty::Collector(_)) =>
+            {
+                self.err(
+                    "a collected value cannot be boxed into an interface; it stays on the main thread",
+                    span,
+                );
+            }
+            (Ty::Array(ee, _) | Ty::Slice(ee), Ty::Array(ae, _) | Ty::Slice(ae)) => {
+                self.reject_collector_iface_box(ee, ae, span);
+            }
+            (Ty::Tuple(es), Ty::Tuple(as_)) if es.len() == as_.len() => {
+                for (e, a) in es.iter().zip(as_) {
+                    self.reject_collector_iface_box(e, a, span);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn check_conformance(&mut self, expected: &Ty, actual: &Ty, span: Span) {
+        self.reject_collector_iface_box(expected, actual, span);
+        if matches!(expected, Ty::Named(i) if self.ifaces.contains(i))
+            && matches!(actual, Ty::Collector(_))
+        {
+            return;
+        }
         if let (Ty::Named(iface), Ty::Named(concrete)) = (expected, actual) {
             if self.ifaces.contains(iface)
                 && !self.ifaces.contains(concrete)
@@ -4691,6 +5081,13 @@ impl TypeChecker {
         match op {
             UnOp::Deref => match t {
                 Ty::Ptr(inner) | Ty::RawPtr(inner) => (**inner).clone(),
+                // A plain collector derefs like the managed `*T` it wraps, reading
+                // the collected block through the same generation check. A closure
+                // or slice collector is not a pointer: it is called or indexed, so
+                // dereferencing it is an error rather than a mislowered load.
+                Ty::Collector(inner) if !matches!(&**inner, Ty::Func(..) | Ty::Slice(_)) => {
+                    (**inner).clone()
+                }
                 Ty::Unknown => Ty::Unknown,
                 _ => {
                     self.err("cannot dereference a non pointer value", span);
@@ -4913,6 +5310,9 @@ fn elem_of(t: &Ty) -> Ty {
     match t {
         Ty::Slice(e) | Ty::Array(e, _) => (**e).clone(),
         Ty::Str => Ty::Char,
+        // A slice collector indexes and ranges through the slice it wraps, so its
+        // element is that slice's element.
+        Ty::Collector(inner) => elem_of(inner),
         _ => Ty::Unknown,
     }
 }
@@ -5051,6 +5451,24 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Ptr(x), Ty::Ptr(y)) => {
             matches!(**x, Ty::Unit) || matches!(**y, Ty::Unit) || compatible(x, y)
         }
+        // Two collectors agree when their elements agree; the wrapper never
+        // widens into a bare pointer, so a `collector<T>` and a `*T` stay distinct.
+        (Ty::Collector(x), Ty::Collector(y)) => compatible(x, y),
+        // A closure or slice collector may be used where the value it wraps is
+        // expected: the collector's rep is that value and its backing outlives the
+        // frame, so a `collector<F>` passes for an `F` and a `collector<U[]>` for a
+        // `U[]`. This is a one-way widening: the collector sits in the actual
+        // position (the second argument, by the checker's expected-then-actual
+        // convention). The reverse, a bare value where a collector is expected,
+        // stays rejected here so it cannot skip the mint that immortalizes the
+        // backing; a lambda literal in that position is minted by the mono rewrite
+        // instead. The plain kind never widens: its inner is not a func or slice,
+        // so the guard fails and it falls through to a mismatch.
+        (Ty::Func(..), Ty::Collector(y)) | (Ty::Slice(_), Ty::Collector(y))
+            if matches!(&**y, Ty::Func(..) | Ty::Slice(_)) =>
+        {
+            compatible(a, y)
+        }
         // *void is the erased currency of the allocator and FFI layer, a thin
         // untracked pointer, so any *raw T passes where *void is expected;
         // codegen already lowers *void to the same bare word. The reverse
@@ -5088,6 +5506,7 @@ fn lower(t: &Type, generics: &HashSet<String>) -> Ty {
             ps.iter().map(|t| lower(t, generics)).collect(),
             Box::new(lower(r, generics)),
         ),
+        Type::Collector(b) => Ty::Collector(Box::new(lower(b, generics))),
         Type::Unit => Ty::Unit,
         // A do-continuation hole is open to any monad element; Unknown lets the
         // compatibility rule wildcard it, so typeck stays permissive until mono
@@ -5231,6 +5650,7 @@ fn ty_str(t: &Ty) -> String {
         Ty::Named(n) => format!("'{n}'"),
         Ty::Func(..) => "a function".to_string(),
         Ty::Future(_) => "a future".to_string(),
+        Ty::Collector(_) => "a collector".to_string(),
         Ty::Unknown => "an unknown type".to_string(),
     }
 }

@@ -1,0 +1,19 @@
+@paradigm procedural
+
+// The accept twin of collectorcapview_fail. A collected closure may capture a
+// collector-typed slice: its backing lives on the collected heap, so the wrapper
+// reads as immortal safe and the capture is allowed. The captured collector is
+// rooted transitively through the outer collected environment, so the inner slice
+// survives as long as the thunk does. Proves the capture rule is not over-wide.
+func mk() -> collector<() -> int64> {
+    xs := collector<int64[]>([5, 6, 7])
+    return collector<() -> int64>(lambda () -> int64 {
+        return xs[0] + xs[2]
+    })
+}
+
+func main() -> int32 {
+    t := mk()
+    println(t())
+    return 0
+}

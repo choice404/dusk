@@ -1,0 +1,20 @@
+@paradigm procedural
+
+// Accept twin of the pointer-to-collector spawn fails: a spawned thread captures
+// a pointer to a cell that holds only a scalar. No collector is reachable through
+// the pointer, so the capture is allowed and the generation check backstops the
+// read. Proves the pointer-reaches-collector ban is not over-wide: an ordinary
+// managed pointer is still capturable.
+struct Cell { v: int64 }
+
+func main() -> int32 {
+    p: *Cell = alloc(Cell { v: 7 })
+    t, e := spawn(lambda () -> void {
+        println((*p).v)
+    })
+    e.ignore()
+    je := join(t)
+    je.ignore()
+    free(p)
+    return 0
+}

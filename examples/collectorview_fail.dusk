@@ -1,0 +1,22 @@
+@paradigm procedural
+
+// A collector is escape neutral only when its element cannot carry a frame view.
+// Box reaches a slice, so minting one copies the slice's fat pointer into the
+// collected block while the backing array dies with mk's frame: returning the
+// collector would dangle. The non-collector twin `return b` is already rejected
+// as a slice escaping its frame; this proves the collector path is not a bypass.
+struct Box {
+    s: int64[],
+}
+
+func mk() -> collector<Box> {
+    a: int64[3] = [111, 222, 333]
+    b := Box { s: a[0..2] }
+    return collector<Box>(b)
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).s[0])
+    return 0
+}

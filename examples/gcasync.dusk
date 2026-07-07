@@ -1,0 +1,38 @@
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+
+// Three collectors minted inside an async func, all held across a suspension.
+// The task frame is a registered collector root, so a collection forced before
+// the await and again after it cannot sweep the blocks the frame still holds.
+// After the await every collector derefs to the value it was minted with, in
+// order, proving the task-frame root keeps more than one collected ref live
+// across a real suspend and resume.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+async func amain() -> int64 {
+    a := collector<int64>(100)
+    b := collector<int64>(20)
+    c := collector<int64>(3)
+    cool_gc_collect()
+    v, e := await sleep_async(1)
+    e.ignore()
+    v.ignore()
+    cool_gc_collect()
+    println(*a)
+    println(*b)
+    println(*c)
+    return *a + *b + *c
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    r := async_run(amain())
+    loop_free()
+    println(r)
+    return 0
+}

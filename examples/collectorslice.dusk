@@ -1,0 +1,36 @@
+@paradigm procedural
+
+// A slice collector: a func builds a frame-local array, mints a collector over
+// it, and returns the collector. The elements are deep copied onto the collected
+// heap at the mint, so the frame-view source is legal and the returned slice
+// views immortal backing, not the dead frame array. The caller forces a
+// collection, then indexes and ranges the collector exactly as a slice: the
+// backing is rooted through xs on the stack, so the sweep keeps it.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+func build() -> collector<int64[]> {
+    a: int64[4] = [10, 20, 30, 40]
+    return collector<int64[]>(a)
+}
+
+func main() -> int32 {
+    xs := build()
+
+    // Sweep after the building frame is gone: the immortal backing survives.
+    cool_gc_collect()
+
+    mut sum: int64 = 0
+    mut i: int64 = 0
+    while i < xs.len {
+        sum = sum + xs[i]
+        i = i + 1
+    }
+    println(sum)
+
+    // A range over the collector reads the immortal backing too.
+    tail := xs[1..4]
+    println(tail[0])
+    return 0
+}

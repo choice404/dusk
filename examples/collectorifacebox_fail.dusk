@@ -1,0 +1,32 @@
+@paradigm procedural
+@paradigm oop
+
+// Compile-fail: a collector boxed into an interface. An interface value is a
+// { data, vtable } fat pointer that can ride a channel or a spawn capture off
+// the main thread, and a collected value stays on the main thread, so the boxing
+// is refused. This is distinct from collectoriface_fail, which rejects a
+// collector over an interface element. The accept twin is boxing a concrete
+// implementer, the ordinary interface path.
+interface Speaker {
+    speak() -> int64
+}
+
+struct Dog {
+    n: int64,
+}
+
+impl Speaker for Dog {
+    func speak() -> int64 {
+        return self.n
+    }
+}
+
+func take(s: Speaker) -> int64 {
+    return s.speak()
+}
+
+func main() -> int32 {
+    c := collector<int64>(5)
+    println(take(c))
+    return 0
+}

@@ -1,0 +1,38 @@
+@paradigm procedural
+@import std.memory.collector
+
+// Exercise the std.memory.collector surface. Mint collected blocks through the
+// collector<T> type, force a collection through the stdlib wrapper, and read its
+// gauges. One block is held on the stack across the collection, a root the scan
+// must find, so it survives the sweep with its value intact. This proves the
+// wrappers reach the collected heap through the stdlib import path.
+
+func main() -> int32 {
+    // A block held on the stack for the whole run: a root the scan keeps.
+    keep := collector<int64>(99)
+
+    // Eight more blocks, each read so its value is used, none held past the loop.
+    mut sum: int64 = 0
+    mut i: int64 = 0
+    while i < 8 {
+        c := collector<int64>(i)
+        sum = sum + *c
+        i = i + 1
+    }
+
+    before := gc_live_blocks()
+    bytes := gc_live_bytes()
+    g0 := gc_collections()
+
+    gc_collect()
+
+    g1 := gc_collections()
+
+    println(before)      // nine blocks live before the collection
+    println(bytes)       // their total payload bytes
+    println(g1 - g0)     // exactly one collection ran
+    println(sum)         // 0 + 1 + ... + 7, each junk block was read
+    println(*keep)       // the held block survived the sweep, value intact
+    println("ok")
+    return 0
+}

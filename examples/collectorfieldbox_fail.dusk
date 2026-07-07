@@ -1,0 +1,33 @@
+@paradigm procedural
+@paradigm oop
+
+// Compile-fail: a collector boxed into an interface at a struct field. An
+// interface value is a { data, vtable } fat pointer that can ride a channel or a
+// spawn capture off the main thread, and a collected value stays on the main
+// thread, so the field init is refused with a clean diagnostic rather than
+// reaching codegen as a fat-rep mismatch. The accept twin, collectorfieldconcrete_ok,
+// boxes a concrete implementer at the same field.
+interface Speaker {
+    speak() -> int64
+}
+
+struct Dog {
+    n: int64,
+}
+
+impl Speaker for Dog {
+    func speak() -> int64 {
+        return self.n
+    }
+}
+
+struct Holder {
+    s: Speaker,
+}
+
+func main() -> int32 {
+    c := collector<int64>(5)
+    h := Holder { s: c }
+    println(h.s.speak())
+    return 0
+}

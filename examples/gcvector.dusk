@@ -1,0 +1,45 @@
+@paradigm procedural
+@import std.vector
+
+// A vector of collectors grows past several collections. The vector buffer is a
+// generational block the collector scans as a root region, so the collector fat
+// values it holds keep their collected blocks live: a collection forced after
+// every push, and once more before the read, cannot sweep an element still in
+// the buffer. Every element then derefs to the value it was minted with, and the
+// sum is the arithmetic answer, proving the generation registry roots a
+// same-thread container of collectors across its growth. A vector of collectors
+// never leaves the main thread, so it is not a channel or a spawn capture and is
+// not confined away.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+struct Point {
+    x: int64,
+    y: int64,
+}
+
+func main() -> int32 {
+    v: *Vector<collector<Point>> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < 10 {
+        c := collector<Point>(Point { x: i, y: i * 2 })
+        vec_push(v, c)
+        cool_gc_collect()
+        i = i + 1
+    }
+    cool_gc_collect()
+
+    mut sum: int64 = 0
+    mut j: int64 = 0
+    while j < vec_len(v) {
+        e := vec_get(v, j)
+        sum = sum + (*e).x + (*e).y
+        j = j + 1
+    }
+    println(sum)
+
+    vec_free(v)
+    free(v)
+    return 0
+}

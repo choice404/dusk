@@ -21,6 +21,13 @@ extern int64_t cool_live_threads(void);
 extern int64_t cool_pool_inflight(void);
 extern int64_t cool_reactor_armed(void);
 
+/* Task frames and closure environment blocks are malloc'd outside the
+   generational registry, so the collector cannot reach a collected block they
+   hold unless they are registered as root regions. They are added when built
+   and removed before their backing memory is freed. */
+extern void cool_gc_add_region(void *base, int64_t len);
+extern void cool_gc_del_region(void *base);
+
 static void cool_async_fatal(const char *msg) {
     fflush(stdout);
     fputs(msg, stderr);
@@ -561,6 +568,12 @@ void *cool_task_new(void *poll, int64_t frame_size, int64_t result_size) {
     t->envs = NULL;
     fut->task = t;
     *(int64_t *)((char *)t + sizeof(cool_task)) = 0;
+    // The dusk visible frame is a root region: it holds the task's locals, which
+    // may reference collected blocks, and it lives outside the generational
+    // registry. Registered after the header is filled, removed at return.
+    if (frame_size > 0) {
+        cool_gc_add_region((char *)t + sizeof(cool_task), frame_size);
+    }
     return fut;
 }
 
@@ -635,12 +648,18 @@ void cool_task_return(void *frame, void *result, int64_t n) {
         fut->task = NULL;
     }
     pthread_mutex_unlock(&l->mu);
+    // Deregister each root region before its backing memory is freed, so the
+    // collector never scans freed memory. A base never registered, a zero
+    // length frame or env, is a harmless no op. This runs after the loop lock is
+    // released, keeping the malloc side outside the loop lock.
     cool_env_block *e = (cool_env_block *)t->envs;
     while (e) {
         cool_env_block *nx = e->next;
+        cool_gc_del_region(e->payload);
         free(e);
         e = nx;
     }
+    cool_gc_del_region((char *)t + sizeof(cool_task));
     free(t);
 }
 
@@ -654,6 +673,11 @@ void *cool_task_env_alloc(void *frame, int64_t n) {
     }
     b->next = (cool_env_block *)t->envs;
     t->envs = b;
+    // The environment payload is a root region: a captured value may reference a
+    // collected block, and the block lives outside the generational registry.
+    if (n > 0) {
+        cool_gc_add_region(b->payload, n);
+    }
     return b->payload;
 }
 

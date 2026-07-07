@@ -1,0 +1,46 @@
+// The collected heap through its C floor, before any surface syntax reaches it.
+// A foreign block binds the collector shims. Mint a handful of collected blocks,
+// hold one in a stack local, force a collection on the main thread, and read the
+// stats. This is a smoke probe: the counters move and a held block survives with
+// its header and contents intact. Precise reclaim, proving a dropped block is
+// swept, needs codegen that controls the root layout and lands with the surface
+// syntax; a conservative scan at this optimization level retains a dropped
+// pointer that still lingers in a stack slot, which is safe, so this probe does
+// not assert on the reclaimed count.
+@paradigm procedural
+
+foreign "C" {
+    func cool_collect_alloc(size: int64) -> *raw int64
+    func cool_gc_collect() -> void
+    func cool_gc_live_blocks() -> int64
+    func cool_gc_collections() -> int64
+}
+
+func main() -> int32 {
+    // A block held on the stack for the whole run: a root the scan must find.
+    keep: *raw int64 = cool_collect_alloc(64)
+    keep[0] = 99
+
+    // Eight more blocks, minting past nothing near the threshold.
+    mut i: int64 = 0
+    while i < 8 {
+        junk: *raw int64 = cool_collect_alloc(64)
+        junk[0] = i
+        i = i + 1
+    }
+
+    before: int64 = cool_gc_live_blocks()
+    c0: int64 = cool_gc_collections()
+
+    cool_gc_collect()
+
+    c1: int64 = cool_gc_collections()
+
+    // Nine blocks live before any collection, exactly one collection run, and
+    // the held block survived the sweep with its contents intact.
+    println(before)
+    println(c1 - c0)
+    println(keep[0])
+    println("ok")
+    return 0
+}

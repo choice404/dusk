@@ -1,0 +1,19 @@
+@paradigm procedural
+@import std.concurrent.channel
+@import std.concurrent.pool
+
+// Compile-fail: a pool task captures a collector. A collected value stays on the
+// main thread; a pool worker runs on another thread, so the capture is refused.
+// The accept twin is poolsum, whose submit captures a channel and a scalar and
+// sends the result back through the channel.
+func main() -> int32 {
+    pe := pool_start(2)
+    pe.ignore()
+    c := collector<int64>(5)
+    se := submit(lambda () -> void {
+        println(*c)
+    })
+    se.ignore()
+    pool_shutdown()
+    return 0
+}

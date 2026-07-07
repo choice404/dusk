@@ -1,0 +1,22 @@
+@paradigm procedural
+
+// The accept twin of collectorview_fail: a collector may hold a managed pointer.
+// A managed *T is not a frame view, its block is a heap root the collector scans
+// and the generation check backstops a stale access, so minting a struct whose
+// field is a managed pointer stays legal. This proves the view reject is not
+// over-wide.
+struct Cell {
+    v: int64,
+}
+
+struct Holder {
+    p: *Cell,
+}
+
+func main() -> int32 {
+    cell: *Cell = alloc(Cell { v: 5 })
+    h := collector<Holder>(Holder { p: cell })
+    println((*(*h).p).v)
+    free(cell)
+    return 0
+}

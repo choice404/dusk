@@ -1,0 +1,35 @@
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+
+// An async func returns a collector, so its future carries a collected value. A
+// future record is a generational block the collector scans, so the returned
+// collector is rooted from completion until the caller reads it, exactly as the
+// vector buffer roots its elements. The task-level thread confinement bans a
+// collector on a channel or a spawn capture, but a future completes on the loop
+// thread the value was minted on, so this must build and run, not be banned with
+// the channel and capture forms. A collection forced inside the task and again
+// after the loop leaves the value intact.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+async func produce(n: int64) -> collector<int64> {
+    c := collector<int64>(n)
+    cool_gc_collect()
+    v, e := await sleep_async(0)
+    e.ignore()
+    v.ignore()
+    return c
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    r := async_run(produce(42))
+    loop_free()
+    cool_gc_collect()
+    println(*r)
+    return 0
+}

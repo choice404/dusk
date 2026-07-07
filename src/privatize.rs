@@ -160,6 +160,7 @@ impl Renamer {
                 }
                 self.ty(r, skip);
             }
+            Type::Collector(b) => self.ty(b, skip),
             Type::Unit => {}
             Type::Infer => {}
         }
@@ -302,6 +303,10 @@ impl Renamer {
                 bound.pop();
             }
             ExprKind::SizeofType(t) => self.ty(t, skip),
+            ExprKind::Collect { ty, arg } => {
+                self.ty(ty, skip);
+                self.expr(arg, skip, bound);
+            }
             ExprKind::Int(..)
             | ExprKind::Float(..)
             | ExprKind::Str(_)

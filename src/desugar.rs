@@ -177,6 +177,10 @@ impl Desugar<'_> {
             ExprKind::Await(op, ty) => {
                 ExprKind::Await(Box::new(self.expr(op)), ty.clone())
             }
+            ExprKind::Collect { ty, arg } => ExprKind::Collect {
+                ty: ty.clone(),
+                arg: Box::new(self.expr(arg)),
+            },
             ExprKind::Do(monad, binds) => {
                 return self.do_to_calls(monad.as_deref(), binds, e.span)
             }

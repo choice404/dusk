@@ -269,6 +269,25 @@ arena_destroy(a)
 free(a)
 ```
 
+## std.memory.collector
+
+Control and gauges for the conservative collected heap. The collected heap is not an allocator you pass with `using`. You reach it only by minting a `collector<T>` value, which the checker confines to the main thread and reclaims by a conservative mark and sweep. This module exposes the collection trigger and four read only counters over that heap, so no pointer crosses the boundary and the wrappers are safe to call anywhere on the main thread. A `Collector` allocator over the raw `alloc` builtin does not ship, because a bare `*void` would erase the type the checker confines through.
+
+| Function                       | Description                                                        |
+| ------------------------------ | ----------------------------------------------------------------- |
+| `gc_collect() -> void`         | Force one full mark and sweep now. Main thread only.              |
+| `gc_live_blocks() -> int64`    | How many collected blocks are live.                               |
+| `gc_live_bytes() -> int64`     | Total live collected payload bytes.                               |
+| `gc_collections() -> int64`    | How many collections have run since start, monotonic.            |
+
+```text
+@import std.memory.collector
+
+t := collector<() -> int64>(lambda () -> int64 { return 41 })
+gc_collect()
+println(t() + gc_collections())
+```
+
 ## std.functional.maybe
 
 An optional value. It is `Some` with a payload or `None`.

@@ -1,0 +1,18 @@
+@paradigm procedural
+
+// A closure collector: a func mints a thunk that captures a frame-local scalar,
+// then returns it. The captured environment lives on the collected heap, not
+// this frame, so the caller can call the thunk after make returns and read the
+// value the frame no longer holds. This is the 0.4.3 blocker the collector kinds
+// close: a closure that outlives the frame that built it.
+func make(base: int64) -> collector<() -> int64> {
+    return collector<() -> int64>(lambda () -> int64 {
+        return base + 1
+    })
+}
+
+func main() -> int32 {
+    thunk := make(41)
+    println(thunk())
+    return 0
+}

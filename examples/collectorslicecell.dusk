@@ -1,0 +1,33 @@
+@paradigm procedural
+
+// A slice collector whose element reaches a managed pointer, with clean pointees.
+// The deep copy immortalizes the outer pointer array; each pointee is heap owned,
+// so it outlives the frame on the managed heap. A forced collection after mk
+// keeps it all: the outer backing is a collector root, and each pointee is a
+// generational root the collector scans. Proves the buried-view guard is precise,
+// not a blanket reject of managed-pointer slice elements.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+struct Inner {
+    v: int64,
+}
+
+struct Cell {
+    p: *Inner,
+}
+
+func mk() -> collector<Cell[]> {
+    x := alloc(Inner { v: 11 })
+    y := alloc(Inner { v: 22 })
+    cells: Cell[2] = [Cell { p: x }, Cell { p: y }]
+    return collector<Cell[]>(cells)
+}
+
+func main() -> int32 {
+    c := mk()
+    cool_gc_collect()
+    println((*c[0].p).v + (*c[1].p).v)
+    return 0
+}

@@ -1,0 +1,44 @@
+// Guards the set-once anchor. main is an ordinary dusk function, so it can
+// recurse: the outer invocation mints a collected block and holds it on its own
+// frame, then calls itself. The inner invocation re-runs the anchor emitted as
+// main's first instruction and forces a collection deep in the recursion. If the
+// anchor were reset on that inner call it would name the inner frame, dropping
+// the outer frame that holds the block out of the scan, and the collection would
+// sweep it while it is live. With a set-once anchor the outer frame stays in the
+// scan and the block survives. After the recursion returns, same size mints
+// would reuse the block's slot if it had been wrongly swept, clobbering its
+// contents; the assertion is that the original value is still there.
+@paradigm procedural
+
+foreign "C" {
+    func cool_collect_alloc(size: int64) -> *raw int64
+    func cool_gc_collect() -> void
+}
+
+func main(argc: int32, argv: string[]) -> int32 {
+    if argc > 1 {
+        // Inner invocation: the anchor first instruction runs again here, one
+        // frame below the outer, then a collection runs deep in the recursion.
+        cool_gc_collect()
+        return 0
+    }
+
+    // Outer invocation: a collected block held on this frame across the call.
+    keep: *raw int64 = cool_collect_alloc(64)
+    keep[0] = 99
+
+    inner: string[] = ["_", "_"]
+    r: int32 = main(2, inner)
+
+    // Same size mints reuse a swept slot, so a wrongly swept keep would be
+    // reissued here and its contents overwritten.
+    mut i: int64 = 0
+    while i < 4 {
+        j: *raw int64 = cool_collect_alloc(64)
+        j[0] = 7777
+        i = i + 1
+    }
+
+    println(keep[0])
+    return r
+}

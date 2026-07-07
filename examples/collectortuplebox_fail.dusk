@@ -1,0 +1,31 @@
+@paradigm procedural
+@paradigm oop
+
+// Compile-fail: a collector boxed into an interface at a tuple element. The
+// reject walks tuple members, so a collected value at an interface member is
+// refused with the collector reason before the generic interface-in-tuple rule
+// fires. The accept twin, collectorfieldconcrete_ok, boxes a concrete implementer.
+interface Speaker {
+    speak() -> int64
+}
+
+struct Dog {
+    n: int64,
+}
+
+impl Speaker for Dog {
+    func speak() -> int64 {
+        return self.n
+    }
+}
+
+func take(t: (Speaker, int64)) -> int64 {
+    return 0
+}
+
+func main() -> int32 {
+    c := collector<int64>(5)
+    r := take((c, 1))
+    println(r)
+    return 0
+}

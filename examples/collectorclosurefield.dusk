@@ -1,0 +1,24 @@
+@paradigm procedural
+
+// A closure collector stored in a struct field. The struct is built in one frame
+// and returned; its field holds a collected thunk over a frame-local capture, so
+// the caller can call the thunk after the building frame is gone. The field's rep
+// is the closure `{ env, fn }`, the same as a bare `() -> int64`, and the mint
+// puts the environment on the collected heap.
+struct Counter {
+    get: collector<() -> int64>,
+}
+
+func make(seed: int64) -> Counter {
+    return Counter {
+        get: collector<() -> int64>(lambda () -> int64 {
+            return seed * 2
+        }),
+    }
+}
+
+func main() -> int32 {
+    c := make(21)
+    println(c.get())
+    return 0
+}

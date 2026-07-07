@@ -62,6 +62,14 @@ pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> Strin
     m.declare("void @cool_future_take(ptr, i64, ptr, ptr)");
     m.declare("void @cool_loop_run(ptr, i64, ptr, i64)");
     m.declare("void @cool_task_state_fault()");
+    m.declare("void @cool_gc_anchor(ptr)");
+    m.declare("ptr @cool_collect_alloc(i64)");
+    m.declare("void @cool_gc_collect()");
+    m.declare("i64 @cool_gc_live_blocks()");
+    m.declare("i64 @cool_gc_live_bytes()");
+    m.declare("i64 @cool_gc_collections()");
+    m.declare("void @cool_gc_add_region(ptr, i64)");
+    m.declare("void @cool_gc_del_region(ptr)");
     m.declare("ptr @cool_read_file(ptr)");
     m.declare("i64 @cool_write_file(ptr, ptr)");
     m.declare("ptr @cool_read_line()");
@@ -694,6 +702,18 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
             }
         }
         Type::RawPtr(b) => CTy::RawPtr(Box::new(lower_ty(b, nom))),
+        // A collector's runtime rep tracks the kind of value it wraps. A plain
+        // element (scalar, managed, string, struct of those) is a managed `*T`,
+        // the fat `{ptr, gen}`, and deref, field, and copy are the managed-pointer
+        // path. A function element is a closure `{env, fn}` and a slice element is
+        // a slice `{ptr, len}`: both carry the same rep as the value they wrap, so
+        // a call dispatches through the closure and an index strides the slice with
+        // no wrapper unwrap. Only the `Collect` node differs, minting the env or
+        // the slice backing on the collected heap.
+        Type::Collector(b) => match &**b {
+            Type::Func(..) | Type::Slice(..) => lower_ty(b, nom),
+            _ => CTy::Ptr(Box::new(lower_ty(b, nom))),
+        },
         Type::Slice(b) => CTy::Slice(Box::new(lower_ty(b, nom))),
         Type::Array(b, n) => CTy::Array(Box::new(lower_ty(b, nom)), *n),
         Type::Func(ps, r) => CTy::Closure(
@@ -764,6 +784,15 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
     let header = format!("define {} @{name}({sig}) {{", ret.ll());
     let mut fb = Fb::new(m, ctx, ret);
     fb.body.push_str("entry:\n");
+    // The C entry records the main thread stack high water for the collector as
+    // its first instruction, so the anchor slot sits at the top of the outermost
+    // frame. An argc/argv main is renamed dusk__main and called one frame below
+    // the wrapper, still the outermost dusk frame, so it anchors there instead.
+    if self_ty.is_none() && (name == "main" || name == "dusk__main") {
+        let slot = fb.fresh();
+        fb.line(&format!("{slot} = alloca i8"));
+        fb.line(&format!("call void @cool_gc_anchor(ptr {slot})"));
+    }
     for (i, (pname, ty)) in params.iter().enumerate() {
         if self_ty.is_some() && i == 0 {
             // The incoming pointer is self's storage. Bind it as a Struct lvalue,
@@ -1783,8 +1812,171 @@ impl<'a> Fb<'a> {
                 let sz = self.elem_size(&cty);
                 Val::new(CTy::Int(64), sz)
             }
+            ExprKind::Collect { ty, arg } => self.gen_collect(ty, arg),
             _ => Val::i0(),
         }
+    }
+
+    /// Mints a `collector<T>(value)` on the collected heap. The kind of element
+    /// picks the rep and the minting path: a function element mints a collected
+    /// closure environment, a slice element deep copies its backing onto the
+    /// collected heap, and any other element is the plain managed-pointer mint.
+    fn gen_collect(&mut self, ty: &Type, arg: &Expr) -> Val {
+        match ty {
+            Type::Func(..) => self.gen_collect_closure(arg),
+            Type::Slice(..) => self.gen_collect_slice(ty, arg),
+            _ => self.gen_collect_plain(ty, arg),
+        }
+    }
+
+    /// The plain collector kind: mirrors `alloc_of` exactly, swapping only the
+    /// allocator. The value is evaluated first, then a collected block is minted
+    /// with `cool_collect_alloc`, then the value is stored into it. The collected
+    /// block carries the same 16 byte header as a generational one, so the
+    /// generation word sits at `p - 8` and the fat value reads it exactly as a
+    /// managed pointer does. No allocation runs between the mint and the rooting
+    /// store, so a nested mint can never sweep the fresh block before it is
+    /// reachable.
+    fn gen_collect_plain(&mut self, ty: &Type, arg: &Expr) -> Val {
+        let value = self.gen_expr(arg);
+        let pointee = lower_ty(ty, &|n| self.ctx.nom(n));
+        let szp = self.fresh();
+        self.line(&format!("{szp} = getelementptr {}, ptr null, i64 1", pointee.ll()));
+        let sz = self.fresh();
+        self.line(&format!("{sz} = ptrtoint ptr {szp} to i64"));
+        let p = self.fresh();
+        self.line(&format!("{p} = call ptr @cool_collect_alloc(i64 {sz})"));
+        let hp = self.fresh();
+        self.line(&format!("{hp} = getelementptr i8, ptr {p}, i64 -8"));
+        let g = self.fresh();
+        self.line(&format!("{g} = load atomic i64, ptr {hp} seq_cst, align 8"));
+        let op = self.adapt(value, &pointee).op;
+        self.line(&format!("store {} {op}, ptr {p}", pointee.ll()));
+        let fat = self.fat(&p, &g);
+        Val::new(CTy::Ptr(Box::new(pointee)), fat)
+    }
+
+    /// The closure collector kind: reuses lambda lowering, minting the captured
+    /// environment on the collected heap instead of a stack alloca or the task
+    /// env arena. The captures are loaded first, before the collected block is
+    /// minted, so a collection triggered by the mint cannot sweep an environment
+    /// no root reaches yet; then nothing allocates between the mint and the
+    /// capture stores, and the `{ env, fn }` value the collector's stack root
+    /// keeps live pins the environment. Sema guarantees a lambda literal here and
+    /// that every capture is immortal safe, so the collected environment holds no
+    /// frame view. A capture-free lambda has no environment to collect and stays a
+    /// null-env closure.
+    fn gen_collect_closure(&mut self, arg: &Expr) -> Val {
+        let ExprKind::Lambda(l) = &arg.kind else {
+            debug_assert!(false, "a collected closure must be a lambda literal");
+            return Val::i0();
+        };
+        let caps = self.lambda_captures(l);
+        let params: Vec<(String, CTy)> = l
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), lower_ty(&p.ty, &|n| self.ctx.nom(n))))
+            .collect();
+        let ret = lower_ty(&l.ret, &|n| self.ctx.nom(n));
+        let id = self.m.fresh_lambda();
+        let fname = format!("@lambda.{id}");
+        let env_ty = format!(
+            "{{ {} }}",
+            caps.iter().map(|(_, t)| t.ll()).collect::<Vec<_>>().join(", ")
+        );
+        let env = if caps.is_empty() {
+            "null".to_string()
+        } else {
+            // Load every capture before the mint. A capture load is a frame read
+            // that never allocates, so a collection cannot run during it, but the
+            // loads are pulled ahead of the mint anyway to keep the rooting
+            // invariant explicit: only stores stand between the mint and the point
+            // the environment becomes reachable.
+            let loaded: Vec<(CTy, String)> = caps
+                .iter()
+                .map(|(cname, cty)| {
+                    let (lty, lptr) = self.locals.get(cname).cloned().unwrap();
+                    let v = self.load(&lty, &lptr);
+                    (cty.clone(), v)
+                })
+                .collect();
+            let szp = self.fresh();
+            self.line(&format!("{szp} = getelementptr {env_ty}, ptr null, i64 1"));
+            let sz = self.fresh();
+            self.line(&format!("{sz} = ptrtoint ptr {szp} to i64"));
+            let e = self.fresh();
+            self.line(&format!("{e} = call ptr @cool_collect_alloc(i64 {sz})"));
+            for (i, (cty, v)) in loaded.iter().enumerate() {
+                let slot = self.fresh();
+                self.line(&format!("{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"));
+                self.line(&format!("store {} {v}, ptr {slot}", cty.ll()));
+            }
+            e
+        };
+        self.emit_lambda_fn(&fname, &env_ty, &caps, &params, &ret, &l.body);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {{ ptr, ptr }} undef, ptr {env}, 0"));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {{ ptr, ptr }} {a}, ptr {fname}, 1"));
+        let pt = params.iter().map(|(_, t)| t.clone()).collect();
+        Val::new(CTy::Closure(pt, Box::new(ret)), b)
+    }
+
+    /// The slice collector kind: deep copies the source slice's elements onto the
+    /// collected heap and yields a slice `{ ptr, len }` over that immortal
+    /// backing. The source is evaluated first, then the backing is minted, then
+    /// the copy loop runs; no allocation stands between the mint and the copy, so
+    /// a collection cannot sweep the backing before it holds the elements, and the
+    /// slice value the collector's stack root keeps live pins it. The elements are
+    /// copied by value, which sema guarantees is a deep copy: the element type is
+    /// immortal safe, so it buries no fat pointer that a shallow copy would leave
+    /// viewing the frame. A frame-view source is therefore legal here, unlike the
+    /// plain kind, since the copy immortalizes it.
+    fn gen_collect_slice(&mut self, ty: &Type, arg: &Expr) -> Val {
+        let sty = lower_ty(ty, &|n| self.ctx.nom(n));
+        let elem = match &sty {
+            CTy::Slice(e) => (**e).clone(),
+            _ => CTy::Int(64),
+        };
+        // Evaluate the source and view it as a slice. An array literal or a bare
+        // array binding materializes on the frame and adapts to a slice; a slice
+        // value passes through. This all happens before the collected mint.
+        let src = self.gen_collection(arg);
+        let src = self.adapt(src, &sty);
+        let (data, len, _) = self.slice_parts(&src);
+        let esz = self.elem_size(&elem);
+        let total = self.op2("mul", "i64", &len, &esz);
+        let out = self.fresh();
+        self.line(&format!("{out} = call ptr @cool_collect_alloc(i64 {total})"));
+        // Element copy loop: out[i] = src[i]. No allocation runs in the loop, so
+        // the backing stays unswept while it is filled.
+        let i = self.alloca_raw("i64");
+        self.line(&format!("store i64 0, ptr {i}"));
+        let cond = self.new_label();
+        let body = self.new_label();
+        let end = self.new_label();
+        self.br(&cond);
+        self.place_label(&cond);
+        let iv = self.load(&CTy::Int(64), &i);
+        let c = self.fresh();
+        self.line(&format!("{c} = icmp slt i64 {iv}, {len}"));
+        self.cond_br(&c, &body, &end);
+        self.place_label(&body);
+        let sp = self.fresh();
+        self.line(&format!("{sp} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        let ev = self.load(&elem, &sp);
+        let dp = self.fresh();
+        self.line(&format!("{dp} = getelementptr {}, ptr {out}, i64 {iv}", elem.ll()));
+        self.line(&format!("store {} {ev}, ptr {dp}", elem.ll()));
+        let ni = self.op2("add", "i64", &iv, "1");
+        self.line(&format!("store i64 {ni}, ptr {i}"));
+        self.br(&cond);
+        self.place_label(&end);
+        let a = self.fresh();
+        self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {out}, 0"));
+        let b = self.fresh();
+        self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"));
+        Val::new(CTy::Slice(Box::new(elem)), b)
     }
 
     fn gen_load(&mut self, e: &Expr) -> Val {

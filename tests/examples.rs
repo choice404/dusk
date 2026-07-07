@@ -274,6 +274,38 @@ fn foreign_calls_libc() {
 }
 
 #[test]
+fn collector_floor_smoke() {
+    // The collected heap through its C floor: mint blocks, force a collection on
+    // the main thread, hold one block across it. Nine blocks live before any
+    // collection, one collection run, the held block survives with its contents,
+    // and the program exits clean.
+    assert_eq!(run("gcprobe.dusk"), "9\n1\n99\nok\n");
+}
+
+#[test]
+fn std_memory_collector_wrappers_reach_the_collected_heap() {
+    // The std.memory.collector surface, the stdlib twin of the gcprobe C floor.
+    // Mint nine collected blocks through the collector<T> type, read the gauges
+    // through the stdlib wrappers, force a collection through gc_collect, and hold
+    // one block on the stack across it. Nine blocks and 72 payload bytes live
+    // before the collection, one collection ran, every junk block was read (sum
+    // 28), and the held block survives the sweep with its value intact. Proves the
+    // control and stats wrappers resolve and reach the collected heap through the
+    // import path.
+    assert_eq!(run("stdcollector.dusk"), "9\n72\n1\n28\n99\nok\n");
+}
+
+#[test]
+fn collector_anchor_is_set_once() {
+    // A recursive main re-runs the anchor from an inner frame and collects deep
+    // in the recursion. The anchor is set once, so the outer frame holding a
+    // collected block stays in the scan and the block survives with its value
+    // intact; a reset anchor would sweep it live and a reused slot would print
+    // the churn value instead of 99.
+    assert_eq!(run("gcreanchor.dusk"), "99\n");
+}
+
+#[test]
 fn use_after_free_faults() {
     let (out, err, ok) = run_raw("uaf.dusk");
     assert!(!ok, "use after free must fault");
@@ -2584,4 +2616,551 @@ fn input_reads_lines_from_stdin() {
 fn readnum_reads_typed_input() {
     let out = run_stdin("readnum.dusk", "21\n2.5\n");
     assert_eq!(out, "enter an int:\n42\nenter a float:\n3.5\n");
+}
+
+#[test]
+fn collector_mint_deref_field_copy_and_return() {
+    // The plain collector kind end to end: a scalar and a struct mint, a read and
+    // a store through the deref, a copy that shares the collected block, and a
+    // collector returned across a frame the block outlives.
+    let out = run("collectorbox.dusk");
+    assert_eq!(out, "10\n1\n2\n30\n30\n3\n4\n");
+}
+
+#[test]
+fn a_collector_may_hold_a_managed_pointer() {
+    // The accept twin of collectorview_fail: a managed *T is not a frame view, so
+    // a struct field holding one is legal in a collector. Proves the view reject
+    // is not over-wide.
+    let out = run("collectorptr.dusk");
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn collecting_a_value_that_reaches_a_frame_view_is_rejected() {
+    // Escape neutrality holds only when the element cannot carry a frame view. A
+    // struct reaching a slice, minted into a collected block that outlives the
+    // frame, would dangle the slice. Without this reject the collector path was a
+    // silent bypass of the frame-slice escape rule (a use after free).
+    let err = check_fails("collectorview_fail.dusk");
+    assert!(
+        err.contains(
+            "a collected value cannot hold a slice, function, or interface; \
+             collect a scalar, a pointer, or a struct of those"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn collector_stays_an_identifier_in_a_comparison() {
+    // `collector` is contextual: `collector < n` is a comparison, not a malformed
+    // mint. The lookahead only mints on a balanced `<T>` followed by `(`.
+    let out = run("collectorident.dusk");
+    assert_eq!(out, "1\n");
+}
+
+#[test]
+fn collecting_a_pointer_to_a_frame_view_is_rejected() {
+    // A managed pointer element is allowed only when its pointee is heap owned.
+    // A pointer whose pointee stores a frame-local slice would dangle once the
+    // collected block outlives the frame, so the mint is refused as an outliving
+    // sink, the same as the rejected `return p`.
+    let err = check_fails("collectorptrview_fail.dusk");
+    assert!(
+        err.contains(
+            "this collects a pointer to an object that stores a view of the current frame"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn collecting_a_struct_embedding_a_frame_view_pointer_is_rejected() {
+    // The struct-embed shape: the frame view sits one struct layer down, behind a
+    // managed pointer field. Minting the struct still dangles the slice.
+    let err = check_fails("collectorptrfield_fail.dusk");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn collecting_a_pointer_to_a_frame_slice_is_rejected() {
+    // The slice-behind-pointer shape: a pointer to a slice that views a frame
+    // local array. The collected block outlives the frame, so the slice dangles.
+    let err = check_fails("collectorptrslice_fail.dusk");
+    assert!(
+        err.contains(
+            "this collects a pointer to an object that stores a view of the current frame"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn passing_a_frame_view_into_a_minting_helper_is_rejected() {
+    // The interprocedural mint-sink: mk mints its pointer parameter, so it is an
+    // outliving sink on that parameter, and a caller handing it a pointer whose
+    // pointee stores a frame view is refused at the call. Reuses the channel-sink
+    // machinery, so the diagnostic wording is shared; the assertion pins the
+    // frame-view core, not the mechanism word.
+    let err = check_fails("collectorptrhelper_fail.dusk");
+    assert!(err.contains("holds a view of the sending frame"), "{err}");
+}
+
+#[test]
+fn a_collector_survives_a_suspension_and_forced_collections() {
+    // A collector minted inside an async func is held across the await in the task
+    // frame, a registered collector root, so a forced collection before and after
+    // the suspension cannot sweep it. The read yields the minted value.
+    let out = run("gccollectorasync.dusk");
+    assert_eq!(out, "777\n");
+}
+
+#[test]
+fn freeing_a_collector_is_rejected() {
+    // A collected value is reclaimed by the collector, so free is refused. The
+    // accept twin is the copy path in collectorbox; an owned *T still frees.
+    let err = check_fails("collectorfree_fail.dusk");
+    assert!(
+        err.contains("a collected value is not freed; the collector reclaims it"),
+        "{err}"
+    );
+}
+
+#[test]
+fn moving_a_collector_is_rejected() {
+    // A collected value is not owned, so there is nothing to move. The accept
+    // twin is the plain copy `d := c` in collectorbox.
+    let err = check_fails("collectormove_fail.dusk");
+    assert!(
+        err.contains("a collected value is not owned; copy it directly"),
+        "{err}"
+    );
+}
+
+#[test]
+fn ref_aliasing_a_collector_is_rejected() {
+    // A ref alias of an unowned collected value is meaningless. The accept twin
+    // is the plain copy `d := c` in collectorbox.
+    let err = check_fails("collectorref_fail.dusk");
+    assert!(
+        err.contains("a collected value is not borrowed with ref; copy it directly"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_closure_collector_outlives_the_frame_that_built_it() {
+    // The closure collector kind: a func mints a thunk that captures a frame-local
+    // scalar, then returns it. The environment lives on the collected heap, so the
+    // caller calls the thunk after the building frame is gone and reads the value.
+    let out = run("collectorthunk.dusk");
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn a_closure_collector_lives_in_a_struct_field() {
+    // A collected thunk stored in a struct field, the struct returned, the thunk
+    // called through the field. The field's rep is the closure { env, fn }.
+    let out = run("collectorclosurefield.dusk");
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn a_slice_collector_deep_copies_a_frame_view_source() {
+    // The slice collector kind: a frame-local array is deep copied onto the
+    // collected heap at the mint, so the returned slice views immortal backing. A
+    // forced collection after the building frame is gone leaves it intact, and the
+    // collector indexes and ranges as a slice.
+    let out = run("collectorslice.dusk");
+    assert_eq!(out, "100\n20\n");
+}
+
+#[test]
+fn a_lazy_chain_of_collected_thunks_survives_a_collection() {
+    // A hand-rolled chain of collected thunks, each capturing the previous through
+    // a struct-of-collector parameter. A forced collection before the single force
+    // proves the whole chain is rooted transitively through the last thunk, so the
+    // sweep keeps every environment and the forced value is exact.
+    let out = run("lazychain.dusk");
+    assert_eq!(out, "111\n");
+}
+
+#[test]
+fn a_closure_collector_may_capture_a_collector_typed_slice() {
+    // The accept twin of collectorcapview_fail: a collector-typed capture reads as
+    // immortal safe because its backing lives on the collected heap. Proves the
+    // capture rule is not over-wide.
+    let out = run("collectorcapok.dusk");
+    assert_eq!(out, "12\n");
+}
+
+#[test]
+fn collecting_a_closure_that_captures_a_frame_view_is_rejected() {
+    // The closure capture rule: a lambda capturing a frame-view slice, minted into
+    // a collected environment that outlives the frame, would dangle the captured
+    // fat pointer. The mint is rejected, naming the capture.
+    let err = check_fails("collectorcapview_fail.dusk");
+    assert!(
+        err.contains(
+            "cannot collect a closure that captures 's': it may view a frame"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn collecting_a_slice_of_slices_is_rejected() {
+    // A slice collector deep copies one level, so a slice-of-slices element leaves
+    // each inner fat pointer viewing the frame. The mint is rejected. The accept
+    // twin is collector<int64[]>, whose scalar element is copied whole.
+    let err = check_fails("collectorslicenest_fail.dusk");
+    assert!(
+        err.contains(
+            "a collected slice's element cannot itself hold a slice, function, or interface"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn collecting_an_interface_value_is_rejected() {
+    // An interface value's data pointer may sit in the frame, so a collector over
+    // an interface element is rejected. The accept twin is a collector over the
+    // concrete type or a managed pointer to it.
+    let err = check_fails("collectoriface_fail.dusk");
+    assert!(
+        err.contains(
+            "a collected value cannot hold a slice, function, or interface"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_slice_collector_over_clean_managed_pointer_structs_is_allowed() {
+    // The buried-view guard is precise, not a blanket reject of managed-pointer
+    // slice elements. Here each pointee is heap owned, so the deep copy is sound: a
+    // forced collection keeps the outer backing and each generational pointee.
+    let out = run("collectorslicecell.dusk");
+    assert_eq!(out, "33\n");
+}
+
+#[test]
+fn collecting_a_slice_of_pointers_to_frame_views_is_rejected() {
+    // The slice-kind twin of collectorptrview_fail: the element reaches a managed
+    // pointer whose pointee stores a frame view. The deep copy does not immortalize
+    // the pointee, so it dangles; the guard looks past the outer frame slice and
+    // rejects the tainted pointer.
+    let err = check_fails("collectorsliceburied_fail.dusk");
+    assert!(
+        err.contains(
+            "a collected slice element holds a pointer to an object that stores a view of the current frame"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn collecting_a_closure_that_captures_a_buried_frame_view_is_rejected() {
+    // The closure-kind twin of collectorptrview_fail: a captured managed pointer
+    // whose pointee stores a frame view. Its type is immortal safe, but the buried
+    // slice dangles once the frame is gone, so the capture rule runs the plain
+    // mint's escape check to catch it, not just a view-typed capture.
+    let err = check_fails("collectorcapbury_fail.dusk");
+    assert!(
+        err.contains("cannot collect a closure that captures 'p': it may view a frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_lambda_widens_into_a_closure_collector_parameter() {
+    // The mono rewrite mints a bare lambda literal at a collector<F> parameter,
+    // and a collector<F> value passes the other way where a plain F is expected.
+    // Both directions leave the environment on the collected heap and dispatch
+    // through the closure rep.
+    let out = run("collectorwiden.dusk");
+    assert_eq!(out, "7\n35\n");
+}
+
+#[test]
+fn a_bare_lambda_at_a_method_collector_parameter_is_rejected() {
+    // The mono rewrite mints a lambda into a collector only at a direct top-level
+    // call, never a method argument, so a bare lambda there would lower to a stack
+    // environment typed as a collector and dangle. Rejected, pointing at the mint.
+    let err = check_fails("collectormethodlam_fail.dusk");
+    assert!(
+        err.contains(
+            "a bare lambda cannot become a closure collector at a method argument"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_explicit_mint_at_a_method_argument_works() {
+    // The accept twin: an explicit mint at a method argument lands the environment
+    // on the collected heap, so the closure survives the building frame and a
+    // forced collection.
+    let out = run("collectormethodmint.dusk");
+    assert_eq!(out, "43\n");
+}
+
+#[test]
+fn a_bare_lambda_at_an_indirect_call_collector_parameter_is_rejected() {
+    // An indirect callee is not rewritten by mono, so a bare lambda at its
+    // closure-collector parameter would skip the mint and dangle. Rejected.
+    let err = check_fails("collectorindirectlam_fail.dusk");
+    assert!(
+        err.contains(
+            "a bare lambda cannot become a closure collector through an indirect call"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_explicit_mint_through_an_indirect_call_works() {
+    // The accept twin: an explicit mint fed to an indirect call mints before the
+    // call, so the collector value the callee receives is already on the collected
+    // heap and survives a forced collection.
+    let out = run("collectorindirectmint.dusk");
+    assert_eq!(out, "5\n");
+}
+
+#[test]
+fn a_closure_capturing_a_buried_frame_view_pointer_parameter_is_rejected() {
+    // The interprocedural closure-capture sink: a minting helper captures its
+    // pointer parameter, and a caller buries a frame view behind its pointee. The
+    // closure mint records a sink on the captured pointer, so the caller is caught
+    // one hop up, matching the plain and slice kinds.
+    let err = check_fails("collectorcapparam_fail.dusk");
+    assert!(err.contains("holds a view of the sending frame"), "{err}");
+}
+
+#[test]
+fn a_closure_capturing_a_clean_pointer_parameter_is_allowed() {
+    // The accept twin: the caller passes a pointer to a heap-clean object, so the
+    // sink does not fire and the closure is sound across a forced collection.
+    let out = run("collectorcapparamok.dusk");
+    assert_eq!(out, "77\n");
+}
+
+#[test]
+fn the_widening_path_enforces_the_capture_rule() {
+    // A bare lambda at a collector parameter is minted, so a frame-view capture is
+    // rejected there too, exactly as in the explicit mint form.
+    let err = check_fails("collectorwidencap_fail.dusk");
+    assert!(
+        err.contains(
+            "cannot collect a closure that captures 's': it may view a frame"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn collectors_survive_a_suspension_held_in_the_task_frame() {
+    // Three collectors minted inside an async func, all held across the await in
+    // the task frame, a registered collector root. A collection forced before and
+    // after the suspension cannot sweep them, so each derefs to its minted value
+    // in order. Proves the task-frame root keeps more than one collected ref live.
+    let out = run("gcasync.dusk");
+    assert_eq!(out, "100\n20\n3\n123\n");
+}
+
+#[test]
+fn a_vector_of_collectors_grows_past_collections() {
+    // A vector of collectors grown past ten collections. The vector buffer is a
+    // generational block the collector scans as a root region, so every element
+    // stays live through the growth and the read. Sum is the arithmetic answer,
+    // proving the generation registry roots a same-thread container of collectors.
+    // A same-thread container is not confined away, so this must build and run.
+    let out = run("gcvector.dusk");
+    assert_eq!(out, "135\n");
+}
+
+#[test]
+fn two_hundred_async_tasks_each_hold_a_collector_across_a_collection() {
+    // Two hundred async tasks each mint a collector and hold it across a timer,
+    // read back with collections interleaved. Every parked task frame is a
+    // registered collector root, so the block a task holds across its suspension
+    // survives a collection forced while all are parked and on every read.
+    let out = run("gcstress.dusk");
+    assert_eq!(out, "19900\n");
+}
+
+#[test]
+fn an_async_func_may_return_a_collector_through_its_future() {
+    // An async func returns a collector, so its future carries a collected value.
+    // A future record is a generational block the collector scans, so the value is
+    // rooted from completion until the read, a collection forced inside the task
+    // and after the loop leaving it intact. A future completes on the loop thread
+    // the value was minted on, so the thread confinement does not ban it the way
+    // it bans a channel element or a spawn capture. This locks the allowance in.
+    let out = run("gcfuturecollector.dusk");
+    assert_eq!(out, "42\n");
+}
+
+#[test]
+fn a_channel_of_collectors_is_rejected() {
+    // A collected value stays on the main thread; a channel carries its element to
+    // another thread, where it would sit unrooted in the ring and be swept while
+    // live. The element type is refused at the mint. The accept twin is chanheap_ok,
+    // a channel of managed pointers whose heap objects the collector still roots.
+    let err = check_fails("chancollector_fail.dusk");
+    assert!(
+        err.contains("a collected value stays on the main thread; it cannot cross through a channel to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_spawn_capturing_a_collector_is_rejected() {
+    // A collected value stays on the main thread; a spawned frame runs on another
+    // thread. The capture is refused. The accept twin is a spawn capturing a
+    // managed pointer or scalar, backstopped by the generation check.
+    let err = check_fails("spawncollector_fail.dusk");
+    assert!(
+        err.contains("spawn cannot capture 'c': a collected value stays on the main thread; it cannot cross to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_submit_capturing_a_collector_is_rejected() {
+    // A collected value stays on the main thread; a pool worker runs on another
+    // thread. The capture is refused. The accept twin is poolsum, whose submit
+    // captures a channel and a scalar and sends the result back.
+    let err = check_fails("submitcollector_fail.dusk");
+    assert!(
+        err.contains("submit cannot capture 'c': a collected value stays on the main thread; it cannot cross to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn boxing_a_collector_into_an_interface_is_rejected() {
+    // An interface value is a fat pointer that can ride a channel or a spawn
+    // capture off the main thread, and a collected value stays on the main thread,
+    // so the boxing is refused. Distinct from collectoriface_fail, a collector
+    // over an interface element. The accept twin is boxing a concrete implementer.
+    let err = check_fails("collectorifacebox_fail.dusk");
+    assert!(
+        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        "{err}"
+    );
+}
+
+// A collector reached through a managed pointer must not cross a thread either.
+// The collector scans anchor-side roots only, never a worker stack, so a
+// collected ref carried behind a pointer to another thread is swept while that
+// thread still holds it, a confirmed use after free. The reach walk finds a
+// collector behind a pointer, bare or buried in a struct, spelled out or through
+// a generic. The accept twins prove an ordinary managed pointer still crosses.
+
+#[test]
+fn a_channel_of_pointers_to_collectors_is_rejected() {
+    let err = check_fails("chancollectorptr_fail.dusk");
+    assert!(
+        err.contains("a collected value stays on the main thread; it cannot cross through a channel to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_channel_of_pointers_to_a_collector_bearing_struct_is_rejected() {
+    let err = check_fails("chancollectorcell_fail.dusk");
+    assert!(
+        err.contains("a collected value stays on the main thread; it cannot cross through a channel to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_generic_channel_at_a_pointer_to_a_collector_is_rejected() {
+    let err = check_fails("chancollectorgeneric_fail.dusk");
+    assert!(
+        err.contains("a collected value stays on the main thread; it cannot cross through a channel to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_spawn_capturing_a_pointer_to_a_collector_is_rejected() {
+    // The repro gpt-5.5 reduced to a use after free: check accepted it, run
+    // faulted. The reach walk now refuses it at check.
+    let err = check_fails("spawncollectorptr_fail.dusk");
+    assert!(
+        err.contains("spawn cannot capture 'p': a collected value stays on the main thread; it cannot cross to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_spawn_capturing_a_pointer_to_a_collector_bearing_struct_is_rejected() {
+    let err = check_fails("spawncollectorcell_fail.dusk");
+    assert!(
+        err.contains("cannot capture 'cell': a collected value stays on the main thread; it cannot cross to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_channel_of_pointers_to_scalar_cells_still_crosses() {
+    // Accept twin: no collector is reachable through the pointer, so the send
+    // crosses freely. Proves the pointer-reaches-collector ban is not over-wide.
+    let out = run("chanptrscalar_ok.dusk");
+    assert_eq!(out, "9\n");
+}
+
+#[test]
+fn a_spawn_capturing_a_pointer_to_a_scalar_cell_still_works() {
+    // Accept twin: an ordinary managed pointer is still capturable.
+    let out = run("spawnptrscalar_ok.dusk");
+    assert_eq!(out, "7\n");
+}
+
+// Boxing a collector into an interface is refused wherever the coercion happens,
+// not only at an argument, binding, or return: a struct field, an array element,
+// and a tuple element route through the same reject with a clean diagnostic
+// rather than reaching codegen as a fat-rep mismatch.
+
+#[test]
+fn boxing_a_collector_into_an_interface_field_is_rejected() {
+    let err = check_fails("collectorfieldbox_fail.dusk");
+    assert!(
+        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn boxing_a_collector_into_an_interface_array_element_is_rejected() {
+    let err = check_fails("collectorarraybox_fail.dusk");
+    assert!(
+        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn boxing_a_collector_into_an_interface_tuple_element_is_rejected() {
+    let err = check_fails("collectortuplebox_fail.dusk");
+    assert!(
+        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn boxing_a_concrete_implementer_into_an_interface_field_still_works() {
+    // Accept twin: the ordinary interface path at a field still works, so the
+    // collector iface-box reject is not over-wide.
+    let out = run("collectorfieldconcrete_ok.dusk");
+    assert_eq!(out, "42\n");
 }

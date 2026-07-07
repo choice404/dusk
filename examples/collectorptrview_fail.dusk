@@ -1,0 +1,21 @@
+@paradigm procedural
+
+// A collector element that is a managed pointer is allowed only when its pointee
+// is heap owned. Here the pointee stores a slice into a frame local array, so the
+// collected block, which outlives the frame, carries a dangling view. The mint is
+// an outliving sink, the same as the rejected `return p`, so it is refused.
+struct Inner {
+    s: int64[],
+}
+
+func mk() -> collector<*Inner> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    return collector<*Inner>(p)
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*(*c)).s[0])
+    return 0
+}
