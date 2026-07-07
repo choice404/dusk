@@ -1,0 +1,34 @@
+// W2: result_from bridges a (value, error) pair, the shape a fallible call
+// returns, into a Result. Its e parameter is declared error, so handing a
+// bound error here directly discharges the caller's must-handle obligation
+// the same way a bare return or a sink call does; neither v nor e2 is ever
+// ignore()'d here.
+
+@paradigm procedural
+
+@import std.functional.result
+
+func fail() -> (int64, error) {
+    return (0, error { message: "boom" })
+}
+
+func succeed() -> (int64, error) {
+    return (42, error {})
+}
+
+func main() -> int32 {
+    v, e := fail()
+    r := result_from(v, e)
+    match r {
+        Ok(x) => println("ok {}", x),
+        Err(msg) => println("err {}", msg),
+    }
+
+    v2, e2 := succeed()
+    r2 := result_from(v2, e2)
+    match r2 {
+        Ok(x) => println("ok {}", x),
+        Err(msg) => println("err {}", msg),
+    }
+    return 0
+}

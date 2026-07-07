@@ -351,6 +351,8 @@ func area(s: Shape) -> float64 {
 
 A variant is constructed through the enum qualified form, `Shape.Circle(2.0)`, the same qualifier a `match` arm reads back against. The bare form, `Circle(2.0)`, is not a constructor and is rejected, `use the qualified form 'Shape.Circle' to construct an enum value; the unqualified variant name is not a constructor`, naming the fix rather than resolving the variant by its global name and risking a collision with a like named function or a stale local of the same name still in scope. A constructor's argument count and each payload's type are checked against the variant's declaration: `Shape.Circle()` with no argument, and `Shape.Rect(1.0, true)` against a `float64` second field, are each rejected at the constructor site rather than left to surface later as an unrelated mismatch once the value is read back.
 
+A generic enum's empty variant, `Opt.None` on `enum Opt<T> { Some(v: T), None }`, carries no payload to read its type parameter from, so something around it has to pin `T` instead. The surrounding expected type does the pinning: a struct literal field, a call argument at a non generic parameter, an assignment's declared type, and an array element each thread their own grounded type down as the constructor's expected, instantiating `T` there rather than falling back to any default. A `Opt.None` sitting nowhere an expected type reaches it, an unannotated `:=` binding among them, is rejected by name, `cannot infer the type parameter 'T' for 'Opt'; add an annotation that pins it`, instead of silently defaulting the parameter to `int64` and later dying inside `clang` on a width it never actually had.
+
 ---
 
 ## Expressions and Operators
@@ -722,13 +724,13 @@ monad Maybe<T> {
 
 The standard library ships these monads through import.
 
-| Monad        | Description                                                      |
-| ------------ | ---------------------------------------------------------------- |
-| Maybe<T>     | an optional value                                                |
-| Either<L, R> | one of two possible types                                        |
-| IO<T>        | wraps a side effecting computation, eager over its carried value |
-| Result<T, E> | success or a typed failure (planned, not yet in the tree)        |
-| List<T>      | the list monad (planned, not yet in the tree)                    |
+| Monad        | Description                                             |
+| ------------ | --------------------------------------------------------- |
+| Maybe<T>     | an optional value                                        |
+| Either<L, R> | one of two possible types                                |
+| IO<T>        | wraps a side effecting computation, lazy over its thunk  |
+| Result<T, E> | success or a typed failure                               |
+| List<T>      | the list monad (planned, not yet in the tree)            |
 
 This program unwraps a `Maybe` and prints the value.
 
@@ -790,33 +792,48 @@ The desugar emits a chain of generic bind continuations over an open type hole, 
 
 Because the continuation the desugar builds carries an open type hole until monomorphization closes it, a second, types only pass re-runs the real type checker over the whole module once every type in it is concrete, recovering the width and type checks the open hole would otherwise let the continuation's body skip. Before this pass landed, an int32 and int64 mix inside a generic `do` continuation's body silently truncated instead of being rejected; it is now caught exactly as the same expression is in plain code, `arithmetic mixes int32 and int64; match the widths`, and a `do` block's inferred element type clashing with an explicit annotation on its binding is caught the same way, `return type does not match the function's return type`. The fix is general, not a special case for `do`: the same recheck also catches a width mismatch hiding inside an ordinary generic function body.
 
-`std.functional.io` ships `IO<T>` as a `monad IO { ... }` block over a plain struct, composing through the generic `do` above like any other monad. `run(io: IO<A>) -> A` is the one effect boundary: it mints a future, offloads the carried value to a pool worker that completes it, and awaits the result back on the loop thread, the offload idiom the async examples already settled on. The loop and the pool must both be running before `run` and torn down after the last one.
+`std.functional.io` ships `IO<T>` as a `monad IO { ... }` block over `struct IO<T> { run: collector<() -> T> }`, composing through the generic `do` above like any other monad. Added in 0.5.3, `IO<T>` is a true lazy monad: `bind` and `unit` never run anything, they build a new collected thunk that captures the source and the continuation, so a whole `do IO { ... }` chain is a suspended computation sitting on the collected heap the moment it is built. `run(io: IO<A>) -> A` is the one effect boundary; it forces the thunk on the calling thread and returns the value the chain produces. Nothing about `IO<T>` touches the event loop or the thread pool: building a chain performs no effect, and `run` needs no `loop_init` or `pool_start` beforehand, unlike the earlier eager form this replaces.
 
 ```text
 @paradigm functional
 
 @import std.functional.io
-@import std.async.loop
-@import std.concurrent.pool
 
 func main() -> int32 {
-    le := loop_init()
-    le.ignore()
-    pe := pool_start(2)
-    pe.ignore()
     r := run(do IO {
         a <- io_pure(10)
         b <- io_pure(20)
         a + b
     })
     println(r)   // 30
-    pool_shutdown()
-    loop_free()
     return 0
 }
 ```
 
-This `IO` is eager over its carried value, not lazy: `bind` applies its continuation immediately and returns the continuation's own `IO`, storing no closure anywhere. A lazy `IO`, one that stores its continuation as a thunk and defers running it until `run`, is not expressible yet: the escape check rejects a struct field holding a closure that captures a local and is returned out of the frame that built it, `a closure that captures a local escapes its frame; it cannot be returned`. This is a deferred item, not an oversight. The eager form is sound and composes; the lazy form waits on a carrier the escape check has no shape for yet.
+Because the thunk and every step it captures live on the collected heap, a chain outlives the frame that built it and survives a collection forced between build and force; the escape check treats the mint the same as any other collected value, so a chain built from steps that only capture immortal safe data (a scalar, a managed pointer, a string, a nested collector) is accepted, while a step that would capture a frame local slice or an uncollected closure is rejected at the mint, naming the capture. `IO<T>` inherits collector confinement: a value of it cannot cross a `spawn` or `submit` capture, a channel, or an interface box, since the suspended environment behind its thunk is only ever rooted on the anchor thread. `IO<T>` does not exist for `void`; an effect that returns nothing yields `bool` instead, `io_print` and `io_println` among them.
+
+**Migration note.** Before 0.5.3, `run` minted a future and offloaded the carried value to a pool worker, so a program using it had to bring the loop and the pool up first and tear them down after the last `run`. That contract is gone: `run` now forces its thunk directly on the calling thread, and a program that still calls `loop_init` or `pool_start` around an `IO` chain for no other reason no longer needs to.
+
+`std.functional.result` ships `Result<T, E>` as `enum Result<T, E> { Ok(v: T), Err(e: E) }`, with a `monad Result { ... }` block fixed to `E = string`, the common case, since a generic `E` cannot flow through `do` inference. `do Result { ... }` threads `Ok` values and short circuits on the first `Err`, and `result_from(v: T, e: error) -> Result<T, string>` bridges the `(value, error)` pair a fallible call returns into a `Result`, folding an existing error into `Err(e.toString())` and an absent one into `Ok(v)`.
+
+```text
+@paradigm functional
+
+@import std.functional.result
+
+func main() -> int32 {
+    r := do Result {
+        a <- Result.Ok(1)
+        b <- Result.Ok(20)
+        a + b
+    }
+    match r {
+        Ok(v) => println("ok {}", v),
+        Err(e) => println("err {}", e),
+    }
+    return 0
+}
+```
 
 ---
 
@@ -884,6 +901,19 @@ e.ignore()   // explicit, visible, greppable suppression
 ```
 
 Unlike Go, there is no `_` suppression. `ignore()` replaces it. The difference is that `ignore()` is a visible, searchable acknowledgement in the source, while `_` hides the decision. An unhandled error binding is a compile error.
+
+Added in 0.5.3, a fourth way to use a bound error is to hand it to a parameter declared `error`.
+
+```text
+func sink(err: error) -> void {
+    err.ignore()
+}
+
+y, e := x.pop_back()
+sink(e)   // discharges e; sink's own err is now its obligation
+```
+
+Handing `e` straight to `sink`'s `err` parameter discharges the caller's obligation the same way a bare `return e` or a call to `check` or `ignore` does; a value handed to a plain, non `error` parameter does not discharge anything, `take(v)` next to an unread `e` is still rejected. The obligation does not stop at the caller: an `error` parameter carries the same must handle rule a let bound error does, so `func swallow(err: error) -> void { }`, a callee that receives an error and drops it with an empty body, is rejected, `the error 'err' is never handled`, the same message an unread let binding gets. A callee discharges its own `error` parameter by inspecting it with `exists()`, resolving it with `check(...)`, discarding it with `ignore()`, returning it, or handing it off again to another `error` parameter, the identical menu a let bound error has. The obligation is narrowed to a direct hand-off: reading the error into a fresh value first, or passing it through a generic passthrough call, does not count, so `sink(fst(e, e2))` still leaves both `e` and `e2` unhandled even though `sink` itself is clean. The net effect is a chain with no silent end: an error can move from a `:=` binding to a parameter to another parameter, but it cannot vanish into a body that never looks at it.
 
 ---
 
@@ -1231,7 +1261,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | Module                 | Description                                                     |
 | ---------------------- | --------------------------------------------------------------- |
 | std.io                 | print, println, printerr, file I/O                              |
-| std.logging            | structured logging with levels and output redirection           |
+| std.logging            | level gated logging to stderr, Debug through Error               |
 | std.memory.arena       | arena allocator                                                 |
 | std.memory.collector   | control and gauges for the collected heap behind `collector<T>` |
 | std.functional.maybe   | Maybe<T> monad                                                  |

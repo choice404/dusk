@@ -1,0 +1,23 @@
+// FIX-2: `pick<T>(a: T, b: T)` reads its first argument speculatively; the
+// unpinnable `Opt.None` yields `Opt<Infer>`, which must not bind the bare T and
+// beat the real pin the second argument supplies. `pick(Opt.None, Opt.Some(2.5))`
+// resolves T to Opt<float64> and runs.
+@paradigm procedural
+
+enum Opt<T> {
+    Some(v: T),
+    None,
+}
+
+func pick<T>(a: T, b: T) -> T {
+    return b
+}
+
+func main() -> int32 {
+    r := pick(Opt.None, Opt.Some(2.5))
+    match r {
+        Some(v) => println("{}", v),
+        None => println("none"),
+    }
+    return 0
+}

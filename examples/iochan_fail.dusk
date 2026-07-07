@@ -1,0 +1,20 @@
+// Compile-fail twin: a channel of IO values. An IO<T> holds a collected thunk, so
+// it stays on the main thread; a channel carries its element to another thread,
+// where the suspended environment would sit unrooted in the ring and be swept
+// while live. The element type is refused at the mint. The accept twin is a
+// channel of managed pointers, whose heap objects the collector still roots.
+
+@paradigm functional
+
+@import std.functional.io
+@import std.concurrent.channel
+
+func main() -> int32 {
+    ch: Channel<IO<int64>> = chan_new(4)
+    m := io_pure(10)
+    e := chan_send(ch, m)
+    e.ignore()
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

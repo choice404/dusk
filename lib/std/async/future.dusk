@@ -60,6 +60,10 @@ export func complete_raw<T>(h: *void, gen: int64, v: T, e: error) -> error {
     buf[0] = v
     ebuf: *raw error = alloc_bytes(sizeof(int64))
     ebuf[0] = e
+    // e is payload here, stored into the completion buffer the awaiter reads, not
+    // an error for this frame to inspect. The store is the hand-off; discard the
+    // must-handle obligation the error parameter now carries.
+    e.ignore()
     rc := cool_future_complete(h, gen, buf, ebuf)
     free(buf)
     free(ebuf)

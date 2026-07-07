@@ -1,0 +1,21 @@
+// Compile-fail twin of the lazy do-IO chain: a `do IO` continuation captures a
+// frame-view slice. The do desugar mints each continuation into a closure
+// collector that outlives the frame, so a captured slice into a local array would
+// dangle. The mint is rejected, naming the capture. The accept twin is iomonad,
+// whose continuations capture only scalars.
+
+@paradigm functional
+
+@import std.functional.io
+
+func main() -> int32 {
+    a: int64[3] = [1, 2, 3]
+    s := a[0..2]
+    chain := do IO {
+        x <- io_pure(10)
+        io_pure(x + s[0])
+    }
+    r := run(chain)
+    println(r)
+    return 0
+}

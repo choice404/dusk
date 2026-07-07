@@ -1,58 +1,111 @@
-// std.functional.io: IO<T> as a monad, with run bridging the effect onto the
-// event loop. This is the eager over value form. bind applies its continuation
-// at once and threads the plain value, storing no closure, because dusk's
-// escape check refuses a struct field that captures a frame, so a value holding
-// a suspended thunk cannot leave the frame that built it. The lazy IO that
-// stores a continuation waits on that field kind and is deferred. The effect
-// boundary is run, which mints a future, hands the value to a pool worker that
-// completes it, and awaits the result on the loop thread, the offload idiom the
-// 0.4.2 examples settled on.
+// std.functional.io: IO<T> as a true lazy monad. An IO<T> holds a collected
+// thunk, so building a chain suspends the computation instead of running it:
+// nothing happens until run forces the thunk. The thunk and every step it
+// captures live on the collected heap, so a chain outlives the frame that built
+// it and survives a collection between build and force. run is the only effect
+// boundary; it forces the thunk on this thread and returns its value.
 
 @paradigm functional
-@import std.async.future
-@import std.async.loop
-@import std.concurrent.pool
+
+@import std.functional.result
 
 export struct IO<T> {
-    v: T,
+    run: collector<() -> T>,
 }
 
-// The IO monad: `do IO { ... }` threads a value through each bind. bind is
-// eager, it runs the continuation on the carried value immediately and returns
-// the continuation's own IO, holding no closure. unit lifts a plain value into
-// IO. F-M1's generic bind through do resolves this pair per site.
+// The IO monad: `do IO { ... }` threads a value through each bind. bind returns a
+// new lazy IO whose thunk forces the source, feeds its value to the continuation,
+// then forces the continuation's own IO. m is a struct of a collected thunk and k
+// is a collected continuation, both immortal safe captures, so the built chain
+// leaves the frame. unit lifts a plain value into an IO that yields it on force.
 monad IO {
-    export func bind<A, B>(m: IO<A>, f: (A) -> IO<B>) -> IO<B> {
-        return f(m.v)
+    export func bind<A, B>(m: IO<A>, k: collector<(A) -> IO<B>>) -> IO<B> {
+        return IO {
+            run: collector<() -> B>(lambda () -> B {
+                a := (m.run)()
+                next := k(a)
+                return (next.run)()
+            }),
+        }
     }
     export func unit<A>(x: A) -> IO<A> {
-        return IO { v: x }
+        return IO {
+            run: collector<() -> A>(lambda () -> A {
+                return x
+            }),
+        }
     }
 }
 
-// Lifts a plain value into IO, the named surface unit gives the do block. Same
-// eager carrier: the value sits in the field until run discharges it.
+// Lifts a plain value into IO, the named surface unit. The thunk captures the
+// value and yields it on force.
 export func io_pure<A>(x: A) -> IO<A> {
-    return IO { v: x }
+    return IO {
+        run: collector<() -> A>(lambda () -> A {
+            return x
+        }),
+    }
 }
 
-// Discharges the effect. Mints a pending future, lifts its raw handle words out
-// before the submit so the offloaded body completes it without capturing a
-// future, and awaits the result on the loop thread. The pool worker only carries
-// scalars, h, gen, and the carried value, so the submit capture rule accepts it.
-// The loop must be running and the pool started before run, and torn down after
-// the last run, the loop_init, pool_start, work, pool_shutdown, loop_free order.
-export func run<A>(io: IO<A>) -> A {
-    f: Future<A> = future_new()
-    h := f.h
-    g := f.gen
-    x := io.v
-    e0 := submit(lambda () -> void {
-        e := complete_raw(h, g, x, error {})
-        e.ignore()
-    })
-    e0.ignore()
-    v, e := await(f)
-    e.ignore()
-    return v
+// Discharges the effect: forces the thunk on this thread and returns its value.
+// The chain's collected environments stay rooted through m until the force
+// completes, so a collection during the build cannot sweep the suspended steps.
+export func run<A>(m: IO<A>) -> A {
+    return (m.run)()
+}
+
+// Maps a pure function over an IO. Returns a new lazy IO whose thunk forces the
+// source and applies f to its value.
+export func io_map<A, B>(m: IO<A>, f: collector<(A) -> B>) -> IO<B> {
+    return IO {
+        run: collector<() -> B>(lambda () -> B {
+            a := (m.run)()
+            return f(a)
+        }),
+    }
+}
+
+// Sequences an effectful step after an IO. Returns a new lazy IO whose thunk
+// forces the source, hands its value to f, then forces the IO f returns. This is
+// bind by another name, the explicit surface for chaining without do.
+export func io_and_then<A, B>(m: IO<A>, f: collector<(A) -> IO<B>>) -> IO<B> {
+    return IO {
+        run: collector<() -> B>(lambda () -> B {
+            a := (m.run)()
+            next := f(a)
+            return (next.run)()
+        }),
+    }
+}
+
+// Prints a message with no trailing newline when forced, and yields true. An
+// effect yields bool, not a void IO, which IO<T> does not carry.
+export func io_print(msg: string) -> IO<bool> {
+    return IO {
+        run: collector<() -> bool>(lambda () -> bool {
+            print(msg)
+            return true
+        }),
+    }
+}
+
+// Prints a message with a trailing newline when forced, and yields true.
+export func io_println(msg: string) -> IO<bool> {
+    return IO {
+        run: collector<() -> bool>(lambda () -> bool {
+            println(msg)
+            return true
+        }),
+    }
+}
+
+// Reads one line from stdin when forced, stripped of its newline, as a Result:
+// Ok on a line, Err with the failure message at end of input or on a read error.
+export func io_read_line() -> IO<Result<string, string>> {
+    return IO {
+        run: collector<() -> Result<string, string>>(lambda () -> Result<string, string> {
+            line, e := read_line()
+            return result_from(line, e)
+        }),
+    }
 }

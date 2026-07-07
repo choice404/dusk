@@ -1,0 +1,18 @@
+// Compile-fail twin: io_pure over a frame-view slice. io_pure lifts its argument
+// into a collected thunk that captures it, so a slice viewing a local array would
+// leave a fat pointer into a dead frame once the thunk outlives io_pure. The mint
+// is rejected at the capture. The accept twin lifts a scalar or a managed pointer,
+// whose backing survives the frame.
+
+@paradigm functional
+
+@import std.functional.io
+
+func main() -> int32 {
+    a: int64[3] = [1, 2, 3]
+    s := a[0..2]
+    m := io_pure(s)
+    r := run(m)
+    println(r[0])
+    return 0
+}

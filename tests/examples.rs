@@ -675,6 +675,77 @@ fn an_enum_constructor_with_a_mistyped_payload_is_rejected() {
 }
 
 #[test]
+fn a_generic_call_that_pins_the_element_rejects_a_mistyped_ctor_payload() {
+    // FIX-A: `keep(0, ...)` pins the element to int64, so `Box.Has(true)` hands a
+    // bool where int64 belongs. The generic payload wildcards at the surface, so
+    // the ground type re-check names the mismatch instead of relabeling the bool.
+    let err = check_fails("enum_relabel_fail.dusk");
+    assert!(err.contains("argument 1 to 'Box.Has' has the wrong type"), "{err}");
+}
+
+#[test]
+fn an_uninferable_enum_ctor_argument_is_rejected() {
+    // FIX-B: `Opt.None` at a generic argument pins nothing, so `take(Opt.None)`
+    // reports the uninferable parameter at the call rather than laundering a silent
+    // int64 default through the argument.
+    let err = check_fails("enum_none_arg_fail.dusk");
+    assert!(err.contains("cannot infer the type parameter 'T' for 'take'"), "{err}");
+}
+
+#[test]
+fn an_error_laundered_through_a_generic_call_is_still_unhandled() {
+    // FIX-C: `sink(fst(e, e2))` hands sink the passthrough result but never hands
+    // off either error, so the discharge is narrowed to a bare binding and both
+    // stay pending.
+    let err = check_fails("err_launder_fail.dusk");
+    assert!(err.contains("'e' is never handled"), "{err}");
+    assert!(err.contains("'e2' is never handled"), "{err}");
+}
+
+#[test]
+fn an_error_read_into_a_fresh_error_is_still_unhandled() {
+    // FIX-C: `sink(remap(e))` reads e into a fresh error, so e is never handed off
+    // and stays pending.
+    let err = check_fails("err_makelaunder_fail.dusk");
+    assert!(err.contains("'e' is never handled"), "{err}");
+}
+
+#[test]
+fn an_error_laundered_through_a_method_argument_is_still_unhandled() {
+    // FIX-D: the method discharge is narrowed too, so `l.note(remap(e))` hands note
+    // a fresh error and e stays pending.
+    let err = check_fails("err_method_fail.dusk");
+    assert!(err.contains("'e' is never handled"), "{err}");
+}
+
+#[test]
+fn a_nested_generic_ctor_payload_of_the_wrong_width_is_rejected() {
+    // FIX-E with FIX-A: the outer ctor threads `Opt<int32>` as the inner payload's
+    // expected, but a declared int64 does not fit an int32 slot, so the ground type
+    // re-check names the mismatch instead of letting clang fault.
+    let err = check_fails("enum_nested_width_fail.dusk");
+    assert!(err.contains("argument 1 to 'Opt.Some' has the wrong type"), "{err}");
+}
+
+#[test]
+fn an_error_parameter_dropped_in_the_callee_is_rejected() {
+    // FIX-1: an error parameter carries a must-handle obligation, so a callee that
+    // drops it is rejected, closing the hand-off launder where the caller's
+    // obligation is discharged while no one inspects the error.
+    let err = check_fails("err_param_unhandled_fail.dusk");
+    assert!(err.contains("the error 'err' is never handled"), "{err}");
+}
+
+#[test]
+fn a_monad_bind_with_an_undetermined_result_element_is_rejected() {
+    // FIX-4: the phantom-source suppression applies only when the monad op's result
+    // element is determined. A do-chain that returns its empty source directly
+    // leaves the whole element uninferable, so it is reported, not defaulted.
+    let err = check_fails("monad_live_element_fail.dusk");
+    assert!(err.contains("cannot infer the type parameter 'A' for 'Evil.bind'"), "{err}");
+}
+
+#[test]
 fn a_struct_field_of_interface_type_is_boxed() {
     // A struct literal boxes a concrete value into an interface field. 9.
     assert_eq!(run("struct_iface_field.dusk"), "9\n");
@@ -1585,14 +1656,65 @@ fn a_malformed_foreign_body_is_rejected_in_bounded_time() {
 
 #[test]
 fn a_struct_field_holding_a_capturing_lambda_returned_out_of_its_frame_is_rejected() {
-    // F-M3's IO is eager over its carried value precisely because a field
-    // cannot hold a suspended thunk that escapes the frame that built it; a
-    // lazy IO storing a capturing lambda in a struct field, returned out of
-    // its constructing function, must be rejected the same way any other
-    // closure escape is.
+    // std.functional.io's IO is lazy through a collected thunk field; a plain
+    // function-typed field cannot hold a suspended thunk that escapes the frame
+    // that built it, which is why the collector kinds exist. A capturing lambda
+    // stored in a bare `() -> T` field and returned out of its constructing
+    // function must be rejected the same way any other closure escape is.
     let err = check_fails("iomonadbad.dusk");
     assert!(
         err.contains("a closure that captures a local escapes its frame; it cannot be returned"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_do_io_continuation_capturing_a_frame_view_is_rejected() {
+    // The lazy IO do desugar mints each continuation into a closure collector that
+    // outlives the frame, so a continuation capturing a frame-view slice would
+    // dangle the captured fat pointer. The mint is rejected, naming the capture.
+    // The accept twin is iomonad, whose continuations capture only scalars.
+    let err = check_fails("lazyiocap_fail.dusk");
+    assert!(
+        err.contains("cannot collect a closure that captures 's': it may view a frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn io_pure_over_a_frame_view_slice_is_rejected() {
+    // io_pure lifts its argument into a collected thunk that captures it, so a
+    // slice viewing a local array would leave a fat pointer into a dead frame once
+    // the thunk outlives io_pure. The caller-side mint check rejects the argument,
+    // proving genericity does not launder the capture past the ground pass.
+    let err = check_fails("iopureslice_fail.dusk");
+    assert!(
+        err.contains("'io_pure' collects 's', but it holds a view of the frame"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_submit_capturing_an_io_value_is_rejected() {
+    // An IO<T> holds a collected thunk, so it is confined to the main thread; a
+    // pool worker runs on another thread, where the collected environment would be
+    // swept while parked. The submit capture is refused, naming the IO value.
+    let err = check_fails("iosubmit_fail.dusk");
+    assert!(
+        err.contains("submit cannot capture 'm': a collected value stays on the main thread; it cannot cross to another thread"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_channel_of_io_values_is_rejected() {
+    // An IO<T> holds a collected thunk, so it stays on the main thread; a channel
+    // carries its element to another thread, where the suspended environment would
+    // sit unrooted in the ring and be swept while live. The element type is refused
+    // at the mint.
+    let err = check_fails("iochan_fail.dusk");
+    assert!(
+        err.contains("a collected value stays on the main thread; it cannot cross through a channel to another thread"),
         "{err}"
     );
 }
@@ -2552,8 +2674,44 @@ golden!(incdec, "incdec.dusk", "6\n-128\n1\n");
 golden!(pipes, "pipes.dusk", "10\n13\n6\n");
 golden!(inclusive, "inclusive.dusk", "9\n0\n15\n");
 golden!(genericmaybe, "genericmaybe.dusk", "Some(30)\nnone\n");
+// A user-defined lazy monad over a collected thunk, driven through `do Lz`. The
+// chain is built without running, so "before" prints ahead of every effect, then
+// forcing runs the effects in order and yields the summed value. Proves mono's
+// per-site inference instantiates a fresh bind/unit pair whose continuation is a
+// collector-wrapped lambda.
+golden!(lazydo, "lazydo.dusk", "before\neffect a\neffect b\nresult 30\n");
+// W1 gate accept twins. A generic call whose element the ground pass validates
+// (enum_relabel_ok), a payload-carrying ctor that pins its element
+// (enum_some_arg_ok), a direct error hand-off to an error parameter
+// (err_handoff_ok) and to an error method parameter (err_method_ok), and a nested
+// generic ctor instantiated at the element the outer ctor fixes (enum_nested_ok).
+golden!(enum_relabel_ok, "enum_relabel_ok.dusk", "has 7\n");
+golden!(enum_some_arg_ok, "enum_some_arg_ok.dusk", "1\n");
+golden!(err_handoff_ok, "err_handoff_ok.dusk", "0\nsunk\n");
+golden!(err_method_ok, "err_method_ok.dusk", "0\nnoted\n");
+golden!(enum_nested_ok, "enum_nested_ok.dusk", "some\n");
+// stdlib-phase gate accept twins. An error parameter inspected in the callee
+// (err_param_handled_ok), a sibling argument pinning a bare type parameter past a
+// poisoned ctor read (enum_infer_from_sibling_ok), and expected threading into a
+// struct-literal field, a non-generic call argument, an assignment, and an array
+// element, each instantiating an annotated `Opt.None` at its element.
+golden!(err_param_handled_ok, "err_param_handled_ok.dusk", "0\n1\n");
+golden!(enum_infer_from_sibling_ok, "enum_infer_from_sibling_ok.dusk", "2.5\n");
+golden!(enum_annot_struct_field_ok, "enum_annot_struct_field_ok.dusk", "none\n");
+golden!(enum_annot_call_arg_ok, "enum_annot_call_arg_ok.dusk", "none\n");
+golden!(enum_annot_assign_ok, "enum_annot_assign_ok.dusk", "none\n");
+golden!(enum_annot_array_ok, "enum_annot_array_ok.dusk", "none\n");
 golden!(doasync, "doasync.dusk", "17\n");
 golden!(iomonad, "iomonad.dusk", "30\n");
+// The lazy IO rework. std.functional.io's IO<T> now holds a collected thunk, so a
+// chain built with io_and_then and io_map suspends until run forces it: lazyio
+// prints "before" ahead of every effect, then the effects in order. lazyiogc
+// forces a collection between the build and run, proving the chain is rooted
+// through the last thunk on the stack. iohelpers exercises io_pure, io_map,
+// io_and_then, and io_println one each.
+golden!(lazyio, "lazyio.dusk", "before\neffect a\neffect b\nresult 30\n");
+golden!(lazyiogc, "lazyiogc.dusk", "42\n");
+golden!(iohelpers, "iohelpers.dusk", "21\n10\neffect\n1\n");
 golden!(tcplocal, "tcplocal.dusk", "ping\n");
 golden!(acceptloop, "acceptloop.dusk", "6\n");
 golden!(stress_timers, "stress_timers.dusk", "2000\n");
@@ -3338,4 +3496,43 @@ fn unicode_rune_count_survives_a_large_input_on_the_default_stack() {
     // reserved once at entry and reused, so half a million scalars count on the
     // default 8 MB stack instead of overflowing it with a per-iteration alloca.
     assert_eq!(run("unicodebig.dusk"), "500000\n");
+}
+
+#[test]
+fn logging_gates_by_level_and_set_level_lowers_the_threshold() {
+    // Default level is Info: log_debug is dropped, the rest fire. After
+    // log_set_level(LogLevel.Debug), log_debug fires too. The exit is clean, so
+    // run_raw is used only to keep stdout and stderr apart, not for a fault.
+    let (out, err, ok) = run_raw("logging.dusk");
+    assert!(ok, "logging.dusk must run cleanly: {err}");
+    assert_eq!(out, "phase1\nphase2\n");
+    assert_eq!(
+        err,
+        "[info] first\n[warn] careful\n[error] broken\n[debug] shown\n"
+    );
+}
+
+// 0.5.3 W2/W4: the Result monad and its helpers, and the new Maybe/Either
+// helpers. Bool prints as its 1/0 word, not the words "true"/"false".
+golden!(resultdo, "resultdo.dusk", "ok 21\nerr too big\n");
+golden!(resultbridge, "resultbridge.dusk", "err boom\nok 42\n");
+golden!(
+    resulthelpers,
+    "resulthelpers.dusk",
+    "1\n1\n0\n10\nrelabeled\n105\n0\n11\n"
+);
+golden!(maybehelpers, "maybehelpers.dusk", "1\n10\n105\n9\n");
+golden!(eitherhelpers, "eitherhelpers.dusk", "-1\n3\n6\n107\n4\n8\n");
+
+#[test]
+fn an_unpinned_result_ctor_is_diagnosed() {
+    // W2 reject twin: `Result.Err("too big")` carries no T payload, and
+    // nothing here pins it, so the binding cannot infer T. Compare
+    // resulthelpers.dusk, where every ctor is pinned by an annotation or by a
+    // plain, T-bearing argument.
+    let err = check_fails("resultctor_fail.dusk");
+    assert!(
+        err.contains("cannot infer the type parameter 'T' for 'Result'"),
+        "{err}"
+    );
 }

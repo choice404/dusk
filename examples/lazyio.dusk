@@ -1,0 +1,22 @@
+// A lazy IO chain built with the explicit surface, io_and_then and io_map. Each
+// step's effect, a print, fires only when run forces the thunk, so "before"
+// prints ahead of any effect. The bare lambdas sit at direct call arguments to
+// io_and_then and io_map, so mono mints each into a closure collector; the built
+// chain outlives the frame on the collected heap.
+
+@paradigm functional
+
+@import std.functional.io
+
+func main() -> int32 {
+    chain := io_and_then(io_println("effect a"), lambda (a: bool) -> IO<int64> {
+        return io_map(io_println("effect b"), lambda (b: bool) -> int64 {
+            return 30
+        })
+    })
+    // The chain is built but not forced: nothing has printed yet.
+    println("before")
+    result := run(chain)
+    println("result {}", result)
+    return 0
+}

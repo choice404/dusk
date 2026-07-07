@@ -2,6 +2,50 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.5.3
+
+The stdlib. This release rebuilds `IO<T>` as a true lazy monad, ships `std.functional.result` and `std.logging`, rounds out the `Maybe` and `Either` helper surfaces, and closes two soundness gaps the stdlib work exposed: a class of generic constructor calls that used to default silently or die inside `clang`, and a must handle launder through an `error` parameter that used to let an obligation end quietly. Suite 434 unit (up from 418), 511 golden (up from 477, 34 of them new for this release), 13 parser termination, clippy clean.
+
+`IO<T>` becomes lazy, a behavior change.
+
+- `std.functional.io` now defines `struct IO<T> { run: collector<() -> T> }`. `bind` and `unit` build a new collected thunk instead of running anything: `bind(m, k)` returns a thunk that, once forced, forces `m`, feeds its value to `k`, and forces the `IO` `k` returns; `unit(x)` returns a thunk that just yields `x`. A `do IO { ... }` block therefore builds a chain of nested thunks on the collected heap with no effect fired yet, and `run(io: IO<A>) -> A` is the one place that forces the outermost thunk and runs the whole chain, on the calling thread.
+- The thunk and every step it captures live on the collected heap, so a chain outlives the frame that built it and survives a collection forced between build and force; `run` keeps the chain rooted through to completion. `IO<T>` inherits collector confinement outright: a value of it cannot cross a `spawn` or `submit` capture, a channel, or an interface box, since the suspended environment behind its thunk is only ever safe on the anchor thread. `IO<T>` still does not exist for `void`; an effect that returns nothing yields `bool`, as `io_print` and `io_println` already did.
+- **Migration note.** The 0.4.3 `IO` was eager over its carried value and its `run` minted a future and offloaded onto the thread pool, so a program had to bring the event loop and the pool up with `loop_init` and `pool_start` before the first `run` and tear them down after the last one. `run` now just forces its thunk on the calling thread; that loop and pool ceremony around an `IO` chain is no longer needed, and a program that keeps it around for no other reason can drop it.
+- `io_pure`, `run`, `io_map`, `io_and_then`, `io_print`, `io_println`, and a new `io_read_line() -> IO<Result<string, string>>`, which reads one line when forced and folds end of input or a read failure into `Err`, ship over the lazy carrier.
+
+`std.functional.result`, new.
+
+- `Result<T, E>` is `enum Result<T, E> { Ok(v: T), Err(e: E) }`. A `monad Result { ... }` block fixes `E` to `string`, the common case, since a generic `E` cannot flow through `do` inference the way `Maybe`'s single type parameter does; a caller needing a different error type uses the plain constructors and helpers instead of `do Result { ... }`. `do Result { ... }` threads `Ok` values and short circuits on the first `Err`.
+- `result_ok`, `result_err`, `is_ok`, `is_err`, `result_unwrap_or`, `result_map`, `result_map_err`, `result_and_then`, and `result_or_else` round out the surface the same way `Maybe`'s helpers do. `result_from(v: T, e: error) -> Result<T, string>` bridges the `(value, error)` pair a fallible call returns: `Ok(v)` when `e` carries nothing, `Err(e.toString())` when it does, and handing `result_from` a bound error discharges the caller's must handle obligation the same way any other hand-off to an `error` parameter now does (see below).
+
+`Maybe` and `Either`, rounded out.
+
+- `Maybe` gains `is_none`, `maybe_map`, `maybe_and_then`, and `maybe_or_else`, alongside the existing `is_some` and `unwrap_or`.
+- `Either` gains `right_or`, `either_map`, `either_map_left`, `either_and_then`, and `either_or_else`, alongside the existing `is_left` and `left_or`. `Either` still has no `monad Either { ... }` block; a `unit` for it would have to pick a free `Left`, and there is no canonical one, so `do Either { ... }` stays unsupported by design and the plain helpers are the surface.
+
+`std.logging`, new.
+
+- `LogLevel` is `Debug`, `Info`, `Warn`, or `Error`, ranked in that order. `log_set_level` sets a process wide threshold, and `log_debug`, `log_info`, `log_warn`, and `log_error` each fire to stderr, tagged `[debug]`, `[info]`, `[warn]`, or `[error]`, only when their own level is at or above the current threshold. The default threshold is `Info`. The level lives in the C runtime as a single atomic word shared by every thread, so a `log_set_level` call from any thread takes effect everywhere at that thread's next log call, and every message goes to stderr so a program's stdout output stays clean underneath it.
+
+Generic inference, hardened against a silent default or a `clang` death.
+
+- A bare lambda handed to a parameter typed `collector<(A) -> X<B>>`, the shape a lazy monad's `bind` takes its continuation as, now pins `A` and `B` the same way a bare lambda at a plain function typed parameter already did; this is what lets `do` notation compose over a lazy monad like the new `IO` or a user defined one shaped like it.
+- An enum constructor for an empty variant, `Opt.None` on a generic `Opt<T>`, carries no payload to read `T` from. Sitting at a struct literal field, a call argument, an assignment's declared right hand side, or an array element, it now instantiates `T` from that position's grounded expected type instead of defaulting; a nested constructor threads the same way, so `Opt.Some(Opt.None)` at an annotated `Opt<Opt<float64>>` instantiates the inner `None` at `float64`.
+- A constructor or a monad `do` element that still cannot be pinned anywhere is now a named compile error, `cannot infer the type parameter 'T' for 'Opt'; add an annotation that pins it`, instead of silently defaulting the parameter to `int64` and dying later inside `clang` on a width mismatch it never surfaced, or being silently relabeled as whatever type happened to be expected.
+- A generic enum constructor's payload is now validated against the variant's declared field type in the ground, types only pass, the same recheck that already catches a width mismatch hiding inside a generic function body: a call that pins the element from one argument, `keep(0, Box.Has(true))` pinning `Box<T>` to `int64` through `seed: T`, now catches the mismatched `bool` payload instead of letting it relabel silently as an `int64`.
+
+Every error must be handled, extended to `error` parameters, a behavior change.
+
+- Handing a bound error straight to a parameter declared `error` now discharges the caller's must handle obligation, the same as a bare `return`, a `check`, or an `ignore` call. The obligation does not stop at the caller: an `error` parameter now carries the same must handle rule a let bound error does, so a function like `func swallow(err: error) -> void { }`, an empty body that receives an error and drops it, is rejected, `the error 'err' is never handled`. A callee discharges its own `error` parameter with `exists()`, `check(...)`, `ignore()`, a `return`, or a hand-off to another `error` parameter, the same menu a let bound error already had.
+- The discharge is narrowed to a direct hand-off at the argument, not a whole expression scan: reading a bound error into a fresh value first, or laundering it through a generic passthrough call, still leaves the original binding unhandled. `sink(fst(e, e2))`, handing a passthrough helper's result to a clean `sink`, still reports both `e` and `e2` as never handled, since neither is handed to `sink` directly. The net effect closes a hole where an obligation could pass from a binding to a parameter to another parameter and end inside a body that never actually inspected it.
+
+Known limitations.
+
+- A monad `do` element bound from an empty source carrier, `a <- Maybe.None` or a user monad's equivalent, still defaults to `int64` when nothing pins its width and the source carrier's own bind body would call the continuation on that phantom element anyway; this is a deterministic default over an underdetermined program, not a reject, and closing it needs an analysis of the bind body itself, out of scope for this release. A `do` chain that returns its own empty source directly, leaving the whole result element undetermined rather than merely a phantom argument, is still reported by name rather than defaulted.
+- A multi statement lambda passed as a helper call's argument still infers its return type weakly in some positions; an explicit return type annotation on the lambda resolves it.
+- `IO<T>` still has no `void` instance; an effect returns `bool` instead.
+- `Either` still has no `monad Either { ... }` block; use the plain helpers.
+
 ## 0.5.2
 
 Unicode strings. This release adds a `rune` type for a single Unicode scalar value, the `\u{...}` escape, strict UTF-8 validation of string literals, and `std.unicode`, a pure dusk decode and encode layer over the string's existing byte view. A string's representation does not change: it stays the same NUL terminated UTF-8 byte view it always was, `s[i]` still reads a byte, and iterating scalar by scalar is a decoding walk, `decode_rune(s, i)`, not a new indexing form. A codegen fix lands alongside the surface work: a loop body binding no longer allocates a fresh stack slot every iteration. Suite 418 unit, 477 golden (up from 458, 19 of them new for this release), 13 parser termination, clippy clean.

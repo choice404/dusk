@@ -1,0 +1,56 @@
+// A user-defined lazy monad driven through `do`. Lz<T> wraps a collected thunk,
+// so a `do Lz { ... }` block builds a suspended computation instead of running
+// it: nothing prints until the chain is forced. This is the do-over-lazy-IO path
+// mono's per-site inference opens, one fresh bind/unit pair minted per `<-`.
+
+@paradigm functional
+
+struct Lz<T> {
+    run: collector<() -> T>
+}
+
+// The Lz monad. bind returns a new thunk that captures the source thunk and the
+// continuation, so forcing the result forces the source, feeds its value to the
+// continuation, then forces that. unit lifts a plain value into a thunk that
+// yields it. Both live on the collected heap, so a chain outlives the frame.
+monad Lz {
+    export func bind<A, B>(m: Lz<A>, k: collector<(A) -> Lz<B>>) -> Lz<B> {
+        return Lz {
+            run: collector<() -> B>(lambda () -> B {
+                a := (m.run)()
+                next := k(a)
+                return (next.run)()
+            })
+        }
+    }
+    export func unit<A>(x: A) -> Lz<A> {
+        return Lz {
+            run: collector<() -> A>(lambda () -> A {
+                return x
+            })
+        }
+    }
+}
+
+// A named step whose effect, a print, fires only when its thunk is forced.
+func step(label: string, val: int64) -> Lz<int64> {
+    return Lz {
+        run: collector<() -> int64>(lambda () -> int64 {
+            println("effect {}", label)
+            return val
+        })
+    }
+}
+
+func main() -> int32 {
+    chain := do Lz {
+        a <- step("a", 10)
+        b <- step("b", 20)
+        a + b
+    }
+    // The chain is built but not run: "before" prints ahead of any effect.
+    println("before")
+    result := (chain.run)()
+    println("result {}", result)
+    return 0
+}

@@ -1,0 +1,27 @@
+// FIX-C reject: `fst` is generic, not an error parameter, so `sink(fst(e, e2))`
+// hands its result to sink but never hands off e or e2 as errors. The discharge
+// is narrowed to a bare error binding at the argument, so an error buried inside
+// a larger expression stays pending and both e and e2 are still rejected.
+@paradigm procedural
+
+func fail() -> (int64, error) {
+    return (0, error { message: "boom" })
+}
+
+func fst<T, U>(a: T, b: U) -> T {
+    return a
+}
+
+func sink(err: error) -> void {
+    err.ignore()
+    println("sunk")
+}
+
+func main() -> int32 {
+    v, e := fail()
+    w, e2 := fail()
+    println(v)
+    println(w)
+    sink(fst(e, e2))
+    return 0
+}

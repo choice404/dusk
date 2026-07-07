@@ -1,0 +1,23 @@
+// FIX-C reject: `remap` reads e into a fresh error, so sink receives a new error
+// and e itself is never handed off. e stays pending and is rejected.
+@paradigm procedural
+
+func fail() -> (int64, error) {
+    return (0, error { message: "boom" })
+}
+
+func remap<T>(x: T) -> error {
+    return error { message: "remapped" }
+}
+
+func sink(err: error) -> void {
+    err.ignore()
+    println("sunk")
+}
+
+func main() -> int32 {
+    v, e := fail()
+    println(v)
+    sink(remap(e))
+    return 0
+}

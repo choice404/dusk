@@ -1,0 +1,34 @@
+// FIX-4: the phantom-source suppression applies only when the monad op's result
+// element is determined. Here the do-chain binds the empty source and returns it
+// directly, so the result element is the source element, wholly uninferable. The
+// element is reported rather than silently defaulted.
+@paradigm functional
+
+enum Evil<T> {
+    Full(v: T),
+    Empty,
+}
+
+monad Evil {
+    func bind<A, B>(m: Evil<A>, f: (A) -> Evil<B>) -> Evil<B> {
+        match m {
+            Full(a) => return f(a),
+            Empty => return f(0),
+        }
+    }
+    func unit<A>(x: A) -> Evil<A> {
+        return Evil.Full(x)
+    }
+}
+
+func main() -> int32 {
+    r := do Evil {
+        a <- Evil.Empty
+        a
+    }
+    match r {
+        Full(v) => println("full"),
+        Empty => println("empty"),
+    }
+    return 0
+}

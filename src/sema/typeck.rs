@@ -776,6 +776,15 @@ impl TypeChecker {
             if matches!(&raw, Ty::Named(n) if self.ifaces.contains(n)) {
                 self.declare_iface_bind(&p.name);
             }
+            // An error parameter carries the same must-handle obligation a
+            // let-bound error does: the callee that receives it must inspect it
+            // with exists, handle it with check, discard it with ignore, return it,
+            // or hand it off again. Without this a call-site hand-off into an error
+            // parameter would discharge the caller's obligation while the callee
+            // silently dropped the error, ending the chain with no one accountable.
+            if matches!(ty, Ty::Error) {
+                self.declare_err(&p.name, f.span);
+            }
             self.declare(&p.name, ty);
         }
         for s in &f.body.stmts {
@@ -1706,13 +1715,13 @@ impl TypeChecker {
     /// annotation would paper over. An interface or slice-of-interface payload is
     /// left to the conformance and covariance guards, which allow a boxed concrete
     /// value; a generic payload lowers to Unknown here and wildcards against any
-    /// argument. Surface pass only: the ground pass runs solely on an already-clean
-    /// program, and mono may share a variant name across instantiations, so no
-    /// arity is re-derived there.
+    /// argument. Runs in both passes: a generic enum's payload reads as Unknown at
+    /// the surface and wildcards, so a mistyped payload buried behind the element
+    /// parameter is caught only once mono grounds it. The ground pass keys by the
+    /// mangled enum name (`Opt$int32`), which is unique per instantiation, so a
+    /// variant name shared across instantiations still checks against the right
+    /// declaration. The display name is demangled so the message reads `Opt.Some`.
     fn check_variant_ctor_args(&mut self, en: &str, v: &str, args: &[Expr], arg_tys: &[Ty], span: Span) {
-        if self.types_only {
-            return;
-        }
         // Only a real variant of this enum is a constructor; a mistyped member
         // name is not one and is not shaped here.
         if !self.enums.get(en).is_some_and(|vs| vs.iter().any(|x| x == v)) {
@@ -1726,10 +1735,13 @@ impl TypeChecker {
             .get(&(en.to_string(), v.to_string()))
             .cloned()
             .unwrap_or_default();
+        // Strip the `$...` monomorphization suffix so a ground instantiation names
+        // its source enum in the message, not the mangled internal name.
+        let disp = en.split('$').next().unwrap_or(en);
         if payloads.len() != args.len() {
             self.err(
                 format!(
-                    "'{en}.{v}' takes {} argument(s), but {} were given",
+                    "'{disp}.{v}' takes {} argument(s), but {} were given",
                     payloads.len(),
                     args.len()
                 ),
@@ -1746,7 +1758,7 @@ impl TypeChecker {
             }
             if !compatible(p, a) {
                 let s = args.get(i).map(|x| x.span).unwrap_or(span);
-                self.err(format!("argument {} to '{en}.{v}' has the wrong type", i + 1), s);
+                self.err(format!("argument {} to '{disp}.{v}' has the wrong type", i + 1), s);
             }
         }
     }
@@ -4473,6 +4485,18 @@ impl TypeChecker {
                                     arg.span,
                                 );
                             }
+                            // The same direct error hand-off a bare call discharges:
+                            // an error binding handed to a method parameter declared
+                            // `error` is that method's to inspect. Only a bare binding
+                            // at the argument counts, so a laundered error stays
+                            // pending.
+                            if matches!(p, Ty::Error)
+                                && matches!(arg_tys.get(i), Some(Ty::Error))
+                            {
+                                if let ExprKind::Ident(n) = &arg.kind {
+                                    self.mark_err_handled(n);
+                                }
+                            }
                         }
                     }
                 }
@@ -4696,6 +4720,18 @@ impl TypeChecker {
                 );
             } else {
                 for (i, (p, a)) in params.iter().zip(&arg_tys).enumerate() {
+                    // An error binding handed directly to a parameter declared
+                    // `error` is that callee's to inspect, mirroring a returned
+                    // error, so mark that one binding discharged. Only a bare error
+                    // binding at the argument counts: an error buried inside a
+                    // larger expression (`sink(fst(e, e2))`, `sink(wrap(e))`) is not
+                    // a hand-off of that error, so it stays pending and is still
+                    // rejected. A value that is not an error binding marks nothing.
+                    if matches!(p, Ty::Error) && matches!(a, Ty::Error) {
+                        if let ExprKind::Ident(n) = &args[i].kind {
+                            self.mark_err_handled(n);
+                        }
+                    }
                     // A lambda literal where a closure collector is expected is
                     // minted by the mono rewrite into an explicit
                     // collector<F>(lambda) node, so accept it here and enforce the
@@ -6401,6 +6437,89 @@ mod tests {
              func a() -> void {\n  v, e := fail()\n  println(v)\n  if e.exists() {\n    return\n  }\n}\n\
              func b() -> void {\n  v, e := fail()\n  println(v)\n  e.ignore()\n}\n\
              func c() -> (int64, error) {\n  v, e := fail()\n  return (v, e)\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn passing_an_error_to_an_error_parameter_handles_it() {
+        // Handing a bound error to a parameter declared `error` discharges the
+        // must-handle obligation, mirroring a returned error.
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func sink(err: error) -> void { err.ignore() }\n\
+             func f() -> void {\n  v, e := fail()\n  println(v)\n  sink(e)\n}",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn an_error_passed_to_a_non_error_parameter_is_still_unhandled() {
+        // The reject twin: passing the error's sibling value to a plain parameter
+        // does not discharge the error, so it is still rejected.
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func take(n: int64) -> void { println(n) }\n\
+             func f() -> void {\n  v, e := fail()\n  take(v)\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn an_error_laundered_through_a_generic_call_is_still_unhandled() {
+        // FIX-C: the discharge is narrowed to a bare error binding at the argument.
+        // `sink(fst(e, e2))` hands sink the passthrough result but never hands off
+        // either error, so both stay pending. Without the narrowing the whole-arg
+        // walk would clear e and e2 and let the laundered errors escape.
+        let e = errs(
+            "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func fst<T, U>(a: T, b: U) -> T { return a }\n\
+             func sink(err: error) -> void { err.ignore() }\n\
+             func f() -> void {\n  v, e := fail()\n  w, e2 := fail()\n  println(v)\n  println(w)\n  sink(fst(e, e2))\n}",
+        );
+        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+        assert!(e.iter().any(|d| d.msg.contains("'e2' is never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn an_error_parameter_dropped_by_the_callee_is_rejected() {
+        // FIX-1: an error parameter carries the same must-handle obligation a
+        // let-bound error does, so a callee that never inspects it is rejected.
+        let e = errs("func swallow(err: error) -> void { }");
+        assert!(e.iter().any(|d| d.msg.contains("the error 'err' is never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn an_error_parameter_inspected_by_the_callee_is_clean() {
+        // FIX-1 accept twin: inspecting the error parameter discharges its
+        // obligation, so no report fires.
+        let e = errs(
+            "func check_it(err: error) -> int64 { if err.exists() { return 1 }\n  return 0 }",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn an_error_parameter_handed_off_again_is_clean() {
+        // FIX-1: re-handing the error parameter to another error parameter is a
+        // valid discharge, mirroring the return hand-off.
+        let e = errs(
+            "func sink(err: error) -> void { err.ignore() }\n\
+             func relay(err: error) -> void { sink(err) }",
+        );
+        assert!(!e.iter().any(|d| d.msg.contains("never handled")), "{e:?}");
+    }
+
+    #[test]
+    fn passing_an_error_to_an_error_method_parameter_handles_it() {
+        // FIX-D: an error binding handed to a method parameter declared `error`
+        // discharges the obligation, the same as a bare or indirect call.
+        let e = errs(
+            "@paradigm oop\n@paradigm procedural\n\
+             struct Log { n: int64 }\n\
+             impl Log {\n  func note(err: error) -> void { err.ignore() }\n}\n\
+             func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
+             func f() -> void {\n  l := Log { n: 1 }\n  v, e := fail()\n  println(v)\n  l.note(e)\n}",
         );
         assert!(!e.iter().any(|d| d.msg.contains("never handled")), "{e:?}");
     }

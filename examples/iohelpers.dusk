@@ -1,0 +1,26 @@
+// The lazy IO helpers, one each: io_pure lifts a value, io_map applies a pure
+// function, io_and_then sequences an IO-returning step, and io_print emits an
+// effect that yields bool. Every step stays suspended until run forces it.
+
+@paradigm functional
+
+@import std.functional.io
+
+func main() -> int32 {
+    // io_pure + io_map: lift 20, add 1.
+    mapped := run(io_map(io_pure(20), lambda (x: int64) -> int64 {
+        return x + 1
+    }))
+    println(mapped)
+
+    // io_and_then: chain a second pure step.
+    chained := run(io_and_then(io_pure(5), lambda (x: int64) -> IO<int64> {
+        return io_pure(x * 2)
+    }))
+    println(chained)
+
+    // io_print: forcing the effect prints, then yields true.
+    ok := run(io_println("effect"))
+    println(ok)
+    return 0
+}

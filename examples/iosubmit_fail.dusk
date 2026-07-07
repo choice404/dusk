@@ -1,0 +1,23 @@
+// Compile-fail twin: a pool task captures an IO value. An IO<T> holds a collected
+// thunk, so it is confined to the main thread; a pool worker runs on another
+// thread, where the collected environment would be swept while parked. The submit
+// capture is refused. The accept twin captures a channel and a scalar and sends
+// the result back.
+
+@paradigm functional
+
+@import std.functional.io
+@import std.concurrent.pool
+
+func main() -> int32 {
+    pe := pool_start(2)
+    pe.ignore()
+    m := io_pure(10)
+    se := submit(lambda () -> void {
+        v := run(m)
+        println(v)
+    })
+    se.ignore()
+    pool_shutdown()
+    return 0
+}

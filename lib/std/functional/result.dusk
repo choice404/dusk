@@ -1,0 +1,100 @@
+// std.functional.result: Result<T, E>, an Ok value or an Err. Ok carries the
+// success value, Err carries the failure. The monad below fixes E to string,
+// the common case, since a generic E cannot flow through `do` inference; a
+// caller needing a different error type works with the plain constructors and
+// helpers below instead of `do Result { ... }`.
+
+@paradigm functional
+
+export enum Result<T, E> {
+    Ok(v: T),
+    Err(e: E),
+}
+
+// The Result monad, string errors only. `do Result { ... }` threads Ok values
+// and short-circuits on the first Err. bind runs the continuation on a present
+// value and passes an Err straight through; unit lifts a plain value into Ok.
+monad Result {
+    export func bind<A, B>(m: Result<A, string>, f: (A) -> Result<B, string>) -> Result<B, string> {
+        match m {
+            Ok(a) => return f(a),
+            Err(e) => return Result.Err(e),
+        }
+    }
+    export func unit<A>(x: A) -> Result<A, string> {
+        return Result.Ok(x)
+    }
+}
+
+// Lifts a plain value into Ok. Named surface unit for use outside `do`.
+export func result_ok<T>(v: T) -> Result<T, string> {
+    return Result.Ok(v)
+}
+
+// Lifts a message into Err. msg does not carry T, so annotate the binding, or
+// call this where the surrounding context (a return, a declared parameter)
+// pins T, the same rule any uninferable enum constructor already follows.
+export func result_err<T>(msg: string) -> Result<T, string> {
+    return Result.Err(msg)
+}
+
+// Bridges a (value, error) pair, the shape a fallible call returns, into a
+// Result: Ok(v) when e carries nothing, Err(e.toString()) when it does. The e
+// parameter is declared error, so handing a bound error here discharges the
+// caller's must-handle obligation the same way a bare return or a sink call
+// does.
+export func result_from<T>(v: T, e: error) -> Result<T, string> {
+    if e.exists() {
+        return Result.Err(e.toString())
+    }
+    return Result.Ok(v)
+}
+
+export func is_ok<T, E>(r: Result<T, E>) -> bool {
+    match r {
+        Ok(v) => return true,
+        Err(e) => return false,
+    }
+}
+
+export func is_err<T, E>(r: Result<T, E>) -> bool {
+    match r {
+        Ok(v) => return false,
+        Err(e) => return true,
+    }
+}
+
+export func result_unwrap_or<T, E>(r: Result<T, E>, fallback: T) -> T {
+    match r {
+        Ok(v) => return v,
+        Err(e) => return fallback,
+    }
+}
+
+export func result_map<T, E, U>(r: Result<T, E>, f: (T) -> U) -> Result<U, E> {
+    match r {
+        Ok(v) => return Result.Ok(f(v)),
+        Err(e) => return Result.Err(e),
+    }
+}
+
+export func result_map_err<T, E, F>(r: Result<T, E>, f: (E) -> F) -> Result<T, F> {
+    match r {
+        Ok(v) => return Result.Ok(v),
+        Err(e) => return Result.Err(f(e)),
+    }
+}
+
+export func result_and_then<T, E, U>(r: Result<T, E>, f: (T) -> Result<U, E>) -> Result<U, E> {
+    match r {
+        Ok(v) => return f(v),
+        Err(e) => return Result.Err(e),
+    }
+}
+
+export func result_or_else<T, E, F>(r: Result<T, E>, f: (E) -> Result<T, F>) -> Result<T, F> {
+    match r {
+        Ok(v) => return Result.Ok(v),
+        Err(e) => return f(e),
+    }
+}

@@ -1,0 +1,32 @@
+// FIX-D reject twin: the method discharge is narrowed to a bare error binding at
+// the argument, so `l.note(remap(e))` hands note a fresh error while e itself is
+// laundered through remap and never handed off. e stays pending and is rejected.
+@paradigm oop
+@paradigm procedural
+
+struct Log {
+    n: int64,
+}
+
+impl Log {
+    func note(err: error) -> void {
+        err.ignore()
+        println("noted")
+    }
+}
+
+func remap<T>(x: T) -> error {
+    return error { message: "remapped" }
+}
+
+func fail() -> (int64, error) {
+    return (0, error { message: "boom" })
+}
+
+func main() -> int32 {
+    l := Log { n: 1 }
+    v, e := fail()
+    println(v)
+    l.note(remap(e))
+    return 0
+}

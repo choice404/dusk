@@ -332,13 +332,14 @@ impl<'a> Mono<'a> {
             ),
             Type::Collector(b) => Type::Collector(Box::new(self.emit_ty(b, span))),
             Type::Unit => Type::Unit,
-            // A hole reaching emit means a do-continuation's element type was never
-            // pinned by per-site inference. Report it and fall back to a ground
-            // type so mangling stays total; analyze fails on the diagnostic first,
-            // so codegen never sees the fallback.
+            // A hole reaching emit means a type argument was never pinned by
+            // per-site inference, whether a do-continuation's monad element or a
+            // generic enum ctor's untouched parameter. Report it in general terms
+            // and fall back to a ground type so mangling stays total; analyze fails
+            // on the diagnostic first, so codegen never sees the fallback.
             Type::Infer => {
                 self.diags.push(Diagnostic::new(
-                    "could not infer the type of this do-continuation; annotate the monad element",
+                    "could not infer this type argument; add an annotation that pins it",
                     span,
                 ));
                 named("int64")
@@ -900,10 +901,16 @@ impl<'a> Mono<'a> {
                     value,
                 })
             }
-            Stmt::Assign(lhs, rhs) => Stmt::Assign(
-                self.rw_expr(lhs, subst, env, None),
-                self.rw_expr(rhs, subst, env, None),
-            ),
+            Stmt::Assign(lhs, rhs) => {
+                // The assignment target's type is the value's expected, so
+                // `x = Opt.None` into a `mut x: Opt<float64>` instantiates the ctor
+                // at the target's element instead of defaulting.
+                let lt = self.static_ty(lhs, subst, env);
+                Stmt::Assign(
+                    self.rw_expr(lhs, subst, env, None),
+                    self.rw_expr(rhs, subst, env, lt.as_ref()),
+                )
+            }
             Stmt::AssignOp(op, lhs, rhs) => Stmt::AssignOp(
                 *op,
                 self.rw_expr(lhs, subst, env, None),
@@ -1008,7 +1015,8 @@ impl<'a> Mono<'a> {
             ExprKind::Field(base, name) => {
                 if let ExprKind::Ident(g) = &base.kind {
                     if self.genums.contains_key(g) && self.enum_has_variant(g, name) {
-                        let targs = self.enum_args(g, expected, &[], subst, env, name);
+                        let (targs, missing) = self.enum_args(g, expected, &[], subst, env, name);
+                        self.report_missing(&missing, g, base.span);
                         let mg = node(ExprKind::Ident(self.instantiate(g, &targs, base.span)), base.span);
                         return node(ExprKind::Field(Box::new(mg), name.clone()), e.span);
                     }
@@ -1036,7 +1044,15 @@ impl<'a> Mono<'a> {
                 ExprKind::Tuple(xs.iter().map(|x| self.rw_expr(x, subst, env, None)).collect())
             }
             ExprKind::Array(xs) => {
-                ExprKind::Array(xs.iter().map(|x| self.rw_expr(x, subst, env, None)).collect())
+                // An annotated array threads its element type to each element, so a
+                // ctor element whose own value cannot pin it,
+                // `[Opt.Some(1.5), Opt.None]` at `Opt<float64>[2]`, instantiates at
+                // the annotation's element instead of defaulting.
+                let elem = match expected {
+                    Some(Type::Array(b, _)) | Some(Type::Slice(b)) => Some(&**b),
+                    _ => None,
+                };
+                ExprKind::Array(xs.iter().map(|x| self.rw_expr(x, subst, env, elem)).collect())
             }
             ExprKind::Lambda(l) => {
                 let mut e2 = env.clone();
@@ -1114,9 +1130,27 @@ impl<'a> Mono<'a> {
         if let ExprKind::Field(base, v) = &callee.kind {
             if let ExprKind::Ident(g) = &base.kind {
                 if self.genums.contains_key(g) && self.enum_has_variant(g, v) {
-                    let cargs: Vec<Expr> =
-                        args.iter().map(|a| self.rw_expr(a, subst, env, None)).collect();
-                    let targs = self.enum_args(g, expected, args, subst, env, v);
+                    let (targs, missing) = self.enum_args(g, expected, args, subst, env, v);
+                    self.report_missing(&missing, g, base.span);
+                    // Rewrite each payload with the grounded variant field type as
+                    // its expected, so a nested generic ctor whose own payload cannot
+                    // pin it, `Opt.Some(Opt.None)`, instantiates at the element the
+                    // outer ctor fixes instead of defaulting and clashing. The ground
+                    // type re-check still validates the payload against this field,
+                    // so a mistyped nested payload stays a named reject.
+                    let ge = self.genums[g];
+                    let fsubst = bind(&ge.generics, &targs);
+                    let field_tys: Vec<Type> = ge
+                        .variants
+                        .iter()
+                        .find(|va| &va.name == v)
+                        .map(|va| va.fields.iter().map(|fld| subst_apply(&fld.ty, &fsubst)).collect())
+                        .unwrap_or_default();
+                    let cargs: Vec<Expr> = args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| self.rw_expr(a, subst, env, field_tys.get(i)))
+                        .collect();
                     let mg = node(ExprKind::Ident(self.instantiate(g, &targs, base.span)), base.span);
                     let nc = node(ExprKind::Field(Box::new(mg), v.clone()), callee.span);
                     return ExprKind::Call(Box::new(nc), cargs);
@@ -1141,8 +1175,20 @@ impl<'a> Mono<'a> {
                 // can be filled with the now-concrete types the declared signature
                 // pins. This is what lets a `do` over a generic monad instantiate a
                 // fresh bind/unit pair per site.
-                let (targs, missing) = self.solve_call(gf, args, subst, env, expected);
-                self.report_missing(&missing, f, callee.span);
+                let (targs, missing, ret_open) = self.solve_call(gf, args, subst, env, expected);
+                // A monad's `bind`/`unit` are reached only through the do-desugar,
+                // which names them `Name.bind`/`Name.unit` (a user identifier cannot
+                // hold a dot). A bind over an empty source, `b <- Maybe.None`, leaves
+                // the source element unpinned; that element is a phantom the chain's
+                // continuation never reads, safe to default, but only when the
+                // chain's result element is itself determined. When the result is
+                // still open (`ret_open`) the whole element is genuinely
+                // uninferable, an untypeable source like `a <- g()` or a do over an
+                // unannotated element, so the report fires as for any generic call.
+                let phantom_only = is_monad_op(f) && !ret_open;
+                if !phantom_only {
+                    self.report_missing(&missing, f, callee.span);
+                }
                 self.check_chan_element(f, &targs, callee.span);
                 let inf_full = bind(&gf.generics, &targs);
                 let cargs: Vec<Expr> = args
@@ -1179,7 +1225,11 @@ impl<'a> Mono<'a> {
                         {
                             self.rw_collect_lambda(x, inner, subst, env)
                         }
-                        _ => self.rw_expr(x, subst, env, None),
+                        // The declared parameter type is the argument's expected, so
+                        // an enum ctor whose own payload cannot pin its element,
+                        // `show(Opt.None)`, instantiates at the parameter's element
+                        // instead of defaulting.
+                        _ => self.rw_expr(x, subst, env, params.get(i)),
                     })
                     .collect();
                 return ExprKind::Call(Box::new(c), a);
@@ -1198,15 +1248,26 @@ impl<'a> Mono<'a> {
         expected: Option<&Type>,
         span: Span,
     ) -> ExprKind {
+        if let Some(gs) = self.gstructs.get(name).copied() {
+            let (targs, missing) = self.infer_struct_args(gs, fields, expected, subst, env);
+            self.report_missing(&missing, name, span);
+            // Thread each field's grounded declared type as its expected, so a field
+            // whose own value cannot pin its element, `Pair { v: Opt.None }`,
+            // instantiates at the type the struct's type argument fixes.
+            let fsubst = bind(&gs.generics, &targs);
+            let new_fields: Vec<(String, Expr)> = fields
+                .iter()
+                .map(|(n, v)| {
+                    let exp = gs.fields.iter().find(|f| &f.name == n).map(|f| subst_apply(&f.ty, &fsubst));
+                    (n.clone(), self.rw_expr(v, subst, env, exp.as_ref()))
+                })
+                .collect();
+            return ExprKind::StructLit(self.instantiate(name, &targs, span), new_fields);
+        }
         let new_fields: Vec<(String, Expr)> = fields
             .iter()
             .map(|(n, v)| (n.clone(), self.rw_expr(v, subst, env, None)))
             .collect();
-        if let Some(gs) = self.gstructs.get(name).copied() {
-            let (targs, missing) = self.infer_struct_args(gs, fields, expected, subst, env);
-            self.report_missing(&missing, name, span);
-            return ExprKind::StructLit(self.instantiate(name, &targs, span), new_fields);
-        }
         ExprKind::StructLit(name.to_string(), new_fields)
     }
 
@@ -1226,7 +1287,7 @@ impl<'a> Mono<'a> {
         subst: &Subst,
         env: &Env,
         expected: Option<&Type>,
-    ) -> (Vec<Type>, Vec<String>) {
+    ) -> (Vec<Type>, Vec<String>, bool) {
         let params: HashSet<String> = gf.generics.iter().cloned().collect();
         let mut inf = Subst::new();
         // Non-lambda arguments first. Their types are authoritative, so a later
@@ -1251,7 +1312,11 @@ impl<'a> Mono<'a> {
         for (i, decl) in gf.params.iter().enumerate() {
             let Some(a) = args.get(i) else { continue };
             let ExprKind::Lambda(l) = &a.kind else { continue };
-            let Type::Func(pdecl, rdecl) = &decl.ty else { continue };
+            // A continuation may be declared as a bare function type or wrapped in a
+            // collector, as a lazy monad's `bind` takes its continuation. Unwrap the
+            // collector so both shapes pin the lambda's parameters and return type.
+            let dty = if let Type::Collector(b) = &decl.ty { &**b } else { &decl.ty };
+            let Type::Func(pdecl, rdecl) = dty else { continue };
             let merged = union(subst, &inf);
             let mut env2 = env.clone();
             for (j, lp) in l.params.iter().enumerate() {
@@ -1268,7 +1333,15 @@ impl<'a> Mono<'a> {
                 }
             }
         }
-        solve(&gf.generics, &inf)
+        // Whether the return type is still under-determined: after the raw
+        // inference, it names a generic the site never pinned. A monad op's result
+        // element must be determined; when it is, a leftover missing parameter is a
+        // phantom source element (a `None`-like empty carrier the chain never
+        // reads) that may default. When the result element itself is open, the
+        // whole element is genuinely uninferable and the caller reports it.
+        let ret_open = mentions(&subst_apply(&gf.ret, &inf), &params);
+        let (targs, missing) = solve(&gf.generics, &inf);
+        (targs, missing, ret_open)
     }
 
     /// Rewrites one call argument, filling a continuation lambda's open holes with
@@ -1301,7 +1374,12 @@ impl<'a> Mono<'a> {
                 }
             }
         }
-        self.rw_expr(arg, subst, env, None)
+        // A non-lambda argument carries the declared parameter type, grounded by
+        // the inferred bindings, as its expected type. This pins an enum-ctor
+        // argument whose own payload cannot: `bind(Maybe.None, k)` instantiates
+        // the `None` at the element the chain fixes instead of defaulting.
+        let expected = decl.map(|d| subst_apply(d, inf_full));
+        self.rw_expr(arg, subst, env, expected.as_ref())
     }
 
     /// Rewrites a lambda literal with its parameter and return types pinned from a
@@ -1374,11 +1452,11 @@ impl<'a> Mono<'a> {
         subst: &Subst,
         env: &Env,
         variant: &str,
-    ) -> Vec<Type> {
+    ) -> (Vec<Type>, Vec<String>) {
         let ge = self.genums[g];
         if let Some(Type::Named(en, eargs)) = expected {
             if en == g && !eargs.is_empty() {
-                return eargs.iter().map(|t| subst_apply(t, subst)).collect();
+                return (eargs.iter().map(|t| subst_apply(t, subst)).collect(), Vec::new());
             }
         }
         let params: HashSet<String> = ge.generics.iter().cloned().collect();
@@ -1392,7 +1470,7 @@ impl<'a> Mono<'a> {
                 }
             }
         }
-        solve(&ge.generics, &inf).0
+        solve(&ge.generics, &inf)
     }
 
     fn enum_has_variant(&self, g: &str, v: &str) -> bool {
@@ -1441,7 +1519,7 @@ impl<'a> Mono<'a> {
                         // site could not pin is left unbound; if the return type
                         // still mentions it the result is unknown, matching the old
                         // behavior, otherwise the ground return type is returned.
-                        let (targs, missing) = self.solve_call(gf, args, subst, env, None);
+                        let (targs, missing, _) = self.solve_call(gf, args, subst, env, None);
                         let miss: HashSet<String> = missing.into_iter().collect();
                         if mentions(&gf.ret, &miss) {
                             None
@@ -1469,8 +1547,20 @@ impl<'a> Mono<'a> {
                 ExprKind::Field(base, v) => {
                     if let ExprKind::Ident(g) = &base.kind {
                         if self.genums.contains_key(g) && self.enum_has_variant(g, v) {
-                            let targs = self.enum_args(g, None, args, subst, env, v);
-                            return Some(Type::Named(g.clone(), targs));
+                            // Speculative typing during inference. A parameter this
+                            // ctor's own payload cannot pin (an enum generic the
+                            // chosen variant never carries, `Result<T, E>`'s E at an
+                            // `Ok` ctor) is re-marked `Infer` by `speculative` rather
+                            // than left at `solve`'s int64 default: `unify` (below)
+                            // then skips binding a *different* parameter to it, so a
+                            // caller that never needed this enum's untouched generic
+                            // still resolves cleanly, while one that does (the
+                            // ctor's own, wholly unpinned type, `Opt.None`'s T) still
+                            // comes back missing through the caller's own `solve`
+                            // and is reported there, unchanged from before.
+                            let (targs, missing) = self.enum_args(g, None, args, subst, env, v);
+                            let generics = self.genums[g].generics.clone();
+                            return Some(Type::Named(g.clone(), speculative(&generics, targs, &missing)));
                         }
                     }
                     None
@@ -1480,8 +1570,9 @@ impl<'a> Mono<'a> {
             ExprKind::Field(base, name) => {
                 if let ExprKind::Ident(g) = &base.kind {
                     if self.genums.contains_key(g) && self.enum_has_variant(g, name) {
-                        let targs = self.enum_args(g, None, &[], subst, env, name);
-                        return Some(Type::Named(g.clone(), targs));
+                        let (targs, missing) = self.enum_args(g, None, &[], subst, env, name);
+                        let generics = self.genums[g].generics.clone();
+                        return Some(Type::Named(g.clone(), speculative(&generics, targs, &missing)));
                     }
                 }
                 if let Type::Named(s, sargs) = self.static_ty(base, subst, env)? {
@@ -1495,8 +1586,11 @@ impl<'a> Mono<'a> {
             }
             ExprKind::StructLit(name, fields) => {
                 if let Some(gs) = self.gstructs.get(name).copied() {
-                    let (targs, _) = self.infer_struct_args(gs, fields, None, subst, env);
-                    Some(Type::Named(name.clone(), targs))
+                    // As with an enum ctor above, a field parameter none of the
+                    // literal's fields pins is re-marked `Infer`, the poison
+                    // `unify` skips, rather than left at `solve`'s int64 default.
+                    let (targs, missing) = self.infer_struct_args(gs, fields, None, subst, env);
+                    Some(Type::Named(name.clone(), speculative(&gs.generics, targs, &missing)))
                 } else {
                     Some(named(name))
                 }
@@ -1610,6 +1704,22 @@ fn bind(generics: &[String], args: &[Type]) -> Subst {
     generics.iter().cloned().zip(args.iter().cloned()).collect()
 }
 
+/// Whether a name is a monad's `bind` or `unit`, the pair the do-desugar emits as
+/// `Name.bind` and `Name.unit`. A source identifier cannot contain a dot, so the
+/// suffix alone identifies the do-notation machinery, where an unpinned source
+/// element may be a phantom rather than an inference gap. The suppression is
+/// further gated on the result element being determined, so this only relaxes a
+/// genuine phantom.
+///
+/// A private (non-exported) monad's ops are privatized to `Name.bind__suffix`
+/// before mono runs, which this suffix match would miss. That path does not arise
+/// today: the do-desugar spells the bare `Name.bind`, so a monad reached through
+/// `do` must export its pair for the call to resolve at all. Should private do
+/// monads ever resolve, this match moves to the module monad table.
+fn is_monad_op(name: &str) -> bool {
+    name.ends_with(".bind") || name.ends_with(".unit")
+}
+
 /// Merges two substitutions, the second overriding the first on a shared name.
 /// Used to apply a callee's declared lambda parameter type, which names the
 /// callee's own type parameters, under both the outer monomorphization
@@ -1620,6 +1730,24 @@ fn union(base: &Subst, over: &Subst) -> Subst {
         out.insert(k.clone(), v.clone());
     }
     out
+}
+
+/// Whether a type carries `solve`'s `Infer` poison anywhere, at any nesting
+/// depth. `unify` skips binding a parameter to such a type: a top-level poison is
+/// a wholly unpinned position, and a poison buried inside a constructor
+/// (`Opt<Infer>` from a speculative `Opt.None` read) would otherwise bind a
+/// *different* parameter to a poisoned type and beat the real pin another argument
+/// supplies, then leak the hole into a garbage diagnostic downstream.
+fn contains_infer(ty: &Type) -> bool {
+    match ty {
+        Type::Infer => true,
+        Type::Named(_, args) => args.iter().any(contains_infer),
+        Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => contains_infer(b),
+        Type::Tuple(xs) => xs.iter().any(contains_infer),
+        Type::Func(ps, r) => ps.iter().any(contains_infer) || contains_infer(r),
+        Type::Collector(b) => contains_infer(b),
+        Type::Unit => false,
+    }
 }
 
 /// Whether a type still mentions any of the given type parameter names. Used to
@@ -1640,7 +1768,13 @@ fn mentions(ty: &Type, names: &HashSet<String>) -> bool {
 /// Resolves each type parameter from the inferred substitution. A parameter no
 /// site pinned defaults to int64 so expansion can proceed, and its name is
 /// returned so the caller can report it; a silent default converts an inference
-/// gap into a wrong program.
+/// gap into a wrong program. A "phantom" generic a monad op deliberately leaves
+/// unsolved (`Maybe.bind(Maybe.None, ..)`'s source element, never reported
+/// since `is_monad_op` suppresses it) still needs a valid, if arbitrary, ground
+/// type to mint its instantiation; int64 stays the right default for that real
+/// rewrite path. `speculative`, below, is the one place that instead wants the
+/// `Infer` poison, for a read that only feeds some *other* function's own
+/// inference.
 fn solve(generics: &[String], inf: &Subst) -> (Vec<Type>, Vec<String>) {
     let mut missing = Vec::new();
     let out = generics
@@ -1653,6 +1787,22 @@ fn solve(generics: &[String], inf: &Subst) -> (Vec<Type>, Vec<String>) {
         })
         .collect();
     (out, missing)
+}
+
+/// Re-marks each still-missing position in an already-solved `targs` with the
+/// `Infer` poison, leaving every pinned position untouched. Used only by
+/// `static_ty`'s speculative ctor and struct-literal reads: `unify` (below)
+/// skips binding a *different* function's own parameter to that poison, so a
+/// caller whose inference never actually depended on this ctor's untouched
+/// generic still resolves cleanly, while one that does still comes back
+/// missing through its own `solve` and is reported there, exactly as if this
+/// read had never run at all.
+fn speculative(generics: &[String], targs: Vec<Type>, missing: &[String]) -> Vec<Type> {
+    generics
+        .iter()
+        .zip(targs)
+        .map(|(g, t)| if missing.iter().any(|m| m == g) { Type::Infer } else { t })
+        .collect()
 }
 
 fn subst_apply(ty: &Type, subst: &Subst) -> Type {
@@ -1680,7 +1830,15 @@ fn subst_apply(ty: &Type, subst: &Subst) -> Type {
 
 fn unify(pat: &Type, concrete: &Type, params: &HashSet<String>, out: &mut Subst) {
     match pat {
-        Type::Named(n, args) if args.is_empty() && params.contains(n) => {
+        // A concrete side of `Infer` is `solve`'s own poison for a parameter no
+        // site pinned (a missing enum-ctor type argument the caller never asked
+        // for, surfaced through a speculative `static_ty` read). Binding a
+        // *different* parameter to it here would launder that hole into a fresh
+        // inference gap with no report; skipping leaves the parameter genuinely
+        // unbound, so a use that actually needs it still reports missing.
+        Type::Named(n, args)
+            if args.is_empty() && params.contains(n) && !contains_infer(concrete) =>
+        {
             out.entry(n.clone()).or_insert_with(|| concrete.clone());
         }
         Type::Named(_, pargs) => {
@@ -1707,6 +1865,14 @@ fn unify(pat: &Type, concrete: &Type, params: &HashSet<String>, out: &mut Subst)
         Type::Collector(pb) => {
             if let Type::Collector(cb) = concrete {
                 unify(pb, cb, params, out);
+            }
+        }
+        Type::Func(pps, pr) => {
+            if let Type::Func(cps, cr) = concrete {
+                for (p, c) in pps.iter().zip(cps) {
+                    unify(p, c, params, out);
+                }
+                unify(pr, cr, params, out);
             }
         }
         _ => {}
@@ -1943,11 +2109,174 @@ mod tests {
         assert!(n.contains(&"id$string".to_string()), "{n:?}");
     }
 
+    #[test]
+    fn unify_binds_a_param_inside_a_collector_func() {
+        // A type parameter that appears only inside a collector-wrapped function
+        // type binds through unify's Func arm, reached by recursing the Collector
+        // arm. The argument is an explicit collector value, so the non-lambda pass
+        // unifies the whole type. Without the Func arm R falls to the int64 default.
+        let n = names(
+            "func run2<R>(f: collector<() -> R>) -> R { return f() }\n\
+             func main() -> int32 {\n\
+               g := collector<() -> float64>(lambda () -> float64 { return 7.0 })\n\
+               x := run2(g)\n  println(x)\n  return 0\n}",
+        );
+        assert!(n.contains(&"run2$float64".to_string()), "{n:?}");
+        assert!(!n.contains(&"run2$int64".to_string()), "{n:?}");
+    }
+
+    #[test]
+    fn a_two_generic_enum_with_one_hardcoded_arg_pins_correctly_through_nested_binds() {
+        // Regression (0.5.3 W2): a Result<T, E>-shaped monad whose bind/unit fix
+        // E to a literal type ("string") that is not one of bind's own generics.
+        // A bare `Ok(v)` source ctor cannot pin E from its own payload, so
+        // static_ty's speculative read used to bail to None entirely, which
+        // skipped the unify that pins bind's own element parameter (A) from the
+        // source's payload. That left the continuation lambda's parameter typed
+        // by a raw, unsubstituted generic-name placeholder ("A" itself, read as
+        // a bogus named type), which cascaded through the nested bind call into
+        // a wrong mangled instantiation. `speculative` (poisoning only the
+        // untouched E position with `Infer`, which `unify` then skips) fixes it
+        // without reopening the uninferable-ctor reject `enum_none_arg_fail`
+        // still covers.
+        let n = names(
+            "enum Res<T, E> { Ok(v: T), Err(e: E) }\n\
+             func bind<A, B>(m: Res<A, string>, f: (A) -> Res<B, string>) -> Res<B, string> {\n\
+               match m { Ok(a) => return f(a), Err(e) => return Res.Err(e) }\n\
+             }\n\
+             func unit<A>(x: A) -> Res<A, string> { return Res.Ok(x) }\n\
+             func main() -> int32 {\n\
+               r := bind(Res.Ok(1), lambda (a: int64) -> Res<int64, string> {\n\
+                 return bind(Res.Ok(20), lambda (b: int64) -> Res<int64, string> {\n\
+                   return unit(a + b)\n\
+                 })\n\
+               })\n\
+               return 0\n}",
+        );
+        assert!(n.iter().any(|x| x == "bind$int64$int64"), "{n:?}");
+        assert!(!n.iter().any(|x| x.contains('A')), "a raw generic name leaked into a mangled instance: {n:?}");
+    }
+
+    #[test]
+    fn solve_call_unwraps_a_collector_to_pin_the_continuation_return() {
+        // bind's continuation param is collector<(A) -> Lz<B>>. When the argument
+        // is a bare lambda, as `do` desugars, the lambda pass must unwrap the
+        // collector to read (A) -> Lz<B> and pin B from the body. The body returns
+        // Lz<float64>, so a correct pin gives bind$int64$float64; without the
+        // unwrap B falls to the int64 default and gives bind$int64$int64.
+        let n = names(
+            "struct Lz<T> { run: collector<() -> T> }\n\
+             func unit2<A>(x: A) -> Lz<A> { return Lz { run: collector<() -> A>(lambda () -> A { return x }) } }\n\
+             func bind<A, B>(m: Lz<A>, k: collector<(A) -> Lz<B>>) -> Lz<B> { return unit2(0) }\n\
+             func mk() -> Lz<int64> { return unit2(5) }\n\
+             func main() -> int32 {\n\
+               r := bind(mk(), lambda (a: int64) -> Lz<float64> { return unit2(2.0) })\n\
+               return 0\n}",
+        );
+        assert!(n.contains(&"bind$int64$float64".to_string()), "{n:?}");
+        assert!(!n.contains(&"bind$int64$int64".to_string()), "{n:?}");
+    }
+
     fn diags(src: &str) -> Vec<String> {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
         expand_with_diags(&m, &MutTupleTypes::new()).1.into_iter().map(|d| d.msg).collect()
+    }
+
+    #[test]
+    fn enum_ctor_with_an_uninferable_param_is_diagnosed() {
+        // `Opt.None` carries no payload to pin T and no annotation flows in, so the
+        // missing parameter is reported at the emission site instead of silently
+        // defaulting to int64 and minting a wrong instantiation.
+        let d = diags(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func main() -> int32 {\n  x := Opt.None\n  return 0\n}",
+        );
+        assert!(
+            d.iter().any(|m| m.contains("cannot infer the type parameter 'T' for 'Opt'")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn annotated_enum_ctor_pins_the_param_and_is_clean() {
+        // The accept twin: an annotation flows the element type into the enum ctor,
+        // so no missing-parameter diagnostic fires.
+        let d = diags(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func main() -> int32 {\n  x: Opt<int64> = Opt.None\n  return 0\n}",
+        );
+        assert!(!d.iter().any(|m| m.contains("cannot infer")), "{d:?}");
+    }
+
+    #[test]
+    fn a_sibling_argument_pins_a_bare_param_past_a_poisoned_ctor_read() {
+        // FIX-2: `Opt.None` reads speculatively as `Opt<Infer>`; the nested poison
+        // must not bind the bare T and beat the real pin the second argument
+        // supplies, so `pick(Opt.None, Opt.Some(2.5))` resolves T to Opt<float64>
+        // and emits no inference diagnostic.
+        let d = diags(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func pick<T>(a: T, b: T) -> T { return b }\n\
+             func main() -> int32 {\n  r := pick(Opt.None, Opt.Some(2.5))\n  return 0\n}",
+        );
+        assert!(
+            !d.iter().any(|m| m.contains("cannot infer") || m.contains("could not infer")),
+            "{d:?}"
+        );
+        let n = names(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func pick<T>(a: T, b: T) -> T { return b }\n\
+             func main() -> int32 {\n  r := pick(Opt.None, Opt.Some(2.5))\n  return 0\n}",
+        );
+        assert!(n.iter().any(|x| x == "pick$Opt$float64"), "{n:?}");
+        assert!(!n.iter().any(|x| x == "pick$Opt$int64"), "{n:?}");
+    }
+
+    #[test]
+    fn an_uninferable_enum_ctor_at_a_call_argument_is_diagnosed() {
+        // FIX-B: `Opt.None` at a generic argument no longer forges an int64 default
+        // through static_ty, so the uninferable parameter is reported at the call
+        // the same way the binding site reports it.
+        let d = diags(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func take<T>(x: Opt<T>) -> int64 { return 0 }\n\
+             func main() -> int32 {\n  r := take(Opt.None)\n  println(r)\n  return 0\n}",
+        );
+        assert!(
+            d.iter().any(|m| m.contains("cannot infer the type parameter 'T' for 'take'")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn an_enum_ctor_that_pins_its_element_at_a_call_argument_is_clean() {
+        // FIX-B accept twin: a payload-carrying ctor pins the element, so the
+        // generic call type-checks without a missing report.
+        let d = diags(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func take<T>(x: Opt<T>) -> int64 { return 0 }\n\
+             func main() -> int32 {\n  r := take(Opt.Some(1))\n  println(r)\n  return 0\n}",
+        );
+        assert!(!d.iter().any(|m| m.contains("cannot infer")), "{d:?}");
+    }
+
+    #[test]
+    fn a_nested_enum_ctor_instantiates_at_the_outer_element() {
+        // FIX-E: the outer ctor threads its grounded field type as the inner
+        // payload's expected, so `Opt.Some(Opt.None)` at `Opt<Opt<float64>>`
+        // instantiates the inner None at float64, and no missing report fires.
+        let d = diags(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func main() -> int32 {\n  x: Opt<Opt<float64>> = Opt.Some(Opt.None)\n  return 0\n}",
+        );
+        assert!(!d.iter().any(|m| m.contains("cannot infer")), "{d:?}");
+        let n = names(
+            "enum Opt<T> { Some(v: T), None }\n\
+             func main() -> int32 {\n  x: Opt<Opt<float64>> = Opt.Some(Opt.None)\n  return 0\n}",
+        );
+        assert!(n.iter().any(|x| x == "Opt$float64"), "inner None must be Opt$float64: {n:?}");
     }
 
     #[test]

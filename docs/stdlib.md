@@ -103,6 +103,40 @@ while !done {
 }
 ```
 
+## std.logging
+
+Level gated logging to stderr, so program output on stdout stays clean underneath it. Added in 0.5.3.
+
+```text
+enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+```
+
+| Function                            | Description                                                     |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `log_set_level(l: LogLevel) -> void` | Set the threshold; a call at or above it fires, anything below it is dropped. |
+| `log_debug(msg: string) -> void`     | Log at `Debug`, tagged `[debug]`.                              |
+| `log_info(msg: string) -> void`      | Log at `Info`, tagged `[info]`.                                 |
+| `log_warn(msg: string) -> void`      | Log at `Warn`, tagged `[warn]`.                                 |
+| `log_error(msg: string) -> void`     | Log at `Error`, tagged `[error]`.                               |
+
+```text
+@paradigm procedural
+@import std.logging
+
+log_info("starting up")      // [info] starting up
+log_debug("skipped by default")
+
+log_set_level(LogLevel.Debug)
+log_debug("now shown")       // [debug] now shown
+```
+
+The order is `Debug < Info < Warn < Error`, and the default threshold is `Info`. The level lives in the C runtime as one atomic word shared by every thread, so `log_set_level` from any thread takes effect everywhere at that thread's next log call.
+
 ## std.string
 
 Read only helpers over NUL terminated strings.
@@ -325,10 +359,14 @@ enum Maybe<T> {
 }
 ```
 
-| Function                                      | Description                             |
-| --------------------------------------------- | --------------------------------------- |
-| `is_some<T>(m: Maybe<T>) -> bool`             | True when the value is `Some`.          |
-| `unwrap_or<T>(m: Maybe<T>, fallback: T) -> T` | The payload, or `fallback` when `None`. |
+| Function                                                            | Description                                             |
+| -------------------------------------------------------------------- | -------------------------------------------------------- |
+| `is_some<T>(m: Maybe<T>) -> bool`                                   | True when the value is `Some`.                          |
+| `is_none<T>(m: Maybe<T>) -> bool`                                   | True when the value is `None`.                           |
+| `unwrap_or<T>(m: Maybe<T>, fallback: T) -> T`                       | The payload, or `fallback` when `None`.                 |
+| `maybe_map<A, B>(m: Maybe<A>, f: (A) -> B) -> Maybe<B>`             | Applies `f` to a `Some` payload, passes `None` through. |
+| `maybe_and_then<A, B>(m: Maybe<A>, f: (A) -> Maybe<B>) -> Maybe<B>` | Chains a `Maybe` returning step onto a `Some` payload.  |
+| `maybe_or_else<A>(m: Maybe<A>, f: () -> Maybe<A>) -> Maybe<A>`      | Runs `f` for a fallback `Maybe` when the value is `None`. |
 
 ```text
 @import std.functional.maybe
@@ -338,7 +376,13 @@ println(unwrap_or(m, 0))        // 42
 
 none: Maybe<int64> = Maybe.None
 println(unwrap_or(none, 99))    // 99
+println(is_none(none))          // 1
+
+doubled := maybe_map(m, lambda (x: int64) -> int64 { return x * 2 })
+println(unwrap_or(doubled, 0))  // 84
 ```
+
+`Maybe` also ships a `monad Maybe { ... }` block, so `do Maybe { ... }` threads `Some` values and short circuits on the first `None`.
 
 ## std.functional.either
 
@@ -351,47 +395,119 @@ enum Either<L, R> {
 }
 ```
 
-| Function                                           | Description                                     |
-| -------------------------------------------------- | ----------------------------------------------- |
-| `is_left<L, R>(e: Either<L, R>) -> bool`           | True when the value is `Left`.                  |
-| `left_or<L, R>(e: Either<L, R>, fallback: L) -> L` | The `Left` payload, or `fallback` when `Right`. |
+| Function                                                                     | Description                                              |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `is_left<L, R>(e: Either<L, R>) -> bool`                                     | True when the value is `Left`.                            |
+| `left_or<L, R>(e: Either<L, R>, fallback: L) -> L`                           | The `Left` payload, or `fallback` when `Right`.           |
+| `right_or<L, R>(e: Either<L, R>, fallback: R) -> R`                          | The `Right` payload, or `fallback` when `Left`.           |
+| `either_map<L, R, B>(e: Either<L, R>, f: (R) -> B) -> Either<L, B>`          | Applies `f` to a `Right` payload, passes `Left` through.  |
+| `either_map_left<L, R, B>(e: Either<L, R>, f: (L) -> B) -> Either<B, R>`     | Applies `f` to a `Left` payload, passes `Right` through.  |
+| `either_and_then<L, R, B>(e: Either<L, R>, f: (R) -> Either<L, B>) -> Either<L, B>` | Chains an `Either` returning step onto a `Right` payload. |
+| `either_or_else<L, R>(e: Either<L, R>, f: (L) -> Either<L, R>) -> Either<L, R>` | Runs `f` for a fallback `Either` when the value is `Left`. |
 
 ```text
 @import std.functional.either
 
 e: Either<int64, int64> = Either.Left(-5)
 println(left_or(e, 0))   // -5
+
+r: Either<int64, int64> = Either.Right(6)
+doubled := either_map(r, lambda (x: int64) -> int64 { return x * 2 })
+println(right_or(doubled, 0))   // 12
 ```
+
+`Either` ships no `monad Either { ... }` block and so has no `do Either { ... }` form: a `unit` for it would have to pick a free `Left`, and there is no canonical one, so the plain helpers above are the whole surface.
 
 ## std.functional.io
 
-`IO<T>` as a monad over a plain struct, composing through generic `do` like any other monad. It is eager over its carried value: `bind` applies its continuation immediately and stores no closure, so it clears the escape check that a lazy, thunk storing `IO` would trip. `run` bridges the value onto the event loop through the pool offload idiom, so the loop and pool must both be up.
+`IO<T>` is `struct IO<T> { run: collector<() -> T> }`, a true lazy monad composing through generic `do` like any other monad. Added in 0.5.3, `bind` and `unit` build a new collected thunk instead of running anything, so a `do IO { ... }` chain is a suspended computation the moment it is built and nothing fires until `run` forces it, on the calling thread. The thunk and every step it captures live on the collected heap, so a chain outlives the frame that built it and survives a collection forced between build and force. Building or running a chain touches neither the event loop nor the thread pool.
 
-| Function                       | Description                                                             |
-| ------------------------------ | ---------------------------------------------------------------------- |
-| `io_pure<A>(x: A) -> IO<A>`     | Wrap a value in `IO`.                                                   |
-| `bind`, `unit` (in `monad IO`)  | The monad pair a `do IO { ... }` block desugars against.               |
-| `run<A>(io: IO<A>) -> A`        | Run the effect on the loop and return the value.                        |
+| Function                                                        | Description                                              |
+| ------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `io_pure<A>(x: A) -> IO<A>`                                     | Wrap a value in a lazy `IO`.                             |
+| `bind`, `unit` (in `monad IO`)                                  | The monad pair a `do IO { ... }` block desugars against. |
+| `run<A>(io: IO<A>) -> A`                                        | Force the thunk on the calling thread and return the value. |
+| `io_map<A, B>(m: IO<A>, f: collector<(A) -> B>) -> IO<B>`       | Map a pure function over the value once forced.          |
+| `io_and_then<A, B>(m: IO<A>, f: collector<(A) -> IO<B>>) -> IO<B>` | Sequence an effectful step after `m`, without `do`.       |
+| `io_print(msg: string) -> IO<bool>`                             | Print `msg` with no newline when forced, yields `true`.   |
+| `io_println(msg: string) -> IO<bool>`                           | Print `msg` with a newline when forced, yields `true`.    |
+| `io_read_line() -> IO<Result<string, string>>`                  | Read one line when forced; `Err` at end of input or on a read error. |
 
 ```text
 @paradigm functional
 
 @import std.functional.io
-@import std.async.loop
-@import std.concurrent.pool
 
-le := loop_init()
-le.ignore()
-pe := pool_start(2)
-pe.ignore()
-r := run(do IO {
-    a <- io_pure(10)
-    b <- io_pure(20)
-    a + b
-})
-println(r)   // 30
-pool_shutdown()
-loop_free()
+func main() -> int32 {
+    r := run(do IO {
+        a <- io_pure(10)
+        b <- io_pure(20)
+        a + b
+    })
+    println(r)   // 30
+    return 0
+}
+```
+
+`IO<T>` does not exist for `void`; an effect that returns nothing yields `bool` instead, as `io_print` and `io_println` do above. As a collected value, an `IO<T>` is confined to the thread that built it: it cannot cross a `spawn` or `submit` capture, a channel, or an interface box.
+
+Before 0.5.3, `run` minted a future and offloaded the carried value to a pool worker, so a program had to bring the event loop and the pool up first and tear them down after. That contract is gone: `run` forces its thunk directly, with no loop or pool required.
+
+## std.functional.result
+
+`Result<T, E>` is `enum Result<T, E> { Ok(v: T), Err(e: E) }`, success or a typed failure. Added in 0.5.3.
+
+```text
+enum Result<T, E> {
+    Ok(v: T),
+    Err(e: E),
+}
+```
+
+| Function                                                          | Description                                                |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `bind`, `unit` (in `monad Result`, `E` fixed to `string`)         | The monad pair a `do Result { ... }` block desugars against. |
+| `result_ok<T>(v: T) -> Result<T, string>`                        | Wrap a value in `Ok`.                                      |
+| `result_err<T>(msg: string) -> Result<T, string>`                | Wrap a message in `Err`.                                   |
+| `result_from<T>(v: T, e: error) -> Result<T, string>`             | Bridge a `(value, error)` pair into a `Result`.            |
+| `is_ok<T, E>(r: Result<T, E>) -> bool`                            | True when the value is `Ok`.                               |
+| `is_err<T, E>(r: Result<T, E>) -> bool`                           | True when the value is `Err`.                              |
+| `result_unwrap_or<T, E>(r: Result<T, E>, fallback: T) -> T`       | The payload, or `fallback` when `Err`.                     |
+| `result_map<T, E, U>(r: Result<T, E>, f: (T) -> U) -> Result<U, E>` | Applies `f` to an `Ok` payload, passes `Err` through.      |
+| `result_map_err<T, E, F>(r: Result<T, E>, f: (E) -> F) -> Result<T, F>` | Applies `f` to an `Err` payload, passes `Ok` through.      |
+| `result_and_then<T, E, U>(r: Result<T, E>, f: (T) -> Result<U, E>) -> Result<U, E>` | Chains a `Result` returning step onto an `Ok` payload.     |
+| `result_or_else<T, E, F>(r: Result<T, E>, f: (E) -> Result<T, F>) -> Result<T, F>` | Runs `f` for a fallback `Result` when the value is `Err`.  |
+
+The `monad Result { ... }` block fixes `E` to `string`, the common case, since a generic `E` cannot flow through `do` inference; a caller needing a different error type uses the plain constructors and helpers above instead of `do Result { ... }`.
+
+```text
+@paradigm functional
+
+@import std.functional.result
+
+func main() -> int32 {
+    r := do Result {
+        a <- Result.Ok(1)
+        b <- Result.Ok(20)
+        a + b
+    }
+    match r {
+        Ok(v) => println("ok {}", v),
+        Err(e) => println("err {}", e),
+    }
+    return 0
+}
+```
+
+`result_from` bridges a fallible call's `(value, error)` return into a `Result`, folding an existing error into `Err(e.toString())` and an absent one into `Ok(v)`. Handing `result_from` a bound error discharges the caller's must handle obligation, the same as handing it to any other parameter declared `error`.
+
+```text
+n, e := read_int()
+r := result_from(n, e)
+match r {
+    Ok(v) => println("got {}", v),
+    Err(msg) => println("failed: {}", msg),
+}
 ```
 
 ## std.async.io

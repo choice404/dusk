@@ -1,0 +1,61 @@
+// std.logging: level gated logging over one process wide level word. The level
+// lives in the C runtime as a single atomic word, shared by every thread, so
+// `log_set_level` from any thread takes effect everywhere at the next log call.
+// The order is Debug < Info < Warn < Error, default Info, and a call fires when
+// its own level is at or above the current threshold. Every message goes to
+// stderr, tagged with its level, so program output on stdout stays clean.
+
+@paradigm procedural
+
+foreign "C" {
+    func cool_log_level_get() -> int64
+    func cool_log_level_set(l: int64) -> void
+}
+
+export enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+// The numeric rank of a level: Debug is 0, Info 1, Warn 2, Error 3. Higher
+// ranks are more severe and this is the same scale the runtime word uses.
+func level_num(l: LogLevel) -> int64 {
+    match l {
+        Debug => return 0,
+        Info => return 1,
+        Warn => return 2,
+        Error => return 3,
+    }
+}
+
+// Sets the threshold: a call at or above this level fires, anything below is
+// dropped. Takes effect for every thread at their next log call.
+export func log_set_level(l: LogLevel) -> void {
+    cool_log_level_set(level_num(l))
+}
+
+export func log_debug(msg: string) -> void {
+    if 0 >= cool_log_level_get() {
+        printerr("[debug] {}", msg)
+    }
+}
+
+export func log_info(msg: string) -> void {
+    if 1 >= cool_log_level_get() {
+        printerr("[info] {}", msg)
+    }
+}
+
+export func log_warn(msg: string) -> void {
+    if 2 >= cool_log_level_get() {
+        printerr("[warn] {}", msg)
+    }
+}
+
+export func log_error(msg: string) -> void {
+    if 3 >= cool_log_level_get() {
+        printerr("[error] {}", msg)
+    }
+}

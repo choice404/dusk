@@ -1,0 +1,27 @@
+// A lazy IO chain forced after a collection. The chain is built with io_and_then
+// and io_map, capturing io_pure thunks and a scalar, all on the collected heap.
+// A forced sweep between the build and run proves the chain is rooted: every
+// collected environment is reachable through the last thunk held on the stack, so
+// the sweep keeps them all and the forced value is exact.
+
+@paradigm functional
+
+@import std.functional.io
+
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+func main() -> int32 {
+    chain := io_and_then(io_pure(40), lambda (a: int64) -> IO<int64> {
+        return io_map(io_pure(1), lambda (b: int64) -> int64 {
+            return a + b + 1
+        })
+    })
+    // Sweep before the single force. The chain is unforced, so its only roots are
+    // the collected environments held through chain on the stack.
+    cool_gc_collect()
+    result := run(chain)
+    println(result)
+    return 0
+}

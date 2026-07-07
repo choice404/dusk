@@ -67,6 +67,19 @@ void cool_println_f64(double v) {
     printf("%g\n", v);
 }
 
+/* The std.logging level word. Default 1 (Info). Relaxed ordering is enough:
+   the gate check races with a concurrent set at worst by one message, never a
+   torn read, and no other memory depends on the ordering. */
+static int64_t cool_log_level = 1;
+
+int64_t cool_log_level_get(void) {
+    return __atomic_load_n(&cool_log_level, __ATOMIC_RELAXED);
+}
+
+void cool_log_level_set(int64_t l) {
+    __atomic_store_n(&cool_log_level, l, __ATOMIC_RELAXED);
+}
+
 void *cool_alloc(size_t n) {
     return malloc(n);
 }

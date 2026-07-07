@@ -1,0 +1,24 @@
+// FIX-A: a generic call pins the element from one argument, so a mistyped payload
+// buried behind the element parameter must be caught. `keep(0, ...)` pins T to
+// int64, so `Box.Has(true)` hands a bool where int64 belongs. The surface pass
+// wildcards the generic payload, so the ground type re-check names the mismatch
+// instead of letting a bool relabel silently as an int64.
+@paradigm procedural
+
+enum Box<T> {
+    Has(v: T),
+    Empty,
+}
+
+func keep<T>(seed: T, b: Box<T>) -> Box<T> {
+    return b
+}
+
+func main() -> int32 {
+    b := keep(0, Box.Has(true))
+    match b {
+        Has(v) => println("has {}", v),
+        Empty => println("empty"),
+    }
+    return 0
+}

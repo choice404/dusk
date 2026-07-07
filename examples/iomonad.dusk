@@ -1,31 +1,19 @@
-// F-M3: std.functional.io's `IO<T>`, eager over its carried value, threaded
-// through `do IO { ... }` by the generic bind. `run` is the only effect
-// boundary: it mints a future, offloads the value to a pool worker, and
-// awaits the result back on the loop thread, the offload idiom the 0.4.2
-// examples settled on. The pool must be started and the loop initialized
-// before run, and torn down after the last run.
+// std.functional.io's IO<T>, a true lazy monad threaded through `do IO { ... }`
+// by the generic bind. Each `<-` binds a value out of an IO without running it;
+// the whole block builds one suspended IO. run is the only effect boundary: it
+// forces the thunk on this thread and returns the value. No loop or pool is
+// needed anymore, the lazy carrier forces directly.
 
 @paradigm functional
 
 @import std.functional.io
-@import std.async.loop
-@import std.concurrent.pool
 
 func main() -> int32 {
-    le := loop_init()
-    le.ignore()
-    pe := pool_start(2)
-    if pe.exists() {
-        printerr(pe)
-        return 1
-    }
     r := run(do IO {
         a <- io_pure(10)
         b <- io_pure(20)
         a + b
     })
     println(r)
-    pool_shutdown()
-    loop_free()
     return 0
 }
