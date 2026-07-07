@@ -1402,13 +1402,13 @@ impl<'a> Mono<'a> {
             .unwrap_or(false)
     }
 
-
     fn static_ty(&self, e: &Expr, subst: &Subst, env: &Env) -> Option<Type> {
         match &e.kind {
             ExprKind::Int(_, s) => Some(named(int_lit_ty(s))),
             ExprKind::Float(..) => Some(named("float64")),
             ExprKind::Bool(_) => Some(named("bool")),
             ExprKind::Char(_) => Some(named("char")),
+            ExprKind::Rune(_) => Some(named("rune")),
             ExprKind::Str(_) => Some(named("string")),
             ExprKind::Ident(n) => env.get(n).cloned(),
             ExprKind::Unary(op, x) => match op {

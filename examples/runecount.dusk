@@ -1,0 +1,30 @@
+@paradigm procedural
+
+@import std.unicode
+@import std.string
+
+// rune_count walks the same decode loop as decode_rune, so a malformed byte
+// counts as exactly one scalar (U+FFFD) rather than desyncing the count.
+func main() -> int32 {
+    println(rune_count("aß中😀"))   // 4 scalars
+    println(rune_count(""))          // empty
+    println(rune_count("hello"))     // 5 ASCII scalars
+
+    sb1: *StringBuilder = alloc(sb_new())
+    sb_push(sb1, "ab")
+    sb_push_char(sb1, 128)           // one stray continuation byte
+    sb_push(sb1, "cd")
+    println(rune_count(sb_cstr(sb1))) // 2 + 1 + 2
+    sb_free(sb1)
+    free(sb1)
+
+    sb2: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb2, 192)           // 0xC0 overlong lead
+    sb_push_char(sb2, 175)           // 0xAF
+    sb_push_rune(sb2, r'中')
+    println(rune_count(sb_cstr(sb2))) // 1 + 1 + 1
+    sb_free(sb2)
+    free(sb2)
+
+    return 0
+}

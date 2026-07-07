@@ -85,6 +85,7 @@ pub enum TokenKind {
     Float { val: f64, suffix: Option<String> },
     Str(String),
     Char(char),
+    Rune(char),
     Bool(bool),
     Kw(Keyword),
 

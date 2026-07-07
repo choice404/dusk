@@ -1,0 +1,61 @@
+@paradigm procedural
+
+@import std.unicode
+@import std.string
+
+// Boundary coverage for the UTF-8 encoder. enc prints the byte count, the raw
+// bytes encode_rune writes, and the width rune_len reports for a scalar. rt
+// encodes a scalar through sb_push_rune and decodes it back, pinning that a
+// boundary scalar round trips to itself at the expected width. Invalid scalars,
+// negative, a surrogate, or above 0x10FFFF, encode as U+FFFD (EF BF BD) at
+// width 3, and rune_len agrees.
+func enc(r: rune) -> void {
+    buf: *raw char = alloc_bytes(4)
+    n: int64 = encode_rune(r, buf)
+    print(n)
+    print(":")
+    mut i: int64 = 0
+    while i < n {
+        print(" ")
+        print(buf[i])
+        i = i + 1
+    }
+    print(" len=")
+    println(rune_len(r))
+    free(buf)
+}
+
+func rt(r: rune) -> void {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push_rune(sb, r)
+    d, w := decode_rune(sb_cstr(sb), 0)
+    println("{} {}", d, w)
+    sb_free(sb)
+    free(sb)
+}
+
+func main() -> int32 {
+    // Invalid scalars all encode to EF BF BD at width 3.
+    enc(-1)         // 3: 239 191 189 len=3
+    enc(55296)      // D800 surrogate -> 3: 239 191 189 len=3
+    enc(1114112)    // 0x110000, one past the max -> 3: 239 191 189 len=3
+
+    // Valid boundary scalars pin the encoder's exact bytes and rune_len width.
+    enc(127)        // 0x7F   -> 1: 127 len=1
+    enc(128)        // 0x80   -> 2: 194 128 len=2
+    enc(2047)       // 0x7FF  -> 2: 223 191 len=2
+    enc(2048)       // 0x800  -> 3: 224 160 128 len=3
+    enc(65535)      // 0xFFFF -> 3: 239 191 191 len=3
+    enc(65536)      // 0x10000 -> 4: 240 144 128 128 len=4
+    enc(1114111)    // 0x10FFFF -> 4: 244 143 191 191 len=4
+
+    // The same boundary scalars round trip back to themselves.
+    rt(127)         // 127 1
+    rt(128)         // 128 2
+    rt(2047)        // 2047 2
+    rt(2048)        // 2048 3
+    rt(65535)       // 65535 3
+    rt(65536)       // 65536 4
+    rt(1114111)     // 1114111 4
+    return 0
+}

@@ -158,6 +158,7 @@ If no `@paradigm` directive is present, the file defaults to procedural.
 | float64 | 8 bytes | 64 bit floating point              |
 | bool    | 1 byte  | true or false                      |
 | char    | 1 byte  | single ASCII character             |
+| rune    | 4 bytes | a Unicode scalar value             |
 | string  | fat ptr | built in string type (see Strings) |
 | error   | builtin | built in error type (see Errors)   |
 
@@ -205,7 +206,45 @@ s: string = "hello"   // a pointer to the NUL terminated bytes
 - A string's length is found by scanning to the NUL, which `std.string`'s `str_len` does. The NUL keeps a string view compatible with C and the foreign interface.
 - The `cstr` builtin reinterprets a NUL terminated `*char` buffer as a string at no runtime cost.
 
-Unicode handling is deferred past the 0.2.x line.
+A string's representation never changed to add Unicode support. It stays the same NUL terminated byte view it always was, UTF-8 by convention rather than by any different layout. `s[i]` reads one byte, exactly as it always has, not one character and not one scalar. Iterating scalar by scalar is a decoding walk over that byte view, not an indexing operation: `std.unicode`'s `decode_rune(s, i)` reads the bytes starting at `i` and returns the decoded scalar paired with its width in bytes, so a caller steps forward by the width it gets back.
+
+```text
+mut i: int64 = 0
+while s[i] != 0 {
+    r, w := decode_rune(s, i)
+    // r is the scalar at this position, w is how many bytes it took
+    i = i + w
+}
+```
+
+A string literal is checked at compile time and rejected if it is not valid UTF-8, `string literal is not valid UTF-8`; a source file with a malformed byte sequence inside a string literal no longer compiles silently with the bad bytes replaced.
+
+### Runes and Unicode
+
+`rune` is a 4 byte primitive holding one Unicode scalar value, the codepoint alone with no encoding attached. Where `char` is one byte and stands for a single ASCII byte in a string, `rune` is wide enough to name any character in Unicode, `中`, `😀`, or an ASCII letter alike.
+
+A rune literal is written `r'...'`: `r'a'`, `r'中'`, or with an escape, `r'\u{1F600}'`. Every ordinary char escape works inside one, and `\u{...}` besides.
+
+`rune` and `int` interconvert both ways under the same rule a `char` and an `int` already follow: a rune assigns to or from any integer width, with a wide integer silently truncating the way it does for `char`. `rune` and `char` do not mix in either direction, a byte and a scalar are different things even though both eventually ride an integer register: assigning a `char` to a `rune`, or a `rune` to a `char`, is `type annotation that does not match its value` at the annotation and `argument N has the wrong type` at a call.
+
+```text
+c: char = 'A'
+b: int64 = c          // ok, char widens to int
+x := r'中'
+v: int64 = x           // ok, rune widens to int
+y: rune = v + 1        // ok, arithmetic happens on the int, then narrows back
+// bad: y2: rune = c   // char does not assign to rune
+```
+
+A rune carries no arithmetic of its own. Adding, subtracting, or otherwise computing on codepoints happens by binding the rune to an `int64`, doing the arithmetic there, and assigning the result back to a `rune`. Comparison is allowed directly between two runes, and between a rune and an int literal, the same as `char`. `sizeof(rune)` is 4. Across the foreign function boundary a `rune` passes as a C `i32`. No user defined type may be named `rune`; the name is reserved for the primitive.
+
+`println(rune)` prints the scalar's codepoint number, not a glyph: `println(r'中')` prints `20013`. Printing the character itself goes through `std.unicode`'s `encode_rune`, which writes the scalar's UTF-8 bytes into a buffer for display.
+
+A `match` pattern does not bind a rune literal, a char literal, or an int literal; the pattern grammar covers a wildcard, a bound name, and an enum variant only. Comparing a rune scrutinee against a literal is written as an `if` chain, not a `match` arm.
+
+The `\u{...}` escape names a Unicode scalar by its hex codepoint, 1 to 6 hex digits between the braces, `\u{9}`, `\u{4E2D}`, `\u{1F600}`. It is legal inside a string literal and a rune literal, where it may name any scalar up to the Unicode maximum `0x10FFFF`, excluding the surrogate range `0xD800..0xDFFF`. Inside a char literal it is legal only for a value that fits one byte, `0x7F` and under; a wider `\u{...}` inside a char literal is rejected, `a char is one byte; this escape does not fit, use a rune literal or a string`. A malformed `\u{...}` is rejected at each of its failure points: an empty or over 6 digit body (`\u escape needs 1 to 6 hex digits`), a missing closing brace (`unterminated \u escape; expected '}'`), a surrogate value (`\u escape is a surrogate code point, not a scalar value`), and a value above the maximum (`\u escape is above 0x10FFFF, the Unicode maximum`).
+
+`std.unicode` carries the decode and encode layer over the byte view: `decode_rune`, `encode_rune`, `rune_len`, `rune_count`, `utf8_valid`, and `sb_push_rune`. See the standard library reference for the full signatures. Case folding, normalization, and grapheme clustering sit outside this layer and are not part of it.
 
 ### Arrays and Slices
 
@@ -1202,6 +1241,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.vector             | dynamic array                                                   |
 | std.map                | hash map                                                        |
 | std.string             | string manipulation utilities                                   |
+| std.unicode            | UTF-8 decode, encode, and validation over the byte view string  |
 | std.concurrent.atomic  | sequentially consistent int64 atomics                           |
 | std.concurrent.channel | bounded thread safe queue between threads                       |
 | std.concurrent.pool    | the global thread pool behind the submit builtin                |

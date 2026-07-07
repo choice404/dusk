@@ -247,6 +247,7 @@ pub enum ExprKind {
     Float(f64, Option<String>),
     Str(String),
     Char(char),
+    Rune(char),
     Bool(bool),
     Ident(String),
     Unary(UnOp, Box<Expr>),

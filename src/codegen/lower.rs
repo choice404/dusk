@@ -679,6 +679,7 @@ fn lower_ty(t: &Type, nom: &impl Fn(&str) -> Nom) -> CTy {
             "int64" | "uint64" => CTy::Int(64),
             "bool" => CTy::Bool,
             "char" => CTy::Char,
+            "rune" => CTy::Int(32),
             "float64" => CTy::F64,
             "float32" => CTy::F32,
             "string" => CTy::RawPtr(Box::new(CTy::Char)),
@@ -790,7 +791,11 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
     // the wrapper, still the outermost dusk frame, so it anchors there instead.
     if self_ty.is_none() && (name == "main" || name == "dusk__main") {
         let slot = fb.fresh();
-        fb.line(&format!("{slot} = alloca i8"));
+        // Route the anchor slot through the funnel too, before any parameter or
+        // local alloca, so it stays the first slot in the entry block: the
+        // collector anchors its stack high water at this address and scans down
+        // from it, so every other slot must live below it.
+        fb.push_entry_alloca(&format!("{slot} = alloca i8"));
         fb.line(&format!("call void @cool_gc_anchor(ptr {slot})"));
     }
     for (i, (pname, ty)) in params.iter().enumerate() {
@@ -819,7 +824,7 @@ fn gen_func(m: &mut Module, ctx: &Ctx, f: &Func, self_ty: Option<&str>) -> Strin
         fb.emit_defers();
         fb.default_ret();
     }
-    format!("{header}\n{}}}", fb.body)
+    format!("{header}\n{}}}", fb.body_out())
 }
 
 pub(crate) struct Fb<'a> {
@@ -838,6 +843,14 @@ pub(crate) struct Fb<'a> {
     // alloca line, so no local's storage pointer is born mid-body where a resume
     // edge could bypass it. Sync functions leave it None and allocate inline.
     pub(crate) frame: Option<crate::codegen::frame::FrameCtx>,
+    // Sync-mode alloca funnel. Every stack slot is buffered here and spliced into
+    // the entry block at finish, not emitted at the binding site. A binding inside
+    // a loop body would otherwise emit its alloca once per iteration, leaking an
+    // unbounded stack slot every pass until the stack overflows; hoisting to entry
+    // gives one slot reused across iterations, the standard LLVM frontend shape.
+    // Async mode leaves this empty: its slots are heap frame GEPs born in a
+    // synthesized entry block (see frame.rs), already hoisted by construction.
+    entry_allocas: String,
 }
 
 impl<'a> Fb<'a> {
@@ -854,6 +867,7 @@ impl<'a> Fb<'a> {
             terminated: false,
             allocator: None,
             frame: None,
+            entry_allocas: String::new(),
         }
     }
 
@@ -894,8 +908,36 @@ impl<'a> Fb<'a> {
             return self.frame_slot(ty.ll(), sa);
         }
         let d = self.fresh();
-        self.line(&format!("{d} = alloca {}", ty.ll()));
+        self.push_entry_alloca(&format!("{d} = alloca {}", ty.ll()));
         d
+    }
+
+    /// Buffers a stack slot in the entry-block funnel. In sync mode every alloca
+    /// lands here so it is emitted once at function entry, not at the binding
+    /// site: a loop-body binding would otherwise allocate a fresh slot each
+    /// iteration and never reclaim it, overflowing the stack on large inputs.
+    /// The store that initializes the slot stays at the binding site; only the
+    /// slot reservation moves earlier, and the entry block dominates all uses.
+    fn push_entry_alloca(&mut self, s: &str) {
+        self.entry_allocas.push_str("  ");
+        self.entry_allocas.push_str(s);
+        self.entry_allocas.push('\n');
+    }
+
+    /// The finished body with the entry-block alloca funnel spliced in right
+    /// after the entry label. Both sync assembly sites open the body with
+    /// `entry:\n` before lowering, so the splice point is always present.
+    fn body_out(&self) -> String {
+        const HEAD: &str = "entry:\n";
+        debug_assert!(
+            self.body.starts_with(HEAD),
+            "sync body must open with the entry label"
+        );
+        let mut out = String::with_capacity(self.body.len() + self.entry_allocas.len());
+        out.push_str(HEAD);
+        out.push_str(&self.entry_allocas);
+        out.push_str(&self.body[HEAD.len()..]);
+        out
     }
 
     /// Appends a frame slot in async mode and returns the SSA name its entry
@@ -1782,6 +1824,7 @@ impl<'a> Fb<'a> {
             ExprKind::Float(v, _) => Val::new(CTy::F64, format!("0x{:016X}", v.to_bits())),
             ExprKind::Bool(b) => Val::new(CTy::Bool, if *b { "1" } else { "0" }),
             ExprKind::Char(c) => Val::new(CTy::Char, (*c as u8).to_string()),
+            ExprKind::Rune(c) => Val::new(CTy::Int(32), (*c as u32).to_string()),
             ExprKind::Str(s) => Val::new(CTy::RawPtr(Box::new(CTy::Char)), self.m.cstring(s)),
             ExprKind::Ident(_) | ExprKind::Field(..) | ExprKind::Unary(UnOp::Deref, _) => {
                 self.gen_load(e)
@@ -2582,8 +2625,13 @@ impl<'a> Fb<'a> {
             ExprKind::Float(..) => CTy::F64,
             ExprKind::Bool(_) => CTy::Bool,
             ExprKind::Char(_) => CTy::Char,
+            ExprKind::Rune(_) => CTy::Int(32),
             ExprKind::Str(_) => CTy::RawPtr(Box::new(CTy::Char)),
-            ExprKind::Ident(n) => self.locals.get(n).map(|(t, _)| t.clone()).unwrap_or(CTy::Unknown),
+            ExprKind::Ident(n) => self
+                .locals
+                .get(n)
+                .map(|(t, _)| t.clone())
+                .unwrap_or(CTy::Unknown),
             ExprKind::Binary(op, a, _) => {
                 use BinOp::*;
                 match op {
@@ -3007,7 +3055,7 @@ impl<'a> Fb<'a> {
             return self.frame_slot(llty.to_string(), (8, 8));
         }
         let d = self.fresh();
-        self.line(&format!("{d} = alloca {llty}"));
+        self.push_entry_alloca(&format!("{d} = alloca {llty}"));
         d
     }
 
@@ -3113,7 +3161,7 @@ impl<'a> Fb<'a> {
             fb.emit_defers();
             fb.default_ret();
         }
-        let def = format!("{header}\n{}}}", fb.body);
+        let def = format!("{header}\n{}}}", fb.body_out());
         self.m.push_function(def);
     }
 

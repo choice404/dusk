@@ -1,0 +1,23 @@
+@paradigm procedural
+
+@import std.unicode
+@import std.string
+
+// Regression guard for the entry-block alloca funnel. rune_count walks a decode
+// loop whose body binds `r, w := decode_rune(s, i)` every iteration. Before the
+// funnel each iteration allocated a fresh stack slot for that binding, so a large
+// input overflowed the default stack. With the funnel the slot is reserved once
+// at entry and reused, so a half-million-character string counts on the default
+// stack without overflow.
+func main() -> int32 {
+    sb: *StringBuilder = alloc(sb_new())
+    mut n: int64 = 0
+    while n < 500000 {
+        sb_push(sb, "a")
+        n = n + 1
+    }
+    println(rune_count(sb_cstr(sb)))  // 500000
+    sb_free(sb)
+    free(sb)
+    return 0
+}

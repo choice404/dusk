@@ -199,6 +199,7 @@ impl Gate {
             | ExprKind::Float(..)
             | ExprKind::Str(_)
             | ExprKind::Char(_)
+            | ExprKind::Rune(_)
             | ExprKind::Bool(_)
             | ExprKind::Ident(_)
             | ExprKind::SizeofType(_) => {}

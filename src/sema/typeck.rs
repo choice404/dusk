@@ -96,6 +96,7 @@ enum Ty {
     Float(u32),
     Bool,
     Char,
+    Rune,
     Str,
     Unit,
     Error,
@@ -414,11 +415,23 @@ impl TypeChecker {
         for item in &module.items {
             match item {
                 Item::Interface(i) => {
+                    if i.name == "rune" {
+                        self.err("'rune' is a builtin type name", Span::new(0, 0));
+                        continue;
+                    }
                     self.ifaces.insert(i.name.clone());
-                    let methods = i.methods.iter().map(|m| (m.name.clone(), m.params.len())).collect();
+                    let methods = i
+                        .methods
+                        .iter()
+                        .map(|m| (m.name.clone(), m.params.len()))
+                        .collect();
                     self.iface_methods.insert(i.name.clone(), methods);
                 }
                 Item::Enum(e) => {
+                    if e.name == "rune" {
+                        self.err("'rune' is a builtin type name", Span::new(0, 0));
+                        continue;
+                    }
                     let variants = e.variants.iter().map(|v| v.name.clone()).collect();
                     self.enums.insert(e.name.clone(), variants);
                     let gens: HashSet<String> = e.generics.iter().cloned().collect();
@@ -495,13 +508,20 @@ impl TypeChecker {
                     // ordinary call resolves against, so the call is type checked.
                     let gens = HashSet::new();
                     for ff in &fb.funcs {
-                        let params =
-                            ff.params.iter().map(|p| self.fix(lower(&p.ty, &gens))).collect();
+                        let params = ff
+                            .params
+                            .iter()
+                            .map(|p| self.fix(lower(&p.ty, &gens)))
+                            .collect();
                         let ret = self.fix(lower(&ff.ret, &gens));
                         self.sigs.insert(ff.name.clone(), (params, ret));
                     }
                 }
                 Item::Struct(s) => {
+                    if s.name == "rune" {
+                        self.err("'rune' is a builtin type name", Span::new(0, 0));
+                        continue;
+                    }
                     let gens: HashSet<String> = s.generics.iter().cloned().collect();
                     let is_gen = !gens.is_empty();
                     let fields = s
@@ -4163,6 +4183,7 @@ impl TypeChecker {
             ExprKind::Float(_, suffix) => Ty::Float(float_suffix_width(suffix)),
             ExprKind::Bool(_) => Ty::Bool,
             ExprKind::Char(_) => Ty::Char,
+            ExprKind::Rune(_) => Ty::Rune,
             ExprKind::Str(_) => Ty::Str,
             ExprKind::Ident(name) => {
                 if !self.types_only && matches!(self.own_of(name), Some(Own::Moved)) {
@@ -4961,7 +4982,14 @@ impl TypeChecker {
     /// the options.
     fn check_printable(&mut self, t: &Ty, span: Span) {
         match t {
-            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Str | Ty::Error | Ty::Unknown => {}
+            Ty::Int(_)
+            | Ty::Float(_)
+            | Ty::Bool
+            | Ty::Char
+            | Ty::Rune
+            | Ty::Str
+            | Ty::Error
+            | Ty::Unknown => {}
             Ty::Named(n) => {
                 if self.structs.contains_key(n) {
                     if !self.impls.contains(&("Display".to_string(), n.clone())) {
@@ -5468,7 +5496,7 @@ fn is_managed(ty: &Ty) -> bool {
 /// return. A managed `*T` and an aggregate passed by value do not cross.
 fn foreign_ty_ok(ty: &Ty) -> bool {
     match ty {
-        Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Unit => true,
+        Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Rune | Ty::Unit => true,
         Ty::RawPtr(_) => true,
         Ty::Ptr(inner) => matches!(**inner, Ty::Unit),
         _ => false,
@@ -5541,6 +5569,7 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         (Ty::Ptr(u), Ty::RawPtr(_)) => matches!(**u, Ty::Unit),
         // A char is an ASCII byte, freely compared with and assigned to ints.
         (Ty::Char, Ty::Int(_)) | (Ty::Int(_), Ty::Char) => true,
+        (Ty::Rune, Ty::Int(_)) | (Ty::Int(_), Ty::Rune) => true,
         _ => false,
     }
 }
@@ -5592,15 +5621,14 @@ fn ty_to_ast(t: &Ty) -> Option<Type> {
         Ty::Float(w) => Type::Named(float_width_name(*w)?, Vec::new()),
         Ty::Bool => Type::Named("bool".to_string(), Vec::new()),
         Ty::Char => Type::Named("char".to_string(), Vec::new()),
+        Ty::Rune => Type::Named("rune".to_string(), Vec::new()),
         Ty::Str => Type::Named("string".to_string(), Vec::new()),
         Ty::Unit => Type::Unit,
         Ty::Ptr(b) => Type::Ptr(Box::new(ty_to_ast(b)?)),
         Ty::RawPtr(b) => Type::RawPtr(Box::new(ty_to_ast(b)?)),
         Ty::Slice(b) => Type::Slice(Box::new(ty_to_ast(b)?)),
         Ty::Array(b, n) => Type::Array(Box::new(ty_to_ast(b)?), *n),
-        Ty::Tuple(ts) => {
-            Type::Tuple(ts.iter().map(ty_to_ast).collect::<Option<Vec<_>>>()?)
-        }
+        Ty::Tuple(ts) => Type::Tuple(ts.iter().map(ty_to_ast).collect::<Option<Vec<_>>>()?),
         _ => return None,
     };
     Some(r)
@@ -5671,6 +5699,7 @@ fn named_ty(n: &str) -> Ty {
         "float64" => Ty::Float(64),
         "bool" => Ty::Bool,
         "char" => Ty::Char,
+        "rune" => Ty::Rune,
         "string" => Ty::Str,
         "error" => Ty::Error,
         "thread" => Ty::Thread,
@@ -5701,6 +5730,7 @@ fn ty_str(t: &Ty) -> String {
         Ty::Float(w) => format!("float{w}"),
         Ty::Bool => "bool".to_string(),
         Ty::Char => "char".to_string(),
+        Ty::Rune => "rune".to_string(),
         Ty::Str => "string".to_string(),
         Ty::Unit => "void".to_string(),
         Ty::Error => "error".to_string(),

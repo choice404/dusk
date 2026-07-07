@@ -309,6 +309,7 @@ fn shift_expr(e: &mut Expr, base: u32) {
         | ExprKind::Float(..)
         | ExprKind::Str(_)
         | ExprKind::Char(_)
+        | ExprKind::Rune(_)
         | ExprKind::Bool(_)
         | ExprKind::Ident(_)
         | ExprKind::SizeofType(_) => {}
@@ -471,6 +472,7 @@ fn fold_expr(e: &mut Expr, ctx: &mut FoldCtx) {
         | ExprKind::Float(..)
         | ExprKind::Str(_)
         | ExprKind::Char(_)
+        | ExprKind::Rune(_)
         | ExprKind::Bool(_)
         | ExprKind::Ident(_)
         | ExprKind::SizeofType(_) => {}

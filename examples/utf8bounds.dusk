@@ -1,0 +1,103 @@
+@paradigm procedural
+
+@import std.unicode
+@import std.string
+
+// Boundary coverage for the strict UTF-8 decoder: overlong lower bounds, the
+// surrogate gap, the U+10FFFF ceiling, the C1/C2 two byte floor, the invalid
+// lead bytes, width-2 and width-4 truncation, a nonzero start offset, and the
+// genuine width 3 U+FFFD that must stay accepted rather than read as the
+// width 1 resync signature. show prints "valid" or "invalid" then the scalar
+// and width decode_rune returns at offset 0, so every accept/reject and the
+// exact scalar it lands on is pinned.
+func show(t: string) -> void {
+    r, w := decode_rune(t, 0)
+    if utf8_valid(t) {
+        println("valid {} {}", r, w)
+    } else {
+        println("invalid {} {}", r, w)
+    }
+}
+
+func c1(b0: char) -> void {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb, b0)
+    show(sb_cstr(sb))
+    sb_free(sb)
+    free(sb)
+}
+
+func c2(b0: char, b1: char) -> void {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb, b0)
+    sb_push_char(sb, b1)
+    show(sb_cstr(sb))
+    sb_free(sb)
+    free(sb)
+}
+
+func c3(b0: char, b1: char, b2: char) -> void {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb, b0)
+    sb_push_char(sb, b1)
+    sb_push_char(sb, b2)
+    show(sb_cstr(sb))
+    sb_free(sb)
+    free(sb)
+}
+
+func c4(b0: char, b1: char, b2: char, b3: char) -> void {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb, b0)
+    sb_push_char(sb, b1)
+    sb_push_char(sb, b2)
+    sb_push_char(sb, b3)
+    show(sb_cstr(sb))
+    sb_free(sb)
+    free(sb)
+}
+
+func main() -> int32 {
+    // 3 byte overlong lower bound vs the minimal 3 byte scalar U+0800.
+    c3(224, 159, 128)   // E0 9F 80 -> invalid 65533 1
+    c3(224, 160, 128)   // E0 A0 80 -> valid 2048 3
+
+    // 4 byte overlong lower bound vs the minimal 4 byte scalar U+10000.
+    c4(240, 143, 128, 128)  // F0 8F 80 80 -> invalid 65533 1
+    c4(240, 144, 128, 128)  // F0 90 80 80 -> valid 65536 4
+
+    // The surrogate gap: U+D7FF is valid, D800 is not.
+    c3(237, 159, 191)   // ED 9F BF -> valid 55295 3
+    c3(237, 160, 128)   // ED A0 80 -> invalid 65533 1
+
+    // The Unicode ceiling: U+10FFFF is valid, the next scalar is not.
+    c4(244, 143, 191, 191)  // F4 8F BF BF -> valid 1114111 4
+    c4(244, 144, 128, 128)  // F4 90 80 80 -> invalid 65533 1
+
+    // The two byte floor: 0xC1 is an overlong lead, 0xC2 0x80 is U+0080.
+    c1(193)             // C1 -> invalid 65533 1
+    c2(194, 128)        // C2 80 -> valid 128 2
+
+    // Invalid lead bytes with no valid continuation.
+    c1(245)             // F5 -> invalid 65533 1
+    c1(254)             // FE -> invalid 65533 1
+    c1(255)             // FF -> invalid 65533 1
+
+    // Truncation: a width 2 lead and a width 4 lead cut short by the NUL.
+    c1(194)             // C2 alone -> invalid 65533 1
+    c3(240, 144, 128)   // F0 90 80 (missing 4th) -> invalid 65533 1
+
+    // A genuine encoded U+FFFD is width 3 and accepted, distinct from the
+    // width 1 resync signature every reject above returns.
+    c3(239, 191, 189)   // EF BF BD -> valid 65533 3
+
+    // Nonzero start offset: decode each scalar of "aß中😀" at its byte offset.
+    s: string = "aß中😀"
+    ra, wa := decode_rune(s, 1)   // ß at offset 1
+    println("{} {}", ra, wa)      // 223 2
+    rb, wb := decode_rune(s, 3)   // 中 at offset 3
+    println("{} {}", rb, wb)      // 20013 3
+    rc, wc := decode_rune(s, 6)   // 😀 at offset 6
+    println("{} {}", rc, wc)      // 128512 4
+    return 0
+}

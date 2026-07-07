@@ -1,0 +1,79 @@
+@paradigm procedural
+
+@import std.unicode
+@import std.string
+
+// utf8_valid runs the same decode loop as decode_rune, so a genuine encoded
+// U+FFFD never gets flagged (it has width 3) while every malformed sequence
+// built below, byte by byte, is caught as the (0xFFFD, 1) resync signature.
+func report(ok: bool) -> void {
+    if ok {
+        println("true")
+    } else {
+        println("false")
+    }
+}
+
+func main() -> int32 {
+    // lone continuation byte 0x80
+    sb1: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb1, 128)
+    t1: string = sb_cstr(sb1)
+
+    // truncated 3 byte sequence 0xE4 0xB8
+    sb2: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb2, 228)
+    sb_push_char(sb2, 184)
+    t2: string = sb_cstr(sb2)
+
+    // overlong encoding of '/' as 0xC0 0xAF
+    sb3: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb3, 192)
+    sb_push_char(sb3, 175)
+    t3: string = sb_cstr(sb3)
+
+    // a surrogate, 0xED 0xA0 0x80
+    sb4: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb4, 237)
+    sb_push_char(sb4, 160)
+    sb_push_char(sb4, 128)
+    t4: string = sb_cstr(sb4)
+
+    // above the Unicode maximum, 0xF4 0x90 0x80 0x80
+    sb5: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb5, 244)
+    sb_push_char(sb5, 144)
+    sb_push_char(sb5, 128)
+    sb_push_char(sb5, 128)
+    t5: string = sb_cstr(sb5)
+
+    report(utf8_valid("aß中😀"))
+    report(utf8_valid(t1))
+    report(utf8_valid(t2))
+    report(utf8_valid(t3))
+    report(utf8_valid(t4))
+    report(utf8_valid(t5))
+
+    r1, w1 := decode_rune(t1, 0)
+    println("{} {}", r1, w1)
+    r2, w2 := decode_rune(t2, 0)
+    println("{} {}", r2, w2)
+    r3, w3 := decode_rune(t3, 0)
+    println("{} {}", r3, w3)
+    r4, w4 := decode_rune(t4, 0)
+    println("{} {}", r4, w4)
+    r5, w5 := decode_rune(t5, 0)
+    println("{} {}", r5, w5)
+
+    sb_free(sb1)
+    free(sb1)
+    sb_free(sb2)
+    free(sb2)
+    sb_free(sb3)
+    free(sb3)
+    sb_free(sb4)
+    free(sb4)
+    sb_free(sb5)
+    free(sb5)
+    return 0
+}

@@ -39,6 +39,7 @@ impl<'a> Lexer<'a> {
                 break;
             };
             match c {
+                b'r' if self.peek2() == Some(b'\'') => self.rune_lit(start),
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.ident(start),
                 b'0'..=b'9' => self.number(start),
                 b'"' => self.string(start),
@@ -213,7 +214,13 @@ impl<'a> Lexer<'a> {
                 Some(c) => buf.push(c),
             }
         }
-        let text = String::from_utf8_lossy(&buf).into_owned();
+        let text = match String::from_utf8(buf) {
+            Ok(s) => s,
+            Err(e) => {
+                self.error("string literal is not valid UTF-8", start);
+                String::from_utf8_lossy(e.as_bytes()).into_owned()
+            }
+        };
         self.push(TokenKind::Str(text), start);
     }
 
@@ -230,7 +237,14 @@ impl<'a> Lexer<'a> {
             }
             Some(b'\\') => {
                 self.pos += 1;
-                self.escape().unwrap_or('\0')
+                let ch = self.escape().unwrap_or('\0');
+                if ch as u32 > 0x7F {
+                    self.error(
+                        "a char is one byte; this escape does not fit, use a rune literal or a string",
+                        start,
+                    );
+                }
+                ch
             }
             Some(c) if c < 0x80 => {
                 self.pos += 1;
@@ -238,7 +252,10 @@ impl<'a> Lexer<'a> {
             }
             Some(_) => {
                 let ch = self.bump_scalar();
-                self.error("non-ASCII char literal not supported", start);
+                self.error(
+                    "a char is one byte; use a rune literal r'...' or a string",
+                    start,
+                );
                 ch
             }
         };
@@ -256,6 +273,44 @@ impl<'a> Lexer<'a> {
         self.push(TokenKind::Char(ch), start);
     }
 
+    /// Lexes a rune literal `r'...'`. Unlike a char, a rune holds any Unicode
+    /// scalar: a multibyte source character or any escape, including `\u{...}`.
+    /// The `r` and opening quote are already confirmed by the dispatch guard.
+    fn rune_lit(&mut self, start: usize) {
+        self.pos += 2;
+        let ch = match self.peek() {
+            None => {
+                self.error("unterminated rune literal", start);
+                '\0'
+            }
+            Some(b'\'') => {
+                self.error("empty rune literal", start);
+                '\0'
+            }
+            Some(b'\\') => {
+                self.pos += 1;
+                self.escape().unwrap_or('\0')
+            }
+            Some(c) if c < 0x80 => {
+                self.pos += 1;
+                c as char
+            }
+            Some(_) => self.bump_scalar(),
+        };
+        if self.peek() == Some(b'\'') {
+            self.pos += 1;
+        } else {
+            while !matches!(self.peek(), Some(b'\'') | Some(b'\n') | None) {
+                self.pos += 1;
+            }
+            if self.peek() == Some(b'\'') {
+                self.pos += 1;
+            }
+            self.error("rune literal must contain exactly one character", start);
+        }
+        self.push(TokenKind::Rune(ch), start);
+    }
+
     fn escape(&mut self) -> Option<char> {
         let esc = self.pos.saturating_sub(1);
         match self.bump() {
@@ -266,12 +321,62 @@ impl<'a> Lexer<'a> {
             Some(b'\\') => Some('\\'),
             Some(b'"') => Some('"'),
             Some(b'\'') => Some('\''),
+            Some(b'u') => self.unicode_escape(esc),
             other => {
                 let what = other.map(|b| b as char).unwrap_or('?');
                 self.error_at(format!("unknown escape '\\{what}'"), esc);
                 None
             }
         }
+    }
+
+    /// Parses the body of a `\u{...}` escape after the `u` is consumed. `esc`
+    /// points at the backslash so every rejection spans the whole escape. The
+    /// grammar is `\u{` then 1 to 6 hex digits then `}`; the value must be a
+    /// Unicode scalar, so surrogates and anything above 0x10FFFF are rejected.
+    fn unicode_escape(&mut self, esc: usize) -> Option<char> {
+        if self.peek() != Some(b'{') {
+            self.error_at("expected '{' after \\u", esc);
+            return None;
+        }
+        self.pos += 1;
+        let mut value: u32 = 0;
+        let mut digits: u32 = 0;
+        loop {
+            match self.peek() {
+                Some(b'}') => {
+                    self.pos += 1;
+                    break;
+                }
+                Some(h) if h.is_ascii_hexdigit() => {
+                    self.pos += 1;
+                    if digits < 6 {
+                        value = value * 16 + hex_val(h);
+                    }
+                    digits += 1;
+                }
+                _ => {
+                    self.error_at("unterminated \\u escape; expected '}'", esc);
+                    return None;
+                }
+            }
+        }
+        if digits == 0 || digits > 6 {
+            self.error_at("\\u escape needs 1 to 6 hex digits", esc);
+            return None;
+        }
+        if (0xD800..=0xDFFF).contains(&value) {
+            self.error_at(
+                "\\u escape is a surrogate code point, not a scalar value",
+                esc,
+            );
+            return None;
+        }
+        if value > 0x10FFFF {
+            self.error_at("\\u escape is above 0x10FFFF, the Unicode maximum", esc);
+            return None;
+        }
+        char::from_u32(value)
     }
 
     /// Munches an operator or punctuation token. Each lead char consumes the
@@ -379,6 +484,17 @@ impl<'a> Lexer<'a> {
         };
         self.pos += 1;
         Some(kind)
+    }
+}
+
+/// Numeric value of a single ASCII hex digit. Callers gate on
+/// `is_ascii_hexdigit`, so the non-hex fallthrough is never reached.
+fn hex_val(b: u8) -> u32 {
+    match b {
+        b'0'..=b'9' => (b - b'0') as u32,
+        b'a'..=b'f' => (b - b'a' + 10) as u32,
+        b'A'..=b'F' => (b - b'A' + 10) as u32,
+        _ => 0,
     }
 }
 
@@ -513,7 +629,10 @@ mod tests {
                 TokenKind::Int { val: 3, suffix: None },
                 TokenKind::Int { val: 0, suffix: None },
                 TokenKind::DotDot,
-                TokenKind::Int { val: 2, suffix: None },
+                TokenKind::Int {
+                    val: 2,
+                    suffix: None
+                },
                 TokenKind::Ident("a".into()),
                 TokenKind::DotDot,
                 TokenKind::Dot,
@@ -563,7 +682,10 @@ mod tests {
                 TokenKind::Int { val: 5, suffix: Some("u8".into()) },
                 TokenKind::Int { val: 1, suffix: None },
                 TokenKind::DotDot,
-                TokenKind::Int { val: 3, suffix: None },
+                TokenKind::Int {
+                    val: 3,
+                    suffix: None
+                },
                 TokenKind::Eof,
             ]
         );
@@ -650,5 +772,122 @@ mod tests {
             .filter(|t| matches!(t.kind, TokenKind::Ident(_)))
             .count();
         assert_eq!(idents, 2);
+    }
+
+    /// The single error message from lexing `src`, asserting exactly one error.
+    fn one_error(src: &str) -> String {
+        let (_toks, errs) = lex(src);
+        assert_eq!(errs.len(), 1, "expected one error for {src:?}: {errs:?}");
+        errs[0].msg.clone()
+    }
+
+    #[test]
+    fn unicode_escape_missing_brace() {
+        assert!(one_error(r#""\u41""#).contains("expected '{' after \\u"));
+    }
+
+    #[test]
+    fn unicode_escape_zero_or_too_many_digits() {
+        assert!(one_error(r#""\u{}""#).contains("1 to 6 hex digits"));
+        assert!(one_error(r#""\u{1234567}""#).contains("1 to 6 hex digits"));
+    }
+
+    #[test]
+    fn unicode_escape_unterminated() {
+        assert!(one_error(r#""\u{41""#).contains("unterminated \\u escape"));
+    }
+
+    #[test]
+    fn unicode_escape_surrogate() {
+        assert!(one_error(r#""\u{D800}""#).contains("surrogate code point"));
+    }
+
+    #[test]
+    fn unicode_escape_above_max() {
+        assert!(one_error(r#""\u{110000}""#).contains("above 0x10FFFF"));
+    }
+
+    #[test]
+    fn unicode_escape_legal_values() {
+        // One digit, six digits, a BMP code point, and an astral one all decode
+        // to their scalar with no error.
+        assert_eq!(
+            kinds(r#""\u{9}""#),
+            vec![TokenKind::Str("\t".into()), TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds(r#""\u{01F600}""#),
+            vec![TokenKind::Str("\u{1F600}".into()), TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds(r#""\u{4E2D}\u{6587}""#),
+            vec![TokenKind::Str("中文".into()), TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds(r#""\u{1F600}""#),
+            vec![TokenKind::Str("😀".into()), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn rune_literals_hold_any_scalar() {
+        assert_eq!(kinds("r'a'"), vec![TokenKind::Rune('a'), TokenKind::Eof]);
+        assert_eq!(kinds("r'中'"), vec![TokenKind::Rune('中'), TokenKind::Eof]);
+        assert_eq!(
+            kinds(r"r'\u{1F600}'"),
+            vec![TokenKind::Rune('😀'), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn r_prefix_does_not_swallow_identifiers() {
+        // A bare `r` followed by anything but a quote stays an identifier, so
+        // `radius`, `r == 'a'`, and `f(r,'a')` all keep `r` as an ident.
+        assert_eq!(
+            kinds("radius"),
+            vec![TokenKind::Ident("radius".into()), TokenKind::Eof]
+        );
+        assert_eq!(
+            kinds("r == 'a'"),
+            vec![
+                TokenKind::Ident("r".into()),
+                TokenKind::EqEq,
+                TokenKind::Char('a'),
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(
+            kinds("f(r,'a')"),
+            vec![
+                TokenKind::Ident("f".into()),
+                TokenKind::LParen,
+                TokenKind::Ident("r".into()),
+                TokenKind::Comma,
+                TokenKind::Char('a'),
+                TokenKind::RParen,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn wide_escape_in_char_is_rejected() {
+        assert!(one_error(r"'\u{4E2D}'").contains("a char is one byte"));
+    }
+
+    #[test]
+    fn invalid_utf8_string_literal_is_rejected() {
+        // A lone 0xFF byte inside a string literal is not valid UTF-8. Source is
+        // normally read through `read_to_string`, so this only reaches the lexer
+        // through a hand-built byte slice, but the guard must still catch it.
+        let raw: Vec<u8> = vec![b'"', 0xFF, b'"'];
+        let src = unsafe { std::str::from_utf8_unchecked(&raw) };
+        let (toks, errs) = lex(src);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].msg.contains("not valid UTF-8"), "{}", errs[0].msg);
+        assert!(matches!(
+            toks.first().map(|t| &t.kind),
+            Some(TokenKind::Str(_))
+        ));
     }
 }

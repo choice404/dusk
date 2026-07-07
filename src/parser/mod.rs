@@ -1373,6 +1373,10 @@ impl Parser {
                 self.pos += 1;
                 node(ExprKind::Char(c), span)
             }
+            TokenKind::Rune(c) => {
+                self.pos += 1;
+                node(ExprKind::Rune(c), span)
+            }
             TokenKind::Bool(b) => {
                 self.pos += 1;
                 node(ExprKind::Bool(b), span)

@@ -3169,3 +3169,173 @@ fn boxing_a_concrete_implementer_into_an_interface_field_still_works() {
     let out = run("collectorfieldconcrete_ok.dusk");
     assert_eq!(out, "42\n");
 }
+
+// Unicode milestone U1: \u{...} escapes and their rejections.
+
+#[test]
+fn unicode_escapes_decode_to_utf8() {
+    // One and two digit code points, a CJK pair, and an astral emoji all decode
+    // through a single string literal and print as their UTF-8 bytes.
+    assert_eq!(run("unicodeescape.dusk"), "Hi 中文 😀\n");
+}
+
+#[test]
+fn unicode_escape_with_too_many_digits_is_rejected() {
+    let err = check_fails("escbadhex.dusk");
+    assert!(err.contains("\\u escape needs 1 to 6 hex digits"), "{err}");
+}
+
+#[test]
+fn unicode_escape_surrogate_is_rejected() {
+    let err = check_fails("escsurrogate.dusk");
+    assert!(
+        err.contains("\\u escape is a surrogate code point, not a scalar value"),
+        "{err}"
+    );
+}
+
+#[test]
+fn unicode_escape_above_maximum_is_rejected() {
+    let err = check_fails("escrange.dusk");
+    assert!(
+        err.contains("\\u escape is above 0x10FFFF, the Unicode maximum"),
+        "{err}"
+    );
+}
+
+#[test]
+fn unicode_escape_without_closing_brace_is_rejected() {
+    let err = check_fails("escunterminated.dusk");
+    assert!(
+        err.contains("unterminated \\u escape; expected '}'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn wide_escape_in_char_literal_is_rejected() {
+    let err = check_fails("charwideescape.dusk");
+    assert!(
+        err.contains(
+            "a char is one byte; this escape does not fit, use a rune literal or a string"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn rune_literals_and_int_flows_run() {
+    assert_eq!(run("runebasics.dusk"), "97\n20013\n128512\n20014\ntrue\n");
+}
+
+#[test]
+fn rune_values_survive_generic_monomorphization() {
+    assert_eq!(run("runegeneric.dusk"), "128512\n20013\n12\n");
+}
+
+#[test]
+fn char_and_rune_share_int_flows_without_mixing() {
+    assert_eq!(run("runechar.dusk"), "65\n20013\ntrue\n");
+}
+
+#[test]
+fn rune_to_char_assignment_is_rejected() {
+    let err = check_fails("runecharmix_fail.dusk");
+    assert!(
+        err.contains("type annotation that does not match its value"),
+        "{err}"
+    );
+}
+
+#[test]
+fn char_to_rune_assignment_and_argument_are_rejected() {
+    let err = check_fails("charrunemix_fail.dusk");
+    assert!(
+        err.contains("type annotation that does not match its value"),
+        "{err}"
+    );
+    assert!(err.contains("argument 1 has the wrong type"), "{err}");
+}
+
+#[test]
+fn string_to_rune_assignment_is_rejected() {
+    let err = check_fails("runestring_fail.dusk");
+    assert!(
+        err.contains("type annotation that does not match its value"),
+        "{err}"
+    );
+}
+
+#[test]
+fn unicode_decode_rune_walks_a_mixed_string() {
+    // std.unicode's decode loop over "aß中😀": one, two, three, and four byte
+    // scalars, then rune_count and str_len agreeing on the same view.
+    assert_eq!(
+        run("runedecode.dusk"),
+        "97 1\n223 2\n20013 3\n128512 4\n4\n10\n"
+    );
+}
+
+#[test]
+fn unicode_sb_push_rune_and_encode_rune_round_trip() {
+    // sb_push_rune rebuilds "aß中😀" scalar by scalar, and encode_rune writes
+    // the same emoji's 4 UTF-8 bytes directly into a raw buffer.
+    assert_eq!(run("runebuild.dusk"), "aß中😀\n240 159 152 128\n");
+}
+
+#[test]
+fn unicode_utf8_valid_rejects_every_boundary_violation() {
+    // utf8_valid accepts well formed UTF-8, then rejects a lone continuation
+    // byte, a truncated sequence, an overlong encoding, a surrogate, and a
+    // scalar above 0x10FFFF; decode_rune resyncs each bad lead to (0xFFFD, 1).
+    assert_eq!(
+        run("utf8valid.dusk"),
+        "true\nfalse\nfalse\nfalse\nfalse\nfalse\n65533 1\n65533 1\n65533 1\n65533 1\n65533 1\n"
+    );
+}
+
+#[test]
+fn unicode_rune_count_counts_each_invalid_byte_as_one_scalar() {
+    // rune_count agrees with decode_rune's resync: a stray continuation byte
+    // and an overlong lead each count as exactly one scalar, never desyncing.
+    assert_eq!(run("runecount.dusk"), "4\n0\n5\n5\n3\n");
+}
+
+#[test]
+fn unicode_decode_pins_every_utf8_boundary() {
+    // Overlong lower bounds, the surrogate gap, the U+10FFFF ceiling, the
+    // C1/C2 floor, invalid leads, width-2 and width-4 truncation, a nonzero
+    // start offset, and the genuine width 3 U+FFFD that stays accepted rather
+    // than reading as the width 1 resync signature.
+    assert_eq!(
+        run("utf8bounds.dusk"),
+        "invalid 65533 1\nvalid 2048 3\ninvalid 65533 1\nvalid 65536 4\n\
+         valid 55295 3\ninvalid 65533 1\nvalid 1114111 4\ninvalid 65533 1\n\
+         invalid 65533 1\nvalid 128 2\ninvalid 65533 1\ninvalid 65533 1\n\
+         invalid 65533 1\ninvalid 65533 1\ninvalid 65533 1\nvalid 65533 3\n\
+         223 2\n20013 3\n128512 4\n"
+    );
+}
+
+#[test]
+fn unicode_encode_pins_every_scalar_boundary() {
+    // encode_rune folds invalid scalars to EF BF BD at width 3, pins the exact
+    // bytes for each valid boundary scalar, and rune_len agrees; the same
+    // scalars round trip back through sb_push_rune and decode_rune.
+    assert_eq!(
+        run("runebounds.dusk"),
+        "3: 239 191 189 len=3\n3: 239 191 189 len=3\n3: 239 191 189 len=3\n\
+         1: 127 len=1\n2: 194 128 len=2\n2: 223 191 len=2\n3: 224 160 128 len=3\n\
+         3: 239 191 191 len=3\n4: 240 144 128 128 len=4\n4: 244 143 191 191 len=4\n\
+         127 1\n128 2\n2047 2\n2048 3\n65535 3\n65536 4\n1114111 4\n"
+    );
+}
+
+#[test]
+fn unicode_rune_count_survives_a_large_input_on_the_default_stack() {
+    // Regression guard for the entry-block alloca funnel: the decode loop binds
+    // `r, w := decode_rune(s, i)` each iteration. With the funnel that slot is
+    // reserved once at entry and reused, so half a million scalars count on the
+    // default 8 MB stack instead of overflowing it with a per-iteration alloca.
+    assert_eq!(run("unicodebig.dusk"), "500000\n");
+}

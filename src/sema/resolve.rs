@@ -304,6 +304,7 @@ impl Resolver {
             | ExprKind::Float(..)
             | ExprKind::Str(_)
             | ExprKind::Char(_)
+            | ExprKind::Rune(_)
             | ExprKind::Bool(_) => {}
             ExprKind::Unary(_, x) => self.expr(x),
             ExprKind::Binary(_, a, b) => {
@@ -368,8 +369,22 @@ impl Resolver {
 fn is_type_name(n: &str) -> bool {
     matches!(
         n,
-        "int8" | "int16" | "int32" | "int64" | "uint8" | "uint16" | "uint32" | "uint64"
-            | "float32" | "float64" | "bool" | "char" | "string" | "void" | "thread"
+        "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "float32"
+            | "float64"
+            | "bool"
+            | "char"
+            | "rune"
+            | "string"
+            | "void"
+            | "thread"
     )
 }
 

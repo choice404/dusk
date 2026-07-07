@@ -1,0 +1,31 @@
+@paradigm procedural
+
+@import std.unicode
+@import std.string
+
+// Build "aß中😀" one scalar at a time with sb_push_rune, then encode the same
+// emoji directly into a raw 4 byte buffer and print its bytes.
+func main() -> int32 {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push_rune(sb, r'a')
+    sb_push_rune(sb, r'ß')
+    sb_push_rune(sb, r'中')
+    sb_push_rune(sb, r'\u{1F600}')
+    println(sb_cstr(sb))
+    sb_free(sb)
+    free(sb)
+
+    buf: *raw char = alloc_bytes(4)
+    n: int64 = encode_rune(r'\u{1F600}', buf)
+    mut i: int64 = 0
+    while i < n {
+        print(buf[i])
+        if i < n - 1 {
+            print(" ")
+        }
+        i = i + 1
+    }
+    println("")
+    free(buf)
+    return 0
+}

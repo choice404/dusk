@@ -288,6 +288,32 @@ gc_collect()
 println(t() + gc_collections())
 ```
 
+## std.unicode
+
+UTF-8 decode, encode, and validation over the string's existing byte view. A string's representation is unchanged: it is still a NUL terminated byte buffer, `s[i]` still reads one byte, and this module is what walks that buffer scalar by scalar. Every function is total, no fault and no unbounded read; a malformed byte or an invalid scalar resyncs to the standard replacement character U+FFFD rather than stopping the walk. Case folding, normalization, and grapheme clustering sit outside this layer.
+
+| Function                                            | Description                                                       |
+| ---------------------------------------------------- | ------------------------------------------------------------------ |
+| `decode_rune(s: string, i: int64) -> (rune, int64)` | Decode one scalar at byte offset `i`, returning it with its width. |
+| `encode_rune(r: rune, buf: *raw char) -> int64`     | Encode a scalar as 1 to 4 UTF-8 bytes into `buf`, sized to at least 4. |
+| `rune_len(r: rune) -> int64`                        | The encoded width of a scalar, 1 to 4, with no write.              |
+| `rune_count(s: string) -> int64`                    | The scalar count of a NUL terminated string.                       |
+| `utf8_valid(s: string) -> bool`                     | Whether `s` is strict, well formed UTF-8.                          |
+| `sb_push_rune(sb: *StringBuilder, r: rune) -> void` | Append one scalar's encoded bytes to a builder.                    |
+
+```text
+@import std.unicode
+
+mut i: int64 = 0
+while s[i] != 0 {
+    r, w := decode_rune(s, i)
+    println(r)     // the scalar's codepoint number
+    i = i + w
+}
+```
+
+`decode_rune`'s only precondition is that `i` lies in `[0, str_len(s)]`; a normal decode walk that steps by the width it gets back never leaves that range. Every rejection is strict: an overlong encoding, a surrogate, and a scalar above `0x10FFFF` are all invalid, the same as a truncated or malformed sequence, and `utf8_valid` runs the identical decode loop `decode_rune` does so the two can never disagree.
+
 ## std.functional.maybe
 
 An optional value. It is `Some` with a payload or `None`.

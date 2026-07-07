@@ -311,6 +311,7 @@ impl Renamer {
             | ExprKind::Float(..)
             | ExprKind::Str(_)
             | ExprKind::Char(_)
+            | ExprKind::Rune(_)
             | ExprKind::Bool(_) => {}
         }
     }

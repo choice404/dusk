@@ -2,6 +2,42 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.5.2
+
+Unicode strings. This release adds a `rune` type for a single Unicode scalar value, the `\u{...}` escape, strict UTF-8 validation of string literals, and `std.unicode`, a pure dusk decode and encode layer over the string's existing byte view. A string's representation does not change: it stays the same NUL terminated UTF-8 byte view it always was, `s[i]` still reads a byte, and iterating scalar by scalar is a decoding walk, `decode_rune(s, i)`, not a new indexing form. A codegen fix lands alongside the surface work: a loop body binding no longer allocates a fresh stack slot every iteration. Suite 418 unit, 477 golden (up from 458, 19 of them new for this release), 13 parser termination, clippy clean.
+
+`rune`, a 4 byte Unicode scalar.
+
+- `rune` is a new primitive, 4 bytes, holding one Unicode scalar value with no encoding attached, wide enough for `中` or `😀` where `char`'s one byte only ever holds ASCII. A rune literal is `r'...'`: `r'a'`, `r'中'`, `r'\u{1F600}'`, every ordinary escape legal inside one plus `\u{...}`.
+- `rune` and `int` interconvert both ways under the same rule `char` and `int` already follow: assignment widens freely, and a wide int silently truncates down to a rune the same way it does for `char`. `rune` and `char` refuse to mix in either direction, since a byte and a scalar are different things even riding the same integer register: `type annotation that does not match its value` at an annotation, `argument N has the wrong type` at a call.
+- A rune carries no arithmetic of its own; codepoint arithmetic happens by binding the rune to an `int64`, computing there, and assigning the result back. Comparison between two runes, or a rune and an int literal, is allowed directly. `sizeof(rune)` is 4, and a `rune` crosses the foreign function boundary as a C `i32`. No user defined type may be named `rune`, the name is reserved.
+- `println(rune)` prints the scalar's codepoint number, not a glyph, `println(r'中')` prints `20013`; printing the character itself goes through `std.unicode`'s `encode_rune`. A `match` pattern still does not bind a rune literal, the same restriction the existing pattern grammar already puts on a char or int literal; compare a rune scrutinee with an `if` chain instead.
+
+The `\u{...}` escape.
+
+- `\u{...}` names a Unicode scalar by 1 to 6 hex digits between the braces, legal inside a string literal and a rune literal for any scalar up to the Unicode maximum `0x10FFFF` excluding the surrogate range `0xD800..0xDFFF`, and legal inside a char literal only when the value fits one byte, `0x7F` and under.
+- Five ways to get it wrong are each a named diagnostic: an empty or over 6 digit body, `\u escape needs 1 to 6 hex digits`; a missing closing brace, `unterminated \u escape; expected '}'`; a surrogate value, `\u escape is a surrogate code point, not a scalar value`; a value above the maximum, `\u escape is above 0x10FFFF, the Unicode maximum`; and a wide escape inside a one byte char literal, `a char is one byte; this escape does not fit, use a rune literal or a string`.
+
+Strict UTF-8 string literals, a behavior change.
+
+- A string literal with an invalid UTF-8 byte sequence used to lex silently, replacing the bad bytes with U+FFFD and moving on. It is now a loud compile time reject, `string literal is not valid UTF-8`. A program that carried a malformed byte sequence inside a string literal and relied on the silent replacement now fails to compile instead; fix the literal's encoding or, if the bytes are intentional, build the string at runtime through `std.unicode`'s `encode_rune` instead of a literal.
+
+`std.unicode`, pure dusk, zero runtime C change.
+
+- `decode_rune(s: string, i: int64) -> (rune, int64)` decodes one scalar at byte offset `i` and returns it paired with its encoded width. It is total: the NUL terminator decodes to `(0, 0)`, and any malformed byte, a stray continuation, an overlong lead, a truncated tail, a surrogate, or a scalar above the maximum, resyncs to exactly `(0xFFFD, 1)` so the caller always makes forward progress one byte at a time. Its precondition is that `i` lies in `[0, str_len(s)]`; a string is a raw NUL terminated view, so an out of range `i` is an unchecked read, exactly as `str_len` would give on the same view.
+- `encode_rune(r: rune, buf: *raw char) -> int64` writes a scalar's 1 to 4 UTF-8 bytes into a caller sized buffer and returns the count; an invalid scalar writes the 3 byte U+FFFD encoding instead. `rune_len` reports the width `encode_rune` would use without writing. `rune_count` walks a string end to end counting scalars, each malformed byte counting as exactly one so the count never desyncs from `decode_rune`'s resync. `utf8_valid` runs the identical decode loop and is invalid only on the resync signature, width 1 paired with the U+FFFD scalar, so it cannot drift from what `decode_rune` itself accepts. `sb_push_rune` appends one scalar's encoded bytes to a `StringBuilder`.
+- The decoder is strict throughout: an overlong encoding, a surrogate, and a scalar above `0x10FFFF` are all rejected the same as a truncated or malformed sequence, never silently accepted as some other valid scalar.
+
+Codegen fix, an unbounded loop no longer overflows the stack.
+
+- A binding introduced inside a loop body used to emit its `alloca` at the binding site, so every iteration allocated a fresh stack slot the loop never reclaimed; a decode loop over roughly 300 KB of input was enough to segfault on the default stack, since dusk's unoptimized build never ran `mem2reg` to fold the growth away. Every sync mode stack slot is now funneled into the function's entry block instead, one slot per binding reused across iterations, the shape a normal LLVM frontend already produces. A 500,000 character `rune_count` walk now returns clean on the default stack; the regression golden is `unicodebig`.
+
+Known limitations.
+
+- `decode_rune`'s `i` precondition is unchecked outside `[0, str_len(s)]`, the same honor system a raw string view already carries; a normal decode walk never leaves the range, only a caller supplying an arbitrary offset can.
+- A `match` pattern still does not bind a rune literal; compare a rune scrutinee with an `if` chain.
+- Case folding, normalization, and grapheme clustering are out of scope for this release and are not part of `std.unicode`.
+
 ## 0.5.1
 
 The collector. This release activates the `collector<T>` syntax the 0.1.0 spec reserved and left dormant: a second, conservative mark and sweep heap sits beside the generational one, single mutator and pinned to the thread it anchors to, opted into per value and never ambient. Nothing else in the pipeline moves; the escape checker, the interprocedural summary, and the async keyword layer are unchanged from 0.5.0 except where a collected value now flows through them. Suite 458 golden (up from 405), 408 unit, 13 parser termination, clippy clean.
