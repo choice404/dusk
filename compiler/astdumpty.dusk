@@ -1,0 +1,259 @@
+// astdumpty: non-recursive AST dump helpers shared by item, statement, and
+// expression renderers.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+
+func ind(out: *StringBuilder, n: int64) -> void {
+    mut i: int64 = 0
+    while i < n {
+        sb_push(out, "    ")
+        i = i + 1
+    }
+}
+
+func push_bool(out: *StringBuilder, b: bool) -> void {
+    if b { sb_push(out, "true") } else { sb_push(out, "false") }
+}
+
+func push_string(out: *StringBuilder, s: string) -> void {
+    sb_push_char(out, 34)
+    sb_push(out, s)
+    sb_push_char(out, 34)
+}
+
+export func render_name_kids(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        push_string(out, ast_name(a, vec_get((*a).kids, off + i)))
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+export func render_type_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_type(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+export func render_type(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    t: TypeNode = vec_get((*a).types, id)
+    if t.kind == tk_unit() {
+        sb_push(out, "Unit")
+        return
+    }
+    if t.kind == tk_infer() {
+        sb_push(out, "Infer")
+        return
+    }
+    if t.kind == tk_named() {
+        sb_push(out, "Named(\n")
+        ind(out, level + 1)
+        push_string(out, ast_name(a, t.a))
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        render_type_list(out, a, t.b, t.c, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_ptr() {
+        sb_push(out, "Ptr(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_rawptr() {
+        sb_push(out, "RawPtr(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_slice() {
+        sb_push(out, "Slice(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_array() {
+        sb_push(out, "Array(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        sb_push_int(out, t.b)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_tuple() {
+        sb_push(out, "Tuple(\n")
+        ind(out, level + 1)
+        render_type_list(out, a, t.a, t.b, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_func() {
+        sb_push(out, "Func(\n")
+        ind(out, level + 1)
+        render_type_list(out, a, t.a, t.b, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        render_type(out, a, t.c, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    sb_push(out, "Collector(\n")
+    ind(out, level + 1)
+    render_type(out, a, t.a, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+export func render_param(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    p: ParamNode = vec_get((*a).params, id)
+    sb_push(out, "Param {\n")
+    ind(out, level + 1)
+    sb_push(out, "using: ")
+    push_bool(out, p.is_using)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, p.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ty: ")
+    render_type(out, a, p.ty, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+export func render_param_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_param(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+export func render_bind(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    b: BindNode = vec_get((*a).binds, id)
+    sb_push(out, "Bind {\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, b.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ty: ")
+    if b.ty < 0 {
+        sb_push(out, "None")
+    } else {
+        sb_push(out, "Some(\n")
+        ind(out, level + 2)
+        render_type(out, a, b.ty, level + 2)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        sb_push_char(out, 41)
+    }
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+export func render_bind_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_bind(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+export func render_field(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    f: FieldNode = vec_get((*a).fields, id)
+    sb_push(out, "Field {\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, f.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ty: ")
+    render_type(out, a, f.ty, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+export func render_field_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_field(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}

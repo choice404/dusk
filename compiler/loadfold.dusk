@@ -1,0 +1,818 @@
+// loadfold: arena mechanics for the P4 loader: span shifting, item copying, and
+// qualified module call folding.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import diag
+
+export struct FileSrc {
+    path: string,
+    base: int64,
+    src: string,
+    len: int64,
+}
+
+func copy_name(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    if id < 0 {
+        return -1
+    }
+    return intern_id((*dst).interner, ast_name(src, id))
+}
+
+func copy_name_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_name(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_type_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_type(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_type(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    t: TypeNode = vec_get((*src).types, id)
+    if t.kind == tk_named() {
+        off, len := copy_type_list(dst, src, t.b, t.c)
+        return ast_type(dst, tk_named(), copy_name(dst, src, t.a), off, len)
+    }
+    if t.kind == tk_ptr() {
+        return ast_type(dst, tk_ptr(), copy_type(dst, src, t.a), 0, 0)
+    }
+    if t.kind == tk_rawptr() {
+        return ast_type(dst, tk_rawptr(), copy_type(dst, src, t.a), 0, 0)
+    }
+    if t.kind == tk_slice() {
+        return ast_type(dst, tk_slice(), copy_type(dst, src, t.a), 0, 0)
+    }
+    if t.kind == tk_array() {
+        return ast_type(dst, tk_array(), copy_type(dst, src, t.a), t.b, 0)
+    }
+    if t.kind == tk_tuple() {
+        off2, len2 := copy_type_list(dst, src, t.a, t.b)
+        return ast_type(dst, tk_tuple(), off2, len2, 0)
+    }
+    if t.kind == tk_func() {
+        off3, len3 := copy_type_list(dst, src, t.a, t.b)
+        return ast_type(dst, tk_func(), off3, len3, copy_type(dst, src, t.c))
+    }
+    if t.kind == tk_collector() {
+        return ast_type(dst, tk_collector(), copy_type(dst, src, t.a), 0, 0)
+    }
+    if t.kind == tk_infer() {
+        return ast_type(dst, tk_infer(), 0, 0, 0)
+    }
+    return ast_type(dst, tk_unit(), 0, 0, 0)
+}
+
+func copy_param(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    p: ParamNode = vec_get((*src).params, id)
+    return ast_param(dst, p.is_using, copy_name(dst, src, p.name), copy_type(dst, src, p.ty))
+}
+
+func copy_param_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_param(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_field(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    f: FieldNode = vec_get((*src).fields, id)
+    return ast_field(dst, copy_name(dst, src, f.name), copy_type(dst, src, f.ty))
+}
+
+func copy_field_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> *Vector<int64> {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_field(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ids
+}
+
+func copy_bind(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    b: BindNode = vec_get((*src).binds, id)
+    mut ty: int64 = -1
+    if b.ty >= 0 {
+        ty = copy_type(dst, src, b.ty)
+    }
+    return ast_bind(dst, copy_name(dst, src, b.name), ty)
+}
+
+func copy_bind_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_bind(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_pattern(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    p: PatternNode = vec_get((*src).patterns, id)
+    if p.kind == pk_ident() {
+        return ast_pattern(dst, pk_ident(), copy_name(dst, src, p.a), 0, 0)
+    }
+    if p.kind == pk_variant() {
+        off, len := copy_name_list(dst, src, p.b, p.c)
+        return ast_pattern(dst, pk_variant(), copy_name(dst, src, p.a), off, len)
+    }
+    return ast_pattern(dst, pk_wildcard(), 0, 0, 0)
+}
+
+func copy_arm(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    arm: ArmNode = vec_get((*src).arms, id)
+    return ast_arm(dst, copy_pattern(dst, src, arm.pat), copy_block(dst, src, arm.body))
+}
+
+func copy_arm_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_arm(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_expr_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_expr(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_field_pairs(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_name(dst, src, vec_get((*src).kids, off + i)))
+        vec_push(ids, copy_expr(dst, src, vec_get((*src).kids, off + i + 1)))
+        i = i + 2
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_do_bind(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    d: DoBindNode = vec_get((*src).do_binds, id)
+    return ast_do_bind(dst, copy_name(dst, src, d.name), copy_expr(dst, src, d.expr))
+}
+
+func copy_do_bind_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_do_bind(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(dst, ids)
+}
+
+func copy_expr(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    e: ExprNode = vec_get((*src).exprs, id)
+    if e.kind == xk_int() {
+        return ast_expr(dst, xk_int(), e.lo, e.hi, e.a, copy_name(dst, src, e.b), 0, 0)
+    }
+    if e.kind == xk_float() {
+        return ast_expr(dst, xk_float(), e.lo, e.hi, e.a, copy_name(dst, src, e.b), 0, 0)
+    }
+    if e.kind == xk_str() {
+        return ast_expr(dst, xk_str(), e.lo, e.hi, copy_name(dst, src, e.a), 0, 0, 0)
+    }
+    if e.kind == xk_char() {
+        return ast_expr(dst, xk_char(), e.lo, e.hi, e.a, 0, 0, 0)
+    }
+    if e.kind == xk_rune() {
+        return ast_expr(dst, xk_rune(), e.lo, e.hi, e.a, 0, 0, 0)
+    }
+    if e.kind == xk_bool() {
+        return ast_expr(dst, xk_bool(), e.lo, e.hi, e.a, 0, 0, 0)
+    }
+    if e.kind == xk_ident() {
+        return ast_expr(dst, xk_ident(), e.lo, e.hi, copy_name(dst, src, e.a), 0, 0, 0)
+    }
+    if e.kind == xk_unary() {
+        return ast_expr(dst, xk_unary(), e.lo, e.hi, e.a, copy_expr(dst, src, e.b), 0, 0)
+    }
+    if e.kind == xk_binary() {
+        return ast_expr(dst, xk_binary(), e.lo, e.hi, e.a, copy_expr(dst, src, e.b), copy_expr(dst, src, e.c), 0)
+    }
+    if e.kind == xk_call() {
+        off, len := copy_expr_list(dst, src, e.b, e.c)
+        return ast_expr(dst, xk_call(), e.lo, e.hi, copy_expr(dst, src, e.a), off, len, 0)
+    }
+    if e.kind == xk_field() {
+        return ast_expr(dst, xk_field(), e.lo, e.hi, copy_expr(dst, src, e.a), copy_name(dst, src, e.b), 0, 0)
+    }
+    if e.kind == xk_index() {
+        return ast_expr(dst, xk_index(), e.lo, e.hi, copy_expr(dst, src, e.a), copy_expr(dst, src, e.b), 0, 0)
+    }
+    if e.kind == xk_range() {
+        return ast_expr(dst, xk_range(), e.lo, e.hi, copy_expr(dst, src, e.a), copy_expr(dst, src, e.b), e.c, 0)
+    }
+    if e.kind == xk_tuple() {
+        off2, len2 := copy_expr_list(dst, src, e.a, e.b)
+        return ast_expr(dst, xk_tuple(), e.lo, e.hi, off2, len2, 0, 0)
+    }
+    if e.kind == xk_array() {
+        off3, len3 := copy_expr_list(dst, src, e.a, e.b)
+        return ast_expr(dst, xk_array(), e.lo, e.hi, off3, len3, 0, 0)
+    }
+    if e.kind == xk_struct_lit() {
+        off4, len4 := copy_field_pairs(dst, src, e.b, e.c)
+        return ast_expr(dst, xk_struct_lit(), e.lo, e.hi, copy_name(dst, src, e.a), off4, len4, 0)
+    }
+    if e.kind == xk_lambda() {
+        poff, plen := copy_param_list(dst, src, e.a, e.b)
+        return ast_expr(dst, xk_lambda(), e.lo, e.hi, poff, plen, copy_type(dst, src, e.c), copy_block(dst, src, e.d))
+    }
+    if e.kind == xk_match() {
+        aoff, alen := copy_arm_list(dst, src, e.b, e.c)
+        return ast_expr(dst, xk_match(), e.lo, e.hi, copy_expr(dst, src, e.a), aoff, alen, 0)
+    }
+    if e.kind == xk_do() {
+        doff, dlen := copy_do_bind_list(dst, src, e.b, e.c)
+        return ast_expr(dst, xk_do(), e.lo, e.hi, copy_name(dst, src, e.a), doff, dlen, 0)
+    }
+    if e.kind == xk_await() {
+        mut ty: int64 = -1
+        if e.b >= 0 {
+            ty = copy_type(dst, src, e.b)
+        }
+        return ast_expr(dst, xk_await(), e.lo, e.hi, copy_expr(dst, src, e.a), ty, 0, 0)
+    }
+    if e.kind == xk_sizeof_type() {
+        return ast_expr(dst, xk_sizeof_type(), e.lo, e.hi, copy_type(dst, src, e.a), 0, 0, 0)
+    }
+    return ast_expr(dst, xk_collect(), e.lo, e.hi, copy_type(dst, src, e.a), copy_expr(dst, src, e.b), 0, 0)
+}
+
+func copy_stmt(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    s: StmtNode = vec_get((*src).stmts, id)
+    if s.kind == sk_let() {
+        off, len := copy_bind_list(dst, src, s.a, s.b)
+        return ast_stmt(dst, sk_let(), off, len, copy_expr(dst, src, s.c), s.d)
+    }
+    if s.kind == sk_assign() {
+        return ast_stmt(dst, sk_assign(), copy_expr(dst, src, s.a), copy_expr(dst, src, s.b), 0, 0)
+    }
+    if s.kind == sk_assign_op() {
+        return ast_stmt(dst, sk_assign_op(), s.a, copy_expr(dst, src, s.b), copy_expr(dst, src, s.c), 0)
+    }
+    if s.kind == sk_return() {
+        mut e: int64 = -1
+        if s.a >= 0 {
+            e = copy_expr(dst, src, s.a)
+        }
+        return ast_stmt(dst, sk_return(), e, 0, 0, 0)
+    }
+    if s.kind == sk_defer() {
+        return ast_stmt(dst, sk_defer(), copy_expr(dst, src, s.a), 0, 0, 0)
+    }
+    if s.kind == sk_if() {
+        mut els: int64 = -1
+        if s.c >= 0 {
+            els = copy_block(dst, src, s.c)
+        }
+        return ast_stmt(dst, sk_if(), copy_expr(dst, src, s.a), copy_block(dst, src, s.b), els, 0)
+    }
+    if s.kind == sk_while() {
+        return ast_stmt(dst, sk_while(), copy_expr(dst, src, s.a), copy_block(dst, src, s.b), s.c, 0)
+    }
+    if s.kind == sk_for() {
+        return ast_stmt(dst, sk_for(), copy_name(dst, src, s.a), copy_expr(dst, src, s.b), copy_block(dst, src, s.c), 0)
+    }
+    if s.kind == sk_match() {
+        off2, len2 := copy_arm_list(dst, src, s.b, s.c)
+        return ast_stmt(dst, sk_match(), copy_expr(dst, src, s.a), off2, len2, 0)
+    }
+    return ast_stmt(dst, sk_expr(), copy_expr(dst, src, s.a), 0, 0, 0)
+}
+
+func copy_block(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    b: BlockNode = vec_get((*src).blocks, id)
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < b.len {
+        vec_push(ids, copy_stmt(dst, src, vec_get((*src).kids, b.off + i)))
+        i = i + 1
+    }
+    return ast_block(dst, ids)
+}
+
+func copy_func(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    f: FuncNode = vec_get((*src).funcs, id)
+    goff, glen := copy_name_list(dst, src, f.generics_off, f.generics_len)
+    poff, plen := copy_param_list(dst, src, f.params_off, f.params_len)
+    nf: FuncNode = FuncNode {
+        exported: f.exported,
+        is_async: f.is_async,
+        name: copy_name(dst, src, f.name),
+        lo: f.lo,
+        hi: f.hi,
+        generics_off: goff,
+        generics_len: glen,
+        params_off: poff,
+        params_len: plen,
+        ret: copy_type(dst, src, f.ret),
+        body: copy_block(dst, src, f.body),
+    }
+    return ast_func(dst, nf)
+}
+
+func copy_variant(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    v: VariantNode = vec_get((*src).variants, id)
+    fs: *Vector<int64> = copy_field_list(dst, src, v.fields_off, v.fields_len)
+    return ast_variant(dst, copy_name(dst, src, v.name), fs)
+}
+
+func copy_variant_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> *Vector<int64> {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_variant(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ids
+}
+
+func copy_method_sig(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    m: MethodSigNode = vec_get((*src).method_sigs, id)
+    poff, plen := copy_param_list(dst, src, m.params_off, m.params_len)
+    params: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < plen {
+        vec_push(params, vec_get((*dst).kids, poff + i))
+        i = i + 1
+    }
+    return ast_method_sig(dst, copy_name(dst, src, m.name), params, copy_type(dst, src, m.ret))
+}
+
+func copy_method_sig_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> *Vector<int64> {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_method_sig(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ids
+}
+
+func copy_foreign_func(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    f: ForeignFuncNode = vec_get((*src).foreign_funcs, id)
+    poff, plen := copy_param_list(dst, src, f.params_off, f.params_len)
+    params: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < plen {
+        vec_push(params, vec_get((*dst).kids, poff + i))
+        i = i + 1
+    }
+    return ast_foreign_func(dst, copy_name(dst, src, f.name), params, copy_type(dst, src, f.ret))
+}
+
+func copy_foreign_func_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> *Vector<int64> {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, copy_foreign_func(dst, src, vec_get((*src).kids, off + i)))
+        i = i + 1
+    }
+    return ids
+}
+
+func copy_item(dst: *Ast, src: *Ast, it: ItemNode) -> void {
+    if it.kind == ik_func() {
+        ast_item(dst, ik_func(), copy_func(dst, src, it.id))
+    } else if it.kind == ik_struct() {
+        s: StructNode = vec_get((*src).structs, it.id)
+        gens: *Vector<int64> = alloc(vec_new())
+        mut i: int64 = 0
+        while i < s.generics_len {
+            vec_push(gens, copy_name(dst, src, vec_get((*src).kids, s.generics_off + i)))
+            i = i + 1
+        }
+        fields: *Vector<int64> = copy_field_list(dst, src, s.fields_off, s.fields_len)
+        ast_item(dst, ik_struct(), ast_struct(dst, s.exported, copy_name(dst, src, s.name), gens, fields))
+    } else if it.kind == ik_enum() {
+        e: EnumNode = vec_get((*src).enums, it.id)
+        gens2: *Vector<int64> = alloc(vec_new())
+        mut j: int64 = 0
+        while j < e.generics_len {
+            vec_push(gens2, copy_name(dst, src, vec_get((*src).kids, e.generics_off + j)))
+            j = j + 1
+        }
+        vars: *Vector<int64> = copy_variant_list(dst, src, e.variants_off, e.variants_len)
+        ast_item(dst, ik_enum(), ast_enum(dst, e.exported, copy_name(dst, src, e.name), gens2, vars))
+    } else if it.kind == ik_interface() {
+        iface: InterfaceNode = vec_get((*src).interfaces, it.id)
+        gens3: *Vector<int64> = alloc(vec_new())
+        mut k: int64 = 0
+        while k < iface.generics_len {
+            vec_push(gens3, copy_name(dst, src, vec_get((*src).kids, iface.generics_off + k)))
+            k = k + 1
+        }
+        methods: *Vector<int64> = copy_method_sig_list(dst, src, iface.methods_off, iface.methods_len)
+        ast_item(dst, ik_interface(), ast_interface(dst, iface.exported, copy_name(dst, src, iface.name), gens3, methods))
+    } else if it.kind == ik_impl() {
+        im: ImplNode = vec_get((*src).impls, it.id)
+        methods2: *Vector<int64> = alloc(vec_new())
+        mut m: int64 = 0
+        while m < im.methods_len {
+            vec_push(methods2, copy_func(dst, src, vec_get((*src).kids, im.methods_off + m)))
+            m = m + 1
+        }
+        ast_item(dst, ik_impl(), ast_impl(dst, copy_name(dst, src, im.iface), copy_name(dst, src, im.ty), im.lo, im.hi, methods2))
+    } else {
+        f: ForeignNode = vec_get((*src).foreigns, it.id)
+        funcs: *Vector<int64> = copy_foreign_func_list(dst, src, f.funcs_off, f.funcs_len)
+        ast_item(dst, ik_foreign(), ast_foreign(dst, copy_name(dst, src, f.abi), f.lo, f.hi, funcs))
+    }
+}
+
+export func load_append_items(dst: *Ast, src: *Ast) -> void {
+    items: *Vector<ItemNode> = (*src).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        copy_item(dst, src, vec_get(items, i))
+        i = i + 1
+    }
+}
+
+export func load_shift_module(a: *Ast, base: int64) -> void {
+    if base == 0 {
+        return
+    }
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            shift_block(a, f.body, base)
+        } else if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            mut j: int64 = 0
+            while j < im.methods_len {
+                mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
+                shift_block(a, mf.body, base)
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+func shift_block(a: *Ast, id: int64, base: int64) -> void {
+    b: BlockNode = vec_get((*a).blocks, id)
+    mut i: int64 = 0
+    while i < b.len {
+        shift_stmt(a, vec_get((*a).kids, b.off + i), base)
+        i = i + 1
+    }
+}
+
+func shift_stmt(a: *Ast, id: int64, base: int64) -> void {
+    s: StmtNode = vec_get((*a).stmts, id)
+    if s.kind == sk_let() {
+        shift_expr(a, s.c, base)
+    } else if s.kind == sk_assign() {
+        shift_expr(a, s.a, base)
+        shift_expr(a, s.b, base)
+    } else if s.kind == sk_assign_op() {
+        shift_expr(a, s.b, base)
+        shift_expr(a, s.c, base)
+    } else if s.kind == sk_return() {
+        if s.a >= 0 {
+            shift_expr(a, s.a, base)
+        }
+    } else if s.kind == sk_defer() {
+        shift_expr(a, s.a, base)
+    } else if s.kind == sk_if() {
+        shift_expr(a, s.a, base)
+        shift_block(a, s.b, base)
+        if s.c >= 0 {
+            shift_block(a, s.c, base)
+        }
+    } else if s.kind == sk_while() {
+        shift_expr(a, s.a, base)
+        shift_block(a, s.b, base)
+    } else if s.kind == sk_for() {
+        shift_expr(a, s.b, base)
+        shift_block(a, s.c, base)
+    } else if s.kind == sk_match() {
+        shift_match(a, s.a, s.b, s.c, base)
+    } else {
+        shift_expr(a, s.a, base)
+    }
+}
+
+func shift_match(a: *Ast, scrut: int64, off: int64, len: int64, base: int64) -> void {
+    shift_expr(a, scrut, base)
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        shift_block(a, arm.body, base)
+        i = i + 1
+    }
+}
+
+func shift_expr(a: *Ast, id: int64, base: int64) -> void {
+    exprs: *Vector<ExprNode> = (*a).exprs
+    mut e: ExprNode = vec_get(exprs, id)
+    e.lo = e.lo + base
+    e.hi = e.hi + base
+    if e.kind == xk_unary() {
+        shift_expr(a, e.b, base)
+    } else if e.kind == xk_binary() {
+        shift_expr(a, e.b, base)
+        shift_expr(a, e.c, base)
+    } else if e.kind == xk_call() {
+        shift_expr(a, e.a, base)
+        mut i: int64 = 0
+        while i < e.c {
+            shift_expr(a, vec_get((*a).kids, e.b + i), base)
+            i = i + 1
+        }
+    } else if e.kind == xk_field() {
+        shift_expr(a, e.a, base)
+    } else if e.kind == xk_index() {
+        shift_expr(a, e.a, base)
+        shift_expr(a, e.b, base)
+    } else if e.kind == xk_range() {
+        shift_expr(a, e.a, base)
+        shift_expr(a, e.b, base)
+    } else if e.kind == xk_tuple() {
+        shift_expr_slice(a, e.a, e.b, base)
+    } else if e.kind == xk_array() {
+        shift_expr_slice(a, e.a, e.b, base)
+    } else if e.kind == xk_struct_lit() {
+        mut j: int64 = 0
+        while j < e.c {
+            shift_expr(a, vec_get((*a).kids, e.b + j + 1), base)
+            j = j + 2
+        }
+    } else if e.kind == xk_lambda() {
+        shift_block(a, e.d, base)
+    } else if e.kind == xk_match() {
+        shift_match(a, e.a, e.b, e.c, base)
+    } else if e.kind == xk_do() {
+        mut k: int64 = 0
+        while k < e.c {
+            d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + k))
+            shift_expr(a, d.expr, base)
+            k = k + 1
+        }
+    } else if e.kind == xk_await() {
+        shift_expr(a, e.a, base)
+    } else if e.kind == xk_collect() {
+        shift_expr(a, e.b, base)
+    }
+    vec_set(exprs, id, e)
+}
+
+func shift_expr_slice(a: *Ast, off: int64, len: int64, base: int64) -> void {
+    mut i: int64 = 0
+    while i < len {
+        shift_expr(a, vec_get((*a).kids, off + i), base)
+        i = i + 1
+    }
+}
+
+func flatten_path(a: *Ast, id: int64) -> (string, bool) {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        return (ast_name(a, e.a), true)
+    }
+    if e.kind == xk_field() {
+        p, ok := flatten_path(a, e.a)
+        if !ok {
+            return ("", false)
+        }
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, p)
+        sb_push_char(b, 46)
+        sb_push(b, ast_name(a, e.b))
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        return (out, true)
+    }
+    return ("", false)
+}
+
+func private_msg(leaf: string, prefix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, leaf)
+    sb_push(b, "' is private to module '")
+    sb_push(b, prefix)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func render_global_diag(files: *Vector<FileSrc>, lo: int64, msg: string) -> string {
+    mut i: int64 = vec_len(files) - 1
+    while i >= 0 {
+        f: FileSrc = vec_get(files, i)
+        if lo >= f.base {
+            local: int64 = lo - f.base
+            line, col := line_col(f.src, f.len, local)
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, f.path)
+            sb_push_char(b, 58)
+            sb_push_int(b, line)
+            sb_push_char(b, 58)
+            sb_push_int(b, col)
+            sb_push(b, ": error: ")
+            sb_push(b, msg)
+            out: string = substring(sb_cstr(b), 0, sb_size(b))
+            sb_free(b)
+            free(b)
+            return out
+        }
+        i = i - 1
+    }
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, "error: ")
+    sb_push(b2, msg)
+    out2: string = substring(sb_cstr(b2), 0, sb_size(b2))
+    sb_free(b2)
+    free(b2)
+    return out2
+}
+
+func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+    mut i: int64 = 0
+    while i < len {
+        fold_expr(a, vec_get((*a).kids, off + i), ns, exports, files, errors)
+        i = i + 1
+    }
+}
+
+func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+    fold_expr(a, scrut, ns, exports, files, errors)
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        fold_block(a, arm.body, ns, exports, files, errors)
+        i = i + 1
+    }
+}
+
+func fold_block(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+    b: BlockNode = vec_get((*a).blocks, id)
+    mut i: int64 = 0
+    while i < b.len {
+        fold_stmt(a, vec_get((*a).kids, b.off + i), ns, exports, files, errors)
+        i = i + 1
+    }
+}
+
+func fold_stmt(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+    s: StmtNode = vec_get((*a).stmts, id)
+    if s.kind == sk_let() {
+        fold_expr(a, s.c, ns, exports, files, errors)
+    } else if s.kind == sk_assign() {
+        fold_expr(a, s.a, ns, exports, files, errors)
+        fold_expr(a, s.b, ns, exports, files, errors)
+    } else if s.kind == sk_assign_op() {
+        fold_expr(a, s.b, ns, exports, files, errors)
+        fold_expr(a, s.c, ns, exports, files, errors)
+    } else if s.kind == sk_return() {
+        if s.a >= 0 {
+            fold_expr(a, s.a, ns, exports, files, errors)
+        }
+    } else if s.kind == sk_defer() {
+        fold_expr(a, s.a, ns, exports, files, errors)
+    } else if s.kind == sk_if() {
+        fold_expr(a, s.a, ns, exports, files, errors)
+        fold_block(a, s.b, ns, exports, files, errors)
+        if s.c >= 0 {
+            fold_block(a, s.c, ns, exports, files, errors)
+        }
+    } else if s.kind == sk_while() {
+        fold_expr(a, s.a, ns, exports, files, errors)
+        fold_block(a, s.b, ns, exports, files, errors)
+    } else if s.kind == sk_for() {
+        fold_expr(a, s.b, ns, exports, files, errors)
+        fold_block(a, s.c, ns, exports, files, errors)
+    } else if s.kind == sk_match() {
+        fold_match(a, s.a, s.b, s.c, ns, exports, files, errors)
+    } else {
+        fold_expr(a, s.a, ns, exports, files, errors)
+    }
+}
+
+func fold_expr(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+    exprs: *Vector<ExprNode> = (*a).exprs
+    e: ExprNode = vec_get(exprs, id)
+    if e.kind == xk_call() {
+        fold_expr(a, e.a, ns, exports, files, errors)
+        fold_expr_slice(a, e.b, e.c, ns, exports, files, errors)
+        mut callee: ExprNode = vec_get(exprs, e.a)
+        if callee.kind == xk_field() {
+            prefix, ok := flatten_path(a, callee.a)
+            if ok {
+                if map_has(ns, prefix) {
+                    leaf: string = ast_name(a, callee.b)
+                    if map_has(exports, prefix) {
+                        empty: *Map<int64> = alloc(map_new())
+                        ex: *Map<int64> = unwrap_or(map_get(exports, prefix), empty)
+                        if !map_has(ex, leaf) {
+                            msg: string = private_msg(leaf, prefix)
+                            vec_push(errors, render_global_diag(files, e.lo, msg))
+                        }
+                    }
+                    callee.kind = xk_ident()
+                    callee.a = callee.b
+                    vec_set(exprs, e.a, callee)
+                }
+            }
+        }
+    } else if e.kind == xk_unary() {
+        fold_expr(a, e.b, ns, exports, files, errors)
+    } else if e.kind == xk_binary() {
+        fold_expr(a, e.b, ns, exports, files, errors)
+        fold_expr(a, e.c, ns, exports, files, errors)
+    } else if e.kind == xk_field() {
+        fold_expr(a, e.a, ns, exports, files, errors)
+    } else if e.kind == xk_index() {
+        fold_expr(a, e.a, ns, exports, files, errors)
+        fold_expr(a, e.b, ns, exports, files, errors)
+    } else if e.kind == xk_range() {
+        fold_expr(a, e.a, ns, exports, files, errors)
+        fold_expr(a, e.b, ns, exports, files, errors)
+    } else if e.kind == xk_tuple() {
+        fold_expr_slice(a, e.a, e.b, ns, exports, files, errors)
+    } else if e.kind == xk_array() {
+        fold_expr_slice(a, e.a, e.b, ns, exports, files, errors)
+    } else if e.kind == xk_struct_lit() {
+        mut i: int64 = 0
+        while i < e.c {
+            fold_expr(a, vec_get((*a).kids, e.b + i + 1), ns, exports, files, errors)
+            i = i + 2
+        }
+    } else if e.kind == xk_lambda() {
+        fold_block(a, e.d, ns, exports, files, errors)
+    } else if e.kind == xk_match() {
+        fold_match(a, e.a, e.b, e.c, ns, exports, files, errors)
+    } else if e.kind == xk_do() {
+        mut j: int64 = 0
+        while j < e.c {
+            d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + j))
+            fold_expr(a, d.expr, ns, exports, files, errors)
+            j = j + 1
+        }
+    } else if e.kind == xk_await() {
+        fold_expr(a, e.a, ns, exports, files, errors)
+    } else if e.kind == xk_collect() {
+        fold_expr(a, e.b, ns, exports, files, errors)
+    }
+}
+
+export func load_fold_qualified_calls(a: *Ast, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            fold_block(a, f.body, ns, exports, files, errors)
+        } else if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            mut j: int64 = 0
+            while j < im.methods_len {
+                f2: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
+                fold_block(a, f2.body, ns, exports, files, errors)
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}

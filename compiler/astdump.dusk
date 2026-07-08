@@ -1,0 +1,601 @@
+// astdump: canonical parse dump renderer for the P1 arena AST.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import bytes
+@import ast
+@import astdump2
+@import astdump_item
+
+func ind(out: *StringBuilder, n: int64) -> void {
+    mut i: int64 = 0
+    while i < n {
+        sb_push(out, "    ")
+        i = i + 1
+    }
+}
+
+func push_bool(out: *StringBuilder, b: bool) -> void {
+    if b { sb_push(out, "true") } else { sb_push(out, "false") }
+}
+
+func push_string(out: *StringBuilder, s: string) -> void {
+    sb_push_char(out, 34)
+    sb_push(out, s)
+    sb_push_char(out, 34)
+}
+
+func render_span(out: *StringBuilder, lo: int64, hi: int64, level: int64) -> void {
+    sb_push(out, "Span {\n")
+    ind(out, level + 1)
+    sb_push(out, "lo: ")
+    sb_push_int(out, lo)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "hi: ")
+    sb_push_int(out, hi)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_string_list(out: *StringBuilder, a: *Ast, ids: *Vector<int64>, level: int64) -> void {
+    if vec_len(ids) == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < vec_len(ids) {
+        ind(out, level + 1)
+        push_string(out, ast_name(a, vec_get(ids, i)))
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_kid_string_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        push_string(out, ast_name(a, vec_get((*a).kids, off + i)))
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_type_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_type(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_type(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    t: TypeNode = vec_get((*a).types, id)
+    if t.kind == tk_unit() {
+        sb_push(out, "Unit")
+        return
+    }
+    if t.kind == tk_infer() {
+        sb_push(out, "Infer")
+        return
+    }
+    if t.kind == tk_named() {
+        sb_push(out, "Named(\n")
+        ind(out, level + 1)
+        push_string(out, ast_name(a, t.a))
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        render_type_list(out, a, t.b, t.c, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_ptr() {
+        sb_push(out, "Ptr(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_rawptr() {
+        sb_push(out, "RawPtr(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_slice() {
+        sb_push(out, "Slice(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_array() {
+        sb_push(out, "Array(\n")
+        ind(out, level + 1)
+        render_type(out, a, t.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        sb_push_int(out, t.b)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_tuple() {
+        sb_push(out, "Tuple(\n")
+        ind(out, level + 1)
+        render_type_list(out, a, t.a, t.b, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if t.kind == tk_func() {
+        sb_push(out, "Func(\n")
+        ind(out, level + 1)
+        render_type_list(out, a, t.a, t.b, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        render_type(out, a, t.c, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    sb_push(out, "Collector(\n")
+    ind(out, level + 1)
+    render_type(out, a, t.a, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func render_param(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    p: ParamNode = vec_get((*a).params, id)
+    sb_push(out, "Param {\n")
+    ind(out, level + 1)
+    sb_push(out, "using: ")
+    push_bool(out, p.is_using)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, p.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ty: ")
+    render_type(out, a, p.ty, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_param_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_param(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_bind(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    b: BindNode = vec_get((*a).binds, id)
+    sb_push(out, "Bind {\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, b.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ty: ")
+    if b.ty < 0 {
+        sb_push(out, "None")
+    } else {
+        sb_push(out, "Some(\n")
+        ind(out, level + 2)
+        render_type(out, a, b.ty, level + 2)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        sb_push_char(out, 41)
+    }
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_bind_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_bind(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_block(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    b: BlockNode = vec_get((*a).blocks, id)
+    sb_push(out, "Block {\n")
+    ind(out, level + 1)
+    sb_push(out, "stmts: ")
+    render_stmt_list(out, a, b.off, b.len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_stmt_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_stmt(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_stmt(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    s: StmtNode = vec_get((*a).stmts, id)
+    if s.kind == sk_let() {
+        render_let_stmt(out, a, s, level)
+    } else if s.kind == sk_assign() {
+        render_assign_stmt(out, a, s, level)
+    } else if s.kind == sk_assign_op() {
+        render_assign_op_stmt(out, a, s, level)
+    } else if s.kind == sk_return() {
+        render_return_stmt(out, a, s, level)
+    } else if s.kind == sk_defer() {
+        sb_push(out, "Defer(\n")
+        ind(out, level + 1)
+        render_expr(out, a, s.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+    } else if s.kind == sk_if() {
+        render_if_stmt(out, a, s, level)
+    } else if s.kind == sk_while() {
+        render_while_stmt(out, a, s, level)
+    } else if s.kind == sk_for() {
+        render_for_stmt(out, a, s, level)
+    } else {
+        sb_push(out, "Expr(\n")
+        ind(out, level + 1)
+        render_expr(out, a, s.a, level + 1)
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+    }
+}
+
+func render_let_stmt(out: *StringBuilder, a: *Ast, s: StmtNode, level: int64) -> void {
+    sb_push(out, "Let(\n")
+    ind(out, level + 1)
+    sb_push(out, "Let {\n")
+    ind(out, level + 2)
+    sb_push(out, "mutable: ")
+    push_bool(out, (s.d & 1) != 0)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "is_ref: ")
+    push_bool(out, (s.d & 2) != 0)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "infer: ")
+    push_bool(out, (s.d & 4) != 0)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "binds: ")
+    render_bind_list(out, a, s.a, s.b, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "value: ")
+    render_expr(out, a, s.c, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "},\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func render_assign_stmt(out: *StringBuilder, a: *Ast, s: StmtNode, level: int64) -> void {
+    sb_push(out, "Assign(\n")
+    ind(out, level + 1)
+    render_expr(out, a, s.a, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    render_expr(out, a, s.b, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func bop_name(op: int64) -> string {
+    if op == bop_add() { return "Add" }
+    if op == bop_sub() { return "Sub" }
+    if op == bop_mul() { return "Mul" }
+    if op == bop_div() { return "Div" }
+    if op == bop_mod() { return "Mod" }
+    if op == bop_bitand() { return "BitAnd" }
+    if op == bop_bitor() { return "BitOr" }
+    if op == bop_bitxor() { return "BitXor" }
+    if op == bop_shl() { return "Shl" }
+    if op == bop_shr() { return "Shr" }
+    return "Add"
+}
+
+func render_assign_op_stmt(out: *StringBuilder, a: *Ast, s: StmtNode, level: int64) -> void {
+    sb_push(out, "AssignOp(\n")
+    ind(out, level + 1)
+    sb_push(out, bop_name(s.a))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    render_expr(out, a, s.b, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    render_expr(out, a, s.c, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func render_return_stmt(out: *StringBuilder, a: *Ast, s: StmtNode, level: int64) -> void {
+    sb_push(out, "Return(\n")
+    ind(out, level + 1)
+    if s.a < 0 {
+        sb_push(out, "None")
+    } else {
+        sb_push(out, "Some(\n")
+        ind(out, level + 2)
+        render_expr(out, a, s.a, level + 2)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        sb_push_char(out, 41)
+    }
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func render_if_stmt(out: *StringBuilder, a: *Ast, s: StmtNode, level: int64) -> void {
+    sb_push(out, "If(\n")
+    ind(out, level + 1)
+    sb_push(out, "If {\n")
+    ind(out, level + 2)
+    sb_push(out, "cond: ")
+    render_expr(out, a, s.a, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "then: ")
+    render_block(out, a, s.b, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "els: ")
+    if s.c < 0 {
+        sb_push(out, "None")
+    } else {
+        sb_push(out, "Some(\n")
+        ind(out, level + 3)
+        render_block(out, a, s.c, level + 3)
+        sb_push(out, ",\n")
+        ind(out, level + 2)
+        sb_push_char(out, 41)
+    }
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "},\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func render_while_stmt(out: *StringBuilder, a: *Ast, s: StmtNode, level: int64) -> void {
+    sb_push(out, "While(\n")
+    ind(out, level + 1)
+    sb_push(out, "While {\n")
+    ind(out, level + 2)
+    sb_push(out, "cond: ")
+    render_expr(out, a, s.a, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "body: ")
+    render_block(out, a, s.b, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "post_test: ")
+    push_bool(out, s.c != 0)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "},\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func render_for_stmt(out: *StringBuilder, a: *Ast, s: StmtNode, level: int64) -> void {
+    sb_push(out, "For(\n")
+    ind(out, level + 1)
+    sb_push(out, "For {\n")
+    ind(out, level + 2)
+    sb_push(out, "var: ")
+    push_string(out, ast_name(a, s.a))
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "iter: ")
+    render_expr(out, a, s.b, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 2)
+    sb_push(out, "body: ")
+    render_block(out, a, s.c, level + 2)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "},\n")
+    ind(out, level)
+    sb_push_char(out, 41)
+}
+
+func render_func(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    f: FuncNode = vec_get((*a).funcs, id)
+    sb_push(out, "Func {\n")
+    ind(out, level + 1)
+    sb_push(out, "exported: ")
+    push_bool(out, f.exported)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "is_async: ")
+    push_bool(out, f.is_async)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, f.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "span: ")
+    render_span(out, f.lo, f.hi, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "generics: ")
+    render_kid_string_list(out, a, f.generics_off, f.generics_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "params: ")
+    render_param_list(out, a, f.params_off, f.params_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ret: ")
+    render_type(out, a, f.ret, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "body: ")
+    render_block(out, a, f.body, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_items(out: *StringBuilder, a: *Ast, level: int64) -> void {
+    items: *Vector<ItemNode> = (*a).items
+    if vec_len(items) == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        ind(out, level + 1)
+        if it.kind == ik_func() {
+            sb_push(out, "Func(\n")
+            ind(out, level + 2)
+            render_func(out, a, it.id, level + 2)
+            sb_push(out, ",\n")
+            ind(out, level + 1)
+            sb_push(out, "),\n")
+        }
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_monads(out: *StringBuilder, a: *Ast, level: int64) -> void {
+    monads: *Vector<MonadNode> = (*a).monads
+    if vec_len(monads) == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < vec_len(monads) {
+        m: MonadNode = vec_get(monads, i)
+        ind(out, level + 1)
+        sb_push(out, "(\n")
+        ind(out, level + 2)
+        push_string(out, ast_name(a, m.name))
+        sb_push(out, ",\n")
+        ind(out, level + 2)
+        render_span(out, m.lo, m.hi, level + 2)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        sb_push(out, "),\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+export func ast_dump(a: *Ast) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push(out, "Module {\n")
+    ind(out, 1)
+    sb_push(out, "paradigms: ")
+    render_string_list(out, a, (*a).paradigms, 1)
+    sb_push(out, ",\n")
+    ind(out, 1)
+    sb_push(out, "imports: ")
+    render_string_list(out, a, (*a).imports, 1)
+    sb_push(out, ",\n")
+    ind(out, 1)
+    sb_push(out, "monads: ")
+    render_monads(out, a, 1)
+    sb_push(out, ",\n")
+    ind(out, 1)
+    sb_push(out, "items: ")
+    render_all_items(out, a, 1)
+    sb_push(out, ",\n")
+    sb_push(out, "}")
+    r: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))
+    sb_free(out)
+    free(out)
+    return r
+}

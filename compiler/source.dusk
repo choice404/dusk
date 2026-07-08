@@ -17,6 +17,8 @@
 
 foreign "C" {
     func cool_file_size(path: *void) -> int64
+    func cool_is_file(path: *void) -> int64
+    func cool_realpath(path: *void) -> *raw char
 }
 
 // A loaded source file: its path and its full text. len is the true byte length
@@ -66,6 +68,20 @@ export func source_load(path: string) -> (Source, error) {
         return (Source { path: path, text: text, len: 0 }, error { message: "source is not valid UTF-8" })
     }
     return (Source { path: path, text: text, len: n }, error {})
+}
+
+export func source_is_file(path: string) -> bool {
+    buf: *raw char = to_cbuf(path)
+    ok: int64 = cool_is_file(buf)
+    free(buf)
+    return ok != 0
+}
+
+export func source_realpath(path: string) -> string {
+    buf: *raw char = to_cbuf(path)
+    out: string = cstr(cool_realpath(buf))
+    free(buf)
+    return out
 }
 
 // The byte at index i, or 0 outside the buffer. Reading past the end is clamped to

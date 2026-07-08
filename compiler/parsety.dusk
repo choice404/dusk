@@ -1,0 +1,184 @@
+// parsety: type grammar and shared signature helpers. This mirrors the stage0
+// recursive type parser but stores every result in the Type arena.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import token
+@import ast
+@import parse
+
+export func parse_type(p: *Parser) -> int64 {
+    mut ty: int64 = -1
+    if p_enter_nesting(p, "type", "type") {
+        ty = parse_type_inner(p)
+    } else {
+        ty = ast_type(p_ast(p), tk_unit(), 0, 0, 0)
+    }
+    p_leave_nesting(p)
+    return ty
+}
+
+func parse_type_inner(p: *Parser) -> int64 {
+    if p_at(p, k_star_star()) {
+        p_split_starstar(p)
+        inner: int64 = parse_type(p)
+        return ast_type(p_ast(p), tk_ptr(), inner, 0, 0)
+    }
+    if p_eat(p, k_star()) {
+        if p_ident_text_is(p, "raw") {
+            if p_kind2(p) == k_ident() {
+                p_bump(p)
+                return ast_type(p_ast(p), tk_rawptr(), parse_type(p), 0, 0)
+            }
+            if p_kind2(p) == k_star() {
+                p_bump(p)
+                return ast_type(p_ast(p), tk_rawptr(), parse_type(p), 0, 0)
+            }
+        }
+        return ast_type(p_ast(p), tk_ptr(), parse_type(p), 0, 0)
+    }
+    mut ty: int64 = parse_base_type(p)
+    mut going: bool = true
+    while going {
+        if p_eat(p, k_lbracket()) {
+            if p_eat(p, k_rbracket()) {
+                ty = ast_type(p_ast(p), tk_slice(), ty, 0, 0)
+            } else {
+                n: int64 = parse_array_len(p)
+                p_expect(p, k_rbracket())
+                ty = ast_type(p_ast(p), tk_array(), ty, n, 0)
+            }
+        } else {
+            going = false
+        }
+    }
+    return ty
+}
+
+func parse_base_type(p: *Parser) -> int64 {
+    if p_eat(p, k_lparen()) {
+        elems: *Vector<int64> = alloc(vec_new())
+        mut reading: bool = true
+        while reading {
+            if p_at(p, k_rparen()) {
+                reading = false
+            } else if p_at_eof(p) {
+                reading = false
+            } else {
+                vec_push(elems, parse_type(p))
+                if !p_eat(p, k_comma()) {
+                    reading = false
+                }
+            }
+        }
+        p_expect(p, k_rparen())
+        if p_eat(p, k_arrow()) {
+            off, len := ast_kids(p_ast(p), elems)
+            ret: int64 = parse_type(p)
+            return ast_type(p_ast(p), tk_func(), off, len, ret)
+        }
+        if vec_len(elems) == 0 {
+            return ast_type(p_ast(p), tk_unit(), 0, 0, 0)
+        }
+        if vec_len(elems) == 1 {
+            return vec_get(elems, 0)
+        }
+        off2, len2 := ast_kids(p_ast(p), elems)
+        return ast_type(p_ast(p), tk_tuple(), off2, len2, 0)
+    }
+    name: int64 = p_ident(p)
+    if str_eq(ast_name(p_ast(p), name), "void") {
+        return ast_type(p_ast(p), tk_unit(), 0, 0, 0)
+    }
+    if str_eq(ast_name(p_ast(p), name), "collector") {
+        if p_at(p, k_lt()) {
+            return ast_type(p_ast(p), tk_collector(), parse_collector_type_arg(p), 0, 0)
+        }
+    }
+    args: *Vector<int64> = alloc(vec_new())
+    if p_at(p, k_lt()) {
+        off_args: *Vector<int64> = parse_type_args(p)
+        off, len := ast_kids(p_ast(p), off_args)
+        return ast_type(p_ast(p), tk_named(), name, off, len)
+    }
+    off, len := ast_kids(p_ast(p), args)
+    return ast_type(p_ast(p), tk_named(), name, off, len)
+}
+
+export func parse_collector_type_arg(p: *Parser) -> int64 {
+    args: *Vector<int64> = parse_type_args(p)
+    if vec_len(args) == 1 {
+        return vec_get(args, 0)
+    }
+    p_error(p, "collector takes one element type: collector<T>")
+    if vec_len(args) > 0 {
+        return vec_get(args, 0)
+    }
+    return ast_type(p_ast(p), tk_unit(), 0, 0, 0)
+}
+
+export func parse_type_args(p: *Parser) -> *Vector<int64> {
+    args: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lt())
+    mut reading: bool = true
+    while reading {
+        if p_at_type_close(p) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            vec_push(args, parse_type(p))
+            if !p_eat(p, k_comma()) {
+                reading = false
+            }
+        }
+    }
+    p_expect_gt(p)
+    return args
+}
+
+func parse_array_len(p: *Parser) -> int64 {
+    if p_at(p, k_int()) {
+        t: Token = p_tok(p)
+        p_bump(p)
+        return p_int_value(p, t)
+    }
+    p_error(p, "expected an array length")
+    return 0
+}
+
+export func parse_generics(p: *Parser) -> *Vector<int64> {
+    g: *Vector<int64> = alloc(vec_new())
+    if p_eat(p, k_lt()) {
+        if !p_at_type_close(p) {
+            vec_push(g, p_ident(p))
+            while p_eat(p, k_comma()) {
+                vec_push(g, p_ident(p))
+            }
+        }
+        p_expect_gt(p)
+    }
+    return g
+}
+
+export func parse_params(p: *Parser) -> *Vector<int64> {
+    ps: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lparen())
+    if !p_at(p, k_rparen()) {
+        mut reading: bool = true
+        while reading {
+            is_using: bool = p_eat_kw(p, "using")
+            name: int64 = p_ident(p)
+            p_expect(p, k_colon())
+            ty: int64 = parse_type(p)
+            vec_push(ps, ast_param(p_ast(p), is_using, name, ty))
+            if !p_eat(p, k_comma()) {
+                reading = false
+            }
+        }
+    }
+    p_expect(p, k_rparen())
+    return ps
+}

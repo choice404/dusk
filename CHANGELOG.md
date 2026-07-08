@@ -2,6 +2,49 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.7.0
+
+The parser in dusk. 0.6.0 gave dusk1 a lexer; 0.7.0 gives it a parser, a loader, and a desugar pass, the three stages that turn a token stream into the merged, monad expanded module the rest of the pipeline consumes. `dusk1 parse`, `dusk1 load`, and `dusk1 desugar` now stand beside `lex` and `scan` as full commands, and each one's dump agrees with stage0's byte for byte across the whole corpus. No language surface changes; this is the bootstrap line doing exactly what it says it will. Suite 458 unit, 554 golden, 13 parser termination, clippy clean.
+
+The parser.
+
+- `compiler/ast.dusk` lays out the AST as a set of parse order arenas rather than a tree of boxed nodes: `ExprNode`, `StmtNode`, `TypeNode`, and `PatternNode` are each a fixed slot tagged record, `kind` plus up to four `int64` payload fields, stored in their own `Vector`, so a node is an integer id into the right arena rather than a pointer. Every variable length list, a call's arguments, a struct's fields, a function's generics, an enum's variants, a block's statements, is an `(off, len)` slice into one shared `kids` vector of ids, so the arena never allocates a list of its own for a shape that already has a home in `kids`. `compiler/intern.dusk` interns every name once into an `Interner`, so two occurrences of the same identifier, `println` at two call sites or a field name repeated across variants, compare and store as one integer rather than two heap strings.
+- `compiler/parse.dusk`, `parseexpr.dusk`, `parsestmt.dusk`, `parseitem.dusk`, `parsety.dusk`, and `parseops.dusk` port the complete grammar stage0's own parser accepts: every expression and statement form, `match` with its arm and pattern grammar, lambdas, and the three `do` classes, a plain source, a named monad, and an anonymous discard. `collector_mint_ahead` in `parseexpr.dusk` runs the same one token lookahead stage0 uses to tell a `collector<T>(...)` mint from an ordinary `collector < n` comparison, since `collector` is a contextual keyword and not a reserved one. `in_async_fn` gates `await` the same four ways stage0 does, `x := await f`, `x, e := await f`, a discarded `await f`, and `return await f`, rejecting it under a lambda, under `defer`, and mid expression by name rather than letting a fifth shape parse silently.
+- `p_enter_nesting` counts every recursive descent into an expression, a statement block, or a type the same way stage0's own guard does, and refuses past a depth of 500 with a named diagnostic, `expression nesting is too deep`, `block nesting is too deep`, or `type nesting is too deep`, instead of overflowing dusk1's own stack. Every toll point stage0's guard covers, parenthesized expressions, nested blocks, and nested generic type arguments among them, has a matching guard here, so a malformed or adversarial input that stage0 rejects cleanly can't take dusk1 down with it.
+
+The loader and privatize.
+
+- `compiler/loader.dusk` ports the full three tier import search: a dotted import resolves beside the importing file first, then against the stdlib root beside the binary or the tree `DUSK_HOME` names, and a quoted git path resolves against the dawn cache, `$DAWN_CACHE` or `~/.dawn/cache`. Every resolved path is canonicalized through `cool_realpath` before it is recorded, so two different relative spellings of the same file merge once rather than twice.
+- `compiler/privatize.dusk` renames every non exported top level item with the same per file suffix scheme stage0 uses, so a bare call can never reach another file's private helper and two files' same named private helpers never collide once merged. `compiler/loadfold.dusk` folds a qualified call like `std.io.println` down to the bare, possibly renamed global it names, once every imported namespace is known, and merges each file's `monad` blocks into the loaded module the same way stage0 does, keeping only the root file's own `Module.monads` record rather than importing an upstream file's monad metadata along with its functions.
+
+Desugar.
+
+- `compiler/desugar.dusk` rewrites every `do { x <- m; ... }` block into nested calls on that monad's `bind` and `unit`, the same expansion stage0's `desugar::run` performs ahead of resolve and typeck. `cont_type` inspects the target `bind`'s own signature to recover the continuation's parameter and return type, falling back to `Type::Infer` when `bind` is itself generic, so a `do` over a still unconstrained monad leaves the same inference holes for a later type pass to fill rather than guessing a concrete type too early. The anonymous discard form, `$do`, gets a synthesized bind name through `discard_name` the same way stage0 mints one.
+
+Parity, extended.
+
+- `tools/differential.sh` now diffs five pipeline stages, `lex`, `scan`, `parse`, `load`, and `desugar`, not two. `parse` agrees with stage0 over all 581 corpus files; `load` and `desugar` agree over 580 of them, the one exception being the single file whose divergence is that stage0's loader gates each imported file's own `@paradigm` and dusk1's does not yet, since that gate is sema's job and lands with the sema port rather than the loader itself.
+
+Oracle tooling, extended.
+
+- `dusk parse`'s dump switches from Rust's derived `Debug` output to a hand written canonical renderer, `parser::dump::render_module`, so a second, non Rust compiler has a format it can actually reproduce: a float prints as `Float(0x...)`, the sixteen hex digits of its IEEE 754 bits, and a string, char, or rune literal escapes every non printable scalar as `\u{hex}`, the same two rules the `lex` dump already used for the same reason. `dusk load` and `dusk desugar` are new commands on the stage0 side, printing the merged module and the merged and desugared module through the same renderer.
+- `docs/dumps.md` is now a full contract over all five dump commands, exit codes included: `parse` always prints, since the parser recovers rather than aborting, and only its exit code reports a lex or parse error, while `load` and `desugar` can print a dump and still exit non zero, an unresolved import or an imported file's paradigm violation recorded as an error without stopping the merge, so a printed dump and a clean exit are independent facts for those two commands. The doc also writes down, as a permanent part of the contract rather than a bug to chase, the one existing asymmetry a merge produces: rebasing a multi file program's spans into one coordinate space walks into a function or method body but leaves an item's own span, and every span recorded in `Module.monads`, in that file's original, unrebased coordinates, so a second compiler's loader has to shift exactly the same nodes and leave exactly the same ones alone to agree.
+
+stdlib and runtime growth.
+
+- The runtime gains `cool_is_file` and `cool_realpath`, the file existence check and the canonicalizing path resolve the loader's import search and its realpath based dedup read through. `lib/std/vector.dusk` gains `vec_set`, an in place element write by index that the AST arenas use to patch a slot after it is first appended.
+
+The audit, honestly recorded.
+
+- `await` inside a `defer` block used to parse without complaint; a `defer` runs at completion and cannot suspend, so it is now rejected by name, `'await' cannot appear under defer; a defer runs at completion and cannot suspend`.
+- `await` used mid expression, buried in an operand rather than named on its own statement, used to go unchecked; it is now rejected, `'await' cannot appear mid-expression; give the awaited value a name`.
+- `collector<T>()` with no argument used to record its diagnostic at an empty, zero width span; it now points at the call itself, so the caret in a rendered diagnostic lands somewhere a reader can see.
+- `cont_type` used to stop at the first function named `bind` it found and read its shape, even when that function's parameter list didn't match a continuation and a later, correctly shaped `bind` was still ahead in the file; it now keeps scanning past a malformed same named match instead of settling for the first one.
+
+Fixture pinning.
+
+- `tests/fixtures/{parse_p1,parse_p2,parse_p3,load_p4,desugar_p5}` adds 63 small, hand written programs, each isolating one edge of the parser or loader grammar, a `collector<T>()` empty argument, an else if chain, a pipe call, a monad merge across two files, a private name shadowed at two different scopes, for `tools/differential.sh` to pin stage0 and dusk1 against, on top of the corpus the two already agree over.
+
 ## 0.6.1
 
 else if, written down. The first surface note recorded under the bootstrap freeze, and not a surface change: the `else if` chain, `if a { } else if b { } else { }`, was already accepted by the parser as an `else` branch whose whole body is a single nested `if`, so no program's meaning moves. 0.6.1 writes it into the spec and pins it with goldens rather than leaving it a shape the parser happened to reach with nothing documenting or testing it. The language holds still, exactly as the freeze promises. Suite 458 unit, 554 golden (up from 552, two new here), 13 parser termination, clippy clean.

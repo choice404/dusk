@@ -1,0 +1,230 @@
+// parsestmt: block and statement grammar for P1. Statements are arena ids, with
+// nested blocks stored in the Block arena and variable-length lists in kids.
+
+@paradigm procedural
+
+@import std.vector
+@import token
+@import intern
+@import ast
+@import parse
+@import parsety
+@import parseexpr
+
+export func parse_block(p: *Parser) -> int64 {
+    if !p_enter_nesting(p, "block", "function") {
+        p_leave_nesting(p)
+        empty: *Vector<int64> = alloc(vec_new())
+        return ast_block(p_ast(p), empty)
+    }
+    stmts: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            sid: int64 = parse_stmt(p)
+            if sid >= 0 {
+                vec_push(stmts, sid)
+            }
+            p_guard_progress(p, before, "unexpected token in block")
+        }
+    }
+    p_expect(p, k_rbrace())
+    p_leave_nesting(p)
+    return ast_block(p_ast(p), stmts)
+}
+
+export func parse_stmt(p: *Parser) -> int64 {
+    if p_eat_kw(p, "return") {
+        if p_at(p, k_rbrace()) {
+            return ast_stmt(p_ast(p), sk_return(), -1, 0, 0, 0)
+        }
+        if p_nl_here(p) {
+            return ast_stmt(p_ast(p), sk_return(), -1, 0, 0, 0)
+        }
+        return ast_stmt(p_ast(p), sk_return(), parse_await_or_expr(p), 0, 0, 0)
+    }
+    if p_eat_kw(p, "defer") {
+        if (*p).in_async_fn && p_ident_text_is(p, "await") {
+            p_error(p, "'await' cannot appear under defer; a defer runs at completion and cannot suspend")
+            p_bump(p)
+        }
+        return ast_stmt(p_ast(p), sk_defer(), parse_expr(p), 0, 0, 0)
+    }
+    if p_kw(p, "if") {
+        return parse_if_stmt(p)
+    }
+    if p_kw(p, "while") {
+        return parse_while_stmt(p)
+    }
+    if p_kw(p, "for") {
+        return parse_for_stmt(p)
+    }
+    if p_eat_kw(p, "mut") {
+        return parse_let_rest(p, true, false)
+    }
+    if p_ident_text_is(p, "ref") {
+        if p_kind2(p) == k_ident() {
+            p_bump(p)
+            return parse_let_rest(p, false, true)
+        }
+    }
+    if is_binding_start(p) {
+        return parse_let_rest(p, false, false)
+    }
+    e: int64 = parse_await_or_expr(p)
+    if p_eat(p, k_assign()) {
+        rhs: int64 = parse_expr(p)
+        return ast_stmt(p_ast(p), sk_assign(), e, rhs, 0, 0)
+    }
+    op: int64 = compound_op(p_kind(p))
+    if op >= 0 {
+        p_bump(p)
+        rhs2: int64 = parse_expr(p)
+        return ast_stmt(p_ast(p), sk_assign_op(), op, e, rhs2, 0)
+    }
+    if !p_nl_here(p) {
+        if p_at(p, k_plus_plus()) {
+            sp_lo: int64 = p_lo(p)
+            sp_hi: int64 = p_hi(p)
+            p_bump(p)
+            one: int64 = ast_expr(p_ast(p), xk_int(), sp_lo, sp_hi, 1, -1, 0, 0)
+            return ast_stmt(p_ast(p), sk_assign_op(), bop_add(), e, one, 0)
+        }
+        if p_at(p, k_minus_minus()) {
+            sp_lo2: int64 = p_lo(p)
+            sp_hi2: int64 = p_hi(p)
+            p_bump(p)
+            one2: int64 = ast_expr(p_ast(p), xk_int(), sp_lo2, sp_hi2, 1, -1, 0, 0)
+            return ast_stmt(p_ast(p), sk_assign_op(), bop_sub(), e, one2, 0)
+        }
+    }
+    return ast_stmt(p_ast(p), sk_expr(), e, 0, 0, 0)
+}
+
+func is_binding_start(p: *Parser) -> bool {
+    if p_kind(p) != k_ident() {
+        return false
+    }
+    k: int64 = p_kind2(p)
+    if k == k_colon() { return true }
+    if k == k_colon_eq() { return true }
+    if k == k_comma() { return true }
+    return false
+}
+
+func parse_let_rest(p: *Parser, mutable: bool, is_ref: bool) -> int64 {
+    binds: *Vector<int64> = alloc(vec_new())
+    mut missing: bool = false
+    mut reading: bool = true
+    while reading {
+        name: int64 = p_ident(p)
+        mut ty: int64 = -1
+        if p_eat(p, k_colon()) {
+            ty = parse_type(p)
+        } else {
+            missing = true
+        }
+        vec_push(binds, ast_bind(p_ast(p), name, ty))
+        if !p_eat(p, k_comma()) {
+            reading = false
+        }
+    }
+    mut infer: bool = false
+    if p_eat(p, k_colon_eq()) {
+        infer = true
+    } else {
+        p_expect(p, k_assign())
+    }
+    if !infer {
+        if missing {
+            p_error(p, "destructuring binding needs ':=' or a type on each name")
+        }
+    }
+    value: int64 = parse_await_or_expr(p)
+    off, len := ast_kids(p_ast(p), binds)
+    mut flags: int64 = 0
+    if mutable { flags = flags | 1 }
+    if is_ref { flags = flags | 2 }
+    if infer { flags = flags | 4 }
+    return ast_stmt(p_ast(p), sk_let(), off, len, value, flags)
+}
+
+export func parse_await_or_expr(p: *Parser) -> int64 {
+    if p_ident_text_is(p, "await") {
+        if (*p).in_async_fn {
+            if (*p).lambda_depth == 0 {
+                lo: int64 = p_lo(p)
+                p_bump(p)
+                op: int64 = parse_expr(p)
+                n: ExprNode = vec_get((*p_ast(p)).exprs, op)
+                return ast_expr(p_ast(p), xk_await(), lo, n.hi, op, -1, 0, 0)
+            }
+        }
+        if !(*p).in_async_fn {
+            if p_kind2(p) != k_lparen() {
+                p_error(p, "'await' is only legal inside an async func")
+            }
+        }
+    }
+    return parse_expr(p)
+}
+
+func parse_if_stmt(p: *Parser) -> int64 {
+    p_expect_kw(p, "if")
+    cond: int64 = parse_expr_no_struct(p)
+    then_block: int64 = parse_block(p)
+    mut els: int64 = -1
+    if p_eat_kw(p, "else") {
+        if p_kw(p, "if") {
+            if !p_enter_nesting(p, "block", "function") {
+                p_leave_nesting(p)
+                empty: *Vector<int64> = alloc(vec_new())
+                els = ast_block(p_ast(p), empty)
+            } else {
+                one: *Vector<int64> = alloc(vec_new())
+                vec_push(one, parse_if_stmt(p))
+                els = ast_block(p_ast(p), one)
+                p_leave_nesting(p)
+            }
+        } else {
+            els = parse_block(p)
+        }
+    }
+    return ast_stmt(p_ast(p), sk_if(), cond, then_block, els, 0)
+}
+
+func parse_while_stmt(p: *Parser) -> int64 {
+    p_expect_kw(p, "while")
+    cond: int64 = parse_expr_no_struct(p)
+    body: int64 = parse_block(p)
+    return ast_stmt(p_ast(p), sk_while(), cond, body, 0, 0)
+}
+
+func parse_for_stmt(p: *Parser) -> int64 {
+    p_expect_kw(p, "for")
+    var: int64 = p_ident(p)
+    p_expect_kw(p, "in")
+    iter: int64 = parse_expr_no_struct(p)
+    body: int64 = parse_block(p)
+    return ast_stmt(p_ast(p), sk_for(), var, iter, body, 0)
+}
+
+func compound_op(k: int64) -> int64 {
+    if k == k_plus_eq() { return bop_add() }
+    if k == k_minus_eq() { return bop_sub() }
+    if k == k_star_eq() { return bop_mul() }
+    if k == k_slash_eq() { return bop_div() }
+    if k == k_percent_eq() { return bop_mod() }
+    if k == k_amp_eq() { return bop_bitand() }
+    if k == k_pipe_eq() { return bop_bitor() }
+    if k == k_caret_eq() { return bop_bitxor() }
+    if k == k_shl_eq() { return bop_shl() }
+    if k == k_shr_eq() { return bop_shr() }
+    return -1
+}

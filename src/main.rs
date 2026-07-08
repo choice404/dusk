@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use dusk::{analyze, Analysis};
-use dusk::{driver, lexer, parser, prescan};
+use dusk::{desugar, driver, lexer, loader, parser, prescan};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -16,6 +16,8 @@ fn main() -> ExitCode {
         "lex" => cmd_lex(args.get(1)),
         "scan" => cmd_scan(args.get(1)),
         "parse" => cmd_parse(args.get(1)),
+        "load" => cmd_load(args.get(1)),
+        "desugar" => cmd_desugar(args.get(1)),
         "check" => cmd_check(args.get(1)),
         "build" => cmd_build(args.get(1)),
         "run" => cmd_run(args.get(1), args.get(2..).unwrap_or(&[])),
@@ -72,27 +74,11 @@ fn render_kind(kind: &dusk::lexer::token::TokenKind) -> String {
     use dusk::lexer::token::TokenKind;
     match kind {
         TokenKind::Float { val, .. } => format!("Float(0x{:016X})", val.to_bits()),
-        TokenKind::Str(s) => format!("Str(\"{}\")", escape_canonical(s.chars())),
-        TokenKind::Char(c) => format!("Char('{}')", escape_canonical(std::iter::once(*c))),
-        TokenKind::Rune(c) => format!("Rune('{}')", escape_canonical(std::iter::once(*c))),
+        TokenKind::Str(s) => format!("Str(\"{}\")", parser::escape_canonical(s.chars())),
+        TokenKind::Char(c) => format!("Char('{}')", parser::escape_canonical(std::iter::once(*c))),
+        TokenKind::Rune(c) => format!("Rune('{}')", parser::escape_canonical(std::iter::once(*c))),
         other => format!("{other:?}"),
     }
-}
-
-/// Escapes a scalar sequence for a dump literal: printable ASCII passes through,
-/// and everything else, controls and every non-ASCII scalar alike, becomes a
-/// `\u{hex}` escape with the lowercase, minimal-width code point.
-fn escape_canonical(chars: impl Iterator<Item = char>) -> String {
-    let mut out = String::new();
-    for c in chars {
-        let cp = c as u32;
-        if (0x20..=0x7e).contains(&cp) {
-            out.push(c);
-        } else {
-            out.push_str(&format!("\\u{{{cp:x}}}"));
-        }
-    }
-    out
 }
 
 /// Dumps the token stream for a source file.
@@ -148,11 +134,50 @@ fn cmd_parse(path: Option<&String>) -> ExitCode {
     };
     let (tokens, lex_errs) = lexer::lex(&src);
     let (module, parse_errs) = parser::parse(tokens);
-    println!("{module:#?}");
+    println!("{}", parser::render_module(&module));
     for e in lex_errs.iter().chain(parse_errs.iter()) {
         eprintln!("{}: {}", path, e.render(&src));
     }
     if lex_errs.is_empty() && parse_errs.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Loads a root file and its imports, dumping the merged AST.
+fn cmd_load(path: Option<&String>) -> ExitCode {
+    let Some(path) = required_path(path, "load") else {
+        return ExitCode::FAILURE;
+    };
+    let prog = loader::load(&path);
+    if let Some(module) = &prog.module {
+        println!("{}", parser::render_module(module));
+    }
+    for e in &prog.errors {
+        eprintln!("{e}");
+    }
+    if prog.errors.is_empty() && prog.module.is_some() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Loads and desugars a root file and its imports, dumping the resulting AST.
+fn cmd_desugar(path: Option<&String>) -> ExitCode {
+    let Some(path) = required_path(path, "desugar") else {
+        return ExitCode::FAILURE;
+    };
+    let prog = loader::load(&path);
+    let module = prog.module.as_ref().map(desugar::run);
+    if let Some(module) = &module {
+        println!("{}", parser::render_module(module));
+    }
+    for e in &prog.errors {
+        eprintln!("{e}");
+    }
+    if prog.errors.is_empty() && module.is_some() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -203,7 +228,12 @@ fn cmd_build(path: Option<&String>) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let out = PathBuf::from("target").join("dusk-out");
-    match driver::build_module(&analysis.module, &analysis.mut_tuple_types, &out, &stem_of(&path)) {
+    match driver::build_module(
+        &analysis.module,
+        &analysis.mut_tuple_types,
+        &out,
+        &stem_of(&path),
+    ) {
         Ok(art) => {
             println!("[dusk] {}", art.bin.display());
             ExitCode::SUCCESS
@@ -246,6 +276,15 @@ fn cmd_run(path: Option<&String>, prog_args: &[String]) -> ExitCode {
     }
 }
 
+/// Reads a required path argument, printing command usage on failure.
+fn required_path(path: Option<&String>, cmd: &str) -> Option<String> {
+    let Some(path) = path else {
+        eprintln!("usage: dusk {cmd} <file.dusk>");
+        return None;
+    };
+    Some(path.clone())
+}
+
 /// Reads a source file, printing a usage or read error on failure.
 fn read_src(path: Option<&String>, cmd: &str) -> Option<(String, String)> {
     let Some(path) = path else {
@@ -268,6 +307,8 @@ fn print_help() {
     println!("  dusk lex <file>      dump the token stream");
     println!("  dusk scan <file>     dump paradigms + imports (pre scan)");
     println!("  dusk parse <file>    lex + parse, dump the AST");
+    println!("  dusk load <file>     load imports, dump the merged AST");
+    println!("  dusk desugar <file>  load + desugar, dump the AST");
     println!("  dusk check <file>    lex + parse + resolve + typecheck");
     println!("  dusk build <file>    compile to a native binary");
     println!("  dusk run <file>      compile and run");

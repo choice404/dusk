@@ -1,0 +1,374 @@
+// astdump_item: item record rendering for the canonical parse dump.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import astdumpty
+@import astdump2
+
+func ind(out: *StringBuilder, n: int64) -> void {
+    mut i: int64 = 0
+    while i < n {
+        sb_push(out, "    ")
+        i = i + 1
+    }
+}
+
+func push_bool(out: *StringBuilder, b: bool) -> void {
+    if b { sb_push(out, "true") } else { sb_push(out, "false") }
+}
+
+func push_string(out: *StringBuilder, s: string) -> void {
+    sb_push_char(out, 34)
+    sb_push(out, s)
+    sb_push_char(out, 34)
+}
+
+func render_span(out: *StringBuilder, lo: int64, hi: int64, level: int64) -> void {
+    sb_push(out, "Span {\n")
+    ind(out, level + 1)
+    sb_push(out, "lo: ")
+    sb_push_int(out, lo)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "hi: ")
+    sb_push_int(out, hi)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_func(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    f: FuncNode = vec_get((*a).funcs, id)
+    sb_push(out, "Func {\n")
+    ind(out, level + 1)
+    sb_push(out, "exported: ")
+    push_bool(out, f.exported)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "is_async: ")
+    push_bool(out, f.is_async)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, f.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "span: ")
+    render_span(out, f.lo, f.hi, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "generics: ")
+    render_name_kids(out, a, f.generics_off, f.generics_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "params: ")
+    render_param_list(out, a, f.params_off, f.params_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ret: ")
+    render_type(out, a, f.ret, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "body: ")
+    render_block(out, a, f.body, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_struct_item(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    s: StructNode = vec_get((*a).structs, id)
+    sb_push(out, "Struct {\n")
+    ind(out, level + 1)
+    sb_push(out, "exported: ")
+    push_bool(out, s.exported)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, s.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "generics: ")
+    render_name_kids(out, a, s.generics_off, s.generics_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "fields: ")
+    render_field_list(out, a, s.fields_off, s.fields_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_variant(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    v: VariantNode = vec_get((*a).variants, id)
+    sb_push(out, "Variant {\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, v.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "fields: ")
+    render_field_list(out, a, v.fields_off, v.fields_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_variant_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_variant(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_enum_item(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    e: EnumNode = vec_get((*a).enums, id)
+    sb_push(out, "Enum {\n")
+    ind(out, level + 1)
+    sb_push(out, "exported: ")
+    push_bool(out, e.exported)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, e.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "generics: ")
+    render_name_kids(out, a, e.generics_off, e.generics_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "variants: ")
+    render_variant_list(out, a, e.variants_off, e.variants_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_method_sig(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    m: MethodSigNode = vec_get((*a).method_sigs, id)
+    sb_push(out, "MethodSig {\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, m.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "params: ")
+    render_param_list(out, a, m.params_off, m.params_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ret: ")
+    render_type(out, a, m.ret, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_method_sig_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_method_sig(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_interface_item(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    it: InterfaceNode = vec_get((*a).interfaces, id)
+    sb_push(out, "Interface {\n")
+    ind(out, level + 1)
+    sb_push(out, "exported: ")
+    push_bool(out, it.exported)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, it.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "generics: ")
+    render_name_kids(out, a, it.generics_off, it.generics_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "methods: ")
+    render_method_sig_list(out, a, it.methods_off, it.methods_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_func_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_func(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_optional_name(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    if id < 0 {
+        sb_push(out, "None")
+    } else {
+        sb_push(out, "Some(\n")
+        ind(out, level + 1)
+        push_string(out, ast_name(a, id))
+        sb_push(out, ",\n")
+        ind(out, level)
+        sb_push_char(out, 41)
+    }
+}
+
+func render_impl_item(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    im: ImplNode = vec_get((*a).impls, id)
+    sb_push(out, "Impl {\n")
+    ind(out, level + 1)
+    sb_push(out, "iface: ")
+    render_optional_name(out, a, im.iface, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ty: ")
+    push_string(out, ast_name(a, im.ty))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "span: ")
+    render_span(out, im.lo, im.hi, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "methods: ")
+    render_func_list(out, a, im.methods_off, im.methods_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_foreign_func(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    ff: ForeignFuncNode = vec_get((*a).foreign_funcs, id)
+    sb_push(out, "ForeignFunc {\n")
+    ind(out, level + 1)
+    sb_push(out, "name: ")
+    push_string(out, ast_name(a, ff.name))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "params: ")
+    render_param_list(out, a, ff.params_off, ff.params_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "ret: ")
+    render_type(out, a, ff.ret, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_foreign_func_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
+    if len == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(out, level + 1)
+        render_foreign_func(out, a, vec_get((*a).kids, off + i), level + 1)
+        sb_push(out, ",\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}
+
+func render_foreign_item(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    f: ForeignNode = vec_get((*a).foreigns, id)
+    sb_push(out, "Foreign {\n")
+    ind(out, level + 1)
+    sb_push(out, "abi: ")
+    push_string(out, ast_name(a, f.abi))
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "span: ")
+    render_span(out, f.lo, f.hi, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level + 1)
+    sb_push(out, "funcs: ")
+    render_foreign_func_list(out, a, f.funcs_off, f.funcs_len, level + 1)
+    sb_push(out, ",\n")
+    ind(out, level)
+    sb_push_char(out, 125)
+}
+
+func render_item_body(out: *StringBuilder, a: *Ast, it: ItemNode, level: int64) -> void {
+    if it.kind == ik_func() {
+        render_func(out, a, it.id, level)
+    } else if it.kind == ik_struct() {
+        render_struct_item(out, a, it.id, level)
+    } else if it.kind == ik_enum() {
+        render_enum_item(out, a, it.id, level)
+    } else if it.kind == ik_interface() {
+        render_interface_item(out, a, it.id, level)
+    } else if it.kind == ik_impl() {
+        render_impl_item(out, a, it.id, level)
+    } else {
+        render_foreign_item(out, a, it.id, level)
+    }
+}
+
+func item_name(kind: int64) -> string {
+    if kind == ik_func() { return "Func" }
+    if kind == ik_struct() { return "Struct" }
+    if kind == ik_enum() { return "Enum" }
+    if kind == ik_interface() { return "Interface" }
+    if kind == ik_impl() { return "Impl" }
+    return "Foreign"
+}
+
+export func render_all_items(out: *StringBuilder, a: *Ast, level: int64) -> void {
+    items: *Vector<ItemNode> = (*a).items
+    if vec_len(items) == 0 {
+        sb_push(out, "[]")
+        return
+    }
+    sb_push(out, "[\n")
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        ind(out, level + 1)
+        sb_push(out, item_name(it.kind))
+        sb_push(out, "(\n")
+        ind(out, level + 2)
+        render_item_body(out, a, it, level + 2)
+        sb_push(out, ",\n")
+        ind(out, level + 1)
+        sb_push(out, "),\n")
+        i = i + 1
+    }
+    ind(out, level)
+    sb_push_char(out, 93)
+}

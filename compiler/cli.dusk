@@ -15,6 +15,12 @@
 @import dump
 @import diag
 @import token
+@import parse
+@import parseitem
+@import ast
+@import astdump
+@import loader
+@import desugar
 
 // Runs the lexer on the file at path, printing one line per token to stdout and any
 // faults to stderr. Returns 1 when the lexer reported a fault, matching stage0's
@@ -67,6 +73,93 @@ export func cmd_scan(path: string) -> int32 {
         j = j + 1
     }
     if vec_len(errs) > 0 {
+        return 1
+    }
+    return 0
+}
+
+// Runs lex + parse on the file at path, printing the canonical AST dump. The dump
+// is printed even when lexing or parsing records faults, matching stage0's parse
+// command contract.
+export func cmd_parse(path: string) -> int32 {
+    s, e := source_load(path)
+    if e.exists() {
+        printerr("dusk1: cannot read source file")
+        return 1
+    }
+    lx: *Lexer = lex(s.text, s.len)
+    p: *Parser = parser_new(lx_tokens(lx), s.text, s.len)
+    a: *Ast = parse_module(p)
+    out: string = ast_dump(a)
+    println(out)
+    free(out)
+    lex_errs: *Vector<Located> = lx_errors(lx)
+    mut i: int64 = 0
+    while i < vec_len(lex_errs) {
+        emit_located(path, s.text, s.len, vec_get(lex_errs, i))
+        i = i + 1
+    }
+    parse_errs: *Vector<Located> = p_errors(p)
+    mut j: int64 = 0
+    while j < vec_len(parse_errs) {
+        emit_located(path, s.text, s.len, vec_get(parse_errs, j))
+        j = j + 1
+    }
+    if vec_len(lex_errs) > 0 {
+        return 1
+    }
+    if vec_len(parse_errs) > 0 {
+        return 1
+    }
+    return 0
+}
+
+// Runs the full P4 loader on the root file, printing the merged AST whenever the
+// root produced a module. Loader diagnostics make the command fail but do not
+// suppress a dump, matching stage0's load command contract.
+export func cmd_load(path: string, prog: string) -> int32 {
+    p: Program = load(path, prog)
+    if p.has_module {
+        out: string = ast_dump(p.module)
+        println(out)
+        free(out)
+    }
+    errs: *Vector<string> = p.errors
+    mut i: int64 = 0
+    while i < vec_len(errs) {
+        printerr(vec_get(errs, i))
+        i = i + 1
+    }
+    if vec_len(errs) > 0 {
+        return 1
+    }
+    if !p.has_module {
+        return 1
+    }
+    return 0
+}
+
+// Runs the loader and then expands monadic do notation before printing the same
+// AST dump format as parse/load. Desugar itself is infallible; only loader faults
+// affect the exit code.
+export func cmd_desugar(path: string, prog: string) -> int32 {
+    p: Program = load(path, prog)
+    if p.has_module {
+        desugar(p.module)
+        out: string = ast_dump(p.module)
+        println(out)
+        free(out)
+    }
+    errs: *Vector<string> = p.errors
+    mut i: int64 = 0
+    while i < vec_len(errs) {
+        printerr(vec_get(errs, i))
+        i = i + 1
+    }
+    if vec_len(errs) > 0 {
+        return 1
+    }
+    if !p.has_module {
         return 1
     }
     return 0

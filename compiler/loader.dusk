@@ -1,0 +1,475 @@
+// loader: P4 import resolver, parser merger, privatizer, and namespace fold.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.os
+@import std.functional.maybe
+@import source
+@import lex
+@import parse
+@import parseitem
+@import ast
+@import diag
+@import home
+@import privatize
+@import loadfold
+
+export struct Program {
+    module: *Ast,
+    has_module: bool,
+    errors: *Vector<string>,
+    files: *Vector<FileSrc>,
+}
+
+struct ParsedFile {
+    ok: bool,
+    ast: *Ast,
+    src: Source,
+}
+
+struct WorkItem {
+    imports: *Vector<string>,
+    dir: string,
+    importer: string,
+}
+
+struct Resolved {
+    ok: bool,
+    file: string,
+    has_leaf: bool,
+    leaf: string,
+}
+
+func new_set() -> *Map<int64> {
+    return alloc(map_new())
+}
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+func has_slash(s: string) -> bool {
+    mut i: int64 = 0
+    while s[i] != 0 {
+        if s[i] == 47 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func dotted_to_rel(s: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while s[i] != 0 {
+        if s[i] == 46 {
+            sb_push_char(b, 47)
+        } else {
+            sb_push_char(b, s[i])
+        }
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func with_dusk_ext(rel: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, rel)
+    sb_push(b, ".dusk")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func dir_of(path: string) -> string {
+    n: int64 = str_len(path)
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if path[i] == 47 {
+            last = i
+        }
+        i = i + 1
+    }
+    if last < 0 {
+        return "."
+    }
+    return substring(path, 0, last)
+}
+
+func last_slash(s: string) -> int64 {
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while s[i] != 0 {
+        if s[i] == 47 {
+            last = i
+        }
+        i = i + 1
+    }
+    return last
+}
+
+func last_dot(s: string) -> int64 {
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while s[i] != 0 {
+        if s[i] == 46 {
+            last = i
+        }
+        i = i + 1
+    }
+    return last
+}
+
+func dawn_cache() -> string {
+    dc: string = env("DAWN_CACHE")
+    if str_len(dc) > 0 {
+        return dc
+    }
+    h: string = env("HOME")
+    d: string = path_join(h, ".dawn")
+    out: string = path_join(d, "cache")
+    return out
+}
+
+func canon(path: string) -> string {
+    real: string = source_realpath(path)
+    if str_len(real) > 0 {
+        return real
+    }
+    return copy_string(path)
+}
+
+func resolved_none() -> Resolved {
+    return Resolved { ok: false, file: "", has_leaf: false, leaf: "" }
+}
+
+func resolve_in_one(rel: string, root: string) -> Resolved {
+    file_rel: string = with_dusk_ext(rel)
+    full: string = path_join(root, file_rel)
+    if source_is_file(full) {
+        return Resolved { ok: true, file: full, has_leaf: false, leaf: "" }
+    }
+    idx: int64 = last_slash(rel)
+    if idx >= 0 {
+        parent_rel: string = substring(rel, 0, idx)
+        leaf: string = substring(rel, idx + 1, str_len(rel))
+        parent_file_rel: string = with_dusk_ext(parent_rel)
+        parent: string = path_join(root, parent_file_rel)
+        if source_is_file(parent) {
+            return Resolved { ok: true, file: parent, has_leaf: true, leaf: leaf }
+        }
+    }
+    return resolved_none()
+}
+
+func resolve(imp: string, base: string, stdlib: string) -> Resolved {
+    if has_slash(imp) {
+        return resolve_in_one(imp, dawn_cache())
+    }
+    rel: string = dotted_to_rel(imp)
+    r: Resolved = resolve_in_one(rel, base)
+    if r.ok {
+        return r
+    }
+    return resolve_in_one(rel, stdlib)
+}
+
+func render_located_string(path: string, src: string, n: int64, e: Located) -> string {
+    line, col := line_col(src, n, e.lo)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, path)
+    sb_push_char(b, 58)
+    sb_push_int(b, line)
+    sb_push_char(b, 58)
+    sb_push_int(b, col)
+    sb_push(b, ": error: ")
+    sb_push(b, e.msg)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func read_error(path: string, e: error) -> string {
+    if !e.exists() {
+        return path
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, path)
+    sb_push(b, ": read error: ")
+    sb_push(b, e.toString())
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func parse_file(path: string, errors: *Vector<string>) -> ParsedFile {
+    s, e := source_load(path)
+    if e.exists() {
+        vec_push(errors, read_error(path, e))
+        return ParsedFile { ok: false, ast: ast_new(), src: s }
+    }
+    lx: *Lexer = lex(s.text, s.len)
+    p: *Parser = parser_new(lx_tokens(lx), s.text, s.len)
+    a: *Ast = parse_module(p)
+    mut ok: bool = true
+    lex_errs: *Vector<Located> = lx_errors(lx)
+    mut i: int64 = 0
+    while i < vec_len(lex_errs) {
+        vec_push(errors, render_located_string(path, s.text, s.len, vec_get(lex_errs, i)))
+        ok = false
+        i = i + 1
+    }
+    parse_errs: *Vector<Located> = p_errors(p)
+    mut j: int64 = 0
+    while j < vec_len(parse_errs) {
+        vec_push(errors, render_located_string(path, s.text, s.len, vec_get(parse_errs, j)))
+        ok = false
+        j = j + 1
+    }
+    return ParsedFile { ok: ok, ast: a, src: s }
+}
+
+func ast_import_strings(a: *Ast) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    imps: *Vector<int64> = (*a).imports
+    mut i: int64 = 0
+    while i < vec_len(imps) {
+        vec_push(out, ast_name(a, vec_get(imps, i)))
+        i = i + 1
+    }
+    return out
+}
+
+func register_file(files: *Vector<FileSrc>, base: int64, path: string, src: Source, a: *Ast) -> int64 {
+    load_shift_module(a, base)
+    vec_push(files, FileSrc { path: path, base: base, src: src.text, len: src.len })
+    return base + src.len + 1
+}
+
+func exported_names(a: *Ast) -> *Map<int64> {
+    names: *Map<int64> = new_set()
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if f.exported {
+                map_put(names, ast_name(a, f.name), 1)
+            }
+        } else if it.kind == ik_struct() {
+            s: StructNode = vec_get((*a).structs, it.id)
+            if s.exported {
+                map_put(names, ast_name(a, s.name), 1)
+            }
+        } else if it.kind == ik_enum() {
+            e: EnumNode = vec_get((*a).enums, it.id)
+            if e.exported {
+                map_put(names, ast_name(a, e.name), 1)
+            }
+        } else if it.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            if iface.exported {
+                map_put(names, ast_name(a, iface.name), 1)
+            }
+        }
+        i = i + 1
+    }
+    return names
+}
+
+func add_namespace(ns: *Map<int64>, modpath: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while modpath[i] != 0 {
+        if modpath[i] == 46 {
+            if sb_size(b) > 0 {
+                prefix: string = substring(sb_cstr(b), 0, sb_size(b))
+                map_put(ns, prefix, 1)
+            }
+            sb_push_char(b, 46)
+        } else {
+            sb_push_char(b, modpath[i])
+        }
+        i = i + 1
+    }
+    if sb_size(b) > 0 {
+        full: string = substring(sb_cstr(b), 0, sb_size(b))
+        map_put(ns, full, 1)
+    }
+    sb_free(b)
+    free(b)
+}
+
+func module_namespace(imp: string, has_leaf: bool) -> string {
+    if has_leaf {
+        idx: int64 = last_dot(imp)
+        if idx >= 0 {
+            return substring(imp, 0, idx)
+        }
+    }
+    return imp
+}
+
+func extend_ns_exports(ns_exports: *Map<*Map<int64>>, modpath: string, ex: *Map<int64>) -> void {
+    if map_has(ns_exports, modpath) {
+        empty: *Map<int64> = new_set()
+        target: *Map<int64> = unwrap_or(map_get(ns_exports, modpath), empty)
+        copy_export_keys(target, ex)
+    } else {
+        target: *Map<int64> = new_set()
+        map_put(ns_exports, modpath, target)
+        copy_export_keys(target, ex)
+    }
+}
+
+func copy_export_keys(target: *Map<int64>, ex: *Map<int64>) -> void {
+    keys: *Vector<string> = map_keys(ex)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        map_put(target, vec_get(keys, i), 1)
+        i = i + 1
+    }
+}
+
+func cannot_resolve(importer: string, imp: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, importer)
+    sb_push(b, ": cannot resolve import '")
+    sb_push(b, imp)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func leaf_error(importer: string, imp: string, leaf: string) -> string {
+    mut modpath: string = imp
+    dot: int64 = last_dot(imp)
+    slash: int64 = last_slash(imp)
+    mut cut: int64 = dot
+    if slash > cut {
+        cut = slash
+    }
+    if cut >= 0 {
+        modpath = substring(imp, 0, cut)
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, importer)
+    sb_push(b, ": import '")
+    sb_push(b, imp)
+    sb_push(b, "' names '")
+    sb_push(b, leaf)
+    sb_push(b, "', but '")
+    sb_push(b, modpath)
+    sb_push(b, "' exports no such symbol")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func pop_work(work: *Vector<WorkItem>) -> WorkItem {
+    idx: int64 = vec_len(work) - 1
+    w: WorkItem = vec_get(work, idx)
+    (*work).len = idx
+    return w
+}
+
+func push_work(work: *Vector<WorkItem>, imports: *Vector<string>, dir: string, importer: string) -> void {
+    vec_push(work, WorkItem { imports: imports, dir: dir, importer: importer })
+}
+
+func empty_program(errors: *Vector<string>, files: *Vector<FileSrc>) -> Program {
+    return Program { module: ast_new(), has_module: false, errors: errors, files: files }
+}
+
+export func load(root_path: string, prog: string) -> Program {
+    errors: *Vector<string> = alloc(vec_new())
+    files: *Vector<FileSrc> = alloc(vec_new())
+    stdlib: string = path_join(dusk_home(prog), "lib")
+    visited: *Map<int64> = new_set()
+    exports: *Map<*Map<int64>> = alloc(map_new())
+    namespaces: *Map<int64> = new_set()
+    ns_exports: *Map<*Map<int64>> = alloc(map_new())
+    mut base: int64 = 0
+
+    root: ParsedFile = parse_file(root_path, errors)
+    if !root.ok {
+        return empty_program(errors, files)
+    }
+    map_put(visited, canon(root_path), 1)
+    base = register_file(files, base, root_path, root.src, root.ast)
+
+    work: *Vector<WorkItem> = alloc(vec_new())
+    push_work(work, ast_import_strings(root.ast), dir_of(root_path), root_path)
+
+    while vec_len(work) > 0 {
+        w: WorkItem = pop_work(work)
+        imps: *Vector<string> = w.imports
+        mut i: int64 = 0
+        while i < vec_len(imps) {
+            imp: string = vec_get(imps, i)
+            r: Resolved = resolve(imp, w.dir, stdlib)
+            if !r.ok {
+                vec_push(errors, cannot_resolve(w.importer, imp))
+            } else {
+                mut has_mod_ns: bool = false
+                mut mod_ns: string = ""
+                if !has_slash(imp) {
+                    mod_ns = module_namespace(imp, r.has_leaf)
+                    add_namespace(namespaces, mod_ns)
+                    has_mod_ns = true
+                }
+
+                cfile: string = canon(r.file)
+                if !map_has(visited, cfile) {
+                    map_put(visited, cfile, 1)
+                    parsed: ParsedFile = parse_file(r.file, errors)
+                    if parsed.ok {
+                        ex: *Map<int64> = exported_names(parsed.ast)
+                        map_put(exports, cfile, ex)
+                        suffix: string = suffix_for(r.file, vec_len(files))
+                        privatize(parsed.ast, suffix)
+                        push_work(work, ast_import_strings(parsed.ast), dir_of(r.file), r.file)
+                        base = register_file(files, base, r.file, parsed.src, parsed.ast)
+                        load_append_items(root.ast, parsed.ast)
+                    }
+                }
+
+                if has_mod_ns {
+                    if map_has(exports, cfile) {
+                        empty: *Map<int64> = new_set()
+                        ex2: *Map<int64> = unwrap_or(map_get(exports, cfile), empty)
+                        extend_ns_exports(ns_exports, mod_ns, ex2)
+                    }
+                }
+                if r.has_leaf {
+                    if map_has(exports, cfile) {
+                        empty2: *Map<int64> = new_set()
+                        ex3: *Map<int64> = unwrap_or(map_get(exports, cfile), empty2)
+                        if !map_has(ex3, r.leaf) {
+                            vec_push(errors, leaf_error(w.importer, imp, r.leaf))
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    load_fold_qualified_calls(root.ast, namespaces, ns_exports, files, errors)
+    return Program { module: root.ast, has_module: true, errors: errors, files: files }
+}

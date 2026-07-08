@@ -1,0 +1,18 @@
+// The loader keeps only the root file's own `monads` record; an imported
+// file's monad blocks are flattened into ordinary functions and merged as
+// items, but the file's `Module.monads` metadata never crosses the merge.
+// Opt.bind is exported and must survive the merge under its own name; Opt's
+// private unit must be renamed like any other private top-level item; and the
+// merged module's `monads` list must contain only names this root file itself
+// declares (none here), never "Opt" from the import.
+@paradigm functional
+@import monad_merge_lib
+
+func main() -> int32 {
+    r := do Opt {
+        a <- Opt { v: 3 }
+        a + 1
+    }
+    println(r.v)
+    return 0
+}

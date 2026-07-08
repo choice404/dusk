@@ -1,0 +1,28 @@
+// privatize's do-bind handling binds every do-bind name into scope before
+// walking any bind's expression (the coarse, safe-direction approximation
+// documented on ren_do / ExprKind::Do). Here the second do-bind's name,
+// "helper", is the same as this file's own private helper. The first
+// do-bind's expression calls that private helper before the shadowing bind is
+// reached, but the renamer already treats "helper" as bound for the whole do
+// block, so the first bind's reference is left as bare "helper" instead of
+// following the helper to its privatized name, the way the plain call two
+// lines above correctly does.
+@paradigm functional
+
+func helper() -> int32 {
+    return 41
+}
+
+func two() -> int32 {
+    return 2
+}
+
+export func run() -> int32 {
+    outside := helper()
+    r := do {
+        a <- helper()
+        helper <- two()
+        a + helper
+    }
+    return outside + r
+}

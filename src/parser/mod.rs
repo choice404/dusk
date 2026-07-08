@@ -6,6 +6,9 @@
 //! line starting with `*` is a dereference, not a multiply.
 
 pub mod ast;
+pub mod dump;
+
+pub use dump::{escape_canonical, render_module};
 
 use crate::diag::{Diagnostic, Span};
 use crate::lexer::token::{Keyword, Token, TokenKind};

@@ -1,0 +1,419 @@
+// desugar: arena rewrite for monadic do notation.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import intern
+
+func empty_kids(a: *Ast) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    return ast_kids(a, ids)
+}
+
+func clone_name_kids(a: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, vec_get((*a).kids, off + i))
+        i = i + 1
+    }
+    return ast_kids(a, ids)
+}
+
+func clone_type_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, clone_type(a, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(a, ids)
+}
+
+func clone_type(a: *Ast, id: int64) -> int64 {
+    t: TypeNode = vec_get((*a).types, id)
+    if t.kind == tk_named() {
+        off, len := clone_type_list(a, t.b, t.c)
+        return ast_type(a, tk_named(), t.a, off, len)
+    }
+    if t.kind == tk_ptr() {
+        return ast_type(a, tk_ptr(), clone_type(a, t.a), 0, 0)
+    }
+    if t.kind == tk_rawptr() {
+        return ast_type(a, tk_rawptr(), clone_type(a, t.a), 0, 0)
+    }
+    if t.kind == tk_slice() {
+        return ast_type(a, tk_slice(), clone_type(a, t.a), 0, 0)
+    }
+    if t.kind == tk_array() {
+        return ast_type(a, tk_array(), clone_type(a, t.a), t.b, 0)
+    }
+    if t.kind == tk_tuple() {
+        off2, len2 := clone_type_list(a, t.a, t.b)
+        return ast_type(a, tk_tuple(), off2, len2, 0)
+    }
+    if t.kind == tk_func() {
+        off3, len3 := clone_type_list(a, t.a, t.b)
+        return ast_type(a, tk_func(), off3, len3, clone_type(a, t.c))
+    }
+    if t.kind == tk_collector() {
+        return ast_type(a, tk_collector(), clone_type(a, t.a), 0, 0)
+    }
+    if t.kind == tk_infer() {
+        return ast_type(a, tk_infer(), 0, 0, 0)
+    }
+    return ast_type(a, tk_unit(), 0, 0, 0)
+}
+
+func int_ty(a: *Ast) -> int64 {
+    off, len := empty_kids(a)
+    name: int64 = intern_id((*a).interner, "int64")
+    return ast_type(a, tk_named(), name, off, len)
+}
+
+func infer_ty(a: *Ast) -> int64 {
+    return ast_type(a, tk_infer(), 0, 0, 0)
+}
+
+func clone_param(a: *Ast, id: int64) -> int64 {
+    p: ParamNode = vec_get((*a).params, id)
+    return ast_param(a, p.is_using, p.name, clone_type(a, p.ty))
+}
+
+func clone_param_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, clone_param(a, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(a, ids)
+}
+
+func clone_bind(a: *Ast, id: int64) -> int64 {
+    b: BindNode = vec_get((*a).binds, id)
+    mut ty: int64 = -1
+    if b.ty >= 0 {
+        ty = clone_type(a, b.ty)
+    }
+    return ast_bind(a, b.name, ty)
+}
+
+func clone_bind_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, clone_bind(a, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(a, ids)
+}
+
+func clone_pattern(a: *Ast, id: int64) -> int64 {
+    p: PatternNode = vec_get((*a).patterns, id)
+    if p.kind == pk_ident() {
+        return ast_pattern(a, pk_ident(), p.a, 0, 0)
+    }
+    if p.kind == pk_variant() {
+        off, len := clone_name_kids(a, p.b, p.c)
+        return ast_pattern(a, pk_variant(), p.a, off, len)
+    }
+    return ast_pattern(a, pk_wildcard(), 0, 0, 0)
+}
+
+func rewrite_expr_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, rewrite_expr(a, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return ast_kids(a, ids)
+}
+
+func rewrite_field_pairs(a: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        vec_push(ids, vec_get((*a).kids, off + i))
+        vec_push(ids, rewrite_expr(a, vec_get((*a).kids, off + i + 1)))
+        i = i + 2
+    }
+    return ast_kids(a, ids)
+}
+
+func rewrite_match(a: *Ast, scrut: int64, off: int64, len: int64) -> (int64, int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        vec_push(ids, ast_arm(a, clone_pattern(a, arm.pat), rewrite_block(a, arm.body)))
+        i = i + 1
+    }
+    aoff, alen := ast_kids(a, ids)
+    return (rewrite_expr(a, scrut), aoff, alen)
+}
+
+func rewrite_block(a: *Ast, id: int64) -> int64 {
+    b: BlockNode = vec_get((*a).blocks, id)
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < b.len {
+        vec_push(ids, rewrite_stmt(a, vec_get((*a).kids, b.off + i)))
+        i = i + 1
+    }
+    return ast_block(a, ids)
+}
+
+func rewrite_stmt(a: *Ast, id: int64) -> int64 {
+    s: StmtNode = vec_get((*a).stmts, id)
+    if s.kind == sk_let() {
+        off, len := clone_bind_list(a, s.a, s.b)
+        return ast_stmt(a, sk_let(), off, len, rewrite_expr(a, s.c), s.d)
+    }
+    if s.kind == sk_assign() {
+        return ast_stmt(a, sk_assign(), rewrite_expr(a, s.a), rewrite_expr(a, s.b), 0, 0)
+    }
+    if s.kind == sk_assign_op() {
+        return ast_stmt(a, sk_assign_op(), s.a, rewrite_expr(a, s.b), rewrite_expr(a, s.c), 0)
+    }
+    if s.kind == sk_return() {
+        mut e: int64 = -1
+        if s.a >= 0 {
+            e = rewrite_expr(a, s.a)
+        }
+        return ast_stmt(a, sk_return(), e, 0, 0, 0)
+    }
+    if s.kind == sk_defer() {
+        return ast_stmt(a, sk_defer(), rewrite_expr(a, s.a), 0, 0, 0)
+    }
+    if s.kind == sk_if() {
+        mut els: int64 = -1
+        if s.c >= 0 {
+            els = rewrite_block(a, s.c)
+        }
+        return ast_stmt(a, sk_if(), rewrite_expr(a, s.a), rewrite_block(a, s.b), els, 0)
+    }
+    if s.kind == sk_while() {
+        return ast_stmt(a, sk_while(), rewrite_expr(a, s.a), rewrite_block(a, s.b), s.c, 0)
+    }
+    if s.kind == sk_for() {
+        return ast_stmt(a, sk_for(), s.a, rewrite_expr(a, s.b), rewrite_block(a, s.c), 0)
+    }
+    if s.kind == sk_match() {
+        scrut, off2, len2 := rewrite_match(a, s.a, s.b, s.c)
+        return ast_stmt(a, sk_match(), scrut, off2, len2, 0)
+    }
+    return ast_stmt(a, sk_expr(), rewrite_expr(a, s.a), 0, 0, 0)
+}
+
+func rewrite_expr(a: *Ast, id: int64) -> int64 {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_unary() {
+        return ast_expr(a, xk_unary(), e.lo, e.hi, e.a, rewrite_expr(a, e.b), 0, 0)
+    }
+    if e.kind == xk_binary() {
+        return ast_expr(a, xk_binary(), e.lo, e.hi, e.a, rewrite_expr(a, e.b), rewrite_expr(a, e.c), 0)
+    }
+    if e.kind == xk_call() {
+        off, len := rewrite_expr_list(a, e.b, e.c)
+        return ast_expr(a, xk_call(), e.lo, e.hi, rewrite_expr(a, e.a), off, len, 0)
+    }
+    if e.kind == xk_field() {
+        return ast_expr(a, xk_field(), e.lo, e.hi, rewrite_expr(a, e.a), e.b, 0, 0)
+    }
+    if e.kind == xk_index() {
+        return ast_expr(a, xk_index(), e.lo, e.hi, rewrite_expr(a, e.a), rewrite_expr(a, e.b), 0, 0)
+    }
+    if e.kind == xk_range() {
+        return ast_expr(a, xk_range(), e.lo, e.hi, rewrite_expr(a, e.a), rewrite_expr(a, e.b), e.c, 0)
+    }
+    if e.kind == xk_tuple() {
+        off2, len2 := rewrite_expr_list(a, e.a, e.b)
+        return ast_expr(a, xk_tuple(), e.lo, e.hi, off2, len2, 0, 0)
+    }
+    if e.kind == xk_array() {
+        off3, len3 := rewrite_expr_list(a, e.a, e.b)
+        return ast_expr(a, xk_array(), e.lo, e.hi, off3, len3, 0, 0)
+    }
+    if e.kind == xk_struct_lit() {
+        off4, len4 := rewrite_field_pairs(a, e.b, e.c)
+        return ast_expr(a, xk_struct_lit(), e.lo, e.hi, e.a, off4, len4, 0)
+    }
+    if e.kind == xk_lambda() {
+        poff, plen := clone_param_list(a, e.a, e.b)
+        return ast_expr(a, xk_lambda(), e.lo, e.hi, poff, plen, clone_type(a, e.c), rewrite_block(a, e.d))
+    }
+    if e.kind == xk_match() {
+        scrut, off5, len5 := rewrite_match(a, e.a, e.b, e.c)
+        return ast_expr(a, xk_match(), e.lo, e.hi, scrut, off5, len5, 0)
+    }
+    if e.kind == xk_do() {
+        return do_to_calls(a, e.a, e.b, e.c, e.lo, e.hi)
+    }
+    if e.kind == xk_await() {
+        mut ty: int64 = -1
+        if e.b >= 0 {
+            ty = clone_type(a, e.b)
+        }
+        return ast_expr(a, xk_await(), e.lo, e.hi, rewrite_expr(a, e.a), ty, 0, 0)
+    }
+    if e.kind == xk_sizeof_type() {
+        return ast_expr(a, xk_sizeof_type(), e.lo, e.hi, clone_type(a, e.a), 0, 0, 0)
+    }
+    if e.kind == xk_collect() {
+        return ast_expr(a, xk_collect(), e.lo, e.hi, clone_type(a, e.a), rewrite_expr(a, e.b), 0, 0)
+    }
+    return ast_expr(a, e.kind, e.lo, e.hi, e.a, e.b, e.c, e.d)
+}
+
+func member_name(a: *Ast, owner: int64, leaf: string) -> int64 {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, ast_name(a, owner))
+    sb_push_char(b, 46)
+    sb_push(b, leaf)
+    s: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return intern_owned((*a).interner, s)
+}
+
+func discard_name(a: *Ast, i: int64) -> int64 {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "$do")
+    sb_push_int(b, i)
+    s: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return intern_owned((*a).interner, s)
+}
+
+func call_expr(a: *Ast, name: int64, args: *Vector<int64>, lo: int64, hi: int64) -> int64 {
+    callee: int64 = ast_expr(a, xk_ident(), lo, hi, name, 0, 0, 0)
+    off, len := ast_kids(a, args)
+    return ast_expr(a, xk_call(), lo, hi, callee, off, len, 0)
+}
+
+func one_arg(v: int64) -> *Vector<int64> {
+    args: *Vector<int64> = alloc(vec_new())
+    vec_push(args, v)
+    return args
+}
+
+func cont_type(a: *Ast, bind_name: int64) -> (int64, int64) {
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if f.name == bind_name {
+                if f.generics_len > 0 {
+                    return (infer_ty(a), infer_ty(a))
+                }
+                if f.params_len > 1 {
+                    p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + 1))
+                    t: TypeNode = vec_get((*a).types, p.ty)
+                    if t.kind == tk_func() {
+                        mut param_ty: int64 = int_ty(a)
+                        if t.b > 0 {
+                            param_ty = vec_get((*a).kids, t.a)
+                        }
+                        return (param_ty, t.c)
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return (int_ty(a), int_ty(a))
+}
+
+func do_to_calls(a: *Ast, monad_id: int64, off: int64, len: int64, lo: int64, hi: int64) -> int64 {
+    mut bind_name: int64 = intern_id((*a).interner, "bind")
+    mut unit_name: int64 = intern_id((*a).interner, "unit")
+    if monad_id >= 0 {
+        bind_name = member_name(a, monad_id, "bind")
+        unit_name = member_name(a, monad_id, "unit")
+    }
+    param_ty, ret_ty := cont_type(a, bind_name)
+    if len == 0 {
+        lit: int64 = ast_expr(a, xk_int(), lo, hi, 0, -1, 0, 0)
+        return call_expr(a, unit_name, one_arg(lit), lo, hi)
+    }
+    last: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, off + len - 1))
+    mut acc: int64 = call_expr(a, unit_name, one_arg(rewrite_expr(a, last.expr)), lo, hi)
+    mut i: int64 = len - 2
+    while i >= 0 {
+        d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, off + i))
+        arg: int64 = rewrite_expr(a, d.expr)
+        mut pname: int64 = d.name
+        if pname < 0 {
+            pname = discard_name(a, i)
+        }
+        pids: *Vector<int64> = alloc(vec_new())
+        vec_push(pids, ast_param(a, false, pname, clone_type(a, param_ty)))
+        poff, plen := ast_kids(a, pids)
+        stmts: *Vector<int64> = alloc(vec_new())
+        vec_push(stmts, ast_stmt(a, sk_return(), acc, 0, 0, 0))
+        body: int64 = ast_block(a, stmts)
+        lam: int64 = ast_expr(a, xk_lambda(), lo, hi, poff, plen, clone_type(a, ret_ty), body)
+        args: *Vector<int64> = alloc(vec_new())
+        vec_push(args, arg)
+        vec_push(args, lam)
+        acc = call_expr(a, bind_name, args, lo, hi)
+        i = i - 1
+    }
+    return acc
+}
+
+func rewrite_func(a: *Ast, id: int64) -> int64 {
+    f: FuncNode = vec_get((*a).funcs, id)
+    goff, glen := clone_name_kids(a, f.generics_off, f.generics_len)
+    poff, plen := clone_param_list(a, f.params_off, f.params_len)
+    nf: FuncNode = FuncNode {
+        exported: f.exported,
+        is_async: f.is_async,
+        name: f.name,
+        lo: f.lo,
+        hi: f.hi,
+        generics_off: goff,
+        generics_len: glen,
+        params_off: poff,
+        params_len: plen,
+        ret: clone_type(a, f.ret),
+        body: rewrite_block(a, f.body),
+    }
+    return ast_func(a, nf)
+}
+
+func rewrite_impl(a: *Ast, id: int64) -> int64 {
+    im: ImplNode = vec_get((*a).impls, id)
+    methods: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < im.methods_len {
+        vec_push(methods, rewrite_func(a, vec_get((*a).kids, im.methods_off + i)))
+        i = i + 1
+    }
+    return ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)
+}
+
+export func desugar(a: *Ast) -> void {
+    old_items: *Vector<ItemNode> = (*a).items
+    new_items: *Vector<ItemNode> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(old_items) {
+        it: ItemNode = vec_get(old_items, i)
+        if it.kind == ik_func() {
+            vec_push(new_items, ItemNode { kind: ik_func(), id: rewrite_func(a, it.id) })
+        } else if it.kind == ik_impl() {
+            vec_push(new_items, ItemNode { kind: ik_impl(), id: rewrite_impl(a, it.id) })
+        } else {
+            vec_push(new_items, it)
+        }
+        i = i + 1
+    }
+    (*a).items = new_items
+}

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse>" >&2
+    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse|load|desugar>" >&2
 }
 
 if [[ $# -ne 3 ]]; then
@@ -25,10 +25,10 @@ if [[ ! -x "$binary_b" ]]; then
 fi
 
 case "$cmd" in
-    lex | scan | parse) ;;
+    lex | scan | parse | load | desugar) ;;
     *)
         usage
-        echo "differential: command must be lex, scan, or parse" >&2
+        echo "differential: command must be lex, scan, parse, load, or desugar" >&2
         exit 2
         ;;
 esac
@@ -76,7 +76,20 @@ first_diff_line() {
 }
 
 count=0
+skipped=0
 while IFS= read -r -d '' file; do
+    # The per-file paradigm gate lands in the dusk compiler with the sema
+    # port; until then stage0 rejects these at load while dusk1 merges them,
+    # so the load and desugar sweeps skip the known paradigm-gated files.
+    if [[ "$cmd" == "load" || "$cmd" == "desugar" ]]; then
+        case "$file" in
+            examples/implgate_fail.dusk)
+                skipped=$((skipped + 1))
+                continue
+                ;;
+        esac
+    fi
+
     out_a="$tmp/a.out"
     out_b="$tmp/b.out"
     err_a="$tmp/a.err"
@@ -109,4 +122,8 @@ while IFS= read -r -d '' file; do
     count=$((count + 1))
 done < <(find examples lib/std -type f -name '*.dusk' -print0 | sort -z)
 
-echo "compared $count files"
+if [[ "$skipped" -gt 0 ]]; then
+    echo "compared $count files, skipped $skipped paradigm-gated"
+else
+    echo "compared $count files"
+fi

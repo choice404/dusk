@@ -1,0 +1,799 @@
+@paradigm procedural
+@import std.string
+@import std.vector
+@import bytes
+@import token
+@import intern
+@import ast
+@import parse
+@import parsety
+@import parseops
+
+struct DoElemNode { kind: int64, a: int64, b: int64 }
+export func parse_expr(p: *Parser) -> int64 {
+    return parse_range(p)
+}
+export func parse_expr_no_struct(p: *Parser) -> int64 {
+    saved: bool = (*p).no_struct
+    (*p).no_struct = true
+    e: int64 = parse_range(p)
+    (*p).no_struct = saved
+    return e
+}
+
+export func parse_block(p: *Parser) -> int64 {
+    if !p_enter_nesting(p, "block", "function") {
+        p_leave_nesting(p)
+        empty: *Vector<int64> = alloc(vec_new())
+        return ast_block(p_ast(p), empty)
+    }
+    stmts: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            vec_push(stmts, parse_stmt(p))
+            p_guard_progress(p, before, "unexpected token in block")
+        }
+    }
+    p_expect(p, k_rbrace())
+    p_leave_nesting(p)
+    return ast_block(p_ast(p), stmts)
+}
+
+export func parse_stmt(p: *Parser) -> int64 {
+    if p_eat_kw(p, "return") {
+        if p_at(p, k_rbrace()) { return ast_stmt(p_ast(p), sk_return(), -1, 0, 0, 0) }
+        if p_nl_here(p) { return ast_stmt(p_ast(p), sk_return(), -1, 0, 0, 0) }
+        return ast_stmt(p_ast(p), sk_return(), parse_await_or_expr(p), 0, 0, 0)
+    }
+    if p_eat_kw(p, "defer") {
+        if (*p).in_async_fn && p_ident_text_is(p, "await") {
+            p_error(p, "'await' cannot appear under defer; a defer runs at completion and cannot suspend")
+            p_bump(p)
+        }
+        return ast_stmt(p_ast(p), sk_defer(), parse_expr(p), 0, 0, 0)
+    }
+    if p_kw(p, "if") { return parse_if_stmt(p) }
+    if p_kw(p, "while") { return parse_while_stmt(p) }
+    if p_kw(p, "for") { return parse_for_stmt(p) }
+    if p_kw(p, "match") {
+        scrut, off, len, hi := parse_match_parts(p)
+        hi.ignore()
+        return ast_stmt(p_ast(p), sk_match(), scrut, off, len, 0)
+    }
+    if p_kw(p, "do") { return parse_do_stmt(p) }
+    if p_eat_kw(p, "mut") { return parse_let_rest(p, true, false) }
+    if p_ident_text_is(p, "ref") {
+        if p_kind2(p) == k_ident() {
+            p_bump(p)
+            return parse_let_rest(p, false, true)
+        }
+    }
+    if is_binding_start(p) { return parse_let_rest(p, false, false) }
+    e: int64 = parse_await_or_expr(p)
+    if p_eat(p, k_assign()) {
+        rhs: int64 = parse_expr(p)
+        return ast_stmt(p_ast(p), sk_assign(), e, rhs, 0, 0)
+    }
+    op: int64 = compound_op(p_kind(p))
+    if op >= 0 {
+        p_bump(p)
+        rhs2: int64 = parse_expr(p)
+        return ast_stmt(p_ast(p), sk_assign_op(), op, e, rhs2, 0)
+    }
+    if !p_nl_here(p) {
+        if p_at(p, k_plus_plus()) {
+            sp_lo: int64 = p_lo(p)
+            sp_hi: int64 = p_hi(p)
+            p_bump(p)
+            one: int64 = ast_expr(p_ast(p), xk_int(), sp_lo, sp_hi, 1, -1, 0, 0)
+            return ast_stmt(p_ast(p), sk_assign_op(), bop_add(), e, one, 0)
+        }
+        if p_at(p, k_minus_minus()) {
+            sp_lo2: int64 = p_lo(p)
+            sp_hi2: int64 = p_hi(p)
+            p_bump(p)
+            one2: int64 = ast_expr(p_ast(p), xk_int(), sp_lo2, sp_hi2, 1, -1, 0, 0)
+            return ast_stmt(p_ast(p), sk_assign_op(), bop_sub(), e, one2, 0)
+        }
+    }
+    return ast_stmt(p_ast(p), sk_expr(), e, 0, 0, 0)
+}
+
+func is_binding_start(p: *Parser) -> bool {
+    if p_kind(p) != k_ident() { return false }
+    k: int64 = p_kind2(p)
+    if k == k_colon() { return true }
+    if k == k_colon_eq() { return true }
+    if k == k_comma() { return true }
+    return false
+}
+
+func parse_let_rest(p: *Parser, mutable: bool, is_ref: bool) -> int64 {
+    binds: *Vector<int64> = alloc(vec_new())
+    mut missing: bool = false
+    mut reading: bool = true
+    while reading {
+        name: int64 = p_ident(p)
+        mut ty: int64 = -1
+        if p_eat(p, k_colon()) {
+            ty = parse_type(p)
+        } else {
+            missing = true
+        }
+        vec_push(binds, ast_bind(p_ast(p), name, ty))
+        if !p_eat(p, k_comma()) { reading = false }
+    }
+    mut infer: bool = false
+    if p_eat(p, k_colon_eq()) {
+        infer = true
+    } else {
+        p_expect(p, k_assign())
+    }
+    if !infer {
+        if missing { p_error(p, "destructuring binding needs ':=' or a type on each name") }
+    }
+    value: int64 = parse_await_or_expr(p)
+    off, len := ast_kids(p_ast(p), binds)
+    mut flags: int64 = 0
+    if mutable { flags = flags | 1 }
+    if is_ref { flags = flags | 2 }
+    if infer { flags = flags | 4 }
+    return ast_stmt(p_ast(p), sk_let(), off, len, value, flags)
+}
+
+export func parse_await_or_expr(p: *Parser) -> int64 {
+    if p_ident_text_is(p, "await") {
+        if (*p).in_async_fn {
+            if (*p).lambda_depth == 0 {
+                lo: int64 = p_lo(p)
+                p_bump(p)
+                op: int64 = parse_expr(p)
+                n: ExprNode = vec_get((*p_ast(p)).exprs, op)
+                return ast_expr(p_ast(p), xk_await(), lo, n.hi, op, -1, 0, 0)
+            }
+        }
+        if !(*p).in_async_fn {
+            if p_kind2(p) != k_lparen() {
+                p_error(p, "'await' is only legal inside an async func")
+            }
+        }
+    }
+    return parse_expr(p)
+}
+
+func parse_range(p: *Parser) -> int64 {
+    lhs: int64 = parse_pipe(p)
+    mut incl: int64 = -1
+    if p_at(p, k_dotdot()) {
+        incl = 0
+    } else if p_at(p, k_dotdot_eq()) {
+        incl = 1
+    }
+    if incl < 0 {
+        return lhs
+    }
+    if p_nl_here(p) {
+        return lhs
+    }
+    p_bump(p)
+    rhs: int64 = parse_pipe(p)
+    l: ExprNode = vec_get((*p_ast(p)).exprs, lhs)
+    r: ExprNode = vec_get((*p_ast(p)).exprs, rhs)
+    return ast_expr(p_ast(p), xk_range(), l.lo, r.hi, lhs, rhs, incl, 0)
+}
+
+func parse_pipe(p: *Parser) -> int64 {
+    mut lhs: int64 = parse_bin(p, 0)
+    mut going: bool = true
+    while going {
+        if p_at(p, k_pipe_gt()) {
+            if !p_nl_here(p) {
+                p_bump(p)
+                rhs: int64 = parse_bin(p, 0)
+                lhs = make_pipe(p, lhs, rhs)
+            } else {
+                going = false
+            }
+        } else {
+            going = false
+        }
+    }
+    return lhs
+}
+
+export func parse_bin(p: *Parser, min_bp: int64) -> int64 {
+    mut e: int64 = -1
+    if p_enter_nesting(p, "expression", "expression") {
+        e = parse_bin_inner(p, min_bp)
+    } else {
+        empty: int64 = intern_id((*p_ast(p)).interner, "")
+        e = ast_expr(p_ast(p), xk_ident(), p_lo(p), p_hi(p), empty, 0, 0, 0)
+    }
+    p_leave_nesting(p)
+    return e
+}
+
+func parse_bin_inner(p: *Parser, min_bp: int64) -> int64 {
+    mut lhs: int64 = parse_unary(p)
+    mut going: bool = true
+    while going {
+        if p_nl_here(p) {
+            going = false
+        } else {
+            op: int64 = binop_for_kind(p_kind(p))
+            if op < 0 {
+                going = false
+            } else {
+                lbp: int64 = bin_lbp(op)
+                if lbp < min_bp {
+                    going = false
+                } else {
+                    rbp: int64 = bin_rbp(op)
+                    p_bump(p)
+                    rhs: int64 = parse_bin(p, rbp)
+                    l: ExprNode = vec_get((*p_ast(p)).exprs, lhs)
+                    r: ExprNode = vec_get((*p_ast(p)).exprs, rhs)
+                    lhs = ast_expr(p_ast(p), xk_binary(), l.lo, r.hi, op, lhs, rhs, 0)
+                    next: int64 = binop_for_kind(p_kind(p))
+                    if is_cmp(op) {
+                        if next >= 0 {
+                            if is_cmp(next) {
+                                p_error(p, "comparison operators cannot be chained")
+                                going = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return lhs
+}
+
+func parse_unary(p: *Parser) -> int64 {
+    mut e: int64 = -1
+    if p_enter_nesting(p, "expression", "expression") {
+        e = parse_unary_inner(p)
+    } else {
+        empty: int64 = intern_id((*p_ast(p)).interner, "")
+        e = ast_expr(p_ast(p), xk_ident(), p_lo(p), p_hi(p), empty, 0, 0, 0)
+    }
+    p_leave_nesting(p)
+    return e
+}
+
+func parse_unary_inner(p: *Parser) -> int64 {
+    lo: int64 = p_lo(p)
+    if p_at(p, k_star_star()) {
+        p_split_starstar(p)
+        e: int64 = parse_unary(p)
+        n: ExprNode = vec_get((*p_ast(p)).exprs, e)
+        return ast_expr(p_ast(p), xk_unary(), lo, n.hi, uop_deref(), e, 0, 0)
+    }
+    mut op: int64 = -1
+    if p_at(p, k_star()) { op = uop_deref() }
+    if p_at(p, k_minus()) { op = uop_neg() }
+    if p_at(p, k_bang()) { op = uop_not() }
+    if p_at(p, k_tilde()) { op = uop_bitnot() }
+    if op >= 0 {
+        p_bump(p)
+        e2: int64 = parse_unary(p)
+        n2: ExprNode = vec_get((*p_ast(p)).exprs, e2)
+        return ast_expr(p_ast(p), xk_unary(), lo, n2.hi, op, e2, 0, 0)
+    }
+    return parse_postfix(p)
+}
+
+func parse_postfix(p: *Parser) -> int64 {
+    mut e: int64 = parse_primary(p)
+    mut going: bool = true
+    while going {
+        if p_nl_here(p) {
+            going = false
+        } else if p_at(p, k_lparen()) {
+            p_bump(p)
+            saved: bool = (*p).no_struct
+            (*p).no_struct = false
+            args: *Vector<int64> = parse_expr_list(p, k_rparen())
+            (*p).no_struct = saved
+            p_expect(p, k_rparen())
+            n: ExprNode = vec_get((*p_ast(p)).exprs, e)
+            off, len := ast_kids(p_ast(p), args)
+            e = ast_expr(p_ast(p), xk_call(), n.lo, p_prev_hi(p), e, off, len, 0)
+        } else if p_at(p, k_lbracket()) {
+            p_bump(p)
+            saved2: bool = (*p).no_struct
+            (*p).no_struct = false
+            idx: int64 = parse_expr(p)
+            (*p).no_struct = saved2
+            p_expect(p, k_rbracket())
+            n2: ExprNode = vec_get((*p_ast(p)).exprs, e)
+            e = ast_expr(p_ast(p), xk_index(), n2.lo, p_prev_hi(p), e, idx, 0, 0)
+        } else if p_at(p, k_dot()) {
+            p_bump(p)
+            name: int64 = p_ident(p)
+            n3: ExprNode = vec_get((*p_ast(p)).exprs, e)
+            e = ast_expr(p_ast(p), xk_field(), n3.lo, p_prev_hi(p), e, name, 0, 0)
+        } else {
+            going = false
+        }
+    }
+    return e
+}
+
+export func parse_expr_list(p: *Parser, end: int64) -> *Vector<int64> {
+    v: *Vector<int64> = alloc(vec_new())
+    if !p_at(p, end) {
+        mut reading: bool = true
+        while reading {
+            vec_push(v, parse_expr(p))
+            if !p_eat(p, k_comma()) {
+                reading = false
+            }
+        }
+    }
+    return v
+}
+
+func parse_primary(p: *Parser) -> int64 {
+    t: Token = p_tok(p)
+    if t.kind == k_int() {
+        val: int64 = p_int_value(p, t)
+        body_end: int64 = p_num_body_end(p, t)
+        suffix: int64 = p_suffix_id(p, t, body_end)
+        p_bump(p)
+        return ast_expr(p_ast(p), xk_int(), t.lo, t.hi, val, suffix, 0, 0)
+    }
+    if t.kind == k_float() {
+        bits: int64 = p_float_bits(p, t)
+        body_end2: int64 = p_num_body_end(p, t)
+        suffix2: int64 = p_suffix_id(p, t, body_end2)
+        p_bump(p)
+        return ast_expr(p_ast(p), xk_float(), t.lo, t.hi, bits, suffix2, 0, 0)
+    }
+    if t.kind == k_str() {
+        sid: int64 = p_string_body_id(p, t)
+        p_bump(p)
+        return ast_expr(p_ast(p), xk_str(), t.lo, t.hi, sid, 0, 0, 0)
+    }
+    if t.kind == k_char() {
+        sc: int64 = p_char_scalar(p, t.lo + 1)
+        p_bump(p)
+        return ast_expr(p_ast(p), xk_char(), t.lo, t.hi, sc, 0, 0, 0)
+    }
+    if t.kind == k_rune() {
+        sc2: int64 = p_char_scalar(p, t.lo + 2)
+        p_bump(p)
+        return ast_expr(p_ast(p), xk_rune(), t.lo, t.hi, sc2, 0, 0, 0)
+    }
+    if t.kind == k_bool() {
+        mut bv: int64 = 0
+        if str_eq_range((*p).src, t.lo, t.hi, "true") {
+            bv = 1
+        }
+        p_bump(p)
+        return ast_expr(p_ast(p), xk_bool(), t.lo, t.hi, bv, 0, 0, 0)
+    }
+    if p_kw(p, "lambda") {
+        return parse_lambda_expr(p)
+    }
+    if p_kw(p, "match") {
+        lo: int64 = p_lo(p)
+        scrut, off, len, hi := parse_match_parts(p)
+        return ast_expr(p_ast(p), xk_match(), lo, hi, scrut, off, len, 0)
+    }
+    if p_kw(p, "do") {
+        return parse_do_expr(p)
+    }
+    if t.kind == k_lbracket() {
+        return parse_array(p, t.lo)
+    }
+    if t.kind == k_lparen() {
+        return parse_paren(p, t.lo)
+    }
+    if t.kind == k_ident() {
+        name: int64 = intern_range((*p_ast(p)).interner, (*p).src, (*p).n, t.lo, t.hi)
+        if (*p).in_async_fn && p_ident_text_is(p, "await") {
+            if (*p).lambda_depth == 0 {
+                p_error(p, "'await' cannot appear mid-expression; give the awaited value a name, as in v, e := await f")
+            } else {
+                p_error(p, "a lambda cannot await; only the enclosing async func can suspend")
+            }
+        }
+        p_bump(p)
+        if str_eq_range((*p).src, t.lo, t.hi, "collector") {
+            if p_at(p, k_lt()) {
+                if !p_nl_here(p) {
+                    if collector_mint_ahead(p) {
+                        return parse_collect_mint(p, t.lo, t.hi)
+                    }
+                }
+            }
+        }
+        if !(*p).no_struct {
+            if p_at(p, k_lbrace()) {
+                return parse_struct_lit(p, name, t.lo)
+            }
+        }
+        return ast_expr(p_ast(p), xk_ident(), t.lo, t.hi, name, 0, 0, 0)
+    }
+    p_error(p, "expected an expression")
+    p_bump(p)
+    empty: int64 = intern_id((*p_ast(p)).interner, "")
+    return ast_expr(p_ast(p), xk_ident(), t.lo, t.hi, empty, 0, 0, 0)
+}
+
+func parse_array(p: *Parser, lo: int64) -> int64 {
+    p_bump(p)
+    saved: bool = (*p).no_struct
+    (*p).no_struct = false
+    elems: *Vector<int64> = parse_expr_list(p, k_rbracket())
+    (*p).no_struct = saved
+    p_expect(p, k_rbracket())
+    off, len := ast_kids(p_ast(p), elems)
+    return ast_expr(p_ast(p), xk_array(), lo, p_prev_hi(p), off, len, 0, 0)
+}
+
+func parse_paren(p: *Parser, lo: int64) -> int64 {
+    p_bump(p)
+    if p_at(p, k_rparen()) {
+        p_bump(p)
+        empty: *Vector<int64> = alloc(vec_new())
+        off0, len0 := ast_kids(p_ast(p), empty)
+        return ast_expr(p_ast(p), xk_tuple(), lo, p_prev_hi(p), off0, len0, 0, 0)
+    }
+    saved: bool = (*p).no_struct
+    (*p).no_struct = false
+    first: int64 = parse_expr(p)
+    if p_at(p, k_comma()) {
+        elems: *Vector<int64> = alloc(vec_new())
+        vec_push(elems, first)
+        mut reading: bool = true
+        while reading {
+            if p_eat(p, k_comma()) {
+                if p_at(p, k_rparen()) {
+                    reading = false
+                } else {
+                    vec_push(elems, parse_expr(p))
+                }
+            } else {
+                reading = false
+            }
+        }
+        p_expect(p, k_rparen())
+        (*p).no_struct = saved
+        off, len := ast_kids(p_ast(p), elems)
+        return ast_expr(p_ast(p), xk_tuple(), lo, p_prev_hi(p), off, len, 0, 0)
+    }
+    p_expect(p, k_rparen())
+    (*p).no_struct = saved
+    n: ExprNode = vec_get((*p_ast(p)).exprs, first)
+    return ast_expr(p_ast(p), n.kind, lo, p_prev_hi(p), n.a, n.b, n.c, n.d)
+}
+
+func parse_struct_lit(p: *Parser, name: int64, lo: int64) -> int64 {
+    p_expect(p, k_lbrace())
+    fields: *Vector<int64> = alloc(vec_new())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            fname: int64 = p_ident(p)
+            p_expect(p, k_colon())
+            saved: bool = (*p).no_struct
+            (*p).no_struct = false
+            val: int64 = parse_expr(p)
+            (*p).no_struct = saved
+            vec_push(fields, fname)
+            vec_push(fields, val)
+            if !p_eat(p, k_comma()) {
+                reading = false
+            }
+        }
+    }
+    p_expect(p, k_rbrace())
+    off, len := ast_kids(p_ast(p), fields)
+    return ast_expr(p_ast(p), xk_struct_lit(), lo, p_prev_hi(p), name, off, len, 0)
+}
+
+func parse_if_stmt(p: *Parser) -> int64 {
+    p_expect_kw(p, "if")
+    cond: int64 = parse_expr_no_struct(p)
+    then_block: int64 = parse_block(p)
+    mut els: int64 = -1
+    if p_eat_kw(p, "else") {
+        if p_kw(p, "if") {
+            if !p_enter_nesting(p, "block", "function") {
+                p_leave_nesting(p)
+                empty: *Vector<int64> = alloc(vec_new())
+                els = ast_block(p_ast(p), empty)
+            } else {
+                one: *Vector<int64> = alloc(vec_new())
+                vec_push(one, parse_if_stmt(p))
+                els = ast_block(p_ast(p), one)
+                p_leave_nesting(p)
+            }
+        } else {
+            els = parse_block(p)
+        }
+    }
+    return ast_stmt(p_ast(p), sk_if(), cond, then_block, els, 0)
+}
+
+func parse_while_stmt(p: *Parser) -> int64 {
+    p_expect_kw(p, "while")
+    cond: int64 = parse_expr_no_struct(p)
+    body: int64 = parse_block(p)
+    return ast_stmt(p_ast(p), sk_while(), cond, body, 0, 0)
+}
+
+func parse_for_stmt(p: *Parser) -> int64 {
+    p_expect_kw(p, "for")
+    var: int64 = p_ident(p)
+    p_expect_kw(p, "in")
+    iter: int64 = parse_expr_no_struct(p)
+    body: int64 = parse_block(p)
+    return ast_stmt(p_ast(p), sk_for(), var, iter, body, 0)
+}
+
+func parse_match_parts(p: *Parser) -> (int64, int64, int64, int64) {
+    p_expect_kw(p, "match")
+    scrut: int64 = parse_expr_no_struct(p)
+    arms: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            pat: int64 = parse_pattern(p)
+            p_expect(p, k_fat_arrow())
+            block_body: bool = p_at(p, k_lbrace())
+            mut body: int64 = -1
+            if block_body {
+                body = parse_block(p)
+            } else if p_kw(p, "return") {
+                one: *Vector<int64> = alloc(vec_new())
+                vec_push(one, parse_stmt(p))
+                body = ast_block(p_ast(p), one)
+            } else {
+                one2: *Vector<int64> = alloc(vec_new())
+                ex: int64 = parse_expr(p)
+                vec_push(one2, ast_stmt(p_ast(p), sk_expr(), ex, 0, 0, 0))
+                body = ast_block(p_ast(p), one2)
+            }
+            vec_push(arms, ast_arm(p_ast(p), pat, body))
+            if block_body {
+                p_eat(p, k_comma())
+            } else if !p_at(p, k_rbrace()) {
+                p_expect(p, k_comma())
+            }
+            p_guard_progress(p, before, "unexpected token in match arm")
+        }
+    }
+    p_expect(p, k_rbrace())
+    off, len := ast_kids(p_ast(p), arms)
+    return (scrut, off, len, p_prev_hi(p))
+}
+
+func parse_pattern(p: *Parser) -> int64 {
+    name: int64 = p_ident(p)
+    if str_eq(ast_name(p_ast(p), name), "_") {
+        return ast_pattern(p_ast(p), pk_wildcard(), 0, 0, 0)
+    }
+    if p_eat(p, k_lparen()) {
+        binds: *Vector<int64> = alloc(vec_new())
+        mut reading: bool = true
+        while reading {
+            if p_at(p, k_rparen()) {
+                reading = false
+            } else if p_at_eof(p) {
+                reading = false
+            } else {
+                vec_push(binds, p_ident(p))
+                if !p_eat(p, k_comma()) {
+                    reading = false
+                }
+            }
+        }
+        p_expect(p, k_rparen())
+        off, len := ast_kids(p_ast(p), binds)
+        return ast_pattern(p_ast(p), pk_variant(), name, off, len)
+    }
+    return ast_pattern(p_ast(p), pk_ident(), name, 0, 0)
+}
+
+func parse_do_stmt(p: *Parser) -> int64 {
+    lo: int64 = p_lo(p)
+    monad_id, elems := parse_do_block_elems(p)
+    if p_kw(p, "while") {
+        if !p_nl_here(p) {
+            p_bump(p)
+            cond: int64 = parse_expr_no_struct(p)
+            if monad_id >= 0 { p_error(p, "a 'do while' loop takes no monad name") }
+            stmts: *Vector<int64> = alloc(vec_new())
+            mut i: int64 = 0
+            while i < vec_len(elems) {
+                el: DoElemNode = vec_get(elems, i)
+                if el.kind == 1 {
+                    vec_push(stmts, el.a)
+                } else {
+                    p_error(p, "monadic bind '<-' is not allowed in a do while loop")
+                }
+                i = i + 1
+            }
+            body: int64 = ast_block(p_ast(p), stmts)
+            return ast_stmt(p_ast(p), sk_while(), cond, body, 1, 0)
+        }
+    }
+    expr: int64 = do_to_expr(p, monad_id, elems, lo)
+    return ast_stmt(p_ast(p), sk_expr(), expr, 0, 0, 0)
+}
+
+func parse_do_expr(p: *Parser) -> int64 {
+    lo: int64 = p_lo(p)
+    monad_id, elems := parse_do_block_elems(p)
+    return do_to_expr(p, monad_id, elems, lo)
+}
+
+func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
+    elems: *Vector<DoElemNode> = alloc(vec_new())
+    if !p_enter_nesting(p, "block", "function") {
+        p_leave_nesting(p)
+        return (-1, elems)
+    }
+    p_expect_kw(p, "do")
+    mut monad_id: int64 = -1
+    if p_kind(p) == k_ident() {
+        if p_kind2(p) == k_lbrace() {
+            monad_id = p_ident(p)
+        }
+    }
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            if p_kind(p) == k_ident() {
+                if p_kind2(p) == k_larrow() {
+                    name: int64 = p_ident(p)
+                    p_bump(p)
+                    e: int64 = parse_expr(p)
+                    vec_push(elems, DoElemNode { kind: 0, a: name, b: e })
+                } else {
+                    sid: int64 = parse_stmt(p)
+                    vec_push(elems, DoElemNode { kind: 1, a: sid, b: 0 })
+                }
+            } else {
+                sid2: int64 = parse_stmt(p)
+                vec_push(elems, DoElemNode { kind: 1, a: sid2, b: 0 })
+            }
+            p_guard_progress(p, before, "unexpected token in do block")
+        }
+    }
+    p_expect(p, k_rbrace())
+    p_leave_nesting(p)
+    return (monad_id, elems)
+}
+
+func do_to_expr(p: *Parser, monad_id: int64, elems: *Vector<DoElemNode>, lo: int64) -> int64 {
+    binds: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(elems) {
+        el: DoElemNode = vec_get(elems, i)
+        if el.kind == 0 {
+            vec_push(binds, ast_do_bind(p_ast(p), el.a, el.b))
+        } else {
+            s: StmtNode = vec_get((*p_ast(p)).stmts, el.a)
+            if s.kind == sk_expr() {
+                vec_push(binds, ast_do_bind(p_ast(p), -1, s.a))
+            } else {
+                p_error(p, "do notation allows only 'x <- e' binds and a final expression")
+            }
+        }
+        i = i + 1
+    }
+    if vec_len(binds) > 0 {
+        last_id: int64 = vec_get(binds, vec_len(binds) - 1)
+        last: DoBindNode = vec_get((*p_ast(p)).do_binds, last_id)
+        if last.name >= 0 {
+            p_error(p, "a do block must end in an expression, not a 'x <- e' bind")
+        }
+    }
+    off, len := ast_kids(p_ast(p), binds)
+    return ast_expr(p_ast(p), xk_do(), lo, p_prev_hi(p), monad_id, off, len, 0)
+}
+
+func parse_lambda_expr(p: *Parser) -> int64 {
+    lo: int64 = p_lo(p)
+    p_expect_kw(p, "lambda")
+    params: *Vector<int64> = parse_params(p)
+    p_expect(p, k_arrow())
+    ret: int64 = parse_type(p)
+    (*p).lambda_depth = (*p).lambda_depth + 1
+    body: int64 = parse_block(p)
+    (*p).lambda_depth = (*p).lambda_depth - 1
+    off, len := ast_kids(p_ast(p), params)
+    return ast_expr(p_ast(p), xk_lambda(), lo, p_prev_hi(p), off, len, ret, body)
+}
+
+func collector_mint_ahead(p: *Parser) -> bool {
+    toks: *Vector<Token> = (*p).toks
+    mut i: int64 = (*p).pos
+    mut depth: int64 = 0
+    mut end: int64 = (*p).pos + 128
+    if end > vec_len(toks) { end = vec_len(toks) }
+    while i < end {
+        t: Token = vec_get((*p).toks, i)
+        if t.kind == k_lt() {
+            depth = depth + 1
+        } else if t.kind == k_gt() {
+            depth = depth - 1
+            if depth == 0 {
+                if i + 1 < vec_len(toks) {
+                    nt: Token = vec_get(toks, i + 1)
+                    return nt.kind == k_lparen()
+                }
+                return false
+            }
+        } else if t.kind == k_shr() {
+            depth = depth - 2
+            if depth <= 0 {
+                if depth == 0 {
+                    if i + 1 < vec_len(toks) {
+                        nt2: Token = vec_get(toks, i + 1)
+                        return nt2.kind == k_lparen()
+                    }
+                }
+                return false
+            }
+        } else if !collector_type_token(t.kind) {
+            return false
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func parse_collect_mint(p: *Parser, lo: int64, kw_hi: int64) -> int64 {
+    ty: int64 = parse_collector_type_arg(p)
+    mut arg: int64 = -1
+    if p_eat(p, k_lparen()) {
+        saved: bool = (*p).no_struct
+        (*p).no_struct = false
+        args: *Vector<int64> = parse_expr_list(p, k_rparen())
+        (*p).no_struct = saved
+        p_expect(p, k_rparen())
+        if vec_len(args) != 1 {
+            p_error(p, "collector takes one value: collector<T>(value)")
+        }
+        if vec_len(args) > 0 {
+            arg = vec_get(args, 0)
+        } else {
+            empty: int64 = intern_id((*p_ast(p)).interner, "")
+            arg = ast_expr(p_ast(p), xk_ident(), lo, kw_hi, empty, 0, 0, 0)
+        }
+    } else {
+        p_error(p, "collector takes one value: collector<T>(value)")
+        empty2: int64 = intern_id((*p_ast(p)).interner, "")
+        arg = ast_expr(p_ast(p), xk_ident(), lo, kw_hi, empty2, 0, 0, 0)
+    }
+    return ast_expr(p_ast(p), xk_collect(), lo, p_prev_hi(p), ty, arg, 0, 0)
+}

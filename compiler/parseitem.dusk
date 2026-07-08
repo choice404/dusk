@@ -1,0 +1,399 @@
+// parseitem: module head and top-level item grammar. P1 constructs functions and
+// records directive vectors; other item forms are reserved in ast.dusk for P2.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import bytes
+@import token
+@import intern
+@import ast
+@import parse
+@import parsety
+@import parseexpr
+
+export func parse_module(p: *Parser) -> *Ast {
+    parse_module_head(p)
+    mut reading: bool = true
+    while reading {
+        if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            if p_kw(p, "monad") {
+                parse_monad_block(p)
+            } else {
+                parse_item(p)
+            }
+            p_guard_progress(p, before, "unexpected token in module body")
+        }
+    }
+    return p_ast(p)
+}
+
+func parse_module_head(p: *Parser) -> void {
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_at()) {
+            p_bump(p)
+            dir: int64 = p_ident(p)
+            d: string = ast_name(p_ast(p), dir)
+            if str_eq(d, "paradigm") {
+                vec_push((*p_ast(p)).paradigms, p_ident(p))
+            } else if str_eq(d, "import") {
+                vec_push((*p_ast(p)).imports, parse_import_path(p))
+            } else {
+                p_error(p, "unknown directive")
+            }
+        } else {
+            reading = false
+        }
+    }
+}
+
+func parse_dotted_path(p: *Parser) -> int64 {
+    b: *StringBuilder = alloc(sb_new())
+    first: int64 = p_ident(p)
+    sb_push(b, ast_name(p_ast(p), first))
+    mut reading: bool = true
+    while reading {
+        if p_eat(p, k_dot()) {
+            sb_push_char(b, 46)
+            part: int64 = p_ident(p)
+            sb_push(b, ast_name(p_ast(p), part))
+        } else {
+            reading = false
+        }
+    }
+    s: string = substring_n(sb_cstr(b), sb_size(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return intern_owned((*p_ast(p)).interner, s)
+}
+
+func parse_import_path(p: *Parser) -> int64 {
+    if p_at(p, k_str()) {
+        t: Token = p_tok(p)
+        p_bump(p)
+        return p_string_body_id(p, t)
+    }
+    return parse_dotted_path(p)
+}
+
+func parse_item(p: *Parser) -> void {
+    exported: bool = p_eat_kw(p, "export")
+    if p_kw(p, "func") {
+        fid: int64 = parse_func(p, exported, false)
+        ast_item(p_ast(p), ik_func(), fid)
+        return
+    }
+    if p_ident_text_is(p, "async") {
+        p_bump(p)
+        if p_kw(p, "func") {
+            fid2: int64 = parse_func(p, exported, true)
+            ast_item(p_ast(p), ik_func(), fid2)
+        } else {
+            p_error(p, "expected 'func' after 'async'")
+        }
+        return
+    }
+    if p_kw(p, "struct") {
+        sid: int64 = parse_struct_item(p, exported)
+        ast_item(p_ast(p), ik_struct(), sid)
+        return
+    }
+    if p_kw(p, "enum") {
+        eid: int64 = parse_enum_item(p, exported)
+        ast_item(p_ast(p), ik_enum(), eid)
+        return
+    }
+    if p_kw(p, "interface") {
+        iid: int64 = parse_interface_item(p, exported)
+        ast_item(p_ast(p), ik_interface(), iid)
+        return
+    }
+    if p_kw(p, "impl") {
+        imid: int64 = parse_impl_item(p)
+        ast_item(p_ast(p), ik_impl(), imid)
+        return
+    }
+    if p_kw(p, "foreign") {
+        fid3: int64 = parse_foreign_item(p)
+        ast_item(p_ast(p), ik_foreign(), fid3)
+        return
+    }
+    if exported {
+        p_error(p, "expected an item after 'export'")
+        return
+    }
+    if p_kw(p, "monad") {
+        parse_monad_block(p)
+        return
+    }
+    p_error(p, "expected an item")
+    p_bump(p)
+}
+
+export func parse_func(p: *Parser, exported: bool, is_async: bool) -> int64 {
+    p_expect_kw(p, "func")
+    name_lo: int64 = p_lo(p)
+    name_hi: int64 = p_hi(p)
+    name: int64 = p_ident(p)
+    gens: *Vector<int64> = parse_generics(p)
+    params: *Vector<int64> = parse_params(p)
+    p_expect(p, k_arrow())
+    ret: int64 = parse_type(p)
+    saved: bool = (*p).in_async_fn
+    (*p).in_async_fn = is_async
+    body: int64 = parse_block(p)
+    (*p).in_async_fn = saved
+    goff, glen := ast_kids(p_ast(p), gens)
+    poff, plen := ast_kids(p_ast(p), params)
+    fn: FuncNode = FuncNode {
+        exported: exported,
+        is_async: is_async,
+        name: name,
+        lo: name_lo,
+        hi: name_hi,
+        generics_off: goff,
+        generics_len: glen,
+        params_off: poff,
+        params_len: plen,
+        ret: ret,
+        body: body,
+    }
+    return ast_func(p_ast(p), fn)
+}
+
+func parse_field_block(p: *Parser) -> *Vector<int64> {
+    fields: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            name: int64 = p_ident(p)
+            p_expect(p, k_colon())
+            ty: int64 = parse_type(p)
+            vec_push(fields, ast_field(p_ast(p), name, ty))
+            if !p_eat(p, k_comma()) {
+                reading = false
+            }
+        }
+    }
+    p_expect(p, k_rbrace())
+    return fields
+}
+
+func parse_struct_item(p: *Parser, exported: bool) -> int64 {
+    p_expect_kw(p, "struct")
+    name: int64 = p_ident(p)
+    gens: *Vector<int64> = parse_generics(p)
+    fields: *Vector<int64> = parse_field_block(p)
+    return ast_struct(p_ast(p), exported, name, gens, fields)
+}
+
+func parse_enum_item(p: *Parser, exported: bool) -> int64 {
+    p_expect_kw(p, "enum")
+    name: int64 = p_ident(p)
+    gens: *Vector<int64> = parse_generics(p)
+    vars: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            vname: int64 = p_ident(p)
+            fields: *Vector<int64> = alloc(vec_new())
+            if p_eat(p, k_lparen()) {
+                mut in_fields: bool = true
+                while in_fields {
+                    if p_at(p, k_rparen()) {
+                        in_fields = false
+                    } else if p_at_eof(p) {
+                        in_fields = false
+                    } else {
+                        fname: int64 = p_ident(p)
+                        p_expect(p, k_colon())
+                        fty: int64 = parse_type(p)
+                        vec_push(fields, ast_field(p_ast(p), fname, fty))
+                        if !p_eat(p, k_comma()) {
+                            in_fields = false
+                        }
+                    }
+                }
+                p_expect(p, k_rparen())
+            }
+            vec_push(vars, ast_variant(p_ast(p), vname, fields))
+            if !p_eat(p, k_comma()) {
+                reading = false
+            }
+        }
+    }
+    p_expect(p, k_rbrace())
+    return ast_enum(p_ast(p), exported, name, gens, vars)
+}
+
+func parse_interface_item(p: *Parser, exported: bool) -> int64 {
+    p_expect_kw(p, "interface")
+    name: int64 = p_ident(p)
+    gens: *Vector<int64> = parse_generics(p)
+    methods: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            mname: int64 = p_ident(p)
+            params: *Vector<int64> = parse_params(p)
+            p_expect(p, k_arrow())
+            ret: int64 = parse_type(p)
+            p_eat(p, k_semi())
+            vec_push(methods, ast_method_sig(p_ast(p), mname, params, ret))
+            p_guard_progress(p, before, "unexpected token in interface body")
+        }
+    }
+    p_expect(p, k_rbrace())
+    return ast_interface(p_ast(p), exported, name, gens, methods)
+}
+
+func parse_foreign_item(p: *Parser) -> int64 {
+    lo: int64 = p_lo(p)
+    hi: int64 = p_hi(p)
+    p_expect_kw(p, "foreign")
+    mut abi: int64 = intern_id((*p_ast(p)).interner, "")
+    if p_at(p, k_str()) {
+        t: Token = p_tok(p)
+        p_bump(p)
+        abi = p_string_body_id(p, t)
+    } else {
+        p_error(p, "expected a calling convention string after 'foreign', such as \"C\"")
+    }
+    funcs: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            p_expect_kw(p, "func")
+            name: int64 = p_ident(p)
+            params: *Vector<int64> = parse_params(p)
+            p_expect(p, k_arrow())
+            ret: int64 = parse_type(p)
+            p_eat(p, k_semi())
+            vec_push(funcs, ast_foreign_func(p_ast(p), name, params, ret))
+            p_guard_progress(p, before, "unexpected token in foreign block")
+        }
+    }
+    p_expect(p, k_rbrace())
+    return ast_foreign(p_ast(p), abi, lo, hi, funcs)
+}
+
+func parse_impl_item(p: *Parser) -> int64 {
+    lo: int64 = p_lo(p)
+    hi: int64 = p_hi(p)
+    p_expect_kw(p, "impl")
+    first: int64 = p_ident(p)
+    mut iface: int64 = -1
+    mut ty: int64 = first
+    if p_eat_kw(p, "for") {
+        iface = first
+        ty = p_ident(p)
+    }
+    methods: *Vector<int64> = alloc(vec_new())
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            if p_kw(p, "func") {
+                vec_push(methods, parse_func(p, false, false))
+            } else if p_ident_text_is(p, "async") {
+                p_error(p, "a method cannot be async")
+                p_bump(p)
+                if p_kw(p, "func") {
+                    vec_push(methods, parse_func(p, false, false))
+                }
+            } else {
+                p_error(p, "expected a method (func) in impl block")
+                p_bump(p)
+            }
+            p_guard_progress(p, before, "unexpected token in impl block")
+        }
+    }
+    p_expect(p, k_rbrace())
+    return ast_impl(p_ast(p), iface, ty, lo, hi, methods)
+}
+
+func qualified_method_name(p: *Parser, monad_name_id: int64, method: int64) -> int64 {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, ast_name(p_ast(p), monad_name_id))
+    sb_push_char(b, 46)
+    sb_push(b, ast_name(p_ast(p), method))
+    s: string = substring_n(sb_cstr(b), sb_size(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return intern_owned((*p_ast(p)).interner, s)
+}
+
+func parse_monad_block(p: *Parser) -> void {
+    lo: int64 = p_lo(p)
+    hi: int64 = p_hi(p)
+    p_expect_kw(p, "monad")
+    name: int64 = p_ident(p)
+    ast_monad(p_ast(p), name, lo, hi)
+    mut has_bind: bool = false
+    mut has_unit: bool = false
+    p_expect(p, k_lbrace())
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_rbrace()) {
+            reading = false
+        } else if p_at_eof(p) {
+            reading = false
+        } else {
+            before: int64 = (*p).pos
+            exported: bool = p_eat_kw(p, "export")
+            if p_kw(p, "func") {
+                fid: int64 = parse_func(p, exported, false)
+                funcs: *Vector<FuncNode> = (*p_ast(p)).funcs
+                mut f: FuncNode = vec_get(funcs, fid)
+                mname: string = ast_name(p_ast(p), f.name)
+                if str_eq(mname, "bind") { has_bind = true }
+                if str_eq(mname, "unit") { has_unit = true }
+                f.name = qualified_method_name(p, name, f.name)
+                vec_set(funcs, fid, f)
+                ast_item(p_ast(p), ik_func(), fid)
+            } else {
+                p_error(p, "expected a method (func) in monad block")
+                p_bump(p)
+            }
+            p_guard_progress(p, before, "unexpected token in monad block")
+        }
+    }
+    p_expect(p, k_rbrace())
+    if !has_bind {
+        p_error_at(p, lo, "a monad block must define both 'bind' and 'unit'")
+    } else if !has_unit {
+        p_error_at(p, lo, "a monad block must define both 'bind' and 'unit'")
+    }
+}

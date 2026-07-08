@@ -1,0 +1,128 @@
+// parseops: token-to-operator helpers shared by the expression and statement
+// parser.
+
+@paradigm procedural
+
+@import std.vector
+@import token
+@import ast
+@import parse
+
+export func make_pipe(p: *Parser, lhs: int64, rhs: int64) -> int64 {
+    a: *Ast = p_ast(p)
+    l: ExprNode = vec_get((*a).exprs, lhs)
+    r: ExprNode = vec_get((*a).exprs, rhs)
+    if r.kind == xk_call() {
+        args: *Vector<int64> = alloc(vec_new())
+        vec_push(args, lhs)
+        mut i: int64 = 0
+        while i < r.c {
+            vec_push(args, vec_get((*a).kids, r.b + i))
+            i = i + 1
+        }
+        off, len := ast_kids(a, args)
+        return ast_expr(a, xk_call(), l.lo, r.hi, r.a, off, len, 0)
+    }
+    if r.kind == xk_ident() {
+        args2: *Vector<int64> = alloc(vec_new())
+        vec_push(args2, lhs)
+        off2, len2 := ast_kids(a, args2)
+        return ast_expr(a, xk_call(), l.lo, r.hi, rhs, off2, len2, 0)
+    }
+    if r.kind == xk_field() {
+        args3: *Vector<int64> = alloc(vec_new())
+        vec_push(args3, lhs)
+        off3, len3 := ast_kids(a, args3)
+        return ast_expr(a, xk_call(), l.lo, r.hi, rhs, off3, len3, 0)
+    }
+    p_error_at(p, r.lo, "the right side of '|>' must be a function name or call")
+    return lhs
+}
+
+export func binop_for_kind(k: int64) -> int64 {
+    if k == k_or_or() { return bop_or() }
+    if k == k_and_and() { return bop_and() }
+    if k == k_eq_eq() { return bop_eq() }
+    if k == k_ne() { return bop_ne() }
+    if k == k_lt() { return bop_lt() }
+    if k == k_le() { return bop_le() }
+    if k == k_gt() { return bop_gt() }
+    if k == k_ge() { return bop_ge() }
+    if k == k_pipe() { return bop_bitor() }
+    if k == k_caret() { return bop_bitxor() }
+    if k == k_amp() { return bop_bitand() }
+    if k == k_shl() { return bop_shl() }
+    if k == k_shr() { return bop_shr() }
+    if k == k_plus() { return bop_add() }
+    if k == k_minus() { return bop_sub() }
+    if k == k_star() { return bop_mul() }
+    if k == k_slash() { return bop_div() }
+    if k == k_percent() { return bop_mod() }
+    if k == k_star_star() { return bop_pow() }
+    return -1
+}
+
+func bin_level(op: int64) -> int64 {
+    if op == bop_or() { return 1 }
+    if op == bop_and() { return 2 }
+    if is_cmp(op) { return 3 }
+    if op == bop_bitor() { return 4 }
+    if op == bop_bitxor() { return 5 }
+    if op == bop_bitand() { return 6 }
+    if op == bop_shl() { return 7 }
+    if op == bop_shr() { return 7 }
+    if op == bop_add() { return 8 }
+    if op == bop_sub() { return 8 }
+    if op == bop_mul() { return 9 }
+    if op == bop_div() { return 9 }
+    if op == bop_mod() { return 9 }
+    return 10
+}
+
+export func bin_lbp(op: int64) -> int64 {
+    if op == bop_pow() { return 20 }
+    return bin_level(op) * 2
+}
+
+export func bin_rbp(op: int64) -> int64 {
+    if op == bop_pow() { return 20 }
+    return bin_level(op) * 2 + 1
+}
+
+export func is_cmp(op: int64) -> bool {
+    if op == bop_eq() { return true }
+    if op == bop_ne() { return true }
+    if op == bop_lt() { return true }
+    if op == bop_le() { return true }
+    if op == bop_gt() { return true }
+    if op == bop_ge() { return true }
+    return false
+}
+
+export func compound_op(k: int64) -> int64 {
+    if k == k_plus_eq() { return bop_add() }
+    if k == k_minus_eq() { return bop_sub() }
+    if k == k_star_eq() { return bop_mul() }
+    if k == k_slash_eq() { return bop_div() }
+    if k == k_percent_eq() { return bop_mod() }
+    if k == k_amp_eq() { return bop_bitand() }
+    if k == k_pipe_eq() { return bop_bitor() }
+    if k == k_caret_eq() { return bop_bitxor() }
+    if k == k_shl_eq() { return bop_shl() }
+    if k == k_shr_eq() { return bop_shr() }
+    return -1
+}
+
+export func collector_type_token(k: int64) -> bool {
+    if k == k_ident() { return true }
+    if k == k_comma() { return true }
+    if k == k_star() { return true }
+    if k == k_star_star() { return true }
+    if k == k_lbracket() { return true }
+    if k == k_rbracket() { return true }
+    if k == k_lparen() { return true }
+    if k == k_rparen() { return true }
+    if k == k_arrow() { return true }
+    if k == k_int() { return true }
+    return false
+}

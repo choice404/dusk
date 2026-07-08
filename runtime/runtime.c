@@ -469,6 +469,28 @@ int64_t cool_file_size(const char *path) {
     return (int64_t)st.st_size;
 }
 
+int64_t cool_is_file(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return 0;
+    }
+    return S_ISREG(st.st_mode) ? 1 : 0;
+}
+
+char *cool_realpath(const char *path) {
+    char *tmp = realpath(path, NULL);
+    if (!tmp) {
+        char *empty = (char *)cool_gen_alloc(1);
+        if (!empty) {
+            fputs("fatal: out of memory\n", stderr);
+            abort();
+        }
+        empty[0] = '\0';
+        return empty;
+    }
+    return cool_gen_dup(tmp, strlen(tmp));
+}
+
 /* Reads an environment variable into a generationally allocated string. An unset
    variable comes back as the empty string, never NULL, because the language has
    no null test and treats a returned string as always valid. The caller owns the
