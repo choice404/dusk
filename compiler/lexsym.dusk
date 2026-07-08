@@ -1,0 +1,132 @@
+// lexsym: the operator and punctuation muncher. Each lead byte takes the longest
+// matching form, three byte operators first, then two byte, then a single byte, so
+// `..=` beats `..`, `<<=` beats `<<`, and a bare `<` falls to Lt. A byte that
+// starts no operator is a recorded fault, and a non-ASCII byte outside a literal
+// is an unexpected character. This mirrors stage0's symbol dispatch exactly.
+
+@paradigm procedural
+
+@import token
+@import lexcore
+
+// The kind and byte length of the multi or single character operator that starts
+// with c, given the next two bytes. A length of 0 means c starts no operator, so
+// the caller falls to the single byte table. Longest forms are tested first.
+func match_op(c: int64, n2: int64, n3: int64) -> (int64, int64) {
+    if c == 58 {
+        if n2 == 61 { return (k_colon_eq(), 2) }
+    }
+    if c == 61 {
+        if n2 == 62 { return (k_fat_arrow(), 2) }
+        if n2 == 61 { return (k_eq_eq(), 2) }
+    }
+    if c == 33 {
+        if n2 == 61 { return (k_ne(), 2) }
+    }
+    if c == 46 {
+        if n2 == 46 {
+            if n3 == 61 { return (k_dotdot_eq(), 3) }
+            return (k_dotdot(), 2)
+        }
+    }
+    if c == 60 {
+        if n2 == 60 {
+            if n3 == 61 { return (k_shl_eq(), 3) }
+            return (k_shl(), 2)
+        }
+        if n2 == 61 { return (k_le(), 2) }
+        if n2 == 45 { return (k_larrow(), 2) }
+    }
+    if c == 62 {
+        if n2 == 62 {
+            if n3 == 61 { return (k_shr_eq(), 3) }
+            return (k_shr(), 2)
+        }
+        if n2 == 61 { return (k_ge(), 2) }
+    }
+    if c == 38 {
+        if n2 == 38 { return (k_and_and(), 2) }
+        if n2 == 61 { return (k_amp_eq(), 2) }
+    }
+    if c == 124 {
+        if n2 == 124 { return (k_or_or(), 2) }
+        if n2 == 62 { return (k_pipe_gt(), 2) }
+        if n2 == 61 { return (k_pipe_eq(), 2) }
+    }
+    if c == 94 {
+        if n2 == 61 { return (k_caret_eq(), 2) }
+    }
+    if c == 43 {
+        if n2 == 43 { return (k_plus_plus(), 2) }
+        if n2 == 61 { return (k_plus_eq(), 2) }
+    }
+    if c == 45 {
+        if n2 == 62 { return (k_arrow(), 2) }
+        if n2 == 45 { return (k_minus_minus(), 2) }
+        if n2 == 61 { return (k_minus_eq(), 2) }
+    }
+    if c == 42 {
+        if n2 == 42 { return (k_star_star(), 2) }
+        if n2 == 61 { return (k_star_eq(), 2) }
+    }
+    if c == 47 {
+        if n2 == 61 { return (k_slash_eq(), 2) }
+    }
+    if c == 37 {
+        if n2 == 61 { return (k_percent_eq(), 2) }
+    }
+    return (0, 0)
+}
+
+// The single byte token kind for lead byte c, or -1 when c starts no token.
+func one_kind(c: int64) -> int64 {
+    if c == 61 { return k_assign() }
+    if c == 43 { return k_plus() }
+    if c == 45 { return k_minus() }
+    if c == 42 { return k_star() }
+    if c == 47 { return k_slash() }
+    if c == 37 { return k_percent() }
+    if c == 60 { return k_lt() }
+    if c == 62 { return k_gt() }
+    if c == 33 { return k_bang() }
+    if c == 38 { return k_amp() }
+    if c == 124 { return k_pipe() }
+    if c == 94 { return k_caret() }
+    if c == 126 { return k_tilde() }
+    if c == 58 { return k_colon() }
+    if c == 59 { return k_semi() }
+    if c == 44 { return k_comma() }
+    if c == 46 { return k_dot() }
+    if c == 64 { return k_at() }
+    if c == 40 { return k_lparen() }
+    if c == 41 { return k_rparen() }
+    if c == 123 { return k_lbrace() }
+    if c == 125 { return k_rbrace() }
+    if c == 91 { return k_lbracket() }
+    if c == 93 { return k_rbracket() }
+    return -1
+}
+
+// Munches one operator or punctuation token starting at lead byte c. A non-ASCII
+// byte here is outside any literal and is an unexpected character.
+export func lx_symbol(lx: *Lexer, start: int64, c: int64) -> void {
+    if c >= 128 {
+        lx_bump_scalar(lx)
+        lx_err(lx, start, "unexpected character")
+        return
+    }
+    kind, len := match_op(c, lx_peek2(lx), lx_peek3(lx))
+    if len > 0 {
+        lx_advance(lx, len)
+        lx_push(lx, kind, start)
+        return
+    }
+    k: int64 = one_kind(c)
+    if k < 0 {
+        lx_advance(lx, 1)
+        lx_err(lx, start, "unexpected character")
+        return
+    }
+    lx_advance(lx, 1)
+    lx_push(lx, k, start)
+}

@@ -1,0 +1,37 @@
+@paradigm procedural
+@import std.map
+@import std.vector
+@import std.functional.maybe
+
+// std.map deterministic iteration: map_keys returns the keys in insertion order,
+// so walking them reads back every live entry once in a stable order the hash
+// layout never perturbs. The inserts cross the grow threshold and overwrite an
+// existing key, neither of which reorders or duplicates a key in the record. The
+// returned vector is owned by the caller, so it is freed independently of the map.
+func main() -> int32 {
+    m: *Map<int64> = alloc(map_new())
+    map_put(m, "one", 1)
+    map_put(m, "two", 2)
+    map_put(m, "three", 3)
+    map_put(m, "four", 4)
+    map_put(m, "five", 5)
+    map_put(m, "six", 6)
+    map_put(m, "seven", 7)
+    map_put(m, "two", 22)
+    map_put(m, "eight", 8)
+
+    ks: *Vector<string> = map_keys(m)
+    println(vec_len(ks))
+    mut i: int64 = 0
+    while i < vec_len(ks) {
+        key: string = vec_get(ks, i)
+        println(unwrap_or(map_get(m, key), -1))
+        i = i + 1
+    }
+    vec_free(ks)
+    free(ks)
+
+    map_free(m)
+    free(m)
+    return 0
+}

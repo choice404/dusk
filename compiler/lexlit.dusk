@@ -1,0 +1,142 @@
+// lexlit: scanning string, char, and rune literals. These passes only find each
+// literal's byte span and record the same faults stage0 records, so the exit
+// status matches; the decoded value is rebuilt from the span when a token is
+// rendered. The escape scanner is shared with the renderer, which is what keeps
+// the span boundaries and the fault set in agreement.
+
+@paradigm procedural
+
+@import bytes
+@import escape
+@import token
+@import lexcore
+
+// A string literal: consume the opening quote, then bytes until the closing quote,
+// stepping a backslash escape past its whole form so an escaped quote does not end
+// the literal. An escape fault and an unterminated literal are both recorded.
+export func lx_string(lx: *Lexer, start: int64) -> void {
+    lx_advance(lx, 1)
+    mut going: bool = true
+    while going {
+        c: int64 = lx_peek(lx)
+        if c < 0 {
+            lx_err(lx, start, "unterminated string literal")
+            going = false
+        } else {
+            if c == 34 {
+                lx_advance(lx, 1)
+                going = false
+            } else {
+                if c == 92 {
+                    scan_one_escape(lx)
+                } else {
+                    lx_advance(lx, 1)
+                }
+            }
+        }
+    }
+    lx_push(lx, k_str(), start)
+}
+
+// Steps one backslash escape, recording its fault if any. Shared by the three
+// literal scanners. The backslash is at the current offset on entry.
+func scan_one_escape(lx: *Lexer) -> int64 {
+    bs: int64 = lx_pos(lx)
+    lx_advance(lx, 1)
+    res: Escape = scan_escape((*lx).src, (*lx).n, lx_pos(lx))
+    lx_seek(lx, res.next)
+    if res.err != 0 {
+        lx_err(lx, bs, esc_err_msg(res.err))
+    }
+    return res.scalar
+}
+
+// A char literal holds exactly one byte wide scalar. A wide escape or a multibyte
+// source character is a fault, as is an empty or unterminated literal. The single
+// character is consumed, then a closing quote is required, with recovery to the
+// next quote on a malformed body so the span matches stage0.
+export func lx_char(lx: *Lexer, start: int64) -> void {
+    lx_advance(lx, 1)
+    c: int64 = lx_peek(lx)
+    if c < 0 {
+        lx_err(lx, start, "unterminated char literal")
+    } else {
+        if c == 39 {
+            lx_err(lx, start, "empty char literal")
+        } else {
+            if c == 92 {
+                scalar: int64 = scan_one_escape(lx)
+                if scalar > 127 {
+                    lx_err(lx, start, "a char is one byte; this escape does not fit, use a rune literal or a string")
+                }
+            } else {
+                if c < 128 {
+                    lx_advance(lx, 1)
+                } else {
+                    lx_bump_scalar(lx)
+                    lx_err(lx, start, "a char is one byte; use a rune literal r'...' or a string")
+                }
+            }
+        }
+    }
+    close_quote(lx, start, "char literal must contain exactly one character")
+    lx_push(lx, k_char(), start)
+}
+
+// A rune literal holds any Unicode scalar: a multibyte source character or any
+// escape, including a wide \u. The opening r and quote are already confirmed by
+// the dispatch guard, so two bytes are consumed here.
+export func lx_rune(lx: *Lexer, start: int64) -> void {
+    lx_advance(lx, 2)
+    c: int64 = lx_peek(lx)
+    if c < 0 {
+        lx_err(lx, start, "unterminated rune literal")
+    } else {
+        if c == 39 {
+            lx_err(lx, start, "empty rune literal")
+        } else {
+            if c == 92 {
+                scan_one_escape(lx)
+            } else {
+                if c < 128 {
+                    lx_advance(lx, 1)
+                } else {
+                    lx_bump_scalar(lx)
+                }
+            }
+        }
+    }
+    close_quote(lx, start, "rune literal must contain exactly one character")
+    lx_push(lx, k_rune(), start)
+}
+
+// Consumes the closing quote of a char or rune. When it is missing, scan to the
+// next quote or newline, consume a quote if found, and record the fault, so the
+// literal's span covers the recovery just as stage0's does.
+func close_quote(lx: *Lexer, start: int64, msg: string) -> void {
+    if lx_peek(lx) == 39 {
+        lx_advance(lx, 1)
+    } else {
+        mut going: bool = true
+        while going {
+            c: int64 = lx_peek(lx)
+            if c == 39 {
+                going = false
+            } else {
+                if c == 10 {
+                    going = false
+                } else {
+                    if c < 0 {
+                        going = false
+                    } else {
+                        lx_advance(lx, 1)
+                    }
+                }
+            }
+        }
+        if lx_peek(lx) == 39 {
+            lx_advance(lx, 1)
+        }
+        lx_err(lx, start, msg)
+    }
+}

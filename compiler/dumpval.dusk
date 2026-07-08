@@ -1,0 +1,134 @@
+// dumpval: rendering a literal token's text payload for the lex dump. The token
+// carries only a span, so the value is rebuilt from the source here. A string,
+// char, or rune is decoded to its scalars, and each scalar is emitted in the
+// canonical dump form: a printable ASCII scalar as itself, and every other scalar,
+// a control or any non-ASCII code point, as a \u{hex} escape. That form needs no
+// Unicode property tables, only the code point, so both compilers reproduce it
+// from the same rule. The escape scanner and the UTF-8 decoder are shared with the
+// lexer and bytes, so the decoded scalars match the ones the lexer walked past.
+
+@paradigm procedural
+
+@import std.string
+@import bytes
+@import escape
+
+// Appends the lowercase, minimal digit hex of v, the digits inside a \u{...}
+// escape.
+func push_hex_min(out: *StringBuilder, v: int64) -> void {
+    if v == 0 {
+        sb_push_char(out, 48)
+        return
+    }
+    mut nib: int64 = 1
+    mut t: int64 = v
+    while t >= 16 {
+        t = t / 16
+        nib = nib + 1
+    }
+    mut i: int64 = nib - 1
+    while i >= 0 {
+        d: int64 = (v >> (4 * i)) & 15
+        mut ch: int64 = 48 + d
+        if d >= 10 {
+            ch = 87 + d
+        }
+        sb_push_char(out, ch)
+        i = i - 1
+    }
+}
+
+// Appends one scalar in the canonical dump form: a printable ASCII scalar, 0x20 to
+// 0x7E, as its own byte, and every other scalar as a \u{hex} escape.
+func push_canonical(out: *StringBuilder, cp: int64) -> void {
+    if cp >= 32 {
+        if cp <= 126 {
+            sb_push_char(out, cp)
+            return
+        }
+    }
+    sb_push(out, "\\u{")
+    push_hex_min(out, cp)
+    sb_push_char(out, 125)
+}
+
+// The canonical rendering of a string token's body, quotes included, for the span
+// [lo, hi). The body is decoded like the lexer decodes it, an invalid escape adding
+// nothing, then each scalar is emitted in canonical form.
+export func debug_string(src: string, n: int64, lo: int64, hi: int64) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push_char(out, 34)
+    mut p: int64 = lo + 1
+    mut going: bool = true
+    while going {
+        if p >= hi {
+            going = false
+        } else {
+            b: int64 = bytes.byte_at(src, n, p)
+            if b == 34 {
+                going = false
+            } else {
+                if b == 92 {
+                    res: Escape = scan_escape(src, n, p + 1)
+                    if res.scalar >= 0 {
+                        push_canonical(out, res.scalar)
+                    }
+                    p = res.next
+                } else {
+                    if b < 128 {
+                        push_canonical(out, b)
+                        p = p + 1
+                    } else {
+                        d: Decoded = bytes.decode_utf8(src, n, p)
+                        push_canonical(out, d.scalar)
+                        p = p + d.len
+                    }
+                }
+            }
+        }
+    }
+    sb_push_char(out, 34)
+    r: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))
+    sb_free(out)
+    free(out)
+    return r
+}
+
+// The canonical rendering of a char or rune token, quotes included. bstart is the
+// first body byte, lo+1 for a char and lo+2 for a rune. Only the leading scalar is
+// rendered, the single character the literal holds. An empty body or an end of
+// input where the character should be renders as the null scalar, and a failed
+// escape falls back to it too, matching stage0's '\0' recovery value.
+export func debug_char(src: string, n: int64, bstart: int64) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push_char(out, 39)
+    b: int64 = bytes.byte_at(src, n, bstart)
+    if b < 0 {
+        push_canonical(out, 0)
+    } else {
+        if b == 39 {
+            push_canonical(out, 0)
+        } else {
+            if b == 92 {
+                res: Escape = scan_escape(src, n, bstart + 1)
+                mut sc: int64 = res.scalar
+                if sc < 0 {
+                    sc = 0
+                }
+                push_canonical(out, sc)
+            } else {
+                if b < 128 {
+                    push_canonical(out, b)
+                } else {
+                    d: Decoded = bytes.decode_utf8(src, n, bstart)
+                    push_canonical(out, d.scalar)
+                }
+            }
+        }
+    }
+    sb_push_char(out, 39)
+    r: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))
+    sb_free(out)
+    free(out)
+    return r
+}

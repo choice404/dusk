@@ -6,6 +6,7 @@
 
 @import std.string
 @import std.functional.maybe
+@import std.vector
 
 export struct Map<V> {
     used: *raw bool,
@@ -13,6 +14,11 @@ export struct Map<V> {
     vals: *raw V,
     len: int64,
     cap: int64,
+    // Keys in insertion order, so iteration is a pure function of the insert
+    // sequence rather than the hash layout. A key is recorded once, at its first
+    // insertion; an overwrite does not touch this and a grow rehashes the table
+    // without rebuilding it. The map owns this vector and map_free releases it.
+    order: *Vector<string>,
 }
 
 // A polynomial rolling hash over the key bytes. Overflow wraps, so the result
@@ -39,7 +45,8 @@ export func map_new<V>() -> Map<V> {
     }
     k: *raw string = alloc_bytes(cap * sizeof(string))
     v: *raw V = alloc_bytes(cap * sizeof(V))
-    return Map { used: u, keys: k, vals: v, len: 0, cap: cap }
+    o: *Vector<string> = alloc(vec_new())
+    return Map { used: u, keys: k, vals: v, len: 0, cap: cap, order: o }
 }
 
 // The slot a key probes to, folded into range. A negative hash, from overflow,
@@ -75,7 +82,10 @@ func map_grow<V>(m: *Map<V>) -> void {
     mut j: int64 = 0
     while j < old_cap {
         if old_used[j] {
-            map_put(m, old_keys[j], old_vals[j])
+            // Rehash into the new table only; the insertion order record is
+            // preserved across a grow, so it is not rebuilt here. The bool result
+            // is discarded because a grow never records a new key.
+            map_place(m, old_keys[j], old_vals[j])
         }
         j = j + 1
     }
@@ -84,15 +94,16 @@ func map_grow<V>(m: *Map<V>) -> void {
     free(old_vals)
 }
 
-export func map_put<V>(m: *Map<V>, k: string, v: V) -> void {
-    if (*m).len * 2 >= (*m).cap {
-        map_grow(m)
-    }
+// Probes for k and places the pair, returning true when a fresh slot was filled
+// and false when an existing key was overwritten. This only touches the table:
+// the caller handles growth and the insertion order record, which keeps a grow's
+// rehash from ever re recording a key.
+func map_place<V>(m: *Map<V>, k: string, v: V) -> bool {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
         if str_eq((*m).keys[idx], k) {
             (*m).vals[idx] = v
-            return
+            return false
         }
         idx = idx + 1
         if idx == (*m).cap {
@@ -103,6 +114,16 @@ export func map_put<V>(m: *Map<V>, k: string, v: V) -> void {
     (*m).keys[idx] = k
     (*m).vals[idx] = v
     (*m).len = (*m).len + 1
+    return true
+}
+
+export func map_put<V>(m: *Map<V>, k: string, v: V) -> void {
+    if (*m).len * 2 >= (*m).cap {
+        map_grow(m)
+    }
+    if map_place(m, k, v) {
+        vec_push((*m).order, k)
+    }
 }
 
 export func map_get<V>(m: *Map<V>, k: string) -> Maybe<V> {
@@ -137,8 +158,29 @@ export func map_len<V>(m: *Map<V>) -> int64 {
     return (*m).len
 }
 
+// The keys in insertion order, as a fresh vector the caller owns and frees with
+// vec_free and free. Each key is copied out of the map's own order record, so the
+// returned vector is independent of the map: freeing it never touches the map,
+// and map_free never touches it, so there is no shared owner. The copied elements
+// are the key strings themselves, which the map still owns, so freeing the
+// returned vector releases its buffer only. A key appears once, at its first
+// insertion, so iterating the result visits every live entry exactly once in a
+// deterministic order.
+export func map_keys<V>(m: *Map<V>) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    src: *Vector<string> = (*m).order
+    mut i: int64 = 0
+    while i < vec_len(src) {
+        vec_push(out, vec_get(src, i))
+        i = i + 1
+    }
+    return out
+}
+
 export func map_free<V>(m: *Map<V>) -> void {
     free((*m).used)
     free((*m).keys)
     free((*m).vals)
+    vec_free((*m).order)
+    free((*m).order)
 }

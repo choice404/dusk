@@ -1,0 +1,253 @@
+// lex: the lexer's driver. It runs the scan loop, dispatching each lead byte to a
+// token producing pass, and holds the identifier, keyword, number, and suffix
+// passes. The literal and operator passes live in lexlit and lexsym. Paradigm
+// agnostic like stage0: it never suppresses a token, and gating is a later pass.
+
+@paradigm procedural
+
+@import std.string
+@import bytes
+@import token
+@import lexcore
+@import lexlit
+@import lexsym
+
+func is_digit(c: int64) -> bool {
+    if c >= 48 {
+        if c <= 57 {
+            return true
+        }
+    }
+    return false
+}
+
+func is_alpha(c: int64) -> bool {
+    if c >= 97 {
+        if c <= 122 {
+            return true
+        }
+    }
+    if c >= 65 {
+        if c <= 90 {
+            return true
+        }
+    }
+    return false
+}
+
+func is_ident_start(c: int64) -> bool {
+    if is_alpha(c) {
+        return true
+    }
+    if c == 95 {
+        return true
+    }
+    return false
+}
+
+func is_ident_continue(c: int64) -> bool {
+    if is_ident_start(c) {
+        return true
+    }
+    return is_digit(c)
+}
+
+func is_alnum(c: int64) -> bool {
+    if is_alpha(c) {
+        return true
+    }
+    return is_digit(c)
+}
+
+// True for the integer and float type suffixes the spec allows.
+func valid_suffix(s: string) -> bool {
+    if str_eq(s, "i8") { return true }
+    if str_eq(s, "i16") { return true }
+    if str_eq(s, "i32") { return true }
+    if str_eq(s, "i64") { return true }
+    if str_eq(s, "u8") { return true }
+    if str_eq(s, "u16") { return true }
+    if str_eq(s, "u32") { return true }
+    if str_eq(s, "u64") { return true }
+    if str_eq(s, "f32") { return true }
+    if str_eq(s, "f64") { return true }
+    return false
+}
+
+// The reserved unsigned integer suffixes, refused here so a literal never silently
+// runs the signed path and yields a wrong value.
+func reserved_suffix(s: string) -> bool {
+    if str_eq(s, "u8") { return true }
+    if str_eq(s, "u16") { return true }
+    if str_eq(s, "u32") { return true }
+    if str_eq(s, "u64") { return true }
+    return false
+}
+
+// An identifier, keyword, or boolean literal. The word is scanned, then classified:
+// true and false are booleans, a reserved word is a keyword, and the rest is an
+// identifier. The kind alone is stored; the renderer reads the span for the text.
+func lx_ident(lx: *Lexer, start: int64) -> void {
+    mut going: bool = true
+    while going {
+        if is_ident_continue(lx_peek(lx)) {
+            lx_advance(lx, 1)
+        } else {
+            going = false
+        }
+    }
+    hi: int64 = lx_pos(lx)
+    if is_bool_range((*lx).src, start, hi) {
+        lx_push(lx, k_bool(), start)
+    } else {
+        if is_keyword_range((*lx).src, start, hi) {
+            lx_push(lx, k_kw(), start)
+        } else {
+            lx_push(lx, k_ident(), start)
+        }
+    }
+}
+
+// The optional type suffix of a numeric literal: a letter, then letters and
+// digits. Returns a fresh string, or the shared empty literal when there is none,
+// which the caller frees only when non empty.
+func lx_suffix(lx: *Lexer) -> string {
+    if !is_alpha(lx_peek(lx)) {
+        return ""
+    }
+    sstart: int64 = lx_pos(lx)
+    mut going: bool = true
+    while going {
+        if is_alnum(lx_peek(lx)) {
+            lx_advance(lx, 1)
+        } else {
+            going = false
+        }
+    }
+    return substring_n((*lx).src, (*lx).n, sstart, lx_pos(lx))
+}
+
+// Whether the base 10 digits s[lo, hi) overflow a signed 64 bit integer, using the
+// same guarded accumulation as std.string parse_int_radix so the lexer flags the
+// exact literals stage0's i64 parse rejects.
+func int_overflows(s: string, n: int64, lo: int64, hi: int64) -> bool {
+    mut acc: int64 = 0
+    mut i: int64 = lo
+    while i < hi {
+        dv: int64 = bytes.byte_at(s, n, i) - 48
+        if acc > (9223372036854775807 - dv) / 10 {
+            return true
+        }
+        acc = acc * 10 + dv
+        i = i + 1
+    }
+    return false
+}
+
+// A numeric literal: digits, then an optional fractional part that makes it a
+// float, then an optional suffix. A reserved or unknown suffix is a recorded fault.
+// The kind alone is stored; the renderer reads the span for the value and suffix.
+func lx_number(lx: *Lexer, start: int64) -> void {
+    mut going: bool = true
+    while going {
+        if is_digit(lx_peek(lx)) {
+            lx_advance(lx, 1)
+        } else {
+            going = false
+        }
+    }
+    int_end: int64 = lx_pos(lx)
+    mut is_float: bool = false
+    if lx_peek(lx) == 46 {
+        if is_digit(lx_peek2(lx)) {
+            is_float = true
+            lx_advance(lx, 1)
+            mut fgoing: bool = true
+            while fgoing {
+                if is_digit(lx_peek(lx)) {
+                    lx_advance(lx, 1)
+                } else {
+                    fgoing = false
+                }
+            }
+        }
+    }
+    suffix: string = lx_suffix(lx)
+    if str_len(suffix) > 0 {
+        if reserved_suffix(suffix) {
+            lx_err(lx, start, "unsigned integers are reserved; use the signed widths")
+        } else {
+            if !valid_suffix(suffix) {
+                lx_err(lx, start, "unknown literal suffix")
+            }
+        }
+        free(suffix)
+    }
+    // A base 10 integer literal that overflows i64 is a fault, the same as stage0's
+    // i64 parse failure. A float never faults here; an out of range float parses to
+    // an infinity, which is a value, not an error.
+    if !is_float {
+        if int_overflows((*lx).src, (*lx).n, start, int_end) {
+            lx_err(lx, start, "invalid integer literal")
+        }
+    }
+    mut kind: int64 = k_int()
+    if is_float {
+        kind = k_float()
+    }
+    lx_push(lx, kind, start)
+}
+
+// Runs the scan loop to end of input, dispatching each lead byte. The rune guard,
+// r immediately before a quote, is tested before the identifier pass so `r'a'`
+// lexes as a rune and a bare `r` stays an identifier.
+export func lex_run(lx: *Lexer) -> void {
+    mut going: bool = true
+    while going {
+        lx_skip_trivia(lx)
+        start: int64 = lx_pos(lx)
+        c: int64 = lx_peek(lx)
+        if c < 0 {
+            lx_push(lx, k_eof(), start)
+            going = false
+        } else {
+            if c == 114 {
+                if lx_peek2(lx) == 39 {
+                    lx_rune(lx, start)
+                } else {
+                    lx_dispatch(lx, start, c)
+                }
+            } else {
+                lx_dispatch(lx, start, c)
+            }
+        }
+    }
+}
+
+func lx_dispatch(lx: *Lexer, start: int64, c: int64) -> void {
+    if is_ident_start(c) {
+        lx_ident(lx, start)
+    } else {
+        if is_digit(c) {
+            lx_number(lx, start)
+        } else {
+            if c == 34 {
+                lx_string(lx, start)
+            } else {
+                if c == 39 {
+                    lx_char(lx, start)
+                } else {
+                    lx_symbol(lx, start, c)
+                }
+            }
+        }
+    }
+}
+
+// Lexes a source buffer of byte length n, returning the finished lexer with its
+// tokens and faults.
+export func lex(src: string, n: int64) -> *Lexer {
+    lx: *Lexer = lx_new(src, n)
+    lex_run(lx)
+    return lx
+}

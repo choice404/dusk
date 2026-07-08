@@ -1,0 +1,155 @@
+// lexcore: the lexer's mutable state and its low level operations. The lexer walks
+// a source buffer by byte offset, pushing tokens and recording faults, so its
+// position and its two output vectors live in one heap value passed by pointer.
+// Peeking, advancing, pushing a token, and skipping trivia are all here; the token
+// producing passes over literals, numbers, and operators build on them.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import bytes
+@import diag
+@import token
+
+// The lexer state: the source and its byte length, the current offset, whether a
+// newline has been seen since the last token, and the collected tokens and faults.
+export struct Lexer {
+    src: string,
+    n: int64,
+    pos: int64,
+    pending_nl: bool,
+    tokens: *Vector<Token>,
+    errors: *Vector<Located>,
+}
+
+export func lx_new(src: string, n: int64) -> *Lexer {
+    tv: *Vector<Token> = alloc(vec_new())
+    ev: *Vector<Located> = alloc(vec_new())
+    return alloc(Lexer {
+        src: src,
+        n: n,
+        pos: 0,
+        pending_nl: false,
+        tokens: tv,
+        errors: ev,
+    })
+}
+
+// The byte at the current offset, the next, and the one after, each -1 at or past
+// the end so a scan can look ahead without a length guard.
+export func lx_peek(lx: *Lexer) -> int64 {
+    return bytes.byte_at((*lx).src, (*lx).n, (*lx).pos)
+}
+export func lx_peek2(lx: *Lexer) -> int64 {
+    return bytes.byte_at((*lx).src, (*lx).n, (*lx).pos + 1)
+}
+export func lx_peek3(lx: *Lexer) -> int64 {
+    return bytes.byte_at((*lx).src, (*lx).n, (*lx).pos + 2)
+}
+
+export func lx_pos(lx: *Lexer) -> int64 {
+    return (*lx).pos
+}
+
+// The tokens and faults collected by a finished lexer.
+export func lx_tokens(lx: *Lexer) -> *Vector<Token> {
+    return (*lx).tokens
+}
+export func lx_errors(lx: *Lexer) -> *Vector<Located> {
+    return (*lx).errors
+}
+
+// Advances the offset by m bytes.
+export func lx_advance(lx: *Lexer, m: int64) -> void {
+    (*lx).pos = (*lx).pos + m
+}
+
+// Moves the offset to an absolute position, used after an escape scanner returns
+// the offset just past the escape it consumed.
+export func lx_seek(lx: *Lexer, p: int64) -> void {
+    (*lx).pos = p
+}
+
+// Pushes a token spanning [start, pos) with the pending newline flag, then clears
+// the flag so it attaches to this token only.
+export func lx_push(lx: *Lexer, kind: int64, start: int64) -> void {
+    t: Token = Token {
+        kind: kind,
+        lo: start,
+        hi: (*lx).pos,
+        nl_before: (*lx).pending_nl,
+    }
+    vec_push((*lx).tokens, t)
+    (*lx).pending_nl = false
+}
+
+// Records a fault at byte offset lo. The message is diagnostic text only; the
+// dump contract compares stdout and exit status, and a recorded fault is what
+// drives the non zero exit.
+export func lx_err(lx: *Lexer, lo: int64, msg: string) -> void {
+    vec_push((*lx).errors, located(lo, msg))
+}
+
+// Advances past a full UTF-8 scalar starting at the current lead byte, clamping to
+// the end of the buffer, the same step stage0's bump_scalar makes.
+export func lx_bump_scalar(lx: *Lexer) -> void {
+    lead: int64 = lx_peek(lx)
+    mut np: int64 = (*lx).pos + bytes.utf8_len(lead)
+    if np > (*lx).n {
+        np = (*lx).n
+    }
+    (*lx).pos = np
+}
+
+// Skips whitespace and line comments, setting the pending newline flag when a
+// newline is passed. A line comment runs to just before its newline, so the
+// newline is seen on the next turn and the flag is set.
+export func lx_skip_trivia(lx: *Lexer) -> void {
+    mut going: bool = true
+    while going {
+        c: int64 = lx_peek(lx)
+        if c == 10 {
+            (*lx).pending_nl = true
+            (*lx).pos = (*lx).pos + 1
+        } else {
+            if c == 32 {
+                (*lx).pos = (*lx).pos + 1
+            } else {
+                if c == 9 {
+                    (*lx).pos = (*lx).pos + 1
+                } else {
+                    if c == 13 {
+                        (*lx).pos = (*lx).pos + 1
+                    } else {
+                        if c == 47 {
+                            if lx_peek2(lx) == 47 {
+                                lx_skip_line_comment(lx)
+                            } else {
+                                going = false
+                            }
+                        } else {
+                            going = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+func lx_skip_line_comment(lx: *Lexer) -> void {
+    mut going: bool = true
+    while going {
+        c: int64 = lx_peek(lx)
+        if c == 10 {
+            going = false
+        } else {
+            if c < 0 {
+                going = false
+            } else {
+                (*lx).pos = (*lx).pos + 1
+            }
+        }
+    }
+}

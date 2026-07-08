@@ -50,7 +50,20 @@ pub fn scan(src: &str) -> (Prescan, Vec<Diagnostic>) {
     let mut offset = 0u32;
     for raw in src.lines() {
         let line_start = offset;
-        offset += raw.len() as u32 + 1;
+        // Advance past this line's content and its actual terminator. `lines()`
+        // strips a `\r\n` or `\n`, so counting only `raw.len() + 1` drifts by one
+        // byte on every CRLF line and misplaces a later directive's span. Measure
+        // the terminator from the source instead: two bytes for `\r\n`, one for a
+        // lone `\n`, and none at end of input with no trailing newline.
+        let after = line_start as usize + raw.len();
+        let term = if src[after..].starts_with("\r\n") {
+            2
+        } else if src[after..].starts_with('\n') {
+            1
+        } else {
+            0
+        };
+        offset = after as u32 + term;
         let line = raw.trim();
         if line.is_empty() || line.starts_with("//") {
             continue;

@@ -1,0 +1,88 @@
+// std.os: a thin wrapper over the process environment and the command shell. run
+// shells a command out through the C library system, env reads an environment
+// variable, and quote wraps an argument in single quotes so a POSIX shell reads
+// it as one literal word. Every string argument is copied into a NUL terminated
+// raw byte buffer for the C boundary, since a string view is typed apart from a
+// raw pointer and the C shims cannot take it directly.
+
+@import std.string
+
+foreign "C" {
+    func system(cmd: *void) -> int64
+    func cool_env(name: *void) -> *raw char
+}
+
+// Copies a string into a fresh NUL terminated raw byte buffer the C boundary can
+// read. The caller owns the buffer and frees it once the call that reads it has
+// returned.
+func to_cbuf(s: string) -> *raw char {
+    n: int64 = str_len(s)
+    buf: *raw char = alloc_bytes(n + 1)
+    mut i: int64 = 0
+    while i < n {
+        buf[i] = s[i]
+        i = i + 1
+    }
+    buf[n] = 0
+    return buf
+}
+
+// Runs cmd through the C library system, which hands it to /bin/sh -c, and
+// returns the child's exit code. system returns the raw wait status word in the
+// low 32 bits of its result. The low 7 bits hold the terminating signal, zero for
+// a normal exit, and bits 8..15 hold the exit code. A child killed by a signal
+// reports 128 plus that signal, the shell convention, so a process the OS kills
+// is never mistaken for a clean exit; a normal exit reports WEXITSTATUS, the
+// status shifted down out of the signal byte. Both masks stay within the low 16
+// bits, so they also discard the high 32 bits of the widened return, which the
+// C int to int64 read leaves unspecified, and only the bits the C value defines
+// feed the result.
+export func run(cmd: string) -> int64 {
+    buf: *raw char = to_cbuf(cmd)
+    status: int64 = system(buf)
+    free(buf)
+    term: int64 = status & 127
+    if term != 0 {
+        return 128 + term
+    }
+    return (status & 65280) / 256
+}
+
+// Reads the value of the environment variable name. An unset variable reads as
+// the empty string, never a fault, so a caller tests the result with str_len or
+// str_eq rather than a null check. The result is a fresh heap string owned by the
+// caller.
+export func env(name: string) -> string {
+    buf: *raw char = to_cbuf(name)
+    v: string = cstr(cool_env(buf))
+    free(buf)
+    return v
+}
+
+// Wraps arg in single quotes so a POSIX shell reads it as one literal word. Every
+// embedded single quote is written as the four byte sequence close quote, escaped
+// quote, reopen quote, which is the portable way to carry a quote through single
+// quoting. The result is a fresh heap string owned by the caller and safe to
+// splice into a command line passed to run.
+export func quote(arg: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    mut i: int64 = 0
+    while arg[i] != 0 {
+        c: char = arg[i]
+        if c == 39 {
+            sb_push_char(b, 39)
+            sb_push_char(b, 92)
+            sb_push_char(b, 39)
+            sb_push_char(b, 39)
+        } else {
+            sb_push_char(b, c)
+        }
+        i = i + 1
+    }
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

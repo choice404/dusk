@@ -1,0 +1,91 @@
+// home: locates the directory the toolchain ships beside the compiler, the one
+// that holds runtime/ (the C runtime sources) and lib/ (the standard library).
+// This mirrors the stage0 resolver in src/home.rs: the DUSK_HOME environment
+// variable wins when it points at a real toolchain, then the directory the
+// running binary sits in, and finally the current working directory, where a
+// source checkout keeps runtime/ and lib/ at its root. The first candidate that
+// actually holds the assets wins, so a stale environment variable falls through
+// to a location that works instead of naming one that does not.
+
+@paradigm procedural
+
+@import std.os
+@import std.string
+
+// Joins a directory and a name with a single separator, returning a fresh heap
+// string the caller owns. No normalization is done: the inputs are assumed to be
+// clean path fragments, which is all the driver ever passes.
+export func path_join(dir: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dir)
+    sb_push_char(b, 47)
+    sb_push(b, name)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The directory portion of a path: everything up to the last separator. A path
+// with no separator names a file in the working directory, so its directory is
+// ".". The result is a fresh heap string the caller owns.
+func dir_of(path: string) -> string {
+    n: int64 = str_len(path)
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if path[i] == 47 {
+            last = i
+        }
+        i = i + 1
+    }
+    if last < 0 {
+        d: *raw char = alloc_bytes(2)
+        d[0] = 46
+        d[1] = 0
+        return cstr(d)
+    }
+    return substring(path, 0, last)
+}
+
+// Whether base holds the toolchain's runtime sources, the test each candidate
+// must pass to be chosen. A shell dir test on base/runtime is enough: it is the
+// same check src/home.rs makes with is_dir, without reading any file into memory.
+// run returns the child's exit code, zero when the directory exists.
+func has_runtime(base: string) -> bool {
+    rt: string = path_join(base, "runtime")
+    q: string = quote(rt)
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "test -d ")
+    sb_push(cmd, q)
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    code: int64 = run(line)
+    sb_free(cmd)
+    free(cmd)
+    free(line)
+    free(q)
+    free(rt)
+    return code == 0
+}
+
+// Resolves the toolchain home for a given argv[0]. DUSK_HOME wins when it points
+// at a directory that actually holds runtime/, then the directory the binary sits
+// in, and finally the working directory as the last resort. The returned string
+// lives for the whole run and is not freed, since the driver joins runtime paths
+// onto it right through to the final clang invocation.
+export func dusk_home(prog: string) -> string {
+    h: string = env("DUSK_HOME")
+    if str_len(h) > 0 {
+        if has_runtime(h) {
+            return h
+        }
+    }
+    d: string = dir_of(prog)
+    if has_runtime(d) {
+        return d
+    }
+    dot: *raw char = alloc_bytes(2)
+    dot[0] = 46
+    dot[1] = 0
+    return cstr(dot)
+}

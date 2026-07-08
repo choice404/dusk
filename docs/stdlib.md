@@ -139,12 +139,16 @@ The order is `Debug < Info < Warn < Error`, and the default threshold is `Info`.
 
 ## std.string
 
-Read only helpers over NUL terminated strings.
+Helpers over NUL terminated strings: length and comparison, signed integer parsing and formatting, substring slicing, a growable builder, and the float constant formatting the bootstrap compiler emits its IR through.
 
 | Function                                              | Description                                 |
 | ----------------------------------------------------- | ------------------------------------------- |
 | `str_len(s: string) -> int64`                         | Length up to the NUL terminator.            |
 | `str_eq(a: string, b: string) -> bool`                | True when both strings hold the same bytes. |
+| `starts_with(s: string, prefix: string) -> bool`      | True when `s` begins with `prefix`.         |
+| `substring(s: string, lo: int64, hi: int64) -> string`| A fresh heap string of `s[lo, hi)`, clamped to the string. |
+| `int_to_string(n: int64) -> string`                   | The base 10 text of a signed integer.       |
+| `int_to_hex16(n: int64) -> string`                    | The `0x` prefixed, 16 digit, uppercase hex of `n` read as a 64 bit word. |
 | `parse_int(s: string) -> (int64, error)`              | Parse a signed base 10 integer.             |
 | `parse_int_radix(s: string, base: int64) -> (int64, error)` | Parse a signed integer in a base from 2 to 36. |
 | `parse_float(s: string) -> (float64, error)`          | Parse a base 10 float.                      |
@@ -172,6 +176,7 @@ he.ignore()
 | `sb_new() -> StringBuilder`                        | A fresh empty builder.                      |
 | `sb_push_char(s: *StringBuilder, c: char) -> void` | Append one character.                       |
 | `sb_push(s: *StringBuilder, t: string) -> void`    | Append every character of a string.         |
+| `sb_push_int(s: *StringBuilder, n: int64) -> void` | Append the base 10 text of `n`, no intermediate string. |
 | `sb_size(s: *StringBuilder) -> int64`              | The number of characters built.             |
 | `sb_cstr(s: *StringBuilder) -> string`             | View the built bytes as a string.           |
 | `sb_free(s: *StringBuilder) -> void`               | Free the backing buffer.                    |
@@ -195,6 +200,17 @@ free(r)
 ```
 
 A builder owns its buffer. `sb_free` releases the buffer and `free` releases the builder struct, so a heap builder is freed with both. `concat` returns a builder whose ownership moves to the caller. The `cstr` builtin underneath `sb_cstr` reinterprets a NUL terminated `*char` as a `string` at no runtime cost, and the view stays valid until the builder next grows or is freed.
+
+### Float constant tokens
+
+A dusk hosted compiler emits a float constant into its IR as the `0x` hex of the value's IEEE 754 bits. These helpers produce that token, so the bootstrap stage and the host stage write the same constant for the same value.
+
+| Function                             | Description                                                        |
+| ------------------------------------ | ----------------------------------------------------------------- |
+| `f64_to_ir_hex(x: float64) -> string`| The IR constant token for a `float64`: `0x` and the 16 hex digits of `x`'s bits. |
+| `f32_to_ir_hex(x: float64) -> string`| The same over the double a `float32` literal rounds to, `(double)(float)x`.       |
+
+The host compiler lowers every float constant, `float64` and `float32` alike, as the `float64` bits of the parsed value and narrows a `float32` with a later `fptrunc`, so a byte for byte match of the emitted token uses `f64_to_ir_hex`. `f32_to_ir_hex` gives the post rounding value a `float32` literal actually holds, for a consumer that wants the double a `float32` constant equals.
 
 ## std.vector
 
@@ -236,6 +252,7 @@ A hash map from string keys to values, generic over the value type. It uses open
 | `map_get<V>(m: *Map<V>, k: string) -> Maybe<V>`   | The value for a key, or `None` when absent. |
 | `map_has<V>(m: *Map<V>, k: string) -> bool`       | True when the key is present.            |
 | `map_len<V>(m: *Map<V>) -> int64`                 | The entry count.                         |
+| `map_keys<V>(m: *Map<V>) -> *Vector<string>`      | The keys in insertion order, a fresh owned vector. |
 | `map_free<V>(m: *Map<V>) -> void`                 | Free the backing buffers.                |
 | `map_hash(s: string) -> int64`                    | The key hash, exposed for reuse.         |
 
@@ -252,7 +269,28 @@ map_free(m)
 free(m)
 ```
 
-`map_get` returns a `Maybe<V>`, so import `std.functional.maybe` to unwrap it. Capacity starts at 8 and doubles each time the map fills to half. `map_free` releases the buffers, not the key strings, which the caller still owns.
+`map_get` returns a `Maybe<V>`, so import `std.functional.maybe` to unwrap it. Capacity starts at 8 and doubles each time the map fills to half. `map_free` releases the buffers, not the key strings, which the caller still owns. `map_keys` returns the keys in the order they were first inserted, so iteration is a pure function of the insert sequence rather than the hash layout. A key appears once, at its first insertion; an overwrite does not move it and a grow rehashes without disturbing it. The returned vector is a fresh copy the caller owns and frees with `vec_free` and `free`, independent of the map, so there is no shared owner. Its elements are the key strings, which the map still owns. Import `std.vector` to walk it with `vec_len` and `vec_get`.
+
+## std.os
+
+A thin wrapper over the process environment and the command shell. Every string argument is copied into a NUL terminated raw buffer for the C boundary, since a string is typed apart from a raw pointer.
+
+| Function                        | Description                                                       |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `run(cmd: string) -> int64`     | Run `cmd` through the C library `system` and return the exit code.|
+| `env(name: string) -> string`   | The value of an environment variable, or the empty string when unset. |
+| `quote(arg: string) -> string`  | Wrap `arg` in single quotes so a POSIX shell reads it as one word. |
+
+```text
+@import std.os
+@import std.string
+
+code := run("exit 7")            // 7
+home := env("HOME")             // "" when unset, never a fault
+safe := quote("it's a test")    // 'it'\''s a test'
+```
+
+`run` returns the child's exit code, decoded from the wait status `system` reports. A normally terminated child reports its exit code. A child the OS kills reports 128 plus the signal, the shell convention, so a process killed by, say, the out of memory killer is never mistaken for a clean exit. `env` reads back the empty string for an unset variable, never a null, so test the result with `str_len` or `str_eq`. `quote` writes every embedded single quote as the four byte close quote, escaped quote, reopen quote sequence, so the quoted result is safe to splice into a command line passed to `run`.
 
 ## std.memory.allocator
 

@@ -1,0 +1,71 @@
+// main: the command line entry for dusk1, the self hosted stage1 compiler. This
+// is the scaffold: the spine that carries source text through IR and clang to a
+// running program, with the front end still to come. Two commands work today.
+// version prints the build string. demo emits the phase 0 IR spine, links it, and
+// runs it, proving the whole toolchain path in dusk. Anything else is a usage
+// error, printed to stderr with a non zero exit so a script can tell it apart from
+// a clean run.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import driver
+@import cli
+
+// The version string the version command prints. This tracks the stage1 scaffold,
+// not the stage0 compiler that builds it.
+func version_string() -> string {
+    return "dusk1 0.6.0 (bootstrap scaffold)"
+}
+
+// Prints the command list to stderr, where every message that is not a built
+// program's own output goes.
+func usage() -> void {
+    printerr("usage: dusk1 <command> [file]")
+    printerr("commands:")
+    printerr("  version       print the compiler version")
+    printerr("  demo          emit the spine IR, link it with clang, and run it")
+    printerr("  lex <file>    dump the token stream of a source file")
+    printerr("  scan <file>   dump the paradigm and import directives of a file")
+}
+
+// Dispatches a command that takes a source file argument, reporting a usage error
+// when the file is missing.
+func run_file_cmd(cmd: string, argv: string[]) -> int32 {
+    if argv.len < 3 {
+        printerr("dusk1: this command needs a file argument")
+        usage()
+        return 1
+    }
+    path: string = argv[2]
+    if str_eq(cmd, "lex") {
+        return cmd_lex(path)
+    }
+    return cmd_scan(path)
+}
+
+func main(argc: int32, argv: string[]) -> int32 {
+    if argv.len < 2 {
+        printerr("dusk1: no command given")
+        usage()
+        return 1
+    }
+    cmd: string = argv[1]
+    if str_eq(cmd, "version") {
+        println(version_string())
+        return 0
+    }
+    if str_eq(cmd, "demo") {
+        return run_demo(argv[0])
+    }
+    if str_eq(cmd, "lex") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "scan") {
+        return run_file_cmd(cmd, argv)
+    }
+    printerr("dusk1: unknown command")
+    usage()
+    return 1
+}

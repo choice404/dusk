@@ -1,0 +1,188 @@
+// driver: the spine. It assembles a textual LLVM IR module, writes it to a .ll
+// file, links that file against the C runtime with clang, and runs the result.
+// This is the same path the stage0 compiler's demo command walks, reproduced in
+// dusk: prove source text through IR through clang through a running binary, end
+// to end, before any front end sits in front of it. The module here is hardcoded,
+// the phase 0 spine that prints a line and an integer and exits zero.
+//
+// Progress and error messages go to stderr, so stdout carries only the built
+// program's own output. printerr flushes stdout first, so the two streams stay in
+// order even though the child program runs in a separate process.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.os
+@import home
+@import source
+@import diag
+
+// The directory the scaffold writes its artifacts to, parallel to the stage0
+// compiler's target/dusk-out. Returned as a literal, never freed.
+func out_dir() -> string {
+    return "target/dusk1-out"
+}
+
+// Builds the phase 0 spine as textual LLVM IR: a module that prints one line and
+// one integer through the C runtime and returns zero from main. This mirrors the
+// stage0 demo module byte for byte, including the interned string constant and its
+// length. The result is a fresh heap string the caller owns and frees.
+func emit_demo_ir() -> string {
+    m: *StringBuilder = alloc(sb_new())
+    sb_push(m, "; ModuleID = 'dusk_demo'\n")
+    sb_push(m, "target triple = \"x86_64-pc-linux-gnu\"\n")
+    sb_push(m, "\n")
+    sb_push(m, "@.str.0 = private unnamed_addr constant [26 x i8] c\"hello from the dusk spine\\00\"\n")
+    sb_push(m, "\n")
+    sb_push(m, "declare void @cool_println_cstr(ptr)\n")
+    sb_push(m, "declare void @cool_print_i64(i64)\n")
+    sb_push(m, "\n")
+    sb_push(m, "define i32 @main() {\n")
+    sb_push(m, "entry:\n")
+    sb_push(m, "  call void @cool_println_cstr(ptr @.str.0)\n")
+    sb_push(m, "  call void @cool_print_i64(i64 42)\n")
+    sb_push(m, "  ret i32 0\n")
+    sb_push(m, "}\n")
+    out: string = substring(sb_cstr(m), 0, sb_size(m))
+    sb_free(m)
+    free(m)
+    return out
+}
+
+// Appends one shell argument to a command line: a leading space, then the argument
+// wrapped in single quotes so a path with an awkward character survives the shell
+// as one word. The quoted temporary is freed after the push.
+func push_arg(cmd: *StringBuilder, arg: string) -> void {
+    sb_push_char(cmd, 32)
+    q: string = quote(arg)
+    sb_push(cmd, q)
+    free(q)
+}
+
+// Appends a runtime source file under rt as a quoted argument. rt is the runtime
+// directory, name a bare file within it; the joined path is freed after the push.
+func push_source(cmd: *StringBuilder, rt: string, name: string) -> void {
+    full: string = path_join(rt, name)
+    push_arg(cmd, full)
+    free(full)
+}
+
+// Links the IR at ll against the C runtime under home, writing the executable to
+// bin, then runs it and returns its exit code. The clang line mirrors the stage0
+// linker: every runtime source, -pthread for toolchains where pthreads is not yet
+// in libc, and -lm for the math intrinsics. No optimization flag rides along, the
+// same as stage0. A clang failure reports a diagnostic and returns its code.
+func link_and_run(home: string, ll: string, bin: string) -> int64 {
+    rt: string = path_join(home, "runtime")
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "clang")
+    push_arg(cmd, ll)
+    push_source(cmd, rt, "runtime.c")
+    push_source(cmd, rt, "collect.c")
+    push_source(cmd, rt, "thread.c")
+    push_source(cmd, rt, "async.c")
+    push_source(cmd, rt, "reactor.c")
+    push_source(cmd, rt, "reactor_epoll.c")
+    push_source(cmd, rt, "reactor_kqueue.c")
+    sb_push(cmd, " -pthread -lm -o")
+    push_arg(cmd, bin)
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    sb_free(cmd)
+    free(cmd)
+    free(rt)
+
+    printerr("[dusk1] linking with clang")
+    code: int64 = run(line)
+    free(line)
+    if code != 0 {
+        d: Diagnostic = diag_new(bin, 0, 0, "clang failed to link the module")
+        diag_emit(d)
+        return code
+    }
+
+    printerr("[dusk1] running ->")
+    rq: string = quote(bin)
+    ec: int64 = run(rq)
+    free(rq)
+    return ec
+}
+
+// Reads the just written IR back through the source loader as a sanity check, so a
+// truncated or unwritten .ll is caught before clang is invoked, and reports its
+// size. This exercises the source buffer path on a real file and returns whether
+// the readback succeeded.
+func check_ir_written(ll: string) -> bool {
+    src, e := source_load(ll)
+    if e.exists() {
+        d: Diagnostic = diag_new(ll, 0, 0, "the emitted IR could not be read back")
+        diag_emit(d)
+        return false
+    }
+    report: *StringBuilder = alloc(sb_new())
+    sb_push(report, "[dusk1] ir bytes   : ")
+    sb_push_int(report, source_len(src))
+    msg: string = substring(sb_cstr(report), 0, sb_size(report))
+    printerr(msg)
+    free(msg)
+    sb_free(report)
+    free(report)
+    source_free(src)
+    return true
+}
+
+// Runs the demo: emit the spine IR, write it, link it, and run it. Progress goes
+// to stderr and the built program owns stdout. Returns 0 when the scaffold did its
+// job, whatever the built program's own exit code, and 1 when a step of the build
+// itself failed. prog is argv[0], used to locate the toolchain home.
+export func run_demo(prog: string) -> int32 {
+    home: string = dusk_home(prog)
+    out: string = out_dir()
+
+    // write_file opens a file but does not create its parent directory, so make
+    // the output directory first.
+    mk: *StringBuilder = alloc(sb_new())
+    sb_push(mk, "mkdir -p ")
+    mq: string = quote(out)
+    sb_push(mk, mq)
+    mkline: string = substring(sb_cstr(mk), 0, sb_size(mk))
+    mkcode: int64 = run(mkline)
+    free(mkline)
+    free(mq)
+    sb_free(mk)
+    free(mk)
+    if mkcode != 0 {
+        d: Diagnostic = diag_new(out, 0, 0, "could not create the output directory")
+        diag_emit(d)
+        return 1
+    }
+
+    ll: string = path_join(out, "demo.ll")
+    bin: string = path_join(out, "demo")
+
+    ir: string = emit_demo_ir()
+    werr := write_file(ll, ir)
+    free(ir)
+    if werr.exists() {
+        d: Diagnostic = diag_new(ll, 0, 0, "could not write the IR module")
+        diag_emit(d)
+        return 1
+    }
+    printerr("[dusk1] emitted IR")
+
+    if !check_ir_written(ll) {
+        return 1
+    }
+
+    code: int64 = link_and_run(home, ll, bin)
+
+    tail: *StringBuilder = alloc(sb_new())
+    sb_push(tail, "[dusk1] exit code  : ")
+    sb_push_int(tail, code)
+    line: string = substring(sb_cstr(tail), 0, sb_size(tail))
+    printerr(line)
+    free(line)
+    sb_free(tail)
+    free(tail)
+    return 0
+}

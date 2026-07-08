@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <pthread.h>
+#include <sys/stat.h>
 
 static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -454,6 +455,66 @@ int64_t cool_write_file(const char *path, const char *data) {
         return -1;
     }
     return (int64_t)wr;
+}
+
+/* The byte size of a regular file, or -1 when it cannot be stat'd. The bootstrap
+   front end reads a source into a NUL terminated buffer but a source may hold an
+   embedded NUL, so the true byte length comes from the file's size rather than
+   from scanning to the first NUL. */
+int64_t cool_file_size(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    return (int64_t)st.st_size;
+}
+
+/* Reads an environment variable into a generationally allocated string. An unset
+   variable comes back as the empty string, never NULL, because the language has
+   no null test and treats a returned string as always valid. The caller owns the
+   result and frees it with the language free, the same generational heap every
+   other string uses. getenv's own buffer is copied out at once, so a later setenv
+   in the same process cannot invalidate a string already handed back. */
+char *cool_env(const char *name) {
+    const char *v = getenv(name);
+    if (!v) {
+        v = "";
+    }
+    size_t len = strlen(v);
+    char *out = (char *)cool_gen_alloc((int64_t)len + 1);
+    if (!out) {
+        fputs("fatal: out of memory\n", stderr);
+        abort();
+    }
+    memcpy(out, v, len + 1);
+    return out;
+}
+
+/* The IEEE 754 bit pattern of a double, reinterpreted as a signed 64 bit
+   integer. The bootstrap compiler emits a float constant as the hex of these
+   bits, matching the host compiler which lowers a float literal as 0x{:016X} of
+   f64::to_bits, so both stages produce the same textual IR for the same constant.
+   The copy through memcpy is the strict aliasing safe reinterpret. */
+int64_t cool_f64_bits(double x) {
+    int64_t bits;
+    memcpy(&bits, &x, sizeof(bits));
+    return bits;
+}
+
+/* The bit pattern a float32 constant rounds to, returned as the double that
+   equals that float, reinterpreted as a signed 64 bit integer. The host compiler
+   lowers every float constant, float32 and float64 alike, as the f64 bits of the
+   parsed value and narrows a float32 later with an fptrunc, so a byte for byte
+   match of the emitted constant token uses cool_f64_bits. This shim rounds x to
+   float first, (double)(float)x, so a consumer that needs the post rounding value
+   a float32 literal actually holds, the exact double a float constant equals, has
+   it directly. */
+int64_t cool_f32_bits(double x) {
+    float f = (float)x;
+    double d = (double)f;
+    int64_t bits;
+    memcpy(&bits, &d, sizeof(bits));
+    return bits;
 }
 
 /* Read one line from stdin into a freshly malloc'd NUL terminated buffer with

@@ -60,6 +60,41 @@ fn cmd_demo() -> ExitCode {
     }
 }
 
+/// Renders a token kind for the lex dump. The dump is a differential interchange
+/// contract, not a Rust value view, so the two forms a textual second compiler
+/// cannot reproduce from Rust's own Debug are given canonical forms it can. A float
+/// prints as its IEEE 754 bits, `Float(0x{:016X})`, so equal values print equal
+/// text with no shortest-decimal rounding to match. A string, char, or rune escapes
+/// every byte that is not printable ASCII as `\u{hex}`, so the escaping needs no
+/// Unicode property tables, only the code point. Every other kind keeps its Debug
+/// form, which is already a plain scalar or ordered list a second compiler matches.
+fn render_kind(kind: &dusk::lexer::token::TokenKind) -> String {
+    use dusk::lexer::token::TokenKind;
+    match kind {
+        TokenKind::Float { val, .. } => format!("Float(0x{:016X})", val.to_bits()),
+        TokenKind::Str(s) => format!("Str(\"{}\")", escape_canonical(s.chars())),
+        TokenKind::Char(c) => format!("Char('{}')", escape_canonical(std::iter::once(*c))),
+        TokenKind::Rune(c) => format!("Rune('{}')", escape_canonical(std::iter::once(*c))),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Escapes a scalar sequence for a dump literal: printable ASCII passes through,
+/// and everything else, controls and every non-ASCII scalar alike, becomes a
+/// `\u{hex}` escape with the lowercase, minimal-width code point.
+fn escape_canonical(chars: impl Iterator<Item = char>) -> String {
+    let mut out = String::new();
+    for c in chars {
+        let cp = c as u32;
+        if (0x20..=0x7e).contains(&cp) {
+            out.push(c);
+        } else {
+            out.push_str(&format!("\\u{{{cp:x}}}"));
+        }
+    }
+    out
+}
+
 /// Dumps the token stream for a source file.
 fn cmd_lex(path: Option<&String>) -> ExitCode {
     let Some((path, src)) = read_src(path, "lex") else {
@@ -67,7 +102,13 @@ fn cmd_lex(path: Option<&String>) -> ExitCode {
     };
     let (tokens, errors) = lexer::lex(&src);
     for t in &tokens {
-        println!("{:>4}..{:<4} {:?}", t.span.lo, t.span.hi, t.kind);
+        println!(
+            "{:>4}..{:<4} nl_before={} {}",
+            t.span.lo,
+            t.span.hi,
+            t.nl_before,
+            render_kind(&t.kind)
+        );
     }
     for e in &errors {
         eprintln!("{}: {}", path, e.render(&src));

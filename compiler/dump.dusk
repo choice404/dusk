@@ -1,0 +1,252 @@
+// dump: rendering the lex and scan dumps byte for byte with stage0. A token line is
+// `{lo:>4}..{hi:<4} nl_before={bool} {kind}`, where the kind is either a fixed
+// variant name or a literal payload rebuilt from the source span. The scan dump is
+// the effective paradigm list and the imports. These write to stdout, the only
+// stream the differential oracle compares.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import bytes
+@import token
+@import prescan
+@import dumpval
+
+func is_digit(c: int64) -> bool {
+    if c >= 48 {
+        if c <= 57 {
+            return true
+        }
+    }
+    return false
+}
+
+// Appends v as decimal, right justified in a field of width w with leading spaces.
+func push_padded_left(out: *StringBuilder, v: int64, w: int64) -> void {
+    s: string = int_to_string(v)
+    mut pad: int64 = w - str_len(s)
+    while pad > 0 {
+        sb_push_char(out, 32)
+        pad = pad - 1
+    }
+    sb_push(out, s)
+    free(s)
+}
+
+// Appends v as decimal, left justified in a field of width w with trailing spaces.
+func push_padded_right(out: *StringBuilder, v: int64, w: int64) -> void {
+    s: string = int_to_string(v)
+    sb_push(out, s)
+    mut pad: int64 = w - str_len(s)
+    free(s)
+    while pad > 0 {
+        sb_push_char(out, 32)
+        pad = pad - 1
+    }
+}
+
+// Appends the `suffix: ...` field of an integer, None when the span from sfrom to
+// hi is empty, otherwise Some("<suffix>").
+func push_suffix(out: *StringBuilder, src: string, n: int64, sfrom: int64, hi: int64) -> void {
+    if sfrom >= hi {
+        sb_push(out, "None")
+    } else {
+        sb_push(out, "Some(\"")
+        s: string = substring_n(src, n, sfrom, hi)
+        sb_push(out, s)
+        free(s)
+        sb_push(out, "\")")
+    }
+}
+
+// Renders an integer token, `Int { val: N, suffix: ... }`. The value is the parsed
+// digits, zero on overflow just as stage0 leaves it, and the suffix is whatever
+// letters trail the digits.
+func render_int(out: *StringBuilder, src: string, n: int64, lo: int64, hi: int64) -> void {
+    mut de: int64 = lo
+    mut going: bool = true
+    while going {
+        if de >= hi {
+            going = false
+        } else {
+            if is_digit(bytes.byte_at(src, n, de)) {
+                de = de + 1
+            } else {
+                going = false
+            }
+        }
+    }
+    digits: string = substring_n(src, n, lo, de)
+    val, e := parse_int(digits)
+    e.ignore()
+    free(digits)
+    sb_push(out, "Int { val: ")
+    vs: string = int_to_string(val)
+    sb_push(out, vs)
+    free(vs)
+    sb_push(out, ", suffix: ")
+    push_suffix(out, src, n, de, hi)
+    sb_push(out, " }")
+}
+
+// Renders a float token as `Float(0x{bits})`, the 16 hex digits of the value's
+// IEEE 754 bits. Parsing the decimal through the same strtod stage0's f64 parse
+// resolves to makes the bits, and so the text, identical for equal values, with no
+// shortest-decimal rounding for a textual compiler to reproduce. The suffix is not
+// part of this form.
+func render_float(out: *StringBuilder, src: string, n: int64, lo: int64, hi: int64) -> void {
+    mut d1: int64 = lo
+    mut a: bool = true
+    while a {
+        if is_digit(bytes.byte_at(src, n, d1)) {
+            d1 = d1 + 1
+        } else {
+            a = false
+        }
+    }
+    mut d2: int64 = d1 + 1
+    mut b: bool = true
+    while b {
+        if is_digit(bytes.byte_at(src, n, d2)) {
+            d2 = d2 + 1
+        } else {
+            b = false
+        }
+    }
+    body: string = substring_n(src, n, lo, d2)
+    val, e := parse_float(body)
+    e.ignore()
+    free(body)
+    sb_push(out, "Float(")
+    hex: string = f64_to_ir_hex(val)
+    sb_push(out, hex)
+    free(hex)
+    sb_push_char(out, 41)
+}
+
+// Appends the kind rendering of a token: a literal payload rebuilt from the span,
+// or the fixed Debug name of an operator, keyword, or punctuation kind.
+func push_kind(out: *StringBuilder, src: string, n: int64, t: Token) -> void {
+    k: int64 = t.kind
+    if k == k_ident() {
+        sb_push(out, "Ident(\"")
+        s: string = substring_n(src, n, t.lo, t.hi)
+        sb_push(out, s)
+        free(s)
+        sb_push(out, "\")")
+        return
+    }
+    if k == k_kw() {
+        sb_push(out, "Kw(")
+        s: string = substring_n(src, n, t.lo, t.hi)
+        sb_push(out, keyword_name(s))
+        free(s)
+        sb_push_char(out, 41)
+        return
+    }
+    if k == k_bool() {
+        sb_push(out, "Bool(")
+        s: string = substring_n(src, n, t.lo, t.hi)
+        sb_push(out, s)
+        free(s)
+        sb_push_char(out, 41)
+        return
+    }
+    if k == k_int() {
+        render_int(out, src, n, t.lo, t.hi)
+        return
+    }
+    if k == k_float() {
+        render_float(out, src, n, t.lo, t.hi)
+        return
+    }
+    if k == k_str() {
+        sb_push(out, "Str(")
+        s: string = debug_string(src, n, t.lo, t.hi)
+        sb_push(out, s)
+        free(s)
+        sb_push_char(out, 41)
+        return
+    }
+    if k == k_char() {
+        sb_push(out, "Char(")
+        s: string = debug_char(src, n, t.lo + 1)
+        sb_push(out, s)
+        free(s)
+        sb_push_char(out, 41)
+        return
+    }
+    if k == k_rune() {
+        sb_push(out, "Rune(")
+        s: string = debug_char(src, n, t.lo + 2)
+        sb_push(out, s)
+        free(s)
+        sb_push_char(out, 41)
+        return
+    }
+    sb_push(out, kind_name(k))
+}
+
+// The full dump line for one token, without a trailing newline, as a fresh string.
+export func render_token(src: string, n: int64, t: Token) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    push_padded_left(out, t.lo, 4)
+    sb_push(out, "..")
+    push_padded_right(out, t.hi, 4)
+    sb_push(out, " nl_before=")
+    if t.nl_before {
+        sb_push(out, "true")
+    } else {
+        sb_push(out, "false")
+    }
+    sb_push_char(out, 32)
+    push_kind(out, src, n, t)
+    r: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))
+    sb_free(out)
+    free(out)
+    return r
+}
+
+// Prints the pre scan dump to stdout: the effective paradigm list, then the
+// imports one per line indented two spaces. An empty paradigm set prints as the
+// default [Procedural].
+export func scan_dump(p: Prescan) -> void {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push(out, "paradigms: [")
+    paras: *Vector<int64> = p.paradigms
+    cnt: int64 = vec_len(paras)
+    if cnt == 0 {
+        sb_push(out, "Procedural")
+    } else {
+        mut i: int64 = 0
+        while i < cnt {
+            if i > 0 {
+                sb_push(out, ", ")
+            }
+            sb_push(out, para_name(vec_get(paras, i)))
+            i = i + 1
+        }
+    }
+    sb_push_char(out, 93)
+    line: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))
+    println(line)
+    free(line)
+    sb_free(out)
+    free(out)
+    println("imports:")
+    imps: *Vector<string> = p.imports
+    mut j: int64 = 0
+    m: int64 = vec_len(imps)
+    while j < m {
+        ib: *StringBuilder = alloc(sb_new())
+        sb_push(ib, "  ")
+        sb_push(ib, vec_get(imps, j))
+        il: string = substring_n(sb_cstr(ib), sb_size(ib), 0, sb_size(ib))
+        println(il)
+        free(il)
+        sb_free(ib)
+        free(ib)
+        j = j + 1
+    }
+}

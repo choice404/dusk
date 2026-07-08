@@ -1,0 +1,283 @@
+// prescan: the cheap line sweep that collects the @paradigm and @import directives
+// from the top of a file, before the lexer runs. It mirrors src/prescan.rs: scan
+// leading lines, skipping blanks and line comments, until the first line that is
+// neither blank, a comment, nor a directive, then stop. A trailing line comment on
+// a directive is stripped, an @import value has its surrounding quotes removed, and
+// an unknown paradigm or unknown @directive is a recorded fault.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import bytes
+@import diag
+
+// The directives collected from the top of a file. paradigms holds the paradigm
+// tags in source order; imports holds the import paths as fresh strings; errors
+// holds any faults for the exit status. The pre scan owns all three vectors.
+export struct Prescan {
+    paradigms: *Vector<int64>,
+    imports: *Vector<string>,
+    errors: *Vector<Located>,
+}
+
+// Paradigm tags and their Debug names, matching the stage0 Paradigm enum.
+export func para_functional() -> int64 { return 0 }
+export func para_procedural() -> int64 { return 1 }
+export func para_oop() -> int64 { return 2 }
+
+export func para_name(tag: int64) -> string {
+    if tag == 0 { return "Functional" }
+    if tag == 1 { return "Procedural" }
+    return "Oop"
+}
+
+// The tag for a paradigm name, or -1 when the name is not a paradigm.
+func para_lookup(s: string) -> int64 {
+    if str_eq(s, "functional") { return para_functional() }
+    if str_eq(s, "procedural") { return para_procedural() }
+    if str_eq(s, "oop") { return para_oop() }
+    return -1
+}
+
+// Whether a Unicode scalar is whitespace, the full set Rust's char::is_whitespace
+// recognizes, so a directive separated or padded by a non-ASCII space is split and
+// trimmed the way stage0 splits and trims it.
+func is_ws_scalar(cp: int64) -> bool {
+    if cp >= 9 {
+        if cp <= 13 {
+            return true
+        }
+    }
+    if cp == 32 { return true }
+    if cp == 133 { return true }
+    if cp == 160 { return true }
+    if cp == 5760 { return true }
+    if cp >= 8192 {
+        if cp <= 8202 {
+            return true
+        }
+    }
+    if cp == 8232 { return true }
+    if cp == 8233 { return true }
+    if cp == 8239 { return true }
+    if cp == 8287 { return true }
+    if cp == 12288 { return true }
+    return false
+}
+
+// The byte length of the whitespace scalar at pos, or 0 when pos is not whitespace
+// or is past the end. A caller advances by the returned length to step over one
+// whitespace scalar of any width.
+func ws_len_at(src: string, n: int64, pos: int64) -> int64 {
+    if pos >= n {
+        return 0
+    }
+    d: Decoded = bytes.decode_utf8(src, n, pos)
+    if is_ws_scalar(d.scalar) {
+        return d.len
+    }
+    return 0
+}
+
+// The trimmed range [ts, te) of the line [ls, le), with leading and trailing
+// whitespace scalars removed. The scan runs forward once: leading whitespace is
+// skipped, then te tracks the end of the last non-whitespace scalar, so a
+// multibyte space at either edge is handled without a backward walk over UTF-8.
+func trim_range(src: string, n: int64, ls: int64, le: int64) -> (int64, int64) {
+    mut ts: int64 = ls
+    mut moving: bool = true
+    while moving {
+        if ts >= le {
+            moving = false
+        } else {
+            w: int64 = ws_len_at(src, n, ts)
+            if w > 0 {
+                ts = ts + w
+            } else {
+                moving = false
+            }
+        }
+    }
+    mut te: int64 = ts
+    mut p: int64 = ts
+    while p < le {
+        w: int64 = ws_len_at(src, n, p)
+        if w > 0 {
+            p = p + w
+        } else {
+            d: Decoded = bytes.decode_utf8(src, n, p)
+            p = p + d.len
+            te = p
+        }
+    }
+    return (ts, te)
+}
+
+// The index of the first "//" in [a, b), or b when there is none.
+func find_line_comment(src: string, n: int64, a: int64, b: int64) -> int64 {
+    mut i: int64 = a
+    while i + 1 < b {
+        if bytes.byte_at(src, n, i) == 47 {
+            if bytes.byte_at(src, n, i + 1) == 47 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return b
+}
+
+// A fresh string of [a, b) with any trailing line comment removed and whitespace
+// trimmed, the cleanup stage0 runs on a directive's argument.
+func clean_rest(src: string, n: int64, a: int64, b: int64) -> string {
+    cut: int64 = find_line_comment(src, n, a, b)
+    ts, te := trim_range(src, n, a, cut)
+    return substring_n(src, n, ts, te)
+}
+
+// A fresh string of s with every leading and trailing double quote removed, the
+// trim_matches('"') stage0 applies to an import path.
+func trim_quotes(s: string) -> string {
+    n: int64 = str_len(s)
+    mut lo: int64 = 0
+    mut moving: bool = true
+    while moving {
+        if lo >= n {
+            moving = false
+        } else {
+            if s[lo] == 34 {
+                lo = lo + 1
+            } else {
+                moving = false
+            }
+        }
+    }
+    mut hi: int64 = n
+    mut shrinking: bool = true
+    while shrinking {
+        if hi <= lo {
+            shrinking = false
+        } else {
+            if s[hi - 1] == 34 {
+                hi = hi - 1
+            } else {
+                shrinking = false
+            }
+        }
+    }
+    return substring(s, lo, hi)
+}
+
+// Processes one line. Returns true to keep scanning, false at the first code line,
+// where the sweep stops. Blank and comment lines are skipped; a directive updates
+// the collections; an unknown @directive is a recorded fault.
+func process_line(src: string, n: int64, ls: int64, le: int64, p: Prescan) -> bool {
+    ts, te := trim_range(src, n, ls, le)
+    if ts == te {
+        return true
+    }
+    if bytes.byte_at(src, n, ts) == 47 {
+        if bytes.byte_at(src, n, ts + 1) == 47 {
+            return true
+        }
+    }
+    // The head runs to the first whitespace scalar. splitn on whitespace makes the
+    // rest begin just after that one scalar, whatever its byte width.
+    mut he: int64 = ts
+    mut scanning: bool = true
+    while scanning {
+        if he >= te {
+            scanning = false
+        } else {
+            w: int64 = ws_len_at(src, n, he)
+            if w > 0 {
+                scanning = false
+            } else {
+                d: Decoded = bytes.decode_utf8(src, n, he)
+                he = he + d.len
+            }
+        }
+    }
+    head: string = substring_n(src, n, ts, he)
+    mut rest_start: int64 = he
+    if he < te {
+        rest_start = he + ws_len_at(src, n, he)
+    }
+    rest: string = clean_rest(src, n, rest_start, te)
+
+    mut keep: bool = true
+    if str_eq(head, "@paradigm") {
+        tag: int64 = para_lookup(rest)
+        if tag < 0 {
+            vec_push(p.errors, located(ls, "unknown paradigm"))
+        } else {
+            vec_push(p.paradigms, tag)
+        }
+    } else {
+        if str_eq(head, "@import") {
+            imp: string = trim_quotes(rest)
+            if str_len(imp) == 0 {
+                vec_push(p.errors, located(ls, "empty import path"))
+                free(imp)
+            } else {
+                vec_push(p.imports, imp)
+            }
+        } else {
+            if bytes.byte_at(src, n, ts) == 64 {
+                vec_push(p.errors, located(ls, "unknown directive"))
+            } else {
+                keep = false
+            }
+        }
+    }
+    free(head)
+    free(rest)
+    return keep
+}
+
+// Runs the pre scan over a source buffer of byte length n, returning the collected
+// directives and faults. The caller owns the returned vectors.
+export func prescan(src: string, n: int64) -> Prescan {
+    pv: *Vector<int64> = alloc(vec_new())
+    iv: *Vector<string> = alloc(vec_new())
+    ev: *Vector<Located> = alloc(vec_new())
+    p: Prescan = Prescan {
+        paradigms: pv,
+        imports: iv,
+        errors: ev,
+    }
+    mut pos: int64 = 0
+    mut running: bool = true
+    while running {
+        if pos > n {
+            running = false
+        } else {
+            mut end: int64 = pos
+            mut finding: bool = true
+            while finding {
+                b: int64 = bytes.byte_at(src, n, end)
+                if b == 10 {
+                    finding = false
+                } else {
+                    if b < 0 {
+                        finding = false
+                    } else {
+                        end = end + 1
+                    }
+                }
+            }
+            keep: bool = process_line(src, n, pos, end, p)
+            if !keep {
+                running = false
+            } else {
+                if bytes.byte_at(src, n, end) == 10 {
+                    pos = end + 1
+                } else {
+                    running = false
+                }
+            }
+        }
+    }
+    return p
+}

@@ -1,4 +1,11 @@
-// std.string: read only helpers over NUL terminated strings.
+// std.string: helpers over NUL terminated strings. Length and comparison,
+// signed integer parsing and formatting, a growable StringBuilder, and the
+// float constant formatting the bootstrap compiler emits its IR through.
+
+foreign "C" {
+    func cool_f64_bits(x: float64) -> int64
+    func cool_f32_bits(x: float64) -> int64
+}
 
 export func str_len(s: string) -> int64 {
     mut n: int64 = 0
@@ -17,6 +24,132 @@ export func str_eq(a: string, b: string) -> bool {
         i = i + 1
     }
     return b[i] == 0
+}
+
+// Whether s begins with prefix, comparing NUL terminated bytes. The empty prefix
+// is a prefix of every string. A prefix longer than s fails at the byte where s
+// runs into its own NUL, so s is never read past its terminator.
+export func starts_with(s: string, prefix: string) -> bool {
+    mut i: int64 = 0
+    while prefix[i] != 0 {
+        if s[i] != prefix[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// A fresh heap string of the bytes s[lo, hi). The range is clamped to the string:
+// a lo below 0 becomes 0, a hi past the length becomes the length, and a lo above
+// hi yields the empty string. The result is NUL terminated and owned by the
+// caller, who frees the underlying buffer with free.
+export func substring(s: string, lo: int64, hi: int64) -> string {
+    n: int64 = str_len(s)
+    mut a: int64 = lo
+    mut b: int64 = hi
+    if a < 0 {
+        a = 0
+    }
+    if b > n {
+        b = n
+    }
+    if a > b {
+        a = b
+    }
+    count: int64 = b - a
+    d: *raw char = alloc_bytes(count + 1)
+    mut i: int64 = 0
+    while i < count {
+        d[i] = s[a + i]
+        i = i + 1
+    }
+    d[count] = 0
+    return cstr(d)
+}
+
+// The base 10 text of a signed integer. The value is accumulated in the non
+// positive range, where INT64_MIN needs no negation, so the most negative input
+// never overflows the way negating it would. The result is a fresh heap string
+// owned by the caller.
+export func int_to_string(n: int64) -> string {
+    if n == 0 {
+        d: *raw char = alloc_bytes(2)
+        d[0] = 48
+        d[1] = 0
+        return cstr(d)
+    }
+    neg: bool = n < 0
+    mut m: int64 = n
+    if n > 0 {
+        m = 0 - n
+    }
+    // m is non positive here, so count the digits of its magnitude.
+    mut count: int64 = 0
+    mut t: int64 = m
+    while t != 0 {
+        count = count + 1
+        t = t / 10
+    }
+    mut total: int64 = count
+    if neg {
+        total = total + 1
+    }
+    d: *raw char = alloc_bytes(total + 1)
+    d[total] = 0
+    mut i: int64 = total - 1
+    while m != 0 {
+        digit: int64 = 0 - (m % 10)
+        d[i] = 48 + digit
+        m = m / 10
+        i = i - 1
+    }
+    if neg {
+        d[0] = 45
+    }
+    return cstr(d)
+}
+
+// The 0x prefixed, 16 digit, uppercase hex text of n read as a raw 64 bit word.
+// A negative n is its two's complement word, FFFFFFFFFFFFFFFF for -1, never a
+// signed form, so this reproduces the host compiler's 0x{:016X} of a float
+// constant's bits byte for byte. Each nibble is masked out after an arithmetic
+// shift, so the sign fill of the high nibbles is discarded.
+export func int_to_hex16(n: int64) -> string {
+    d: *raw char = alloc_bytes(19)
+    d[0] = 48
+    d[1] = 120
+    mut i: int64 = 0
+    while i < 16 {
+        shift: int64 = 4 * (15 - i)
+        nib: int64 = (n >> shift) & 15
+        mut ch: int64 = 48 + nib
+        if nib >= 10 {
+            ch = 55 + nib
+        }
+        d[2 + i] = ch
+        i = i + 1
+    }
+    d[18] = 0
+    return cstr(d)
+}
+
+// The IR constant token for a float64 value: 0x followed by the 16 hex digits of
+// its IEEE 754 bits. The host compiler lowers a float literal as 0x{:016X} of
+// f64::to_bits, so this reproduces the same token for the same value, which is
+// what a dusk hosted compiler emits for a float64 constant.
+export func f64_to_ir_hex(x: float64) -> string {
+    return int_to_hex16(cool_f64_bits(x))
+}
+
+// The IR constant token a float32 literal rounds to, as the exact double it
+// equals: 0x followed by the 16 hex digits of (double)(float)x. The host compiler
+// emits a float32 constant as the f64 bits of the parsed value and narrows it
+// with a later fptrunc, so a byte for byte match of the emitted token uses
+// f64_to_ir_hex; this returns the post rounding value for a consumer that wants
+// the double a float32 constant actually holds.
+export func f32_to_ir_hex(x: float64) -> string {
+    return int_to_hex16(cool_f32_bits(x))
 }
 
 // The value of byte c as a digit in the given base, or -1 when c is not a digit
@@ -171,6 +304,35 @@ export func sb_push(s: *StringBuilder, t: string) -> void {
     while t[i] != 0 {
         sb_push_char(s, t[i])
         i = i + 1
+    }
+}
+
+// Append the base 10 text of n straight into the builder, with no intermediate
+// string. The value is accumulated in the non positive range, the same guard
+// int_to_string uses, so INT64_MIN needs no negation and never overflows. Digits
+// go out most significant first by dividing down from the highest power of ten.
+export func sb_push_int(s: *StringBuilder, n: int64) -> void {
+    if n == 0 {
+        sb_push_char(s, 48)
+        return
+    }
+    if n < 0 {
+        sb_push_char(s, 45)
+    }
+    mut m: int64 = n
+    if n > 0 {
+        m = 0 - n
+    }
+    // m <= -1 here. Grow div to the highest power of ten at or below the
+    // magnitude, then walk it back down emitting one digit each step.
+    mut div: int64 = 1
+    while (m / div) <= -10 {
+        div = div * 10
+    }
+    while div > 0 {
+        digit: int64 = 0 - ((m / div) % 10)
+        sb_push_char(s, 48 + digit)
+        div = div / 10
     }
 }
 

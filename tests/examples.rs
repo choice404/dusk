@@ -4,10 +4,16 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// Resolves the compiler under test. `DUSK_BIN` overrides the cargo built
+/// binary so the golden suite can run against a bootstrap stage.
+fn dusk_bin() -> String {
+    std::env::var("DUSK_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_dusk").to_string())
+}
+
 /// Compiles and runs an example through the built `dusk` binary, returning its
 /// stdout. Panics if the compiler itself fails.
 fn run(example: &str) -> String {
-    let bin = env!("CARGO_BIN_EXE_dusk");
+    let bin = dusk_bin();
     let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
     let out = Command::new(bin)
         .arg("run")
@@ -26,7 +32,7 @@ fn run(example: &str) -> String {
 /// exited cleanly. Unlike `run`, it tolerates a non zero exit, so a program that
 /// faults at runtime, like a use after free, can be checked.
 fn run_raw(example: &str) -> (String, String, bool) {
-    let bin = env!("CARGO_BIN_EXE_dusk");
+    let bin = dusk_bin();
     let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
     let out = Command::new(bin)
         .arg("run")
@@ -67,7 +73,7 @@ fn main_argc_argv_builds_slice() {
     assert_eq!(run("args.dusk"), "1\n");
     // `dusk run file.dusk a b` hands the trailing arguments to the program, so
     // argv counts the program name plus both of them.
-    let bin = env!("CARGO_BIN_EXE_dusk");
+    let bin = dusk_bin();
     let path = format!("{}/examples/args.dusk", env!("CARGO_MANIFEST_DIR"));
     let out = Command::new(bin)
         .args(["run", &path, "a", "b"])
@@ -79,7 +85,7 @@ fn main_argc_argv_builds_slice() {
 
 /// Runs `dusk check` on an example that must be rejected, returning stderr.
 fn check_fails(example: &str) -> String {
-    let bin = env!("CARGO_BIN_EXE_dusk");
+    let bin = dusk_bin();
     let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
     let out = Command::new(bin)
         .args(["check", &path])
@@ -1020,7 +1026,7 @@ fn a_method_cannot_be_async() {
 /// for a front-end acceptance a golden cannot run yet because a matching codegen
 /// path is still landing.
 fn check_ok(example: &str) {
-    let bin = env!("CARGO_BIN_EXE_dusk");
+    let bin = dusk_bin();
     let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
     let out = Command::new(bin)
         .args(["check", &path])
@@ -2862,7 +2868,7 @@ fn awaiting_a_net_future_outside_an_async_func_is_rejected() {
 /// Runs an example feeding `input` to its stdin, so a program that reads with
 /// `read_line` can be exercised deterministically from a pipe.
 fn run_stdin(example: &str, input: &str) -> String {
-    let bin = env!("CARGO_BIN_EXE_dusk");
+    let bin = dusk_bin();
     let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
     let mut child = Command::new(bin)
         .arg("run")
@@ -3781,4 +3787,170 @@ golden!(uintsigned_ok, "uintsigned_ok.dusk", "5\n7\n");
 fn a_loop_pumping_call_inside_an_async_func_is_rejected() {
     let err = check_fails("asyncpump_fail.dusk");
     assert!(err.contains("pumps the event loop and cannot be called inside an async func"), "{err}");
+}
+
+// Bootstrap prerequisites: std.string formatting, the float constant IR tokens,
+// std.os process control, and deterministic map iteration.
+
+golden!(
+    string_formatting_helpers,
+    "strfmt.dusk",
+    "0\n12345\n-42\n-9223372036854775808\n9223372036854775807\n\
+     0x0000000000000000\n0xFFFFFFFFFFFFFFFF\n0x00000000000000FF\n\
+     hello\nworld\nllo\n\nyes\nno\nyes\n\
+     n=-1000 0 -9223372036854775808\n"
+);
+
+// The expected tokens are the IEEE 754 bits computed on the host: f64_to_ir_hex
+// is f64::to_bits, which is what the host compiler emits for a float constant, so
+// this pins the two stages to the same textual IR. f32_to_ir_hex is the bits of
+// the double a float32 literal rounds to.
+golden!(
+    float_constant_ir_hex_tokens,
+    "floatbits.dusk",
+    "0x0000000000000000\n0x3FF0000000000000\n0xBFF0000000000000\n\
+     0x3FB999999999999A\n0x3FF8000000000000\n0x400921F9F01B866E\n\
+     0x3FB99999A0000000\n0x3FF8000000000000\n0x400921FA00000000\n"
+);
+
+// The quoted argument carries a literal backslash, so the expected line escapes
+// it. run's decode returns the child exit code, and an unset variable reads back
+// as the empty string with length 0.
+golden!(
+    os_process_run_quote_env,
+    "osproc.dusk",
+    "7\n0\n1\n'plain'\n'it'\\''s a test'\n''\n0\n"
+);
+
+// map_keys walks the keys in insertion order across a grow and past an overwrite,
+// so "two" reads back its overwritten value 22 in its first insertion slot and no
+// key is duplicated.
+golden!(map_deterministic_iteration, "mapkeys.dusk", "8\n1\n22\n3\n4\n5\n6\n7\n8\n");
+
+#[test]
+fn a_foreign_signature_rejects_a_string_parameter() {
+    // A string is typed apart from a raw pointer, so it cannot cross the C
+    // boundary directly; std.os copies it into a *raw char buffer first. The
+    // reject is why that copy exists.
+    let err = check_fails("foreignstr_fail.dusk");
+    assert!(err.contains("C boundary does not support"), "{err}");
+}
+
+#[test]
+fn bootstrap_scaffold_demo() {
+    // The dusk1 scaffold under compiler/ is stage0's first self hosted target: a
+    // dusk program that assembles the phase 0 IR spine, writes it, links it with
+    // clang, and runs it. Its stdout is the built program's own output, byte for
+    // byte the stage0 demo, since the scaffold sends every progress and error
+    // message of its own to stderr. Both commands run through one `dusk run` of
+    // the same source file, which stage0 compiles and executes.
+    let bin = dusk_bin();
+    let main = format!("{}/compiler/main.dusk", env!("CARGO_MANIFEST_DIR"));
+
+    let demo = Command::new(&bin)
+        .args(["run", &main, "demo"])
+        .output()
+        .expect("spawn dusk");
+    assert!(
+        demo.status.success(),
+        "scaffold demo did not run cleanly: {}",
+        String::from_utf8_lossy(&demo.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&demo.stdout),
+        "hello from the dusk spine\n42",
+        "the linked spine must print its line and integer"
+    );
+
+    let version = Command::new(&bin)
+        .args(["run", &main, "version"])
+        .output()
+        .expect("spawn dusk");
+    assert!(
+        version.status.success(),
+        "scaffold version did not run cleanly: {}",
+        String::from_utf8_lossy(&version.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        "dusk1 0.6.0 (bootstrap scaffold)\n",
+        "version prints the scaffold build string"
+    );
+}
+
+#[test]
+fn bootstrap_lex_and_scan_match_stage0() {
+    // The dusk1 lexer and pre scan reproduce stage0's lex and scan dumps byte for
+    // byte, the differential parity the self hosting bootstrap depends on. This is
+    // a smoke check over a spread of files: plain source, Unicode escape strings,
+    // rune literals, float constants, a multi paradigm header, and two lex rejects
+    // that must exit non zero in both. The full oracle is tools/differential.sh
+    // over all 579 corpus files.
+    //
+    // The scaffold is built under a unique entry stem in a temp directory so its
+    // build output cannot collide with another test that builds compiler/main.dusk.
+    let bin = dusk_bin();
+    let root = env!("CARGO_MANIFEST_DIR");
+    let compiler = std::path::Path::new(root).join("compiler");
+    let tmp = std::env::temp_dir().join(format!("dusk1_parity_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("mkdir temp");
+    for entry in std::fs::read_dir(&compiler).expect("read compiler dir") {
+        let p = entry.expect("dir entry").path();
+        if p.extension().and_then(|e| e.to_str()) == Some("dusk") {
+            let name = p.file_name().unwrap().to_str().unwrap().to_string();
+            // Rename the entry so its build output has a stem no other test uses.
+            let dest = if name == "main.dusk" {
+                tmp.join("duskparity.dusk")
+            } else {
+                tmp.join(&name)
+            };
+            std::fs::copy(&p, &dest).expect("copy module");
+        }
+    }
+    let entry = tmp.join("duskparity.dusk");
+    let build = Command::new(&bin)
+        .args(["build", entry.to_str().unwrap()])
+        .output()
+        .expect("spawn dusk");
+    assert!(
+        build.status.success(),
+        "parity scaffold build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let scaffold = format!("{root}/target/dusk-out/duskparity");
+
+    let samples = [
+        "hello.dusk",
+        "unicodeescape.dusk",
+        "runebasics.dusk",
+        "floatbits.dusk",
+        "m9d.dusk",
+        "escbadhex.dusk",
+        "uintsuffix_fail.dusk",
+    ];
+    for cmd in ["lex", "scan"] {
+        for ex in samples {
+            let path = format!("{root}/examples/{ex}");
+            let want = Command::new(&bin)
+                .args([cmd, &path])
+                .output()
+                .expect("spawn stage0");
+            let got = Command::new(&scaffold)
+                .args([cmd, &path])
+                .output()
+                .expect("spawn dusk1");
+            assert_eq!(
+                got.stdout, want.stdout,
+                "{cmd} stdout differs on {ex}:\nstage0: {}\ndusk1:  {}",
+                String::from_utf8_lossy(&want.stdout),
+                String::from_utf8_lossy(&got.stdout)
+            );
+            assert_eq!(
+                got.status.code(),
+                want.status.code(),
+                "{cmd} exit code differs on {ex}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
 }

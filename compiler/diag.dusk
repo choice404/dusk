@@ -1,0 +1,104 @@
+// diag: the diagnostic, the scaffold's one channel for reporting a fault in a
+// source program. A diagnostic points at a single location, a line and column in
+// a named file, and carries the message that names the fix. This is the initial
+// shape, a header line rendered as `file:line:col: error: message`, the same form
+// the stage0 compiler prints. The caret run under the offending source line comes
+// once the scaffold threads the source buffer through to the point a diagnostic
+// is raised, so the fields the caret needs are already in place.
+
+@paradigm procedural
+
+@import std.string
+@import bytes
+
+// One reported fault: where it is and what it says. Line and column are 1 based,
+// counting from the start of the file, the convention every editor jumps to. The
+// file and message strings are borrowed, so they must outlive the diagnostic;
+// every caller here holds the source path and a literal message for the whole run.
+export struct Diagnostic {
+    file: string,
+    line: int64,
+    col: int64,
+    message: string,
+}
+
+// Builds a diagnostic at the given location. A plain constructor, kept so a caller
+// reads at the raise site rather than spelling out the struct literal each time.
+export func diag_new(file: string, line: int64, col: int64, message: string) -> Diagnostic {
+    return Diagnostic { file: file, line: line, col: col, message: message }
+}
+
+// Renders a diagnostic as `file:line:col: error: message`, returning a fresh heap
+// string the caller owns and frees. This is the header the stage0 compiler prints;
+// the caret block beneath it is not built yet.
+export func diag_render(d: Diagnostic) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d.file)
+    sb_push_char(b, 58)
+    sb_push_int(b, d.line)
+    sb_push_char(b, 58)
+    sb_push_int(b, d.col)
+    sb_push(b, ": error: ")
+    sb_push(b, d.message)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Prints a diagnostic to stderr, where the scaffold sends every compiler message
+// so a caller can separate diagnostics from the output of the program being built.
+export func diag_emit(d: Diagnostic) -> void {
+    line: string = diag_render(d)
+    printerr(line)
+    free(line)
+}
+
+// A fault located by a byte offset into the source, the form the lexer and pre
+// scan raise before line and column are known. The offset is resolved to a line
+// and column against the source only when the fault is printed.
+export struct Located {
+    lo: int64,
+    msg: string,
+}
+
+export func located(lo: int64, msg: string) -> Located {
+    return Located { lo: lo, msg: msg }
+}
+
+// The 1 based line and column of a byte offset, the column counted in Unicode
+// scalars so a multibyte character earlier on the line does not overcount it, the
+// same rule stage0 uses. Continuation bytes, 0x80 to 0xBF, do not start a scalar
+// and so are not counted. Returns line in the high half and column in the low half
+// is avoided; instead the two are returned as a pair.
+export func line_col(src: string, n: int64, off: int64) -> (int64, int64) {
+    mut line: int64 = 1
+    mut col: int64 = 1
+    mut i: int64 = 0
+    while i < off {
+        b: int64 = bytes.byte_at(src, n, i)
+        if b == 10 {
+            line = line + 1
+            col = 1
+        } else {
+            if b < 128 {
+                col = col + 1
+            } else {
+                if b >= 192 {
+                    col = col + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return (line, col)
+}
+
+// Prints a located fault to stderr as `file:line:col: error: msg`, resolving the
+// offset against the source. Diagnostic text is not part of the dump contract, so
+// this need only be close to stage0, but the location is exact.
+export func emit_located(file: string, src: string, n: int64, e: Located) -> void {
+    l, c := line_col(src, n, e.lo)
+    d: Diagnostic = diag_new(file, l, c, e.msg)
+    diag_emit(d)
+}

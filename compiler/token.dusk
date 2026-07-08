@@ -1,0 +1,208 @@
+// token: the lexed token and the tables that name its kind. A token is a flat
+// value, a kind tag plus its byte span and the newline flag the parser reads. The
+// kind is an integer; the literal payload of an Ident, Int, Str, and the rest is
+// recovered from the source span when a token is rendered, which keeps the token
+// itself small and free of owned heap. kind_name maps an operator or punctuation
+// kind to the exact Debug name stage0 prints, and returns the empty string for a
+// kind whose rendering reads the span.
+
+@paradigm procedural
+
+@import std.string
+@import bytes
+
+// A lexed token: its kind tag, the half open byte span [lo, hi) it covers, and
+// whether a newline preceded it, the flag the parser treats as a statement break.
+export struct Token {
+    kind: int64,
+    lo: int64,
+    hi: int64,
+    nl_before: bool,
+}
+
+// The special kinds, whose rendering reads the source span for a literal value or
+// a keyword name rather than a fixed variant name.
+export func k_ident() -> int64 { return 0 }
+export func k_int() -> int64 { return 1 }
+export func k_float() -> int64 { return 2 }
+export func k_str() -> int64 { return 3 }
+export func k_char() -> int64 { return 4 }
+export func k_rune() -> int64 { return 5 }
+export func k_bool() -> int64 { return 6 }
+export func k_kw() -> int64 { return 7 }
+
+// The operator, punctuation, and end kinds, each rendered by its Debug name.
+export func k_colon_eq() -> int64 { return 10 }
+export func k_arrow() -> int64 { return 11 }
+export func k_fat_arrow() -> int64 { return 12 }
+export func k_larrow() -> int64 { return 13 }
+export func k_dotdot() -> int64 { return 14 }
+export func k_dotdot_eq() -> int64 { return 15 }
+export func k_eq_eq() -> int64 { return 16 }
+export func k_ne() -> int64 { return 17 }
+export func k_le() -> int64 { return 18 }
+export func k_ge() -> int64 { return 19 }
+export func k_and_and() -> int64 { return 20 }
+export func k_or_or() -> int64 { return 21 }
+export func k_amp() -> int64 { return 22 }
+export func k_pipe() -> int64 { return 23 }
+export func k_caret() -> int64 { return 24 }
+export func k_tilde() -> int64 { return 25 }
+export func k_shl() -> int64 { return 26 }
+export func k_shr() -> int64 { return 27 }
+export func k_star_star() -> int64 { return 28 }
+export func k_pipe_gt() -> int64 { return 29 }
+export func k_plus_plus() -> int64 { return 30 }
+export func k_minus_minus() -> int64 { return 31 }
+export func k_plus_eq() -> int64 { return 32 }
+export func k_minus_eq() -> int64 { return 33 }
+export func k_star_eq() -> int64 { return 34 }
+export func k_slash_eq() -> int64 { return 35 }
+export func k_percent_eq() -> int64 { return 36 }
+export func k_amp_eq() -> int64 { return 37 }
+export func k_pipe_eq() -> int64 { return 38 }
+export func k_caret_eq() -> int64 { return 39 }
+export func k_shl_eq() -> int64 { return 40 }
+export func k_shr_eq() -> int64 { return 41 }
+export func k_assign() -> int64 { return 42 }
+export func k_plus() -> int64 { return 43 }
+export func k_minus() -> int64 { return 44 }
+export func k_star() -> int64 { return 45 }
+export func k_slash() -> int64 { return 46 }
+export func k_percent() -> int64 { return 47 }
+export func k_lt() -> int64 { return 48 }
+export func k_gt() -> int64 { return 49 }
+export func k_bang() -> int64 { return 50 }
+export func k_colon() -> int64 { return 51 }
+export func k_semi() -> int64 { return 52 }
+export func k_comma() -> int64 { return 53 }
+export func k_dot() -> int64 { return 54 }
+export func k_at() -> int64 { return 55 }
+export func k_lparen() -> int64 { return 56 }
+export func k_rparen() -> int64 { return 57 }
+export func k_lbrace() -> int64 { return 58 }
+export func k_rbrace() -> int64 { return 59 }
+export func k_lbracket() -> int64 { return 60 }
+export func k_rbracket() -> int64 { return 61 }
+export func k_eof() -> int64 { return 62 }
+
+// The Debug name of an operator, punctuation, or end kind, matching stage0's
+// TokenKind Debug output. Returns the empty string for a special kind, whose
+// renderer reads the source span instead.
+export func kind_name(kind: int64) -> string {
+    if kind == 10 { return "ColonEq" }
+    if kind == 11 { return "Arrow" }
+    if kind == 12 { return "FatArrow" }
+    if kind == 13 { return "LArrow" }
+    if kind == 14 { return "DotDot" }
+    if kind == 15 { return "DotDotEq" }
+    if kind == 16 { return "EqEq" }
+    if kind == 17 { return "Ne" }
+    if kind == 18 { return "Le" }
+    if kind == 19 { return "Ge" }
+    if kind == 20 { return "AndAnd" }
+    if kind == 21 { return "OrOr" }
+    if kind == 22 { return "Amp" }
+    if kind == 23 { return "Pipe" }
+    if kind == 24 { return "Caret" }
+    if kind == 25 { return "Tilde" }
+    if kind == 26 { return "Shl" }
+    if kind == 27 { return "Shr" }
+    if kind == 28 { return "StarStar" }
+    if kind == 29 { return "PipeGt" }
+    if kind == 30 { return "PlusPlus" }
+    if kind == 31 { return "MinusMinus" }
+    if kind == 32 { return "PlusEq" }
+    if kind == 33 { return "MinusEq" }
+    if kind == 34 { return "StarEq" }
+    if kind == 35 { return "SlashEq" }
+    if kind == 36 { return "PercentEq" }
+    if kind == 37 { return "AmpEq" }
+    if kind == 38 { return "PipeEq" }
+    if kind == 39 { return "CaretEq" }
+    if kind == 40 { return "ShlEq" }
+    if kind == 41 { return "ShrEq" }
+    if kind == 42 { return "Assign" }
+    if kind == 43 { return "Plus" }
+    if kind == 44 { return "Minus" }
+    if kind == 45 { return "Star" }
+    if kind == 46 { return "Slash" }
+    if kind == 47 { return "Percent" }
+    if kind == 48 { return "Lt" }
+    if kind == 49 { return "Gt" }
+    if kind == 50 { return "Bang" }
+    if kind == 51 { return "Colon" }
+    if kind == 52 { return "Semi" }
+    if kind == 53 { return "Comma" }
+    if kind == 54 { return "Dot" }
+    if kind == 55 { return "At" }
+    if kind == 56 { return "LParen" }
+    if kind == 57 { return "RParen" }
+    if kind == 58 { return "LBrace" }
+    if kind == 59 { return "RBrace" }
+    if kind == 60 { return "LBracket" }
+    if kind == 61 { return "RBracket" }
+    if kind == 62 { return "Eof" }
+    return ""
+}
+
+// The Debug name of a keyword given its source text, or the empty string when the
+// text is an ordinary identifier. This is both the keyword table and the lexer's
+// keyword test: a non empty result means the ident is a keyword.
+export func keyword_name(text: string) -> string {
+    if str_eq(text, "func") { return "Func" }
+    if str_eq(text, "lambda") { return "Lambda" }
+    if str_eq(text, "struct") { return "Struct" }
+    if str_eq(text, "enum") { return "Enum" }
+    if str_eq(text, "interface") { return "Interface" }
+    if str_eq(text, "impl") { return "Impl" }
+    if str_eq(text, "foreign") { return "Foreign" }
+    if str_eq(text, "monad") { return "Monad" }
+    if str_eq(text, "export") { return "Export" }
+    if str_eq(text, "mut") { return "Mut" }
+    if str_eq(text, "using") { return "Using" }
+    if str_eq(text, "defer") { return "Defer" }
+    if str_eq(text, "match") { return "Match" }
+    if str_eq(text, "return") { return "Return" }
+    if str_eq(text, "if") { return "If" }
+    if str_eq(text, "else") { return "Else" }
+    if str_eq(text, "for") { return "For" }
+    if str_eq(text, "while") { return "While" }
+    if str_eq(text, "do") { return "Do" }
+    if str_eq(text, "in") { return "In" }
+    return ""
+}
+
+// Whether the source range s[lo, hi) spells a keyword, tested without allocating a
+// substring, so the lexer classifies an identifier on the hot path with no heap
+// traffic. The keyword set is the same one keyword_name names.
+export func is_keyword_range(s: string, lo: int64, hi: int64) -> bool {
+    if str_eq_range(s, lo, hi, "func") { return true }
+    if str_eq_range(s, lo, hi, "lambda") { return true }
+    if str_eq_range(s, lo, hi, "struct") { return true }
+    if str_eq_range(s, lo, hi, "enum") { return true }
+    if str_eq_range(s, lo, hi, "interface") { return true }
+    if str_eq_range(s, lo, hi, "impl") { return true }
+    if str_eq_range(s, lo, hi, "foreign") { return true }
+    if str_eq_range(s, lo, hi, "monad") { return true }
+    if str_eq_range(s, lo, hi, "export") { return true }
+    if str_eq_range(s, lo, hi, "mut") { return true }
+    if str_eq_range(s, lo, hi, "using") { return true }
+    if str_eq_range(s, lo, hi, "defer") { return true }
+    if str_eq_range(s, lo, hi, "match") { return true }
+    if str_eq_range(s, lo, hi, "return") { return true }
+    if str_eq_range(s, lo, hi, "if") { return true }
+    if str_eq_range(s, lo, hi, "else") { return true }
+    if str_eq_range(s, lo, hi, "for") { return true }
+    if str_eq_range(s, lo, hi, "while") { return true }
+    if str_eq_range(s, lo, hi, "do") { return true }
+    if str_eq_range(s, lo, hi, "in") { return true }
+    return false
+}
+
+// Whether the source range s[lo, hi) spells a boolean literal, true or false.
+export func is_bool_range(s: string, lo: int64, hi: int64) -> bool {
+    if str_eq_range(s, lo, hi, "true") { return true }
+    if str_eq_range(s, lo, hi, "false") { return true }
+    return false
+}
