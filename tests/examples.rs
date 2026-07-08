@@ -52,6 +52,27 @@ fn for_loop_over_array() {
 }
 
 #[test]
+fn else_if_chain_selects_one_arm() {
+    // An `else if` chain parses as an `else` whose body is a single nested `if`,
+    // so a full chain fires exactly one arm and a chain with no tail `else` falls
+    // through silently when nothing matches. `classify` prints one line per call;
+    // `grade(50)` matches no arm and prints nothing, the last line here is `C`.
+    assert_eq!(
+        run("elseif.dusk"),
+        "negative\nzero\nsmall\nbig\nA\nB\nC\n"
+    );
+}
+
+#[test]
+fn else_if_condition_is_type_checked() {
+    // The desugared inner `if` is checked like any other, so a non-bool `else if`
+    // condition is rejected at the condition with a caret on it, not coerced.
+    let err = check_fails("elseif_badcond.dusk");
+    assert!(err.contains("if condition must be a bool"), "{err}");
+    assert!(err.contains("} else if 3 {"), "missing source line: {err}");
+}
+
+#[test]
 fn float32_prints_through_the_f64_printer() {
     // A float32 is fpext'd to double before the f64 runtime printer, direct,
     // computed, and through a format hole. Without the widening the module fails
@@ -3885,7 +3906,7 @@ fn bootstrap_lex_and_scan_match_stage0() {
     // a smoke check over a spread of files: plain source, Unicode escape strings,
     // rune literals, float constants, a multi paradigm header, and two lex rejects
     // that must exit non zero in both. The full oracle is tools/differential.sh
-    // over all 579 corpus files.
+    // over all 581 corpus files.
     //
     // The scaffold is built under a unique entry stem in a temp directory so its
     // build output cannot collide with another test that builds compiler/main.dusk.

@@ -10,6 +10,8 @@ The surface described in this spec is frozen as of 0.5.4 for the bootstrap. The 
 
 The one exception is a soundness hole. A hole found during the bootstrap may force a surface change to close it, and when that happens the change is named in the changelog of the release that makes it.
 
+A shape the compiler already accepts can also be written into this spec for the first time without breaking the freeze, since a program's meaning does not change when the reference catches up to what the parser has always done. The `else if` chain is the first such note, recorded in 0.6.1: `if a { } else if b { } else { }` has always parsed as an `else` branch whose whole body is a single nested `if`, so a chain of any length is ordinary nested `if`s carrying no new node, no new keyword, and no new rule. Each `else if` condition is a bool and is checked like any `if` condition, and a chain longer than the parser's nesting ceiling is refused with the same too deep diagnostic every deep nesting meets rather than overflowing the stack.
+
 ---
 
 ## Table of Contents

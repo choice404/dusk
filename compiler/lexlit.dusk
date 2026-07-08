@@ -22,17 +22,13 @@ export func lx_string(lx: *Lexer, start: int64) -> void {
         if c < 0 {
             lx_err(lx, start, "unterminated string literal")
             going = false
+        } else if c == 34 {
+            lx_advance(lx, 1)
+            going = false
+        } else if c == 92 {
+            scan_one_escape(lx)
         } else {
-            if c == 34 {
-                lx_advance(lx, 1)
-                going = false
-            } else {
-                if c == 92 {
-                    scan_one_escape(lx)
-                } else {
-                    lx_advance(lx, 1)
-                }
-            }
+            lx_advance(lx, 1)
         }
     }
     lx_push(lx, k_str(), start)
@@ -60,24 +56,18 @@ export func lx_char(lx: *Lexer, start: int64) -> void {
     c: int64 = lx_peek(lx)
     if c < 0 {
         lx_err(lx, start, "unterminated char literal")
-    } else {
-        if c == 39 {
-            lx_err(lx, start, "empty char literal")
-        } else {
-            if c == 92 {
-                scalar: int64 = scan_one_escape(lx)
-                if scalar > 127 {
-                    lx_err(lx, start, "a char is one byte; this escape does not fit, use a rune literal or a string")
-                }
-            } else {
-                if c < 128 {
-                    lx_advance(lx, 1)
-                } else {
-                    lx_bump_scalar(lx)
-                    lx_err(lx, start, "a char is one byte; use a rune literal r'...' or a string")
-                }
-            }
+    } else if c == 39 {
+        lx_err(lx, start, "empty char literal")
+    } else if c == 92 {
+        scalar: int64 = scan_one_escape(lx)
+        if scalar > 127 {
+            lx_err(lx, start, "a char is one byte; this escape does not fit, use a rune literal or a string")
         }
+    } else if c < 128 {
+        lx_advance(lx, 1)
+    } else {
+        lx_bump_scalar(lx)
+        lx_err(lx, start, "a char is one byte; use a rune literal r'...' or a string")
     }
     close_quote(lx, start, "char literal must contain exactly one character")
     lx_push(lx, k_char(), start)
@@ -91,20 +81,14 @@ export func lx_rune(lx: *Lexer, start: int64) -> void {
     c: int64 = lx_peek(lx)
     if c < 0 {
         lx_err(lx, start, "unterminated rune literal")
+    } else if c == 39 {
+        lx_err(lx, start, "empty rune literal")
+    } else if c == 92 {
+        scan_one_escape(lx)
+    } else if c < 128 {
+        lx_advance(lx, 1)
     } else {
-        if c == 39 {
-            lx_err(lx, start, "empty rune literal")
-        } else {
-            if c == 92 {
-                scan_one_escape(lx)
-            } else {
-                if c < 128 {
-                    lx_advance(lx, 1)
-                } else {
-                    lx_bump_scalar(lx)
-                }
-            }
-        }
+        lx_bump_scalar(lx)
     }
     close_quote(lx, start, "rune literal must contain exactly one character")
     lx_push(lx, k_rune(), start)
@@ -122,16 +106,12 @@ func close_quote(lx: *Lexer, start: int64, msg: string) -> void {
             c: int64 = lx_peek(lx)
             if c == 39 {
                 going = false
+            } else if c == 10 {
+                going = false
+            } else if c < 0 {
+                going = false
             } else {
-                if c == 10 {
-                    going = false
-                } else {
-                    if c < 0 {
-                        going = false
-                    } else {
-                        lx_advance(lx, 1)
-                    }
-                }
+                lx_advance(lx, 1)
             }
         }
         if lx_peek(lx) == 39 {

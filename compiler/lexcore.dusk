@@ -112,28 +112,20 @@ export func lx_skip_trivia(lx: *Lexer) -> void {
         if c == 10 {
             (*lx).pending_nl = true
             (*lx).pos = (*lx).pos + 1
-        } else {
-            if c == 32 {
-                (*lx).pos = (*lx).pos + 1
+        } else if c == 32 {
+            (*lx).pos = (*lx).pos + 1
+        } else if c == 9 {
+            (*lx).pos = (*lx).pos + 1
+        } else if c == 13 {
+            (*lx).pos = (*lx).pos + 1
+        } else if c == 47 {
+            if lx_peek2(lx) == 47 {
+                lx_skip_line_comment(lx)
             } else {
-                if c == 9 {
-                    (*lx).pos = (*lx).pos + 1
-                } else {
-                    if c == 13 {
-                        (*lx).pos = (*lx).pos + 1
-                    } else {
-                        if c == 47 {
-                            if lx_peek2(lx) == 47 {
-                                lx_skip_line_comment(lx)
-                            } else {
-                                going = false
-                            }
-                        } else {
-                            going = false
-                        }
-                    }
-                }
+                going = false
             }
+        } else {
+            going = false
         }
     }
 }
@@ -144,12 +136,10 @@ func lx_skip_line_comment(lx: *Lexer) -> void {
         c: int64 = lx_peek(lx)
         if c == 10 {
             going = false
+        } else if c < 0 {
+            going = false
         } else {
-            if c < 0 {
-                going = false
-            } else {
-                (*lx).pos = (*lx).pos + 1
-            }
+            (*lx).pos = (*lx).pos + 1
         }
     }
 }

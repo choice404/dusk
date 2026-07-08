@@ -67,23 +67,19 @@ export func debug_string(src: string, n: int64, lo: int64, hi: int64) -> string 
             b: int64 = bytes.byte_at(src, n, p)
             if b == 34 {
                 going = false
-            } else {
-                if b == 92 {
-                    res: Escape = scan_escape(src, n, p + 1)
-                    if res.scalar >= 0 {
-                        push_canonical(out, res.scalar)
-                    }
-                    p = res.next
-                } else {
-                    if b < 128 {
-                        push_canonical(out, b)
-                        p = p + 1
-                    } else {
-                        d: Decoded = bytes.decode_utf8(src, n, p)
-                        push_canonical(out, d.scalar)
-                        p = p + d.len
-                    }
+            } else if b == 92 {
+                res: Escape = scan_escape(src, n, p + 1)
+                if res.scalar >= 0 {
+                    push_canonical(out, res.scalar)
                 }
+                p = res.next
+            } else if b < 128 {
+                push_canonical(out, b)
+                p = p + 1
+            } else {
+                d: Decoded = bytes.decode_utf8(src, n, p)
+                push_canonical(out, d.scalar)
+                p = p + d.len
             }
         }
     }
@@ -105,26 +101,20 @@ export func debug_char(src: string, n: int64, bstart: int64) -> string {
     b: int64 = bytes.byte_at(src, n, bstart)
     if b < 0 {
         push_canonical(out, 0)
-    } else {
-        if b == 39 {
-            push_canonical(out, 0)
-        } else {
-            if b == 92 {
-                res: Escape = scan_escape(src, n, bstart + 1)
-                mut sc: int64 = res.scalar
-                if sc < 0 {
-                    sc = 0
-                }
-                push_canonical(out, sc)
-            } else {
-                if b < 128 {
-                    push_canonical(out, b)
-                } else {
-                    d: Decoded = bytes.decode_utf8(src, n, bstart)
-                    push_canonical(out, d.scalar)
-                }
-            }
+    } else if b == 39 {
+        push_canonical(out, 0)
+    } else if b == 92 {
+        res: Escape = scan_escape(src, n, bstart + 1)
+        mut sc: int64 = res.scalar
+        if sc < 0 {
+            sc = 0
         }
+        push_canonical(out, sc)
+    } else if b < 128 {
+        push_canonical(out, b)
+    } else {
+        d: Decoded = bytes.decode_utf8(src, n, bstart)
+        push_canonical(out, d.scalar)
     }
     sb_push_char(out, 39)
     r: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))

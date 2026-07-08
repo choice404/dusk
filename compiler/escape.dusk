@@ -71,16 +71,14 @@ func unicode_escape(src: string, n: int64, a: int64) -> Escape {
         if b == 125 {
             p = p + 1
             looping = false
-        } else {
-            if bytes.is_hex_digit(b) {
-                p = p + 1
-                if digits < 6 {
-                    value = value * 16 + bytes.hex_val(b)
-                }
-                digits = digits + 1
-            } else {
-                return Escape { next: p, scalar: -1, err: esc_u_unterm() }
+        } else if bytes.is_hex_digit(b) {
+            p = p + 1
+            if digits < 6 {
+                value = value * 16 + bytes.hex_val(b)
             }
+            digits = digits + 1
+        } else {
+            return Escape { next: p, scalar: -1, err: esc_u_unterm() }
         }
     }
     if digits == 0 {

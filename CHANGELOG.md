@@ -2,6 +2,14 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.6.1
+
+else if, written down. The first surface note recorded under the bootstrap freeze, and not a surface change: the `else if` chain, `if a { } else if b { } else { }`, was already accepted by the parser as an `else` branch whose whole body is a single nested `if`, so no program's meaning moves. 0.6.1 writes it into the spec and pins it with goldens rather than leaving it a shape the parser happened to reach with nothing documenting or testing it. The language holds still, exactly as the freeze promises. Suite 458 unit, 554 golden (up from 552, two new here), 13 parser termination, clippy clean.
+
+- The parser has read `else if` as `else { if ... }` since before 0.5.0, and 0.5.0 gave the chain its own depth guard. Each link recurses `if_ -> if_` past both block guards, so a long chain grows the call stack one frame per link while the shared nesting depth stays flat, which once overflowed the stack. Counting the else-if descent feeds the shared ceiling, so a chain past it unwinds into `expression nesting is too deep; simplify the expression` at the link that crosses it rather than aborting the process. The two parser termination tests that pin both ends, a twenty thousand link chain and a fifty link one, already shipped with that guard; 0.6.1 adds only the running goldens and the spec note on top.
+- `examples/elseif.dusk` runs both shapes end to end through codegen: a full chain that ends in a tail `else` and fires exactly one arm, and a chain with no tail `else` where a value matching no arm falls through and prints nothing. `examples/elseif_badcond.dusk` is its compile-fail twin: because the desugared inner `if` is type checked like any other, a non-bool `else if` condition is rejected at the condition, `if condition must be a bool`, with the caret on it.
+- The change is a parser and documentation matter only. No new token, so the stage0 and dusk1 lexers still agree byte for byte and `tools/differential.sh` stays green over the corpus, now 581 files with the two new examples in it. Resolve, typeck, mono, and codegen see ordinary nested `if`s and are untouched.
+
 ## 0.6.0
 
 The stage one spine. This is the first release of the 0.6.x through 0.9.x line the bootstrap freeze opened: the language stops changing and the compiler starts being rewritten in itself. 0.6.0 lands the first slice of that rewrite, `compiler/`, a dusk program that is dusk1, the self hosted stage1 compiler's front end scaffold, and the parity gate that holds it accountable to the stage0 compiler that builds it. Nothing here changes the language. Suite 458 unit, 552 golden (up from 545, seven of them new for this release), 13 parser termination, clippy clean.

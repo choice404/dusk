@@ -99,12 +99,10 @@ func lx_ident(lx: *Lexer, start: int64) -> void {
     hi: int64 = lx_pos(lx)
     if is_bool_range((*lx).src, start, hi) {
         lx_push(lx, k_bool(), start)
+    } else if is_keyword_range((*lx).src, start, hi) {
+        lx_push(lx, k_kw(), start)
     } else {
-        if is_keyword_range((*lx).src, start, hi) {
-            lx_push(lx, k_kw(), start)
-        } else {
-            lx_push(lx, k_ident(), start)
-        }
+        lx_push(lx, k_ident(), start)
     }
 }
 
@@ -176,10 +174,8 @@ func lx_number(lx: *Lexer, start: int64) -> void {
     if str_len(suffix) > 0 {
         if reserved_suffix(suffix) {
             lx_err(lx, start, "unsigned integers are reserved; use the signed widths")
-        } else {
-            if !valid_suffix(suffix) {
-                lx_err(lx, start, "unknown literal suffix")
-            }
+        } else if !valid_suffix(suffix) {
+            lx_err(lx, start, "unknown literal suffix")
         }
         free(suffix)
     }
@@ -210,16 +206,14 @@ export func lex_run(lx: *Lexer) -> void {
         if c < 0 {
             lx_push(lx, k_eof(), start)
             going = false
-        } else {
-            if c == 114 {
-                if lx_peek2(lx) == 39 {
-                    lx_rune(lx, start)
-                } else {
-                    lx_dispatch(lx, start, c)
-                }
+        } else if c == 114 {
+            if lx_peek2(lx) == 39 {
+                lx_rune(lx, start)
             } else {
                 lx_dispatch(lx, start, c)
             }
+        } else {
+            lx_dispatch(lx, start, c)
         }
     }
 }
@@ -227,20 +221,14 @@ export func lex_run(lx: *Lexer) -> void {
 func lx_dispatch(lx: *Lexer, start: int64, c: int64) -> void {
     if is_ident_start(c) {
         lx_ident(lx, start)
+    } else if is_digit(c) {
+        lx_number(lx, start)
+    } else if c == 34 {
+        lx_string(lx, start)
+    } else if c == 39 {
+        lx_char(lx, start)
     } else {
-        if is_digit(c) {
-            lx_number(lx, start)
-        } else {
-            if c == 34 {
-                lx_string(lx, start)
-            } else {
-                if c == 39 {
-                    lx_char(lx, start)
-                } else {
-                    lx_symbol(lx, start, c)
-                }
-            }
-        }
+        lx_symbol(lx, start, c)
     }
 }
 
