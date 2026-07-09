@@ -28,6 +28,13 @@ pub struct Analysis {
     pub mut_tuple_types: mono::MutTupleTypes,
 }
 
+impl Analysis {
+    /// Returns the monomorphized ground module that codegen would consume.
+    pub fn ground_module(&self) -> parser::ast::Module {
+        mono::expand(&self.module, &self.mut_tuple_types)
+    }
+}
+
 /// Loads a program and its imports, gates paradigms per file, desugars, and runs
 /// semantic analysis. Returns the checked program, ready to build, and any
 /// diagnostics already rendered with their file path.

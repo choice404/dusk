@@ -1,0 +1,150 @@
+// resolveexpr: helper records and deterministic helper routines for resolve.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+export struct Var {
+    mutable: bool,
+    depth: int64,
+    used: bool,
+    is_let: bool,
+    lo: int64,
+    hi: int64,
+}
+
+export struct PendingUnused {
+    name: string,
+    var: Var,
+}
+
+export func zero_var() -> Var {
+    return Var { mutable: false, depth: 0, used: false, is_let: false, lo: 0, hi: 0 }
+}
+
+export func quoted_msg(prefix: string, name: string, suffix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push_char(b, 39)
+    sb_push(b, suffix)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func is_builtin_name(name: string) -> bool {
+    if str_eq(name, "alloc") { return true }
+    if str_eq(name, "free") { return true }
+    if str_eq(name, "print") { return true }
+    if str_eq(name, "println") { return true }
+    if str_eq(name, "printerr") { return true }
+    if str_eq(name, "sizeof") { return true }
+    if str_eq(name, "alloc_bytes") { return true }
+    if str_eq(name, "ptr_add") { return true }
+    if str_eq(name, "map") { return true }
+    if str_eq(name, "filter") { return true }
+    if str_eq(name, "reduce") { return true }
+    if str_eq(name, "fold") { return true }
+    if str_eq(name, "foreach") { return true }
+    if str_eq(name, "debug_alloc") { return true }
+    if str_eq(name, "debug_free") { return true }
+    if str_eq(name, "debug_leaks") { return true }
+    if str_eq(name, "debug_double_frees") { return true }
+    if str_eq(name, "read_file") { return true }
+    if str_eq(name, "write_file") { return true }
+    if str_eq(name, "read_line") { return true }
+    if str_eq(name, "read_all") { return true }
+    if str_eq(name, "parse_float") { return true }
+    if str_eq(name, "cstr") { return true }
+    if str_eq(name, "move") { return true }
+    if str_eq(name, "spawn") { return true }
+    if str_eq(name, "join") { return true }
+    if str_eq(name, "submit") { return true }
+    if str_eq(name, "async_run") { return true }
+    return false
+}
+
+export func is_type_name(name: string) -> bool {
+    if str_eq(name, "int8") { return true }
+    if str_eq(name, "int16") { return true }
+    if str_eq(name, "int32") { return true }
+    if str_eq(name, "int64") { return true }
+    if str_eq(name, "float32") { return true }
+    if str_eq(name, "float64") { return true }
+    if str_eq(name, "bool") { return true }
+    if str_eq(name, "char") { return true }
+    if str_eq(name, "rune") { return true }
+    if str_eq(name, "string") { return true }
+    if str_eq(name, "void") { return true }
+    if str_eq(name, "thread") { return true }
+    return false
+}
+
+export func is_reserved_uint(name: string) -> bool {
+    if str_eq(name, "uint8") { return true }
+    if str_eq(name, "uint16") { return true }
+    if str_eq(name, "uint32") { return true }
+    if str_eq(name, "uint64") { return true }
+    return false
+}
+
+func str_less(a: string, b: string) -> bool {
+    mut i: int64 = 0
+    while a[i] != 0 {
+        if b[i] == 0 {
+            return false
+        }
+        if a[i] < b[i] {
+            return true
+        }
+        if a[i] > b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return b[i] != 0
+}
+
+func unused_less(a: PendingUnused, b: PendingUnused) -> bool {
+    if a.var.lo < b.var.lo {
+        return true
+    }
+    if a.var.lo > b.var.lo {
+        return false
+    }
+    return str_less(a.name, b.name)
+}
+
+export func sort_unused(v: *Vector<PendingUnused>) -> void {
+    mut i: int64 = 1
+    while i < vec_len(v) {
+        mut j: int64 = i
+        while j > 0 {
+            cur: PendingUnused = vec_get(v, j)
+            prev: PendingUnused = vec_get(v, j - 1)
+            if unused_less(cur, prev) {
+                vec_set(v, j - 1, cur)
+                vec_set(v, j, prev)
+                j = j - 1
+            } else {
+                j = 0
+            }
+        }
+        i = i + 1
+    }
+}
+
+export func import_root(imp: string) -> string {
+    mut i: int64 = 0
+    while imp[i] != 0 {
+        if imp[i] == 46 {
+            return substring(imp, 0, i)
+        }
+        i = i + 1
+    }
+    return substring(imp, 0, i)
+}

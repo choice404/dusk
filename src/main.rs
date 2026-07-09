@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use dusk::{analyze, Analysis};
 use dusk::{desugar, driver, lexer, loader, parser, prescan};
+use dusk::sema::summary;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -19,6 +20,8 @@ fn main() -> ExitCode {
         "load" => cmd_load(args.get(1)),
         "desugar" => cmd_desugar(args.get(1)),
         "check" => cmd_check(args.get(1)),
+        "mono" => cmd_mono(args.get(1)),
+        "esc" => cmd_esc(args.get(1)),
         "build" => cmd_build(args.get(1)),
         "run" => cmd_run(args.get(1), args.get(2..).unwrap_or(&[])),
         "version" | "--version" | "-V" => {
@@ -201,6 +204,45 @@ fn cmd_check(path: Option<&String>) -> ExitCode {
     }
 }
 
+/// Checks a source file and dumps the monomorphized ground AST when clean.
+fn cmd_mono(path: Option<&String>) -> ExitCode {
+    let Some((path, _)) = read_src(path, "mono") else {
+        return ExitCode::FAILURE;
+    };
+    let (analysis, errs) = analyze(&path);
+    for e in &errs {
+        eprintln!("{e}");
+    }
+    if errs.is_empty() {
+        if let Some(analysis) = analysis {
+            println!("{}", parser::render_module(&analysis.ground_module()));
+            return ExitCode::SUCCESS;
+        }
+    }
+    ExitCode::FAILURE
+}
+
+/// Loads and desugars a source file, then dumps the escape summary oracle.
+fn cmd_esc(path: Option<&String>) -> ExitCode {
+    let Some(path) = required_path(path, "esc") else {
+        return ExitCode::FAILURE;
+    };
+    let prog = loader::load(&path);
+    for e in &prog.errors {
+        eprintln!("{e}");
+    }
+    let Some(module) = &prog.module else {
+        return ExitCode::FAILURE;
+    };
+    if !prog.errors.is_empty() {
+        return ExitCode::FAILURE;
+    }
+    let desugared = desugar::run(module);
+    let escape = summary::compute(&desugared);
+    println!("{}", summary::render_escape_info(&escape));
+    ExitCode::SUCCESS
+}
+
 /// Runs the front end. Prints diagnostics; returns the checked program only when
 /// clean, so the build path has both the module and its mutable-tuple table.
 fn front_end(path: &str) -> Option<Analysis> {
@@ -310,6 +352,8 @@ fn print_help() {
     println!("  dusk load <file>     load imports, dump the merged AST");
     println!("  dusk desugar <file>  load + desugar, dump the AST");
     println!("  dusk check <file>    lex + parse + resolve + typecheck");
+    println!("  dusk mono <file>     check + dump the monomorphized AST");
+    println!("  dusk esc <file>      dump the escape summary oracle");
     println!("  dusk build <file>    compile to a native binary");
     println!("  dusk run <file>      compile and run");
     println!("  dusk version         print version");

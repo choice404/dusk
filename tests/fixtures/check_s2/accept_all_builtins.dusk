@@ -1,0 +1,56 @@
+@paradigm functional
+@import std.async.future
+@import std.async.loop
+
+async func a() -> int32 {
+  return 0
+}
+
+func main() -> int32 {
+  print("a")
+  println("b")
+  printerr("c")
+  n := sizeof(int64)
+  p: *int64 = alloc(1)
+  free(p)
+  raw: *raw int8 = alloc_bytes(n)
+  raw2 := ptr_add(raw, 1)
+  debug_free(raw2)
+  leak := debug_leaks()
+  doubles := debug_double_frees()
+  dbg := debug_alloc(8)
+  debug_free(dbg)
+  xs: int64[3] = [1, 2, 3]
+  ys := map(xs[0..3], lambda (x: int64) -> int64 { return x + 1 })
+  zs := filter(ys, lambda (x: int64) -> bool { return x > 1 })
+  r := reduce(zs, lambda (a: int64, b: int64) -> int64 { return a + b })
+  f := fold(zs, 0, lambda (a: int64, b: int64) -> int64 { return a + b })
+  foreach(zs, lambda (x: int64) -> void { println(x) })
+  data, e1 := read_file("/tmp/nope")
+  e1.ignore()
+  e2 := write_file("/tmp/nope", data)
+  e2.ignore()
+  line, e3 := read_line()
+  e3.ignore()
+  all, e4 := read_all()
+  e4.ignore()
+  pf, e5 := parse_float("1.5")
+  e5.ignore()
+  cs := cstr(line)
+  m := move(all)
+  t, e6 := spawn(lambda () -> void { println("thread") })
+  e6.ignore()
+  e7 := join(t)
+  e7.ignore()
+  e8 := submit(lambda () -> void { println("task") })
+  e8.ignore()
+  le := loop_init()
+  le.ignore()
+  ar := async_run(a())
+  loop_free()
+  println(leak + doubles + r + f + ar)
+  println(pf)
+  println(cs)
+  println(m)
+  return 0
+}

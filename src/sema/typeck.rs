@@ -1148,7 +1148,9 @@ impl TypeChecker {
         if let Some(pending) = self.err_binds.pop() {
             if !self.types_only {
                 let mut pending: Vec<(String, Span)> = pending.into_iter().collect();
-                pending.sort_by_key(|(_, s)| s.lo);
+                pending.sort_by(|(an, aspan), (bn, bspan)| {
+                    aspan.lo.cmp(&bspan.lo).then(an.cmp(bn))
+                });
                 for (name, span) in pending {
                     self.err(
                         format!(

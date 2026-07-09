@@ -16,6 +16,7 @@
 @import home
 @import privatize
 @import loadfold
+@import paradigm
 
 export struct Program {
     module: *Ast,
@@ -236,6 +237,15 @@ func parse_file(path: string, errors: *Vector<string>) -> ParsedFile {
         vec_push(errors, render_located_string(path, s.text, s.len, vec_get(parse_errs, j)))
         ok = false
         j = j + 1
+    }
+    if ok {
+        paradigm_errs: *Vector<SpanDiagnostic> = paradigm_check(a)
+        mut k: int64 = 0
+        while k < vec_len(paradigm_errs) {
+            vec_push(errors, render_file_diag(path, s.text, s.len, vec_get(paradigm_errs, k)))
+            ok = false
+            k = k + 1
+        }
     }
     return ParsedFile { ok: ok, ast: a, src: s }
 }

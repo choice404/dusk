@@ -203,3 +203,152 @@ merge itself, and the span rebasing described above, before any one file's own
 parsed shape is the suspect, and `desugar` localizes the monadic `do` rewrite
 on top of an already agreed merge, before semantic analysis or code generation
 can hide the source.
+
+## The Mono and Escape Dumps
+
+`dusk mono <file>` runs the full front end, load, desugar, and semantic
+analysis, and on a clean result prints the ground module, the one
+monomorphization produced, through the same renderer `parse` and `load` use.
+
+```text
+{render_module(&analysis.ground_module())}
+```
+
+Ground here means every generic is gone: mono has already expanded each
+distinct type argument set to its own concrete copy and given that copy a
+mangled name, so a call the source spells `id<int64>` prints as a call to
+whatever mangled name mono picked for that instantiation, and the mangled name
+is the name, with no unmangling step anywhere in the dump. `mono` diverges
+from `parse`, `load`, and `desugar` in one respect worth stating plainly: it
+only has a module to print when the front end is clean. A diagnostic from
+resolve, typeck, or monomorphization writes to stderr the same way `check`'s
+does, but stdout stays empty and the process exits non zero; there is no
+ground module to show for a program the checker rejected, since monomorphizing
+a rejected module never happens.
+
+The mono dump is the handoff point between semantic analysis and code
+generation. Two compilers that already agree on `check`'s verdict agree only
+that they accept or reject the same programs. A byte identical `mono` dump
+goes further: it proves that what codegen would actually receive as input, the
+concrete, fully monomorphized tree with every mangled name resolved, is one
+and the same, before either compiler's code generator is trusted at all.
+
+`dusk esc <file>` loads and desugars a file the way `desugar` does, then runs
+the interprocedural escape summary pass over the desugared module and prints
+its result. Escape summaries are compute only data, an oracle for the flow
+across call boundaries that typeck's ownership and escape enforcement
+consults at every call site, not a stage that reports its own diagnostics, so
+`esc` prints unconditionally once loading and desugaring succeed and fails the
+same way `load` and `desugar` fail when a source file itself is unclean.
+
+```text
+{render_escape_info(&summary::compute(&desugared_module))}
+```
+
+The dump is one line per fact, four kinds of line: a `fn` line for the
+summary computed for every free function, a `method` line for the summary
+computed for every impl method, a `lambda` line for a fact keyed by a lambda
+literal's own span, and a `store` line for one direct, frame local store the
+walk found.
+
+```text
+fn {name} returns_alias={mask} reads_through={mask} sinks={mask} collect_sinks={mask} flows=[{(i,j)},...]
+method {recv}#{name} returns_alias={mask} reads_through={mask} sinks={mask} collect_sinks={mask} flows=[{(i,j)},...]
+lambda {lo}:{hi} {table}={value}
+store {lo}:{hi} {param_index}
+```
+
+Every kind sorts before printing, so a hash map's iteration order never
+reaches the page: `fn` lines sort by function name, `method` lines by
+`(receiver, name)`, the four lambda tables interleave into one list and sort
+by `(span.lo, span.hi, table name)`, and `store` lines come out of the walk
+that builds them already sorted by `(span.lo, span.hi, param index)`, so
+render adds no sort of its own there.
+
+A `{mask}` is a `ParamSet`, a bitmask over parameter indices backed by a
+`u64`, printed with lowercase hex and a `0x` prefix, `0x0` for the empty set.
+A function with more than 64 parameters is beyond any real program the
+analysis is built for, so an index past that bound saturates the set to its
+top rather than silently dropping it: the mask overstates the relation
+instead of understating it, which is the direction that keeps the analysis
+sound. A saturated mask prints as `0xffffffffffffffff`, every bit set. A
+`flows` field is a list of `(i,j)` pairs, parameter `i`'s view flowing into
+parameter `j`'s place, sorted and deduplicated before printing. The four
+lambda table names, `lambda_returns`, `lambda_sinks`, `lambda_collect_sinks`,
+and `lambda_capture_flows`, are the literal name of the table a lambda's fact
+belongs to; a `lambda_capture_flows` value is a list of `(param_index,
+capture_name)` pairs in place of a mask, since a capture flow is keyed by the
+outer variable's own name rather than by a parameter index alone.
+
+## The `check` Differential Contract
+
+`check` produces no dump: a clean run prints `ok: {path}` to stdout and
+nothing else, and a rejected program prints nothing to stdout and its
+diagnostics to stderr. `mono` shares that same empty stdout on a rejected
+program, but `tools/differential.sh` still runs a plain byte for byte stdout
+comparison for `mono`, the same rule every other dump command gets; on a
+rejected program that comparison is trivially satisfied, since both
+compilers' stdout is empty, and the only thing actually gated on a `mono`
+divergence is the shared exit code check every command in the sweep runs
+first. `check` gets a contract of its own, narrower than the plain byte for
+byte rule, built specifically around the fact that its only output, once a
+program is rejected, lives in stderr rather than on stdout.
+
+The verdict is the hard gate: both compilers must exit zero, or both must
+exit non zero, on the same input, every time. A verdict mismatch is a
+divergence and stops the sweep outright.
+
+When both compilers accept a program, stdout is compared byte for byte the
+same way a dump's stdout is, `ok: {path}` against `ok: {path}`. When both
+compilers reject a program, the two stderr streams are not compared byte for
+byte, because diagnostic wording is not frozen: a message can be reworded,
+reordered, or improved in either compiler without that change meaning
+anything went wrong. What has to agree is where the checker stopped and on
+what kind of problem, not how it phrased the sentence about it. The sweep
+extracts a `{path}: {line}:` prefix from the first `error:` line in each
+compiler's stderr and requires the two prefixes to match; a mismatch here is
+a divergence and stops the sweep the same as a verdict mismatch. The full
+`(path, line)` multiset across every diagnostic in each stderr is also
+compared, but a mismatch there prints only an `advisory:` line and does not
+fail the sweep, since a diagnostic one compiler reports past the first
+already agreed error, and the other does not, is a difference in how far each
+checker kept going after the first failure, not a difference in what it found
+wrong first.
+
+The reasoning matches the reasoning behind never diffing diagnostic text
+elsewhere in this project: a diagnostic's location and its pass or fail
+verdict are semantic, part of what the language actually promises a program
+means, while its exact wording is not, and freezing the wording would punish
+making an error message clearer later. Gating on the location prefix and the
+verdict, and only advising on the rest, lets two compilers go on disagreeing
+about phrasing forever while still proving they agree on the only two facts
+that matter: whether a program is accepted, and if not, the first place it
+goes wrong.
+
+## The Sema Corpus
+
+`tests/sema_corpus/` is a fixed corpus of `.dusk` programs, one file per
+case, split into subdirectories, `summary/`, `typeck/`, and `mono/` at the
+time of writing, each aimed at one part of semantic analysis, alongside a
+single `manifest.tsv` recording what `dusk check` does to every file in the
+corpus.
+
+The manifest is three tab separated columns, one row per file, in the
+corpus's own sorted path order:
+
+```text
+{path}\t{exit}\t{first_diag_prefix}
+```
+
+`{path}` is the file's path relative to the repository root. `{exit}` is the
+exit code `dusk check` produced for that file, `0` or `1`. `{first_diag_prefix}`
+is the same `{path}: {line}:` prefix the `check` differential contract gates
+on above, taken from the first `error:` line in that run's stderr; a file
+that exits `0` has no such line, so its third column is empty.
+
+The manifest is generated, never hand edited: `tools/sema_manifest.sh
+<binary>` runs `<binary> check` over every file in the corpus and rewrites
+`manifest.tsv` from scratch. Adding a case, or changing an existing case's
+expected outcome on purpose, goes through the script, not a manual edit to
+the tsv; nothing reads a hand edited row as authoritative, and the next run
+of the script overwrites it anyway, so a hand edit never actually holds.

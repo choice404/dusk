@@ -217,6 +217,89 @@ pub fn compute(module: &Module) -> EscapeInfo {
     }
 }
 
+/// Renders the escape-analysis oracle in a stable line-oriented format.
+pub fn render_escape_info(info: &EscapeInfo) -> String {
+    let mut lines = Vec::new();
+
+    let mut fns: Vec<_> = info.fns.iter().collect();
+    fns.sort_by_key(|(name, _)| *name);
+    for (name, summary) in fns {
+        lines.push(format!("fn {name} {}", render_summary(summary)));
+    }
+
+    let mut methods: Vec<_> = info.method_summaries.iter().collect();
+    methods.sort_by(|((ar, an), _), ((br, bn), _)| ar.cmp(br).then(an.cmp(bn)));
+    for ((recv, name), summary) in methods {
+        lines.push(format!("method {recv}#{name} {}", render_summary(summary)));
+    }
+
+    let mut lambdas = Vec::new();
+    for (span, ps) in &info.lambda_returns {
+        lambdas.push((span.lo, span.hi, "lambda_returns", render_mask(*ps)));
+    }
+    for (span, ps) in &info.lambda_sinks {
+        lambdas.push((span.lo, span.hi, "lambda_sinks", render_mask(*ps)));
+    }
+    for (span, ps) in &info.lambda_collect_sinks {
+        lambdas.push((span.lo, span.hi, "lambda_collect_sinks", render_mask(*ps)));
+    }
+    for (span, flows) in &info.lambda_capture_flows {
+        lambdas.push((
+            span.lo,
+            span.hi,
+            "lambda_capture_flows",
+            render_capture_flows(flows),
+        ));
+    }
+    lambdas.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(b.2)));
+    for (lo, hi, table, value) in lambdas {
+        lines.push(format!("lambda {lo}:{hi} {table}={value}"));
+    }
+
+    for (span, j) in &info.frame_stores {
+        lines.push(format!("store {}:{} {j}", span.lo, span.hi));
+    }
+
+    lines.join("\n")
+}
+
+fn render_summary(summary: &EscapeSummary) -> String {
+    format!(
+        "returns_alias={} reads_through={} sinks={} collect_sinks={} flows={}",
+        render_mask(summary.returns_alias),
+        render_mask(summary.reads_through),
+        render_mask(summary.sinks),
+        render_mask(summary.collect_sinks),
+        render_flows(&summary.flows_into)
+    )
+}
+
+fn render_mask(ps: ParamSet) -> String {
+    format!("{:#x}", ps.0)
+}
+
+fn render_flows(flows: &[(u8, u8)]) -> String {
+    let mut flows = flows.to_vec();
+    flows.sort_unstable();
+    flows.dedup();
+    let parts: Vec<String> = flows
+        .iter()
+        .map(|(i, j)| format!("({i},{j})"))
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn render_capture_flows(flows: &[(u8, String)]) -> String {
+    let mut flows = flows.to_vec();
+    flows.sort();
+    flows.dedup();
+    let parts: Vec<String> = flows
+        .iter()
+        .map(|(i, name)| format!("({i},{name})"))
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
 /// A method posed as a plain function: the by-pointer receiver `self` prepended
 /// as a leading parameter of the impl's type, so the summary walk indexes it as
 /// parameter 0 and the declared parameters follow at 1, 2, .... Codegen lowers a

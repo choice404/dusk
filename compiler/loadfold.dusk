@@ -10,13 +10,6 @@
 @import ast
 @import diag
 
-export struct FileSrc {
-    path: string,
-    base: int64,
-    src: string,
-    len: int64,
-}
-
 func copy_name(dst: *Ast, src: *Ast, id: int64) -> int64 {
     if id < 0 {
         return -1
@@ -637,34 +630,7 @@ func private_msg(leaf: string, prefix: string) -> string {
 }
 
 func render_global_diag(files: *Vector<FileSrc>, lo: int64, msg: string) -> string {
-    mut i: int64 = vec_len(files) - 1
-    while i >= 0 {
-        f: FileSrc = vec_get(files, i)
-        if lo >= f.base {
-            local: int64 = lo - f.base
-            line, col := line_col(f.src, f.len, local)
-            b: *StringBuilder = alloc(sb_new())
-            sb_push(b, f.path)
-            sb_push_char(b, 58)
-            sb_push_int(b, line)
-            sb_push_char(b, 58)
-            sb_push_int(b, col)
-            sb_push(b, ": error: ")
-            sb_push(b, msg)
-            out: string = substring(sb_cstr(b), 0, sb_size(b))
-            sb_free(b)
-            free(b)
-            return out
-        }
-        i = i - 1
-    }
-    b2: *StringBuilder = alloc(sb_new())
-    sb_push(b2, "error: ")
-    sb_push(b2, msg)
-    out2: string = substring(sb_cstr(b2), 0, sb_size(b2))
-    sb_free(b2)
-    free(b2)
-    return out2
+    return render_diag(files, span_diag(lo, lo, msg))
 }
 
 func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {

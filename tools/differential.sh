@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse|load|desugar>" >&2
+    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse|load|desugar|check|mono>" >&2
 }
 
 if [[ $# -ne 3 ]]; then
@@ -25,10 +25,10 @@ if [[ ! -x "$binary_b" ]]; then
 fi
 
 case "$cmd" in
-    lex | scan | parse | load | desugar) ;;
+    lex | scan | parse | load | desugar | check | mono) ;;
     *)
         usage
-        echo "differential: command must be lex, scan, parse, load, or desugar" >&2
+        echo "differential: command must be lex, scan, parse, load, desugar, check, or mono" >&2
         exit 2
         ;;
 esac
@@ -75,13 +75,25 @@ first_diff_line() {
     fi
 }
 
+first_diag_header() {
+    local stderr_path=$1
+
+    sed -nE 's/^(.+): ([0-9]+):[0-9]+: error:.*/\1: \2:/p' "$stderr_path" | head -n 1
+}
+
+diag_header_multiset() {
+    local stderr_path=$1
+    local out_path=$2
+
+    sed -nE 's/^(.+): ([0-9]+):[0-9]+: error:.*/\1: \2:/p' "$stderr_path" | sort >"$out_path"
+}
+
 count=0
 skipped=0
 while IFS= read -r -d '' file; do
-    # The per-file paradigm gate lands in the dusk compiler with the sema
-    # port; until then stage0 rejects these at load while dusk1 merges them,
-    # so the load and desugar sweeps skip the known paradigm-gated files.
-    if [[ "$cmd" == "load" || "$cmd" == "desugar" ]]; then
+    # check and mono still exclude the known paradigm-gated fixture until dusk1
+    # carries the full sema verdicts those modes compare.
+    if [[ "$cmd" == "check" || "$cmd" == "mono" ]]; then
         case "$file" in
             examples/implgate_fail.dusk)
                 skipped=$((skipped + 1))
@@ -107,16 +119,41 @@ while IFS= read -r -d '' file; do
         status_b=$?
     fi
 
-    if ! cmp -s "$out_a" "$out_b"; then
-        echo "divergence: $file" >&2
-        echo "first diff: $(first_diff_line "$out_a" "$out_b")" >&2
-        exit 1
-    fi
-
     if [[ "$status_a" -ne "$status_b" ]]; then
         echo "divergence: $file" >&2
         echo "exit code: $binary_a returned $status_a, $binary_b returned $status_b" >&2
         exit 1
+    fi
+
+    if [[ "$cmd" == "check" ]]; then
+        if [[ "$status_a" -eq 0 ]]; then
+            if ! cmp -s "$out_a" "$out_b"; then
+                echo "divergence: $file" >&2
+                echo "first diff: $(first_diff_line "$out_a" "$out_b")" >&2
+                exit 1
+            fi
+        else
+            primary_a=$(first_diag_header "$err_a")
+            primary_b=$(first_diag_header "$err_b")
+            if [[ "$primary_a" != "$primary_b" ]]; then
+                echo "divergence: $file" >&2
+                echo "primary diagnostic: $binary_a emitted '$primary_a', $binary_b emitted '$primary_b'" >&2
+                exit 1
+            fi
+            headers_a="$tmp/a.headers"
+            headers_b="$tmp/b.headers"
+            diag_header_multiset "$err_a" "$headers_a"
+            diag_header_multiset "$err_b" "$headers_b"
+            if ! cmp -s "$headers_a" "$headers_b"; then
+                echo "advisory: header multiset differs: $file" >&2
+            fi
+        fi
+    else
+        if ! cmp -s "$out_a" "$out_b"; then
+            echo "divergence: $file" >&2
+            echo "first diff: $(first_diff_line "$out_a" "$out_b")" >&2
+            exit 1
+        fi
     fi
 
     count=$((count + 1))

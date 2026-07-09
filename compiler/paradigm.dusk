@@ -1,0 +1,316 @@
+// paradigm: per-file paradigm gate. Builtins and paradigm-specific syntax are
+// checked against the file's own @paradigm directives before imports are merged.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import diag
+
+struct Gate {
+    functional: bool,
+    procedural: bool,
+    oop: bool,
+    user_fns: *Map<int64>,
+    errors: *Vector<SpanDiagnostic>,
+}
+
+func declares(a: *Ast, name: string) -> bool {
+    ps: *Vector<int64> = (*a).paradigms
+    mut i: int64 = 0
+    while i < vec_len(ps) {
+        if str_eq(ast_name(a, vec_get(ps, i)), name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func collect_user_fns(a: *Ast) -> *Map<int64> {
+    fns: *Map<int64> = alloc(map_new())
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            map_put(fns, ast_name(a, f.name), 1)
+        }
+        i = i + 1
+    }
+    return fns
+}
+
+func gate_new(a: *Ast) -> *Gate {
+    functional: bool = declares(a, "functional")
+    oop: bool = declares(a, "oop")
+    mut procedural: bool = declares(a, "procedural")
+    ps: *Vector<int64> = (*a).paradigms
+    if vec_len(ps) == 0 {
+        procedural = true
+    }
+    errs: *Vector<SpanDiagnostic> = alloc(vec_new())
+    return alloc(Gate {
+        functional: functional,
+        procedural: procedural,
+        oop: oop,
+        user_fns: collect_user_fns(a),
+        errors: errs,
+    })
+}
+
+func requires_msg(what: string, paradigm: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, what)
+    sb_push(b, " requires the ")
+    sb_push(b, paradigm)
+    sb_push(b, " paradigm; add '@paradigm ")
+    sb_push(b, paradigm)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func need_functional(g: *Gate, what: string, lo: int64, hi: int64) -> void {
+    if !(*g).functional {
+        vec_push((*g).errors, span_diag(lo, hi, requires_msg(what, "functional")))
+    }
+}
+
+func need_procedural(g: *Gate, what: string, lo: int64, hi: int64) -> void {
+    if !(*g).procedural {
+        vec_push((*g).errors, span_diag(lo, hi, requires_msg(what, "procedural")))
+    }
+}
+
+func need_oop(g: *Gate, what: string, lo: int64, hi: int64) -> void {
+    if !(*g).oop {
+        vec_push((*g).errors, span_diag(lo, hi, requires_msg(what, "oop")))
+    }
+}
+
+func named_what(name: string, suffix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "the '")
+    sb_push(b, name)
+    sb_push(b, "' ")
+    sb_push(b, suffix)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func impl_what(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "the impl of '")
+    sb_push(b, name)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func is_functional_builtin(name: string) -> bool {
+    if str_eq(name, "map") { return true }
+    if str_eq(name, "filter") { return true }
+    if str_eq(name, "reduce") { return true }
+    if str_eq(name, "fold") { return true }
+    if str_eq(name, "foreach") { return true }
+    return false
+}
+
+func gate_block(g: *Gate, a: *Ast, id: int64) -> void {
+    b: BlockNode = vec_get((*a).blocks, id)
+    mut i: int64 = 0
+    while i < b.len {
+        gate_stmt(g, a, vec_get((*a).kids, b.off + i))
+        i = i + 1
+    }
+}
+
+func gate_match(g: *Gate, a: *Ast, scrut: int64, off: int64, len: int64) -> void {
+    gate_expr(g, a, scrut)
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        gate_block(g, a, arm.body)
+        i = i + 1
+    }
+}
+
+func gate_stmt(g: *Gate, a: *Ast, id: int64) -> void {
+    s: StmtNode = vec_get((*a).stmts, id)
+    if s.kind == sk_let() {
+        value: ExprNode = vec_get((*a).exprs, s.c)
+        if (s.d & 1) != 0 {
+            need_procedural(g, "the 'mut' keyword", value.lo, value.hi)
+        }
+        gate_expr(g, a, s.c)
+    } else if s.kind == sk_assign() {
+        gate_expr(g, a, s.a)
+        gate_expr(g, a, s.b)
+    } else if s.kind == sk_assign_op() {
+        gate_expr(g, a, s.b)
+        gate_expr(g, a, s.c)
+    } else if s.kind == sk_return() {
+        if s.a >= 0 {
+            gate_expr(g, a, s.a)
+        }
+    } else if s.kind == sk_defer() {
+        gate_expr(g, a, s.a)
+    } else if s.kind == sk_if() {
+        gate_expr(g, a, s.a)
+        gate_block(g, a, s.b)
+        if s.c >= 0 {
+            gate_block(g, a, s.c)
+        }
+    } else if s.kind == sk_while() {
+        cond: ExprNode = vec_get((*a).exprs, s.a)
+        if s.c != 0 {
+            need_procedural(g, "the 'do while' loop", cond.lo, cond.hi)
+        } else {
+            need_procedural(g, "the 'while' loop", cond.lo, cond.hi)
+        }
+        gate_expr(g, a, s.a)
+        gate_block(g, a, s.b)
+    } else if s.kind == sk_for() {
+        iter: ExprNode = vec_get((*a).exprs, s.b)
+        need_procedural(g, "the 'for' loop", iter.lo, iter.hi)
+        gate_expr(g, a, s.b)
+        gate_block(g, a, s.c)
+    } else if s.kind == sk_match() {
+        gate_match(g, a, s.a, s.b, s.c)
+    } else {
+        gate_expr(g, a, s.a)
+    }
+}
+
+func gate_expr_slice(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
+    mut i: int64 = 0
+    while i < len {
+        gate_expr(g, a, vec_get((*a).kids, off + i))
+        i = i + 1
+    }
+}
+
+func gate_field_pairs(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
+    mut i: int64 = 0
+    while i < len {
+        gate_expr(g, a, vec_get((*a).kids, off + i + 1))
+        i = i + 2
+    }
+}
+
+func gate_do_binds(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
+    mut i: int64 = 0
+    while i < len {
+        d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, off + i))
+        gate_expr(g, a, d.expr)
+        i = i + 1
+    }
+}
+
+func gate_expr(g: *Gate, a: *Ast, id: int64) -> void {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_ident() {
+            name: string = ast_name(a, callee.a)
+            if is_functional_builtin(name) {
+                user_fns: *Map<int64> = (*g).user_fns
+                if !map_has(user_fns, name) {
+                    what: string = named_what(name, "builtin")
+                    need_functional(g, what, e.lo, e.hi)
+                    free(what)
+                }
+            }
+        }
+        gate_expr(g, a, e.a)
+        gate_expr_slice(g, a, e.b, e.c)
+    } else if e.kind == xk_do() {
+        need_functional(g, "do notation", e.lo, e.hi)
+        gate_do_binds(g, a, e.b, e.c)
+    } else if e.kind == xk_unary() {
+        gate_expr(g, a, e.b)
+    } else if e.kind == xk_binary() {
+        gate_expr(g, a, e.b)
+        gate_expr(g, a, e.c)
+    } else if e.kind == xk_index() {
+        gate_expr(g, a, e.a)
+        gate_expr(g, a, e.b)
+    } else if e.kind == xk_range() {
+        gate_expr(g, a, e.a)
+        gate_expr(g, a, e.b)
+    } else if e.kind == xk_field() {
+        gate_expr(g, a, e.a)
+    } else if e.kind == xk_tuple() {
+        gate_expr_slice(g, a, e.a, e.b)
+    } else if e.kind == xk_array() {
+        gate_expr_slice(g, a, e.a, e.b)
+    } else if e.kind == xk_struct_lit() {
+        gate_field_pairs(g, a, e.b, e.c)
+    } else if e.kind == xk_lambda() {
+        gate_block(g, a, e.d)
+    } else if e.kind == xk_match() {
+        gate_match(g, a, e.a, e.b, e.c)
+    } else if e.kind == xk_await() {
+        gate_expr(g, a, e.a)
+    } else if e.kind == xk_collect() {
+        gate_expr(g, a, e.b)
+    }
+}
+
+func gate_monads(g: *Gate, a: *Ast) -> void {
+    ms: *Vector<MonadNode> = (*a).monads
+    mut i: int64 = 0
+    while i < vec_len(ms) {
+        m: MonadNode = vec_get(ms, i)
+        what: string = named_what(ast_name(a, m.name), "monad block")
+        need_functional(g, what, m.lo, m.hi)
+        free(what)
+        i = i + 1
+    }
+}
+
+func gate_items(g: *Gate, a: *Ast) -> void {
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            gate_block(g, a, f.body)
+        } else if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            what: string = impl_what(ast_name(a, im.ty))
+            need_oop(g, what, im.lo, im.hi)
+            free(what)
+            mut j: int64 = 0
+            while j < im.methods_len {
+                mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
+                gate_block(g, a, mf.body)
+                j = j + 1
+            }
+        } else if it.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            what2: string = named_what(ast_name(a, iface.name), "interface")
+            need_oop(g, what2, 0, 0)
+            free(what2)
+        }
+        i = i + 1
+    }
+}
+
+export func paradigm_check(a: *Ast) -> *Vector<SpanDiagnostic> {
+    g: *Gate = gate_new(a)
+    gate_monads(g, a)
+    gate_items(g, a)
+    return (*g).errors
+}

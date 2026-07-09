@@ -135,11 +135,14 @@ impl Resolver {
 
     fn pop_scope(&mut self) {
         let scope = self.scopes.pop().unwrap();
-        for (name, var) in scope {
-            if var.is_let && !var.used {
-                self.errors
-                    .push(Diagnostic::new(format!("unused variable '{name}'"), var.span));
-            }
+        let mut unused: Vec<(String, Var)> = scope
+            .into_iter()
+            .filter(|(_, var)| var.is_let && !var.used)
+            .collect();
+        unused.sort_by(|(an, av), (bn, bv)| av.span.lo.cmp(&bv.span.lo).then(an.cmp(bn)));
+        for (name, var) in unused {
+            self.errors
+                .push(Diagnostic::new(format!("unused variable '{name}'"), var.span));
         }
     }
 
