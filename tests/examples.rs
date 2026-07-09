@@ -57,10 +57,7 @@ fn else_if_chain_selects_one_arm() {
     // so a full chain fires exactly one arm and a chain with no tail `else` falls
     // through silently when nothing matches. `classify` prints one line per call;
     // `grade(50)` matches no arm and prints nothing, the last line here is `C`.
-    assert_eq!(
-        run("elseif.dusk"),
-        "negative\nzero\nsmall\nbig\nA\nB\nC\n"
-    );
+    assert_eq!(run("elseif.dusk"), "negative\nzero\nsmall\nbig\nA\nB\nC\n");
 }
 
 #[test]
@@ -100,7 +97,11 @@ fn main_argc_argv_builds_slice() {
         .args(["run", &path, "a", "b"])
         .output()
         .expect("spawn dusk");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "3\n");
 }
 
@@ -122,7 +123,10 @@ fn bare_call_to_imported_private_name_is_rejected() {
     assert!(err.contains("undefined name 'helper'"), "{err}");
     // The diagnostic carries a caret under the offending source line, not just
     // a line:col header.
-    assert!(err.contains("println(helper())"), "missing source line: {err}");
+    assert!(
+        err.contains("println(helper())"),
+        "missing source line: {err}"
+    );
     assert!(err.contains("^~~~~~"), "missing caret run: {err}");
 }
 
@@ -147,7 +151,10 @@ fn cross_thread_use_after_free_faults() {
     // The free is ordered before the dereference by an atomic flag, so the
     // generation fault is deterministic, not a lucky race.
     let (out, err, ok) = run_raw("uafthread.dusk");
-    assert!(!ok, "the thread's dereference of the freed pointer must fault");
+    assert!(
+        !ok,
+        "the thread's dereference of the freed pointer must fault"
+    );
     assert_eq!(out, "freeing\n");
     assert!(err.contains("freed or stale pointer"), "{err}");
 }
@@ -199,7 +206,10 @@ fn dereferencing_a_drained_recv_placeholder_faults_by_name() {
 fn freeing_a_held_mutex_faults() {
     let (out, err, ok) = run_raw("mutexheld.dusk");
     assert!(!ok, "freeing a held mutex must fault");
-    assert_eq!(out, "locking\n", "the print before the free survives the abort");
+    assert_eq!(
+        out, "locking\n",
+        "the print before the free survives the abort"
+    );
     assert!(err.contains("mutex freed while held"), "{err}");
 }
 
@@ -207,7 +217,10 @@ fn freeing_a_held_mutex_faults() {
 fn unlocking_an_unheld_mutex_faults() {
     let (out, err, ok) = run_raw("mutexunlock.dusk");
     assert!(!ok, "unlocking an unheld mutex must fault");
-    assert_eq!(out, "unlocking\n", "the print before the unlock survives the abort");
+    assert_eq!(
+        out, "unlocking\n",
+        "the print before the unlock survives the abort"
+    );
     assert!(err.contains("does not hold it"), "{err}");
 }
 
@@ -215,15 +228,24 @@ fn unlocking_an_unheld_mutex_faults() {
 fn pool_shutdown_from_a_pool_task_faults() {
     let (out, err, ok) = run_raw("poolself.dusk");
     assert!(!ok, "a pool task shutting the pool down must fault");
-    assert_eq!(out, "submitting\n", "the print before the drain survives the abort");
-    assert!(err.contains("cannot shut down from inside a pool task"), "{err}");
+    assert_eq!(
+        out, "submitting\n",
+        "the print before the drain survives the abort"
+    );
+    assert!(
+        err.contains("cannot shut down from inside a pool task"),
+        "{err}"
+    );
 }
 
 #[test]
 fn freeing_a_condvar_with_a_waiter_faults() {
     let (out, err, ok) = run_raw("condfree.dusk");
     assert!(!ok, "freeing a condvar with a parked waiter must fault");
-    assert_eq!(out, "freeing\n", "the print before the free survives the abort");
+    assert_eq!(
+        out, "freeing\n",
+        "the print before the free survives the abort"
+    );
     assert!(err.contains("condvar freed while threads wait"), "{err}");
 }
 
@@ -231,7 +253,10 @@ fn freeing_a_condvar_with_a_waiter_faults() {
 fn awaiting_a_consumed_future_faults() {
     let (out, err, ok) = run_raw("doubleawait.dusk");
     assert!(!ok, "the second await of one future must fault");
-    assert_eq!(out, "1\n", "the first await's value prints before the fault");
+    assert_eq!(
+        out, "1\n",
+        "the first await's value prints before the fault"
+    );
     assert!(err.contains("fatal: use of a dead future"), "{err}");
 }
 
@@ -239,51 +264,84 @@ fn awaiting_a_consumed_future_faults() {
 fn awaiting_off_the_loop_thread_faults() {
     let (_, err, ok) = run_raw("offthreadawait.dusk");
     assert!(!ok, "an await from a spawned thread must fault");
-    assert!(err.contains("fatal: the event loop was touched off its thread"), "{err}");
+    assert!(
+        err.contains("fatal: the event loop was touched off its thread"),
+        "{err}"
+    );
 }
 
 #[test]
 fn an_unfinishable_await_faults_instead_of_hanging() {
     let (_, err, ok) = run_raw("idledeadlock.dusk");
     assert!(!ok, "an await nothing can complete must fault");
-    assert!(err.contains("fatal: the event loop is idle but work is still pending"), "{err}");
+    assert!(
+        err.contains("fatal: the event loop is idle but work is still pending"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_completer_exiting_reawakens_the_deadlock_gate() {
     let (_, err, ok) = run_raw("threadexitdeadlock.dusk");
-    assert!(!ok, "the await must fault once its last possible completer exits");
-    assert!(err.contains("fatal: the event loop is idle but work is still pending"), "{err}");
+    assert!(
+        !ok,
+        "the await must fault once its last possible completer exits"
+    );
+    assert!(
+        err.contains("fatal: the event loop is idle but work is still pending"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_future_before_loop_init_faults() {
     let (_, err, ok) = run_raw("noloop.dusk");
     assert!(!ok, "minting a future before loop_init must fault");
-    assert!(err.contains("fatal: the event loop is not running"), "{err}");
+    assert!(
+        err.contains("fatal: the event loop is not running"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_reactor_stopped_with_an_armed_watch_faults() {
     let (out, err, ok) = run_raw("watchleak.dusk");
-    assert!(!ok, "stopping the reactor with a watch still armed must fault");
-    assert_eq!(out, "await timed out\n0\n", "the timeout prints before the fault");
-    assert!(err.contains("fatal: the reactor stopped while a watch is still armed"), "{err}");
+    assert!(
+        !ok,
+        "stopping the reactor with a watch still armed must fault"
+    );
+    assert_eq!(
+        out, "await timed out\n0\n",
+        "the timeout prints before the fault"
+    );
+    assert!(
+        err.contains("fatal: the reactor stopped while a watch is still armed"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_second_watch_on_an_armed_fd_faults() {
     let (out, err, ok) = run_raw("doublewatch.dusk");
     assert!(!ok, "a second watch on an already armed fd must fault");
-    assert_eq!(out, "future is pending\n0\n", "the pending poll prints before the fault");
-    assert!(err.contains("fatal: the file descriptor already has an armed watch"), "{err}");
+    assert_eq!(
+        out, "future is pending\n0\n",
+        "the pending poll prints before the fault"
+    );
+    assert!(
+        err.contains("fatal: the file descriptor already has an armed watch"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_watch_on_an_invalid_fd_faults() {
     let (out, err, ok) = run_raw("badfdwatch.dusk");
     assert!(!ok, "arming a watch on an invalid fd must fault");
-    assert_eq!(out, "arming\n", "the print before the arm survives the fault");
+    assert_eq!(
+        out, "arming\n",
+        "the print before the arm survives the fault"
+    );
     assert!(
         err.contains("fatal: a readiness watch was armed on an invalid file descriptor"),
         "{err}"
@@ -366,7 +424,10 @@ fn array_index_out_of_bounds_faults() {
 fn stale_free_of_reused_block_faults() {
     let (out, err, ok) = run_raw("stalefree.dusk");
     assert!(!ok, "freeing a stale pointer to a reused block must fault");
-    assert_eq!(out, "2\n", "q's valid deref prints before the stale free faults");
+    assert_eq!(
+        out, "2\n",
+        "q's valid deref prints before the stale free faults"
+    );
     assert!(err.contains("freed or stale pointer"), "{err}");
 }
 
@@ -405,13 +466,19 @@ fn an_inclusive_slice_past_the_end_faults() {
 #[test]
 fn bitwise_and_across_mismatched_widths_is_rejected() {
     let err = check_fails("bitmix.dusk");
-    assert!(err.contains("'&' mixes int32 and int64; match the widths"), "{err}");
+    assert!(
+        err.contains("'&' mixes int32 and int64; match the widths"),
+        "{err}"
+    );
 }
 
 #[test]
 fn bitwise_and_on_bools_is_rejected() {
     let err = check_fails("boolbit.dusk");
-    assert!(err.contains("bitwise operators need integer operands"), "{err}");
+    assert!(
+        err.contains("bitwise operators need integer operands"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -429,19 +496,28 @@ fn a_constant_negative_shift_amount_is_rejected() {
 #[test]
 fn a_constant_oversize_shift_amount_is_rejected() {
     let err = check_fails("shiftwide.dusk");
-    assert!(err.contains("shift amount 32 is out of range for int32"), "{err}");
+    assert!(
+        err.contains("shift amount 32 is out of range for int32"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_constant_negative_integer_exponent_is_rejected() {
     let err = check_fails("powneg.dusk");
-    assert!(err.contains("'**' on integers needs a nonnegative exponent"), "{err}");
+    assert!(
+        err.contains("'**' on integers needs a nonnegative exponent"),
+        "{err}"
+    );
 }
 
 #[test]
 fn pow_mixing_int_and_float_is_rejected() {
     let err = check_fails("powmix.dusk");
-    assert!(err.contains("'**' needs two operands of the same numeric type"), "{err}");
+    assert!(
+        err.contains("'**' needs two operands of the same numeric type"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -465,7 +541,10 @@ fn incrementing_an_immutable_binding_is_rejected() {
 #[test]
 fn increment_has_no_value_to_bind() {
     let err = check_fails("incval.dusk");
-    assert!(err.contains("expected an expression, found PlusPlus"), "{err}");
+    assert!(
+        err.contains("expected an expression, found PlusPlus"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -711,7 +790,10 @@ fn a_generic_call_that_pins_the_element_rejects_a_mistyped_ctor_payload() {
     // bool where int64 belongs. The generic payload wildcards at the surface, so
     // the ground type re-check names the mismatch instead of relabeling the bool.
     let err = check_fails("enum_relabel_fail.dusk");
-    assert!(err.contains("argument 1 to 'Box.Has' has the wrong type"), "{err}");
+    assert!(
+        err.contains("argument 1 to 'Box.Has' has the wrong type"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -720,7 +802,10 @@ fn an_uninferable_enum_ctor_argument_is_rejected() {
     // reports the uninferable parameter at the call rather than laundering a silent
     // int64 default through the argument.
     let err = check_fails("enum_none_arg_fail.dusk");
-    assert!(err.contains("cannot infer the type parameter 'T' for 'take'"), "{err}");
+    assert!(
+        err.contains("cannot infer the type parameter 'T' for 'take'"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -755,7 +840,10 @@ fn a_nested_generic_ctor_payload_of_the_wrong_width_is_rejected() {
     // expected, but a declared int64 does not fit an int32 slot, so the ground type
     // re-check names the mismatch instead of letting clang fault.
     let err = check_fails("enum_nested_width_fail.dusk");
-    assert!(err.contains("argument 1 to 'Opt.Some' has the wrong type"), "{err}");
+    assert!(
+        err.contains("argument 1 to 'Opt.Some' has the wrong type"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -773,7 +861,10 @@ fn a_monad_bind_with_an_undetermined_result_element_is_rejected() {
     // element is determined. A do-chain that returns its empty source directly
     // leaves the whole element uninferable, so it is reported, not defaulted.
     let err = check_fails("monad_live_element_fail.dusk");
-    assert!(err.contains("cannot infer the type parameter 'A' for 'Evil.bind'"), "{err}");
+    assert!(
+        err.contains("cannot infer the type parameter 'A' for 'Evil.bind'"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -879,13 +970,19 @@ fn await_inside_a_match_arm_reads_the_payload_after_resume() {
 #[test]
 fn await_outside_an_async_func_is_rejected() {
     let err = check_fails("asyncawaitoutside.dusk");
-    assert!(err.contains("'await' is only legal inside an async func"), "{err}");
+    assert!(
+        err.contains("'await' is only legal inside an async func"),
+        "{err}"
+    );
 }
 
 #[test]
 fn await_mid_expression_is_rejected() {
     let err = check_fails("asyncawaitmidexpr.dusk");
-    assert!(err.contains("'await' cannot appear mid-expression"), "{err}");
+    assert!(
+        err.contains("'await' cannot appear mid-expression"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -909,7 +1006,10 @@ fn main_cannot_be_async() {
 #[test]
 fn an_async_func_cannot_take_type_parameters() {
     let err = check_fails("asyncgeneric.dusk");
-    assert!(err.contains("an async func cannot take type parameters"), "{err}");
+    assert!(
+        err.contains("an async func cannot take type parameters"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -921,7 +1021,10 @@ fn an_async_func_cannot_take_a_slice_param() {
 #[test]
 fn an_async_func_cannot_take_a_future_param() {
     let err = check_fails("asyncfutureparam.dusk");
-    assert!(err.contains("a future belongs to the event loop thread"), "{err}");
+    assert!(
+        err.contains("a future belongs to the event loop thread"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -948,7 +1051,10 @@ fn an_unused_bound_future_is_rejected() {
 #[test]
 fn a_bare_async_call_that_is_never_awaited_is_rejected() {
     let err = check_fails("asyncbaredisard.dusk");
-    assert!(err.contains("the future from 'g' is never awaited"), "{err}");
+    assert!(
+        err.contains("the future from 'g' is never awaited"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -978,7 +1084,10 @@ fn a_future_stored_but_never_awaited_is_still_dropped() {
     // futurefan stores futures in a vector, but a bare async call whose future is
     // never bound is still discarded before it can be awaited or released.
     let err = check_fails("futuredrop.dusk");
-    assert!(err.contains("the future from 'one' is never awaited"), "{err}");
+    assert!(
+        err.contains("the future from 'one' is never awaited"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1007,13 +1116,19 @@ fn a_frame_viewing_future_element_in_a_container_is_still_rejected() {
 #[test]
 fn async_run_inside_an_async_func_is_rejected() {
     let err = check_fails("asyncruninside.dusk");
-    assert!(err.contains("async_run cannot be called inside an async func"), "{err}");
+    assert!(
+        err.contains("async_run cannot be called inside an async func"),
+        "{err}"
+    );
 }
 
 #[test]
 fn async_run_of_a_bound_future_is_rejected() {
     let err = check_fails("asyncrunnondirect.dusk");
-    assert!(err.contains("async_run takes a direct call of an async func"), "{err}");
+    assert!(
+        err.contains("async_run takes a direct call of an async func"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1328,13 +1443,19 @@ fn a_mutable_tuple_slice_storage_runs_inside_an_async_body() {
 #[test]
 fn a_conditional_reassignment_to_an_escaping_tuple_is_rejected() {
     let err = check_fails("flowmerge_if_tuple.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_conditional_re_slice_of_a_local_array_is_rejected() {
     let err = check_fails("flowmerge_reslice_in_if.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1342,31 +1463,46 @@ fn a_conditional_reassignment_to_an_array_literal_slice_then_returned_is_rejecte
     // The assignment-path array-literal coercion is legal, but the may-join keeps
     // r's escape flag raised, so returning the frame-local backing is still caught.
     let err = check_fails("sliceassign_escape.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_conditional_reassignment_to_a_capturing_lambda_is_rejected() {
     let err = check_fails("flowmerge_closure_if.dusk");
-    assert!(err.contains("a closure that captures a local escapes its frame"), "{err}");
+    assert!(
+        err.contains("a closure that captures a local escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_reassignment_to_an_escaping_value_in_a_while_body_is_rejected() {
     let err = check_fails("flowmerge_while.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_reassignment_to_an_escaping_value_nested_in_two_ifs_is_rejected() {
     let err = check_fails("flowmerge_nested_if.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_reassignment_to_an_escaping_value_in_one_if_arm_is_rejected() {
     let err = check_fails("flowmerge_one_arm.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1388,37 +1524,55 @@ fn an_unconditional_reassignment_to_clean_after_a_branch_checks_ok() {
 #[test]
 fn a_struct_with_a_slice_field_viewing_a_local_is_rejected() {
     let err = check_fails("escstruct_slice_field.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_struct_field_reassigned_to_a_local_view_is_rejected() {
     let err = check_fails("escstruct_field_reassign.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_struct_with_a_closure_field_capturing_a_local_is_rejected() {
     let err = check_fails("escstruct_closure_field.dusk");
-    assert!(err.contains("a closure that captures a local escapes its frame"), "{err}");
+    assert!(
+        err.contains("a closure that captures a local escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_frame_local_struct_laundered_through_an_alias_is_rejected() {
     let err = check_fails("escstruct_via_alias.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_nested_struct_with_a_buried_local_view_is_rejected() {
     let err = check_fails("escstruct_nested.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_conditional_struct_field_store_of_a_local_view_is_rejected() {
     let err = check_fails("escstruct_branch_reassign.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1436,37 +1590,55 @@ fn a_struct_with_a_non_capturing_closure_field_runs() {
 #[test]
 fn an_enum_with_a_slice_payload_viewing_a_local_is_rejected() {
     let err = check_fails("escenum_slice_payload.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_frame_local_enum_laundered_through_a_binding_is_rejected() {
     let err = check_fails("escenum_via_binding.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_conditional_enum_reassignment_to_a_local_payload_is_rejected() {
     let err = check_fails("escenum_branch.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_fixed_array_whose_elements_view_a_local_is_rejected() {
     let err = check_fails("escarray_slice_elems.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_frame_local_array_of_slices_via_a_binding_is_rejected() {
     let err = check_fails("escarray_via_binding.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_conditional_array_reassignment_to_local_element_views_is_rejected() {
     let err = check_fails("escarray_branch.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1484,37 +1656,55 @@ fn a_fixed_array_of_param_slices_runs() {
 #[test]
 fn a_struct_field_of_enum_type_wrapping_a_local_is_rejected() {
     let err = check_fails("escdepth_struct_of_enum.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn an_enum_payload_of_enum_type_wrapping_a_local_is_rejected() {
     let err = check_fails("escdepth_enum_of_enum.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_struct_field_of_fat_array_type_viewing_a_local_is_rejected() {
     let err = check_fails("escdepth_struct_of_fatarray.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_generic_struct_field_burying_a_local_view_is_rejected() {
     let err = check_fails("escdepth_generic_box.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_nested_carrier_laundered_through_a_binding_is_rejected() {
     let err = check_fails("escdepth_via_binding.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_conditional_reassignment_of_a_nested_carrier_is_rejected() {
     let err = check_fails("escdepth_branch.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1537,31 +1727,46 @@ fn a_generic_struct_field_from_a_param_runs() {
 #[test]
 fn projecting_a_slice_field_out_of_a_local_struct_is_rejected() {
     let err = check_fails("escproj_field.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn projecting_an_element_out_of_a_local_array_of_slices_is_rejected() {
     let err = check_fails("escproj_index.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_match_arm_projecting_an_escaping_payload_is_rejected() {
     let err = check_fails("escproj_match.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_projection_placed_into_a_struct_field_is_rejected() {
     let err = check_fails("escproj_into_struct.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn returning_an_interface_value_by_value_is_rejected() {
     let err = check_fails("esciface_return.dusk");
-    assert!(err.contains("returning an interface value is not supported"), "{err}");
+    assert!(
+        err.contains("returning an interface value is not supported"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1583,13 +1788,19 @@ fn projecting_a_slice_field_out_of_a_param_backed_struct_runs() {
 #[test]
 fn indexing_a_slice_field_of_a_local_struct_is_rejected() {
     let err = check_fails("escsliceidx.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_slice_index_projection_via_a_binding_is_rejected() {
     let err = check_fails("escsliceidx_via_binding.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1772,7 +1983,10 @@ fn regression_pin_generic_do_width_mismatch_is_rejected() {
     // mono-expanded module must catch this like any other arithmetic
     // mismatch, or the miscompile is back.
     let err = check_fails("genericwidth.dusk");
-    assert!(err.contains("arithmetic mixes int32 and int64; match the widths"), "{err}");
+    assert!(
+        err.contains("arithmetic mixes int32 and int64; match the widths"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1782,7 +1996,10 @@ fn regression_pin_generic_do_annotation_element_clash_is_rejected() {
     // the `do` and reach clang unchecked. The types-only re-check must reject
     // it at `dusk check`.
     let err = check_fails("genericpin.dusk");
-    assert!(err.contains("return type does not match the function's return type"), "{err}");
+    assert!(
+        err.contains("return type does not match the function's return type"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1981,7 +2198,10 @@ fn re_slicing_a_laundered_call_result_is_rejected() {
 #[test]
 fn a_direct_store_of_a_frame_view_into_a_parameter_place_is_rejected() {
     let err = check_fails("escstore_param.dusk");
-    assert!(err.contains("stored into a place reachable through parameter"), "{err}");
+    assert!(
+        err.contains("stored into a place reachable through parameter"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -2035,7 +2255,10 @@ fn a_map_lambda_wrapping_its_element_in_a_tuple_is_rejected() {
 #[test]
 fn a_foreach_lambda_stashing_its_element_through_a_capture_is_rejected() {
     let err = check_fails("escforeach_stash.dusk");
-    assert!(err.contains("stored into a place reachable through parameter"), "{err}");
+    assert!(
+        err.contains("stored into a place reachable through parameter"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -2104,7 +2327,10 @@ fn a_helper_that_fuses_a_frame_store_and_a_channel_send_is_rejected() {
     // yet). The store-edge closure of the sink set lifts the sink to the source
     // position, so the frame view the caller supplies in that argument is caught.
     let err = check_fails("escchan_stash_send.dusk");
-    assert!(err.contains("'stash_send' sends 'local' across a channel"), "{err}");
+    assert!(
+        err.contains("'stash_send' sends 'local' across a channel"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -2117,7 +2343,11 @@ fn sending_a_polluted_pointer_through_a_direct_lambda_call_is_rejected() {
     // helper would. Single-fires: only the closure sink check names it.
     let err = check_fails("escchan_lambda.dusk");
     assert!(err.contains("'sender' sends 'c' across a channel"), "{err}");
-    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+    assert_eq!(
+        err.matches("across a channel").count(),
+        1,
+        "single diagnostic: {err}"
+    );
 }
 
 #[test]
@@ -2141,7 +2371,11 @@ fn a_polluted_pointer_through_a_lambda_reassigned_to_a_sinking_one_is_rejected()
     // the polluted argument is refused, the same reject a direct chan_send earns.
     let err = check_fails("escchan_reassign.dusk");
     assert!(err.contains("'s' sends 'c' across a channel"), "{err}");
-    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+    assert_eq!(
+        err.matches("across a channel").count(),
+        1,
+        "single diagnostic: {err}"
+    );
 }
 
 #[test]
@@ -2151,8 +2385,15 @@ fn a_polluted_pointer_through_a_lambda_in_a_struct_field_callee_is_rejected() {
     // send analysis, so the conservative send-reject fires: dusk cannot see which
     // argument it hands to a channel, so a polluted managed pointer is refused.
     let err = check_fails("escchan_field.dusk");
-    assert!(err.contains("this call may send 'c' across a channel"), "{err}");
-    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+    assert!(
+        err.contains("this call may send 'c' across a channel"),
+        "{err}"
+    );
+    assert_eq!(
+        err.matches("across a channel").count(),
+        1,
+        "single diagnostic: {err}"
+    );
 }
 
 #[test]
@@ -2168,7 +2409,11 @@ fn sending_a_polluted_receiver_through_a_method_is_rejected() {
     // view is rejected exactly as a direct chan_send(ch, c) is. Single-fires.
     let err = check_fails("escchan_method.dusk");
     assert!(err.contains("'ship' sends 'c' across a channel"), "{err}");
-    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+    assert_eq!(
+        err.matches("across a channel").count(),
+        1,
+        "single diagnostic: {err}"
+    );
 }
 
 #[test]
@@ -2242,8 +2487,15 @@ fn a_polluted_pointer_through_a_lambda_destructured_from_a_tuple_is_rejected() {
     // sourced from a tuple destructure is opaque to the send analysis, so the
     // conservative send-reject refuses the polluted managed pointer argument.
     let err = check_fails("escchan_tuple.dusk");
-    assert!(err.contains("this call may send 'c' across a channel"), "{err}");
-    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+    assert!(
+        err.contains("this call may send 'c' across a channel"),
+        "{err}"
+    );
+    assert_eq!(
+        err.matches("across a channel").count(),
+        1,
+        "single diagnostic: {err}"
+    );
 }
 
 #[test]
@@ -2256,7 +2508,11 @@ fn a_polluted_pointer_through_a_local_bound_to_a_sinking_module_function_is_reje
     // spurious cross-flow the opaque TOP would have added.
     let err = check_fails("escchan_fnbind.dusk");
     assert!(err.contains("'f' sends 'c' across a channel"), "{err}");
-    assert_eq!(err.matches("across a channel").count(), 1, "single diagnostic: {err}");
+    assert_eq!(
+        err.matches("across a channel").count(),
+        1,
+        "single diagnostic: {err}"
+    );
 }
 
 #[test]
@@ -2496,7 +2752,10 @@ fn a_struct_returned_by_value_that_shares_a_polluted_pointer_is_rejected() {
     // struct by value hands out a struct whose pointer reaches the dangling view.
     // Caught here as a fat-value escape on the returned struct.
     let err = check_fails("escalias_structcopy.dusk");
-    assert!(err.contains("a slice into a local array escapes its frame"), "{err}");
+    assert!(
+        err.contains("a slice into a local array escapes its frame"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -2525,7 +2784,8 @@ fn a_frame_slice_stored_through_a_destructured_aggregate_member_is_rejected() {
 }
 
 #[test]
-fn a_frame_slice_stored_through_an_aggregate_member_destructured_from_a_tuple_binding_is_rejected() {
+fn a_frame_slice_stored_through_an_aggregate_member_destructured_from_a_tuple_binding_is_rejected()
+{
     // The whole-value twin of escalias_aggdestructure: the aggregate member is
     // taken through a tuple BINDING, not a tuple literal, so `a, n := t` routes the
     // no-per-position-expression path. `st := Store { c: c }` embeds `c`, `t := (st,
@@ -2623,7 +2883,11 @@ golden!(storeheap_param_ok, "storeheap_param_ok.dusk", "10\n40\n");
 golden!(filter_scalar_ok, "filter_scalar_ok.dusk", "3\n12\n30\n");
 golden!(foldfresh_ok, "foldfresh_ok.dusk", "9\n9\n");
 golden!(mapfresh_views_ok, "mapfresh_views_ok.dusk", "111\n111\n");
-golden!(vecget_heap_return_ok, "vecget_heap_return_ok.dusk", "10\n40\n");
+golden!(
+    vecget_heap_return_ok,
+    "vecget_heap_return_ok.dusk",
+    "10\n40\n"
+);
 golden!(derefheap_ok, "derefheap_ok.dusk", "1\n4\n");
 // M5 gate round-three no-over-reject accepts: a heap-clean pointer sent over a
 // channel (the accept twin of escchan_polluted), and a minting identity map
@@ -2703,8 +2967,16 @@ golden!(chanlambda_ok, "chanlambda_ok.dusk", "42\n");
 // reversed from sinking to clean then called with a polluted pointer proves the
 // reassignment re-records the new empty sink set rather than dropping to opaque
 // (reassign_clean_ok).
-golden!(escchan_clean_lambda_ok, "escchan_clean_lambda_ok.dusk", "42\n");
-golden!(cleanlambda_polluted_ok, "cleanlambda_polluted_ok.dusk", "111\n");
+golden!(
+    escchan_clean_lambda_ok,
+    "escchan_clean_lambda_ok.dusk",
+    "42\n"
+);
+golden!(
+    cleanlambda_polluted_ok,
+    "cleanlambda_polluted_ok.dusk",
+    "111\n"
+);
 golden!(fieldcall_ok, "fieldcall_ok.dusk", "42\n");
 golden!(reassign_clean_ok, "reassign_clean_ok.dusk", "111\n");
 golden!(mapcopy_store_ok, "mapcopy_store_ok.dusk", "111\n");
@@ -2756,7 +3028,11 @@ golden!(qualified, "qualified.dusk", "qualified\n9\n");
 golden!(map, "map.dusk", "3\n1\n22\n3\n-1\n");
 golden!(fileio, "fileio.dusk", "persisted\n9\n");
 golden!(parse, "parse.dusk", "255\n255\n10\n15\n-42\n-1\n4\n-2\n");
-golden!(printing, "printing.dusk", "score: 42\nabc\nAda is 36\n{braces} and 7\n");
+golden!(
+    printing,
+    "printing.dusk",
+    "score: 42\nabc\nAda is 36\n{braces} and 7\n"
+);
 golden!(strbuf, "strbuf.dusk", "dusk and dawn\n13\nhello, world\n");
 golden!(genref, "genref.dusk", "10\n15\n3\n4\n30\n");
 golden!(ownership, "ownership.dusk", "2\n2\n");
@@ -2772,12 +3048,24 @@ golden!(handoff, "handoff.dusk", "41\nhanded off\n");
 golden!(countermutex, "countermutex.dusk", "10000\n");
 golden!(bank, "bank.dusk", "60\n40\n100\n");
 golden!(bounded, "bounded.dusk", "1275\n");
-golden!(pingpong, "pingpong.dusk", "ping\npong\nping\npong\nping\npong\ndone\n");
+golden!(
+    pingpong,
+    "pingpong.dusk",
+    "ping\npong\nping\npong\nping\npong\ndone\n"
+);
 golden!(poolsum, "poolsum.dusk", "5050\n");
 golden!(poolstress, "poolstress.dusk", "10000\n");
-golden!(submitshut, "submitshut.dusk", "refused before start\n7\nrefused after shutdown\n");
+golden!(
+    submitshut,
+    "submitshut.dusk",
+    "refused before start\n7\nrefused after shutdown\n"
+);
 golden!(trypoll, "trypoll.dusk", "full\n9\n");
-golden!(recvtimeout, "recvtimeout.dusk", "timed out\n0\n5\nclosed\n0\n");
+golden!(
+    recvtimeout,
+    "recvtimeout.dusk",
+    "timed out\n0\n5\nclosed\n0\n"
+);
 golden!(offload, "offload.dusk", "60\n");
 golden!(awaitoffload, "awaitoffload.dusk", "60\n");
 golden!(chanbridge, "chanbridge.dusk", "42\n");
@@ -2790,7 +3078,11 @@ golden!(spawnfuture, "spawnfuture.dusk", "42\n");
 golden!(racingcomplete, "racingcomplete.dusk", "2\n");
 golden!(sleepsum, "sleepsum.dusk", "42\n");
 golden!(failfuture, "failfuture.dusk", "invalid digit for base\n0\n");
-golden!(doublecomplete, "doublecomplete.dusk", "future already completed\n4\n");
+golden!(
+    doublecomplete,
+    "doublecomplete.dusk",
+    "future already completed\n4\n"
+);
 golden!(trypending, "trypending.dusk", "future is pending\n0\n9\n");
 golden!(awaittimeout, "awaittimeout.dusk", "await timed out\n0\n8\n");
 golden!(reactorlife, "reactorlife.dusk", "ok\n");
@@ -2801,9 +3093,21 @@ golden!(timerinterleave, "timerinterleave.dusk", "0\n1\n0\n");
 golden!(reactorsum, "reactorsum.dusk", "10\n");
 golden!(writewatch, "writewatch.dusk", "2\n");
 golden!(sigpipe, "sigpipe.dusk", "broken pipe\n0\n");
-golden!(fdexhaust_pipe, "fdexhaust_pipe.dusk", "too many open files\nok\n");
-golden!(fdexhaust_connect, "fdexhaust_connect.dusk", "too many open files\nok\n");
-golden!(fdexhaust_accept, "fdexhaust_accept.dusk", "too many open files\nok\n");
+golden!(
+    fdexhaust_pipe,
+    "fdexhaust_pipe.dusk",
+    "too many open files\nok\n"
+);
+golden!(
+    fdexhaust_connect,
+    "fdexhaust_connect.dusk",
+    "too many open files\nok\n"
+);
+golden!(
+    fdexhaust_accept,
+    "fdexhaust_accept.dusk",
+    "too many open files\nok\n"
+);
 golden!(display, "display.dusk", "point\npoint\n");
 golden!(fmtesc, "fmtesc.dusk", "{}\na {b} c\n{} 1\n");
 golden!(emptyerr, "emptyerr.dusk", "\nafter\n");
@@ -2818,8 +3122,16 @@ golden!(errmessage, "errmessage.dusk", "0\nboom\nboom\n\n");
 golden!(errmsgmatch, "errmsgmatch.dusk", "0\nnegative\n");
 golden!(privacy, "privacy.dusk", "1\n2\n");
 golden!(bitops, "bitops.dusk", "8\n14\n6\n-13\n255\n-1\n48\n");
-golden!(shifts, "shifts.dusk", "8\n10\n-4\n-1\n4611686018427387904\n8\n-128\n");
-golden!(powers, "powers.dusk", "1024\n512\n4\n1\n-27\n32\n1024\n6.25\n");
+golden!(
+    shifts,
+    "shifts.dusk",
+    "8\n10\n-4\n-1\n4611686018427387904\n8\n-128\n"
+);
+golden!(
+    powers,
+    "powers.dusk",
+    "1024\n512\n4\n1\n-27\n32\n1024\n6.25\n"
+);
 golden!(precedence, "precedence.dusk", "24\n32\n7\n18\n1\n2\n");
 golden!(compound, "compound.dusk", "3\n0.5\n");
 golden!(singleval, "singleval.dusk", "9\n25\n11\n");
@@ -2832,7 +3144,11 @@ golden!(genericmaybe, "genericmaybe.dusk", "Some(30)\nnone\n");
 // forcing runs the effects in order and yields the summed value. Proves mono's
 // per-site inference instantiates a fresh bind/unit pair whose continuation is a
 // collector-wrapped lambda.
-golden!(lazydo, "lazydo.dusk", "before\neffect a\neffect b\nresult 30\n");
+golden!(
+    lazydo,
+    "lazydo.dusk",
+    "before\neffect a\neffect b\nresult 30\n"
+);
 // W1 gate accept twins. A generic call whose element the ground pass validates
 // (enum_relabel_ok), a payload-carrying ctor that pins its element
 // (enum_some_arg_ok), a direct error hand-off to an error parameter
@@ -2849,9 +3165,21 @@ golden!(enum_nested_ok, "enum_nested_ok.dusk", "some\n");
 // struct-literal field, a non-generic call argument, an assignment, and an array
 // element, each instantiating an annotated `Opt.None` at its element.
 golden!(err_param_handled_ok, "err_param_handled_ok.dusk", "0\n1\n");
-golden!(enum_infer_from_sibling_ok, "enum_infer_from_sibling_ok.dusk", "2.5\n");
-golden!(enum_annot_struct_field_ok, "enum_annot_struct_field_ok.dusk", "none\n");
-golden!(enum_annot_call_arg_ok, "enum_annot_call_arg_ok.dusk", "none\n");
+golden!(
+    enum_infer_from_sibling_ok,
+    "enum_infer_from_sibling_ok.dusk",
+    "2.5\n"
+);
+golden!(
+    enum_annot_struct_field_ok,
+    "enum_annot_struct_field_ok.dusk",
+    "none\n"
+);
+golden!(
+    enum_annot_call_arg_ok,
+    "enum_annot_call_arg_ok.dusk",
+    "none\n"
+);
 golden!(enum_annot_assign_ok, "enum_annot_assign_ok.dusk", "none\n");
 golden!(enum_annot_array_ok, "enum_annot_array_ok.dusk", "none\n");
 golden!(doasync, "doasync.dusk", "17\n");
@@ -2862,7 +3190,11 @@ golden!(iomonad, "iomonad.dusk", "30\n");
 // forces a collection between the build and run, proving the chain is rooted
 // through the last thunk on the stack. iohelpers exercises io_pure, io_map,
 // io_and_then, and io_println one each.
-golden!(lazyio, "lazyio.dusk", "before\neffect a\neffect b\nresult 30\n");
+golden!(
+    lazyio,
+    "lazyio.dusk",
+    "before\neffect a\neffect b\nresult 30\n"
+);
 golden!(lazyiogc, "lazyiogc.dusk", "42\n");
 golden!(iohelpers, "iohelpers.dusk", "21\n10\neffect\n1\n");
 golden!(tcplocal, "tcplocal.dusk", "ping\n");
@@ -2883,7 +3215,10 @@ golden!(futureannot, "futureannot.dusk", "3\n");
 #[test]
 fn awaiting_a_net_future_outside_an_async_func_is_rejected() {
     let err = check_fails("netbadawait.dusk");
-    assert!(err.contains("'await' is only legal inside an async func"), "{err}");
+    assert!(
+        err.contains("'await' is only legal inside an async func"),
+        "{err}"
+    );
 }
 
 /// Runs an example feeding `input` to its stdin, so a program that reads with
@@ -3020,7 +3355,10 @@ fn passing_a_frame_view_into_a_minting_helper_is_rejected() {
     let err = check_fails("collectorptrhelper_fail.dusk");
     assert!(err.contains("holds a view of the frame"), "{err}");
     assert!(err.contains("collects"), "{err}");
-    assert!(!err.contains("channel"), "collect reject must not mention a channel: {err}");
+    assert!(
+        !err.contains("channel"),
+        "collect reject must not mention a channel: {err}"
+    );
 }
 
 #[test]
@@ -3118,9 +3456,7 @@ fn collecting_a_closure_that_captures_a_frame_view_is_rejected() {
     // fat pointer. The mint is rejected, naming the capture.
     let err = check_fails("collectorcapview_fail.dusk");
     assert!(
-        err.contains(
-            "cannot collect a closure that captures 's': it may view a frame"
-        ),
+        err.contains("cannot collect a closure that captures 's': it may view a frame"),
         "{err}"
     );
 }
@@ -3146,9 +3482,7 @@ fn collecting_an_interface_value_is_rejected() {
     // concrete type or a managed pointer to it.
     let err = check_fails("collectoriface_fail.dusk");
     assert!(
-        err.contains(
-            "a collected value cannot hold a slice, function, or interface"
-        ),
+        err.contains("a collected value cannot hold a slice, function, or interface"),
         "{err}"
     );
 }
@@ -3207,9 +3541,7 @@ fn a_bare_lambda_at_a_method_collector_parameter_is_rejected() {
     // environment typed as a collector and dangle. Rejected, pointing at the mint.
     let err = check_fails("collectormethodlam_fail.dusk");
     assert!(
-        err.contains(
-            "a bare lambda cannot become a closure collector at a method argument"
-        ),
+        err.contains("a bare lambda cannot become a closure collector at a method argument"),
         "{err}"
     );
 }
@@ -3229,9 +3561,7 @@ fn a_bare_lambda_at_an_indirect_call_collector_parameter_is_rejected() {
     // closure-collector parameter would skip the mint and dangle. Rejected.
     let err = check_fails("collectorindirectlam_fail.dusk");
     assert!(
-        err.contains(
-            "a bare lambda cannot become a closure collector through an indirect call"
-        ),
+        err.contains("a bare lambda cannot become a closure collector through an indirect call"),
         "{err}"
     );
 }
@@ -3255,7 +3585,10 @@ fn a_closure_capturing_a_buried_frame_view_pointer_parameter_is_rejected() {
     let err = check_fails("collectorcapparam_fail.dusk");
     assert!(err.contains("holds a view of the frame"), "{err}");
     assert!(err.contains("collects"), "{err}");
-    assert!(!err.contains("channel"), "collect reject must not mention a channel: {err}");
+    assert!(
+        !err.contains("channel"),
+        "collect reject must not mention a channel: {err}"
+    );
 }
 
 #[test]
@@ -3272,9 +3605,7 @@ fn the_widening_path_enforces_the_capture_rule() {
     // rejected there too, exactly as in the explicit mint form.
     let err = check_fails("collectorwidencap_fail.dusk");
     assert!(
-        err.contains(
-            "cannot collect a closure that captures 's': it may view a frame"
-        ),
+        err.contains("cannot collect a closure that captures 's': it may view a frame"),
         "{err}"
     );
 }
@@ -3367,7 +3698,9 @@ fn boxing_a_collector_into_an_interface_is_rejected() {
     // over an interface element. The accept twin is boxing a concrete implementer.
     let err = check_fails("collectorifacebox_fail.dusk");
     assert!(
-        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        err.contains(
+            "a collected value cannot be boxed into an interface; it stays on the main thread"
+        ),
         "{err}"
     );
 }
@@ -3450,7 +3783,9 @@ fn a_spawn_capturing_a_pointer_to_a_scalar_cell_still_works() {
 fn boxing_a_collector_into_an_interface_field_is_rejected() {
     let err = check_fails("collectorfieldbox_fail.dusk");
     assert!(
-        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        err.contains(
+            "a collected value cannot be boxed into an interface; it stays on the main thread"
+        ),
         "{err}"
     );
 }
@@ -3459,7 +3794,9 @@ fn boxing_a_collector_into_an_interface_field_is_rejected() {
 fn boxing_a_collector_into_an_interface_array_element_is_rejected() {
     let err = check_fails("collectorarraybox_fail.dusk");
     assert!(
-        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        err.contains(
+            "a collected value cannot be boxed into an interface; it stays on the main thread"
+        ),
         "{err}"
     );
 }
@@ -3468,7 +3805,9 @@ fn boxing_a_collector_into_an_interface_array_element_is_rejected() {
 fn boxing_a_collector_into_an_interface_tuple_element_is_rejected() {
     let err = check_fails("collectortuplebox_fail.dusk");
     assert!(
-        err.contains("a collected value cannot be boxed into an interface; it stays on the main thread"),
+        err.contains(
+            "a collected value cannot be boxed into an interface; it stays on the main thread"
+        ),
         "{err}"
     );
 }
@@ -3704,11 +4043,7 @@ fn generic_struct_over_an_interface_argument_rejects_in_bounded_time() {
     );
 }
 
-golden!(
-    genfieldarr,
-    "genfieldarr.dusk",
-    "2\n"
-);
+golden!(genfieldarr, "genfieldarr.dusk", "2\n");
 
 #[test]
 fn do_over_a_private_imported_monad_is_undefined_not_silently_bound() {
@@ -3728,10 +4063,24 @@ fn do_over_a_private_imported_monad_is_undefined_not_silently_bound() {
 #[test]
 fn enum_constructor_payload_literal_out_of_range_is_rejected() {
     let err = check_fails("ctorfit_fail.dusk");
-    assert!(err.contains("literal 4294967297 does not fit in 32 bits"), "{err}");
+    assert!(
+        err.contains("literal 4294967297 does not fit in 32 bits"),
+        "{err}"
+    );
 }
 
 golden!(ctorfit_ok, "ctorfit_ok.dusk", "2147483647\n127\n");
+
+#[test]
+fn struct_literal_field_literal_out_of_range_is_rejected() {
+    let err = check_fails("structlitwidth_fail.dusk");
+    assert!(
+        err.contains("literal 2147483648 does not fit in 32 bits"),
+        "{err}"
+    );
+}
+
+golden!(structlitwidth_ok, "structlitwidth.dusk", "2147483647\n");
 
 #[test]
 fn assigning_to_a_string_element_is_rejected() {
@@ -3755,7 +4104,10 @@ golden!(usingphantom_accept, "allocator.dusk", "24\n");
 #[test]
 fn binding_a_whole_fallible_tuple_is_rejected() {
     let err = check_fails("tuplebind_fail.dusk");
-    assert!(err.contains("a fallible result must be destructured"), "{err}");
+    assert!(
+        err.contains("a fallible result must be destructured"),
+        "{err}"
+    );
 }
 
 golden!(tuplebind_ok, "tuplebind_ok.dusk", "7\n");
@@ -3777,7 +4129,10 @@ golden!(monaddecl_ok, "monaddecl_ok.dusk", "7\n");
 #[test]
 fn a_method_call_on_an_enum_value_is_rejected() {
     let err = check_fails("enummethod_fail.dusk");
-    assert!(err.contains("methods on the enum 'Maybe' are not supported"), "{err}");
+    assert!(
+        err.contains("methods on the enum 'Maybe' are not supported"),
+        "{err}"
+    );
 }
 
 golden!(enummethod_ok, "enummethod_ok.dusk", "1\n");
@@ -3785,7 +4140,10 @@ golden!(enummethod_ok, "enummethod_ok.dusk", "1\n");
 #[test]
 fn a_functional_builtin_with_the_wrong_arity_is_rejected() {
     let err = check_fails("foldarity_fail.dusk");
-    assert!(err.contains("fold takes 3 argument(s), but 4 were given"), "{err}");
+    assert!(
+        err.contains("fold takes 3 argument(s), but 4 were given"),
+        "{err}"
+    );
 }
 
 golden!(foldarity_ok, "foldarity_ok.dusk", "6\n");
@@ -3807,7 +4165,10 @@ golden!(uintsigned_ok, "uintsigned_ok.dusk", "5\n7\n");
 #[test]
 fn a_loop_pumping_call_inside_an_async_func_is_rejected() {
     let err = check_fails("asyncpump_fail.dusk");
-    assert!(err.contains("pumps the event loop and cannot be called inside an async func"), "{err}");
+    assert!(
+        err.contains("pumps the event loop and cannot be called inside an async func"),
+        "{err}"
+    );
 }
 
 // Bootstrap prerequisites: std.string formatting, the float constant IR tokens,
@@ -3846,7 +4207,11 @@ golden!(
 // map_keys walks the keys in insertion order across a grow and past an overwrite,
 // so "two" reads back its overwritten value 22 in its first insertion slot and no
 // key is duplicated.
-golden!(map_deterministic_iteration, "mapkeys.dusk", "8\n1\n22\n3\n4\n5\n6\n7\n8\n");
+golden!(
+    map_deterministic_iteration,
+    "mapkeys.dusk",
+    "8\n1\n22\n3\n4\n5\n6\n7\n8\n"
+);
 
 #[test]
 fn a_foreign_signature_rejects_a_string_parameter() {
@@ -3961,7 +4326,8 @@ fn bootstrap_lex_and_scan_match_stage0() {
                 .output()
                 .expect("spawn dusk1");
             assert_eq!(
-                got.stdout, want.stdout,
+                got.stdout,
+                want.stdout,
                 "{cmd} stdout differs on {ex}:\nstage0: {}\ndusk1:  {}",
                 String::from_utf8_lossy(&want.stdout),
                 String::from_utf8_lossy(&got.stdout)

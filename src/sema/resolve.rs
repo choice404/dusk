@@ -14,10 +14,34 @@ use crate::diag::{Diagnostic, Span};
 use crate::parser::ast::*;
 
 const BUILTINS: &[&str] = &[
-    "alloc", "free", "print", "println", "printerr", "sizeof", "alloc_bytes", "ptr_add", "map",
-    "filter", "reduce", "fold", "foreach", "debug_alloc", "debug_free", "debug_leaks",
-    "debug_double_frees", "read_file", "write_file", "read_line", "read_all", "parse_float",
-    "cstr", "move", "spawn", "join", "submit", "async_run",
+    "alloc",
+    "free",
+    "print",
+    "println",
+    "printerr",
+    "sizeof",
+    "alloc_bytes",
+    "ptr_add",
+    "map",
+    "filter",
+    "reduce",
+    "fold",
+    "foreach",
+    "debug_alloc",
+    "debug_free",
+    "debug_leaks",
+    "debug_double_frees",
+    "read_file",
+    "write_file",
+    "read_line",
+    "read_all",
+    "parse_float",
+    "cstr",
+    "move",
+    "spawn",
+    "join",
+    "submit",
+    "async_run",
 ];
 
 /// Resolves names and checks scope rules for a module, returning diagnostics.
@@ -141,8 +165,10 @@ impl Resolver {
             .collect();
         unused.sort_by(|(an, av), (bn, bv)| av.span.lo.cmp(&bv.span.lo).then(an.cmp(bn)));
         for (name, var) in unused {
-            self.errors
-                .push(Diagnostic::new(format!("unused variable '{name}'"), var.span));
+            self.errors.push(Diagnostic::new(
+                format!("unused variable '{name}'"),
+                var.span,
+            ));
         }
     }
 
@@ -483,7 +509,8 @@ mod tests {
 
     #[test]
     fn enum_variant_resolves() {
-        let e = errs("enum Sh { Circle(r: float64), Empty }\nfunc f() -> Sh { return Circle(1.0) }");
+        let e =
+            errs("enum Sh { Circle(r: float64), Empty }\nfunc f() -> Sh { return Circle(1.0) }");
         assert!(e.is_empty(), "{e:?}");
     }
 

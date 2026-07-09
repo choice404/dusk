@@ -439,7 +439,10 @@ impl Parser {
                 }
                 self.expect(&TokenKind::RParen);
             }
-            variants.push(Variant { name: vname, fields });
+            variants.push(Variant {
+                name: vname,
+                fields,
+            });
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
@@ -545,7 +548,12 @@ impl Parser {
             self.guard_progress(before, "impl block");
         }
         self.expect(&TokenKind::RBrace);
-        Impl { iface, ty, span, methods }
+        Impl {
+            iface,
+            ty,
+            span,
+            methods,
+        }
     }
 
     /// Parses a `monad Name { funcs }` block, flattening its methods (typically
@@ -1562,7 +1570,13 @@ impl Parser {
             node(ExprKind::Ident(String::new()), start)
         };
         let span = Span::new(start.lo, self.prev_hi());
-        node(ExprKind::Collect { ty, arg: Box::new(arg) }, span)
+        node(
+            ExprKind::Collect {
+                ty,
+                arg: Box::new(arg),
+            },
+            span,
+        )
     }
 
     fn struct_lit(&mut self, name: String, start: Span) -> Expr {
@@ -1700,9 +1714,7 @@ mod tests {
     #[test]
     fn precedence_mul_over_add() {
         let m = parse_ok("func f() -> int64 { return 1 + 2 * 3 }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
             panic!()
         };
@@ -1717,9 +1729,7 @@ mod tests {
     #[test]
     fn deref_at_line_start_not_multiply() {
         let m = parse_ok("func f(p: *int64) -> void {\n  x := 5\n  *p = x\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         assert_eq!(f.body.stmts.len(), 2);
         assert!(matches!(f.body.stmts[1], Stmt::Assign(_, _)));
     }
@@ -1727,9 +1737,7 @@ mod tests {
     #[test]
     fn tuple_destructure_and_call() {
         let m = parse_ok("func f() -> int32 {\n  y, e := g()\n  return 0\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Let(l) = &f.body.stmts[0] else {
             panic!()
         };
@@ -1749,9 +1757,7 @@ mod tests {
                }\n\
              }",
         );
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         assert!(matches!(f.body.stmts[1], Stmt::Match(_)));
     }
 
@@ -1767,18 +1773,14 @@ mod tests {
                return x\n\
              }",
         );
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         assert!(matches!(f.body.stmts[0], Stmt::Let(_)));
     }
 
     #[test]
     fn pointer_and_slice_types() {
         let m = parse_ok("func f(a: *Point, b: int32[], c: int32[4]) -> void { return }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         assert!(matches!(f.params[0].ty, Type::Ptr(_)));
         assert!(matches!(f.params[1].ty, Type::Slice(_)));
         assert!(matches!(f.params[2].ty, Type::Array(_, 4)));
@@ -1787,9 +1789,7 @@ mod tests {
     #[test]
     fn raw_pointer_type_is_distinct_from_managed() {
         let m = parse_ok("func f(a: *int64, b: *raw int64, c: *raw *int64) -> void { return }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         // A bare `*T` is the managed pointer, `*raw T` the thin one, and `raw`
         // nests, so `*raw *int64` is a raw pointer to a managed pointer.
         assert!(matches!(f.params[0].ty, Type::Ptr(_)));
@@ -1809,11 +1809,14 @@ mod tests {
 
     #[test]
     fn do_ending_in_bind_errors() {
-        let (toks, _) = lex(
-            "func f() -> int64 {\n  r := do {\n    a <- 1\n    b <- 2\n  }\n  return 0\n}",
-        );
+        let (toks, _) =
+            lex("func f() -> int64 {\n  r := do {\n    a <- 1\n    b <- 2\n  }\n  return 0\n}");
         let (_m, errs) = parse(toks);
-        assert!(errs.iter().any(|d| d.msg.contains("must end in an expression")), "{errs:?}");
+        assert!(
+            errs.iter()
+                .any(|d| d.msg.contains("must end in an expression")),
+            "{errs:?}"
+        );
     }
 
     #[test]
@@ -1823,7 +1826,12 @@ mod tests {
              func unit(x: int64) -> int64 { return x }\n\
              func f() -> void {\n  mut i: int64 = 0\n  do {\n    a <- 1\n    a\n  }\n  while i < 3 {\n    i = i + 1\n  }\n}",
         );
-        let Item::Func(f) = m.items.iter().find(|it| matches!(it, Item::Func(f) if f.name == "f")).unwrap() else {
+        let Item::Func(f) = m
+            .items
+            .iter()
+            .find(|it| matches!(it, Item::Func(f) if f.name == "f"))
+            .unwrap()
+        else {
             panic!()
         };
         // The do statement and the while loop are two separate statements.
@@ -1835,9 +1843,7 @@ mod tests {
         let m = parse_ok(
             "func f() -> void {\n  mut x: int32 = 0\n  do {\n    x = x + 1\n  } while x < 3\n}",
         );
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         match &f.body.stmts[1] {
             Stmt::While(w) => assert!(w.post_test),
             other => panic!("expected do while, got {other:?}"),
@@ -1848,9 +1854,7 @@ mod tests {
     fn bitwise_below_comparison_shift_between_and_add() {
         // `1 & 3 == 1` groups as `(1 & 3) == 1`, so `&` binds tighter than `==`.
         let m = parse_ok("func f() -> bool { return 1 & 3 == 1 }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
             panic!()
         };
@@ -1866,9 +1870,7 @@ mod tests {
     fn shift_binds_looser_than_add() {
         // `1 + 2 << 3` groups as `(1 + 2) << 3`, so `+` binds tighter than `<<`.
         let m = parse_ok("func f() -> int64 { return 1 + 2 << 3 }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
             panic!()
         };
@@ -1884,9 +1886,7 @@ mod tests {
     fn exponent_is_right_associative() {
         // `2 ** 3 ** 2` groups as `2 ** (3 ** 2)`, so the right child is a Pow.
         let m = parse_ok("func f() -> int64 { return 2 ** 3 ** 2 }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
             panic!()
         };
@@ -1902,9 +1902,7 @@ mod tests {
     fn unary_minus_binds_tighter_than_exponent() {
         // `-2 ** 2` is `(-2) ** 2`, so the left child of Pow is a negation.
         let m = parse_ok("func f() -> int64 { return -2 ** 2 }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
             panic!()
         };
@@ -1919,9 +1917,7 @@ mod tests {
     #[test]
     fn compound_assignment_produces_assign_op() {
         let m = parse_ok("func f() -> void {\n  mut x: int64 = 0\n  x += 3\n  return\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         match &f.body.stmts[1] {
             Stmt::AssignOp(BinOp::Add, lhs, rhs) => {
                 assert!(matches!(lhs.kind, ExprKind::Ident(_)));
@@ -1946,9 +1942,7 @@ mod tests {
         ] {
             let prog = format!("func f() -> void {{\n  mut x: int64 = 0\n  {src}\n  return\n}}");
             let m = parse_ok(&prog);
-            let Item::Func(f) = &m.items[0] else {
-                panic!()
-            };
+            let Item::Func(f) = &m.items[0] else { panic!() };
             match &f.body.stmts[1] {
                 Stmt::AssignOp(op, ..) => assert_eq!(*op, want, "for {src}"),
                 other => panic!("expected AssignOp for {src}, got {other:?}"),
@@ -1959,9 +1953,7 @@ mod tests {
     #[test]
     fn increment_desugars_to_compound_add_of_one() {
         let m = parse_ok("func f() -> void {\n  mut i: int64 = 0\n  i++\n  return\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         match &f.body.stmts[1] {
             Stmt::AssignOp(BinOp::Add, lhs, rhs) => {
                 assert!(matches!(lhs.kind, ExprKind::Ident(_)));
@@ -1974,9 +1966,7 @@ mod tests {
     #[test]
     fn decrement_desugars_to_compound_sub_of_one() {
         let m = parse_ok("func f() -> void {\n  mut i: int64 = 0\n  i--\n  return\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         match &f.body.stmts[1] {
             Stmt::AssignOp(BinOp::Sub, _, rhs) => {
                 assert!(matches!(rhs.kind, ExprKind::Int(1, None)));
@@ -1989,10 +1979,9 @@ mod tests {
     fn increment_on_a_place_expression() {
         // `++`/`--` work on any place, so `xs[i]++` and `s.f++` are increments of
         // the element or field.
-        let m = parse_ok("func f() -> void {\n  mut xs: int64[3] = [0, 0, 0]\n  xs[1]++\n  return\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let m =
+            parse_ok("func f() -> void {\n  mut xs: int64[3] = [0, 0, 0]\n  xs[1]++\n  return\n}");
+        let Item::Func(f) = &m.items[0] else { panic!() };
         assert!(matches!(
             &f.body.stmts[1],
             Stmt::AssignOp(BinOp::Add, lhs, _) if matches!(lhs.kind, ExprKind::Index(..))
@@ -2004,9 +1993,7 @@ mod tests {
         let m = parse_ok(
             "func f(xs: int64[]) -> void {\n  a := xs[1..3]\n  b := xs[1..=3]\n  println(a[0])\n  println(b[0])\n  return\n}",
         );
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Let(la) = &f.body.stmts[0] else {
             panic!()
         };
@@ -2019,17 +2006,21 @@ mod tests {
         let ExprKind::Index(_, bi) = &lb.value.kind else {
             panic!("expected an index")
         };
-        assert!(matches!(ai.kind, ExprKind::Range(_, _, false)), "exclusive flag");
-        assert!(matches!(bi.kind, ExprKind::Range(_, _, true)), "inclusive flag");
+        assert!(
+            matches!(ai.kind, ExprKind::Range(_, _, false)),
+            "exclusive flag"
+        );
+        assert!(
+            matches!(bi.kind, ExprKind::Range(_, _, true)),
+            "inclusive flag"
+        );
     }
 
     #[test]
     fn pipe_into_a_call_prepends_the_left_side() {
         // `x |> f(a)` rewrites to `f(x, a)`: x is prepended as the first argument.
         let m = parse_ok("func f() -> int64 {\n  x := 1\n  return x |> g(2)\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Return(Some(e)) = &f.body.stmts[1] else {
             panic!()
         };
@@ -2046,9 +2037,7 @@ mod tests {
     fn pipe_into_a_bare_name_makes_a_call() {
         // `x |> f` rewrites to `f(x)`.
         let m = parse_ok("func f() -> int64 {\n  x := 1\n  return x |> g\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Return(Some(e)) = &f.body.stmts[1] else {
             panic!()
         };
@@ -2073,7 +2062,9 @@ mod tests {
             panic!()
         };
         assert!(matches!(&callee.kind, ExprKind::Ident(n) if n == "g"));
-        assert!(matches!(&args[0].kind, ExprKind::Call(inner, _) if matches!(&inner.kind, ExprKind::Ident(n) if n == "f")));
+        assert!(
+            matches!(&args[0].kind, ExprKind::Call(inner, _) if matches!(&inner.kind, ExprKind::Ident(n) if n == "f"))
+        );
     }
 
     #[test]
@@ -2081,7 +2072,8 @@ mod tests {
         let (toks, _) = lex("func f() -> int64 {\n  x := 1\n  return x |> 3\n}");
         let (_m, errs) = parse(toks);
         assert!(
-            errs.iter().any(|d| d.msg == "the right side of '|>' must be a function name or call"),
+            errs.iter()
+                .any(|d| d.msg == "the right side of '|>' must be a function name or call"),
             "{errs:?}"
         );
     }
@@ -2121,9 +2113,7 @@ mod tests {
         // The lexer joins the two closing `>` into one `>>`; the parser must
         // split it so `Wrap<Box<int64>>` types both layers.
         let m = parse_ok("func f(w: Wrap<Box<int64>>) -> void { return }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         match &f.params[0].ty {
             Type::Named(outer, args) => {
                 assert_eq!(outer, "Wrap");
@@ -2139,9 +2129,7 @@ mod tests {
     fn generic_close_before_assign_splits_ge() {
         // `x: Vec<int64>= v` closes the generic and leaves `=` as the assignment.
         let m = parse_ok("func f() -> void {\n  x: Vec<int64>= v\n  return\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Let(l) = &f.body.stmts[0] else {
             panic!("expected a let binding")
         };
@@ -2153,9 +2141,7 @@ mod tests {
     fn double_star_at_prefix_is_deref_of_deref() {
         // `**pp = 5` stores through a pointer to a pointer, not an exponent.
         let m = parse_ok("func f(pp: **int64) -> void {\n  **pp = 5\n  return\n}");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         let Stmt::Assign(lhs, _) = &f.body.stmts[0] else {
             panic!("expected an assignment")
         };
@@ -2166,9 +2152,7 @@ mod tests {
     #[test]
     fn type_trailing_comma_ok() {
         let m = parse_ok("func f() -> (int32, int64,) { return (0, 0) }");
-        let Item::Func(f) = &m.items[0] else {
-            panic!()
-        };
+        let Item::Func(f) = &m.items[0] else { panic!() };
         assert!(matches!(f.ret, Type::Tuple(_)));
     }
 
@@ -2191,7 +2175,11 @@ mod tests {
         let e = parse_errs(
             "monad M {\n  func unit(x: int64) -> int64 { return x }\n}\nfunc main() -> int32 { return 0 }",
         );
-        assert!(e.iter().any(|d| d.msg.contains("must define both 'bind' and 'unit'")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("must define both 'bind' and 'unit'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -2228,22 +2216,36 @@ mod tests {
     #[test]
     fn async_without_func_errors() {
         let errs = parse_errs("async g() -> int64 { return 1 }");
-        assert!(errs.iter().any(|d| d.msg == "expected 'func' after 'async'"), "{errs:?}");
+        assert!(
+            errs.iter()
+                .any(|d| d.msg == "expected 'func' after 'async'"),
+            "{errs:?}"
+        );
     }
 
     #[test]
     fn await_let_destructure_in_async() {
-        let m = parse_ok("async func g() -> int64 {\n  v, e := await leaf()\n  e.ignore()\n  return v\n}");
+        let m = parse_ok(
+            "async func g() -> int64 {\n  v, e := await leaf()\n  e.ignore()\n  return v\n}",
+        );
         let Item::Func(f) = &m.items[0] else { panic!() };
-        let Stmt::Let(l) = &f.body.stmts[0] else { panic!("expected a let") };
-        assert!(matches!(l.value.kind, ExprKind::Await(..)), "value is an await: {:?}", l.value.kind);
+        let Stmt::Let(l) = &f.body.stmts[0] else {
+            panic!("expected a let")
+        };
+        assert!(
+            matches!(l.value.kind, ExprKind::Await(..)),
+            "value is an await: {:?}",
+            l.value.kind
+        );
     }
 
     #[test]
     fn await_single_bind_in_async() {
         let m = parse_ok("async func g() -> int64 {\n  v := await leaf()\n  return v\n}");
         let Item::Func(f) = &m.items[0] else { panic!() };
-        let Stmt::Let(l) = &f.body.stmts[0] else { panic!() };
+        let Stmt::Let(l) = &f.body.stmts[0] else {
+            panic!()
+        };
         assert!(matches!(l.value.kind, ExprKind::Await(..)));
     }
 
@@ -2251,7 +2253,9 @@ mod tests {
     fn return_await_in_async() {
         let m = parse_ok("async func g() -> int64 {\n  return await leaf()\n}");
         let Item::Func(f) = &m.items[0] else { panic!() };
-        let Stmt::Return(Some(e)) = &f.body.stmts[0] else { panic!() };
+        let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
+            panic!()
+        };
         assert!(matches!(e.kind, ExprKind::Await(..)));
     }
 
@@ -2259,7 +2263,9 @@ mod tests {
     fn void_await_form_in_async() {
         let m = parse_ok("async func g() -> void {\n  await tick()\n  return\n}");
         let Item::Func(f) = &m.items[0] else { panic!() };
-        let Stmt::Expr(e) = &f.body.stmts[0] else { panic!("expected an expr stmt") };
+        let Stmt::Expr(e) = &f.body.stmts[0] else {
+            panic!("expected an expr stmt")
+        };
         assert!(matches!(e.kind, ExprKind::Await(..)));
     }
 
@@ -2269,26 +2275,42 @@ mod tests {
         // suspension of the parenthesized operand, not a call to a function.
         let m = parse_ok("async func g() -> int64 {\n  v := await(leaf())\n  return v\n}");
         let Item::Func(f) = &m.items[0] else { panic!() };
-        let Stmt::Let(l) = &f.body.stmts[0] else { panic!() };
-        let ExprKind::Await(op, _) = &l.value.kind else { panic!("expected an await") };
-        assert!(matches!(op.kind, ExprKind::Call(..)), "operand is the inner call");
+        let Stmt::Let(l) = &f.body.stmts[0] else {
+            panic!()
+        };
+        let ExprKind::Await(op, _) = &l.value.kind else {
+            panic!("expected an await")
+        };
+        assert!(
+            matches!(op.kind, ExprKind::Call(..)),
+            "operand is the inner call"
+        );
     }
 
     #[test]
     fn await_call_in_sync_stays_a_call() {
         // Outside an async func `await(f)` remains an ordinary call, so shipped
         // sync callers of the stdlib await keep compiling.
-        let m = parse_ok("func f() -> int64 {\n  v, e := await(leaf())\n  e.ignore()\n  return v\n}");
+        let m =
+            parse_ok("func f() -> int64 {\n  v, e := await(leaf())\n  e.ignore()\n  return v\n}");
         let Item::Func(f) = &m.items[0] else { panic!() };
-        let Stmt::Let(l) = &f.body.stmts[0] else { panic!() };
-        assert!(matches!(l.value.kind, ExprKind::Call(..)), "value is a call: {:?}", l.value.kind);
+        let Stmt::Let(l) = &f.body.stmts[0] else {
+            panic!()
+        };
+        assert!(
+            matches!(l.value.kind, ExprKind::Call(..)),
+            "value is a call: {:?}",
+            l.value.kind
+        );
     }
 
     #[test]
     fn await_in_sync_func_is_rejected() {
-        let errs = parse_errs("func f() -> int64 {\n  v, e := await leaf()\n  e.ignore()\n  return v\n}");
+        let errs =
+            parse_errs("func f() -> int64 {\n  v, e := await leaf()\n  e.ignore()\n  return v\n}");
         assert!(
-            errs.iter().any(|d| d.msg == "'await' is only legal inside an async func"),
+            errs.iter()
+                .any(|d| d.msg == "'await' is only legal inside an async func"),
             "{errs:?}"
         );
     }
@@ -2297,7 +2319,8 @@ mod tests {
     fn await_mid_expression_is_rejected() {
         let errs = parse_errs("async func g() -> int64 {\n  x := 1 + await leaf()\n  return x\n}");
         assert!(
-            errs.iter().any(|d| d.msg.contains("'await' cannot appear mid-expression")),
+            errs.iter()
+                .any(|d| d.msg.contains("'await' cannot appear mid-expression")),
             "{errs:?}"
         );
     }
@@ -2317,17 +2340,19 @@ mod tests {
     fn await_under_defer_is_rejected() {
         let errs = parse_errs("async func g() -> int64 {\n  defer await tick()\n  return 1\n}");
         assert!(
-            errs.iter().any(|d| d.msg.contains("'await' cannot appear under defer")),
+            errs.iter()
+                .any(|d| d.msg.contains("'await' cannot appear under defer")),
             "{errs:?}"
         );
     }
 
     #[test]
     fn async_method_is_rejected() {
-        let errs = parse_errs(
-            "impl T {\n  async func m() -> int64 { return 1 }\n}",
+        let errs = parse_errs("impl T {\n  async func m() -> int64 { return 1 }\n}");
+        assert!(
+            errs.iter().any(|d| d.msg == "a method cannot be async"),
+            "{errs:?}"
         );
-        assert!(errs.iter().any(|d| d.msg == "a method cannot be async"), "{errs:?}");
     }
 
     // Progress invariant. Every recovery loop routes its no-progress case through
@@ -2356,7 +2381,10 @@ mod tests {
         ];
         for src in cases {
             let errs = parse_errs(src);
-            assert!(!errs.is_empty(), "malformed input silently accepted: {src:?}");
+            assert!(
+                !errs.is_empty(),
+                "malformed input silently accepted: {src:?}"
+            );
         }
     }
 
@@ -2364,7 +2392,8 @@ mod tests {
     fn stalled_interface_body_names_its_context() {
         let errs = parse_errs("interface I { + }");
         assert!(
-            errs.iter().any(|d| d.msg.contains("unexpected token in interface body")),
+            errs.iter()
+                .any(|d| d.msg.contains("unexpected token in interface body")),
             "{errs:?}"
         );
     }
@@ -2373,7 +2402,8 @@ mod tests {
     fn stalled_foreign_body_names_its_context() {
         let errs = parse_errs("foreign \"C\" { + }");
         assert!(
-            errs.iter().any(|d| d.msg.contains("unexpected token in foreign block")),
+            errs.iter()
+                .any(|d| d.msg.contains("unexpected token in foreign block")),
             "{errs:?}"
         );
     }
@@ -2382,7 +2412,8 @@ mod tests {
     fn stalled_module_body_names_its_context() {
         let errs = parse_errs("123 456");
         assert!(
-            errs.iter().any(|d| d.msg.contains("unexpected token in module body")),
+            errs.iter()
+                .any(|d| d.msg.contains("unexpected token in module body")),
             "{errs:?}"
         );
     }
@@ -2472,6 +2503,9 @@ mod tests {
         );
         let (toks, _) = lex(&src);
         let (_m, errs) = parse(toks);
-        assert!(errs.is_empty(), "shallow nesting spuriously rejected: {errs:?}");
+        assert!(
+            errs.is_empty(),
+            "shallow nesting spuriously rejected: {errs:?}"
+        );
     }
 }

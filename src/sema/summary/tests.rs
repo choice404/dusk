@@ -15,7 +15,11 @@ fn summarize(src: &str) -> EscapeInfo {
 }
 
 fn returns_of(info: &EscapeInfo, f: &str) -> Vec<u8> {
-    info.fns.get(f).expect("summary present").returns_alias.to_vec()
+    info.fns
+        .get(f)
+        .expect("summary present")
+        .returns_alias
+        .to_vec()
 }
 
 fn flows_of(info: &EscapeInfo, f: &str) -> Vec<(u8, u8)> {
@@ -23,7 +27,11 @@ fn flows_of(info: &EscapeInfo, f: &str) -> Vec<(u8, u8)> {
 }
 
 fn reads_of(info: &EscapeInfo, f: &str) -> Vec<u8> {
-    info.fns.get(f).expect("summary present").reads_through.to_vec()
+    info.fns
+        .get(f)
+        .expect("summary present")
+        .reads_through
+        .to_vec()
 }
 
 fn sinks_of(info: &EscapeInfo, f: &str) -> Vec<u8> {
@@ -297,7 +305,11 @@ fn a_named_funcvalue_binding_resolves_to_its_target_and_does_not_sink() {
          func viewer(data: int64[]) -> int64[] { f := id\n return f(data) }",
     );
     assert_eq!(returns_of(&m, "viewer"), vec![0]);
-    assert!(sinks_of(&m, "viewer").is_empty(), "{:?}", sinks_of(&m, "viewer"));
+    assert!(
+        sinks_of(&m, "viewer").is_empty(),
+        "{:?}",
+        sinks_of(&m, "viewer")
+    );
 }
 
 #[test]
@@ -539,7 +551,11 @@ fn a_foreach_lambda_storing_its_element_through_a_capture_records_the_edge() {
            })\n\
          }",
     );
-    assert!(flows_of(&m, "fill").contains(&(0, 1)), "{:?}", flows_of(&m, "fill"));
+    assert!(
+        flows_of(&m, "fill").contains(&(0, 1)),
+        "{:?}",
+        flows_of(&m, "fill")
+    );
 }
 
 #[test]
@@ -600,8 +616,16 @@ fn a_lambda_that_stores_its_param_through_a_captured_pointer_records_a_capture_f
          }",
     );
     let edges: Vec<Vec<(u8, String)>> = m.lambda_capture_flows.values().cloned().collect();
-    assert_eq!(edges.len(), 1, "one lambda records a capture flow: {edges:?}");
-    assert_eq!(edges[0], vec![(0u8, "c".to_string())], "param 0 flows into capture c");
+    assert_eq!(
+        edges.len(),
+        1,
+        "one lambda records a capture flow: {edges:?}"
+    );
+    assert_eq!(
+        edges[0],
+        vec![(0u8, "c".to_string())],
+        "param 0 flows into capture c"
+    );
 }
 
 #[test]
@@ -616,5 +640,9 @@ fn a_lambda_that_only_reads_its_capture_records_no_capture_flow() {
            return reader()\n\
          }",
     );
-    assert!(m.lambda_capture_flows.is_empty(), "{:?}", m.lambda_capture_flows);
+    assert!(
+        m.lambda_capture_flows.is_empty(),
+        "{:?}",
+        m.lambda_capture_flows
+    );
 }

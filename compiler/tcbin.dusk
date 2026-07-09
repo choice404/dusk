@@ -1,0 +1,261 @@
+// tcbin: unary, binary, width, and constant checks.
+
+@paradigm procedural
+
+@import std.string
+@import ast
+@import ty
+@import tcstate
+
+func binop_spelling(op: int64) -> string {
+    if op == bop_add() { return "+" }
+    if op == bop_sub() { return "-" }
+    if op == bop_mul() { return "*" }
+    if op == bop_div() { return "/" }
+    if op == bop_mod() { return "%" }
+    if op == bop_eq() { return "==" }
+    if op == bop_ne() { return "!=" }
+    if op == bop_lt() { return "<" }
+    if op == bop_le() { return "<=" }
+    if op == bop_gt() { return ">" }
+    if op == bop_ge() { return ">=" }
+    if op == bop_and() { return "&&" }
+    if op == bop_or() { return "||" }
+    if op == bop_bitand() { return "&" }
+    if op == bop_bitor() { return "|" }
+    if op == bop_bitxor() { return "^" }
+    if op == bop_shl() { return "<<" }
+    if op == bop_shr() { return ">>" }
+    return "**"
+}
+
+func mix_msg(tc: *TypeChecker, prefix: string, a: int64, b: int64, suffix: string) -> string {
+    as: string = ty_render((*tc).ty, a)
+    bs: string = ty_render((*tc).ty, b)
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, prefix)
+    sb_push(sb, as)
+    sb_push(sb, " and ")
+    sb_push(sb, bs)
+    sb_push(sb, suffix)
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+func max_width(a: int64, b: int64) -> int64 {
+    if a > b { return a }
+    return b
+}
+
+export func check_unary(tc: *TypeChecker, op: int64, t: int64, lo: int64, hi: int64) -> int64 {
+    n: TyNode = ty_get((*tc).ty, t)
+    if op == uop_deref() {
+        if n.kind == tyk_ptr() || n.kind == tyk_rawptr() { return n.a }
+        if n.kind == tyk_collector() {
+            inner: TyNode = ty_get((*tc).ty, n.a)
+            if inner.kind != tyk_func() && inner.kind != tyk_slice() { return n.a }
+        }
+        if n.kind == tyk_unknown() { return t }
+        tc_emit(tc, "cannot dereference a non pointer value", lo, hi)
+        return ty_unknown((*tc).ty)
+    }
+    if op == uop_neg() {
+        if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_unknown() { return t }
+        tc_emit(tc, "unary minus needs a numeric operand", lo, hi)
+        return ty_unknown((*tc).ty)
+    }
+    if op == uop_not() {
+        if n.kind == tyk_bool() || n.kind == tyk_unknown() { return ty_bool((*tc).ty) }
+        tc_emit(tc, "'!' needs a bool operand", lo, hi)
+        return ty_bool((*tc).ty)
+    }
+    if n.kind == tyk_int() || n.kind == tyk_unknown() { return t }
+    tc_emit(tc, "'~' needs an integer operand", lo, hi)
+    return ty_unknown((*tc).ty)
+}
+
+export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: int64, hi: int64) -> int64 {
+    ta: TyNode = ty_get((*tc).ty, a)
+    tb: TyNode = ty_get((*tc).ty, b)
+    unknown: bool = ta.kind == tyk_unknown() || tb.kind == tyk_unknown()
+    if op == bop_add() || op == bop_sub() || op == bop_mul() || op == bop_div() || op == bop_mod() {
+        if unknown {
+            if ta.kind == tyk_unknown() { return b }
+            return a
+        }
+        if ta.kind == tyk_int() && tb.kind == tyk_int() {
+            if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_int((*tc).ty, max_width(ta.w, tb.w)) }
+            tc_emit(tc, mix_msg(tc, "arithmetic mixes ", a, b, "; match the widths"), lo, hi)
+            return ty_unknown((*tc).ty)
+        }
+        if ta.kind == tyk_float() && tb.kind == tyk_float() {
+            if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_float((*tc).ty, max_width(ta.w, tb.w)) }
+            tc_emit(tc, mix_msg(tc, "arithmetic mixes ", a, b, "; match the widths"), lo, hi)
+            return ty_unknown((*tc).ty)
+        }
+        tc_emit(tc, "arithmetic needs two operands of the same numeric type", lo, hi)
+        return ty_unknown((*tc).ty)
+    }
+    if op == bop_eq() || op == bop_ne() || op == bop_lt() || op == bop_le() || op == bop_gt() || op == bop_ge() {
+        if !compat((*tc).ty, a, b) { tc_emit(tc, "comparison needs two operands of the same type", lo, hi) }
+        return ty_bool((*tc).ty)
+    }
+    if op == bop_and() || op == bop_or() {
+        if !unknown {
+            if !(ta.kind == tyk_bool() && tb.kind == tyk_bool()) {
+                tc_emit(tc, "logical operators need bool operands", lo, hi)
+            }
+        }
+        return ty_bool((*tc).ty)
+    }
+    if op == bop_bitand() || op == bop_bitor() || op == bop_bitxor() || op == bop_shl() || op == bop_shr() {
+        if unknown {
+            if ta.kind == tyk_unknown() { return b }
+            return a
+        }
+        if ta.kind == tyk_int() && tb.kind == tyk_int() {
+            if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_int((*tc).ty, max_width(ta.w, tb.w)) }
+            sb: *StringBuilder = alloc(sb_new())
+            sb_push_char(sb, 39)
+            sb_push(sb, binop_spelling(op))
+            sb_push(sb, "' mixes ")
+            sb_push(sb, ty_render((*tc).ty, a))
+            sb_push(sb, " and ")
+            sb_push(sb, ty_render((*tc).ty, b))
+            sb_push(sb, "; match the widths")
+            out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+            sb_free(sb)
+            free(sb)
+            tc_emit(tc, out, lo, hi)
+            return ty_unknown((*tc).ty)
+        }
+        if op == bop_shl() || op == bop_shr() {
+            tc_emit(tc, "shift operators need integer operands", lo, hi)
+        } else {
+            tc_emit(tc, "bitwise operators need integer operands", lo, hi)
+        }
+        return ty_unknown((*tc).ty)
+    }
+    if unknown {
+        if ta.kind == tyk_unknown() { return b }
+        return a
+    }
+    if ta.kind == tyk_int() && tb.kind == tyk_int() {
+        if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_int((*tc).ty, max_width(ta.w, tb.w)) }
+        tc_emit(tc, mix_msg(tc, "'**' mixes ", a, b, "; match the widths"), lo, hi)
+        return ty_unknown((*tc).ty)
+    }
+    if ta.kind == tyk_float() && tb.kind == tyk_float() {
+        if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_float((*tc).ty, max_width(ta.w, tb.w)) }
+        tc_emit(tc, mix_msg(tc, "'**' mixes ", a, b, "; match the widths"), lo, hi)
+        return ty_unknown((*tc).ty)
+    }
+    tc_emit(tc, "'**' needs two operands of the same numeric type", lo, hi)
+    return ty_unknown((*tc).ty)
+}
+
+export func int_suffix_width(s: string) -> int64 {
+    if str_eq(s, "i8") || str_eq(s, "u8") { return 8 }
+    if str_eq(s, "i16") || str_eq(s, "u16") { return 16 }
+    if str_eq(s, "i32") || str_eq(s, "u32") { return 32 }
+    if str_eq(s, "i64") || str_eq(s, "u64") { return 64 }
+    return 0
+}
+
+export func float_suffix_width(s: string) -> int64 {
+    if str_eq(s, "f32") { return 32 }
+    if str_eq(s, "f64") { return 64 }
+    return 0
+}
+
+func literal_fit_msg(val: int64, w: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "literal ")
+    sb_push_int(b, val)
+    sb_push(b, " does not fit in ")
+    sb_push_int(b, w)
+    sb_push(b, " bits")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func check_int_value_fits(tc: *TypeChecker, val: int64, w: int64, lo: int64, hi: int64) -> void {
+    if w != 8 && w != 16 && w != 32 { return }
+    mut low: int64 = -128
+    mut high: int64 = 127
+    if w == 16 {
+        low = -32768
+        high = 32767
+    } else if w == 32 {
+        low = -2147483648
+        high = 2147483647
+    }
+    if val < low || val > high {
+        tc_emit(tc, literal_fit_msg(val, w), lo, hi)
+    }
+}
+
+export func check_int_fits(tc: *TypeChecker, expr: int64, target: int64) -> void {
+    nt: TyNode = ty_get((*tc).ty, target)
+    if nt.kind != tyk_int() { return }
+    if nt.w != 8 && nt.w != 16 && nt.w != 32 { return }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr)
+    if e.kind == xk_int() && e.b < 0 {
+        check_int_value_fits(tc, e.a, nt.w, e.lo, e.hi)
+    } else if e.kind == xk_unary() && e.a == uop_neg() {
+        inner: ExprNode = vec_get((*a).exprs, e.b)
+        if inner.kind == xk_int() && inner.b < 0 {
+            check_int_value_fits(tc, 0 - inner.a, nt.w, e.lo, e.hi)
+        }
+    }
+}
+
+export func const_int(tc: *TypeChecker, expr: int64) -> (bool, int64) {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr)
+    if e.kind == xk_int() { return (true, e.a) }
+    if e.kind == xk_unary() && e.a == uop_neg() {
+        inner: ExprNode = vec_get((*a).exprs, e.b)
+        if inner.kind == xk_int() { return (true, 0 - inner.a) }
+    }
+    return (false, 0)
+}
+
+export func check_pow_exponent(tc: *TypeChecker, base: int64, exp: int64, exp_expr: int64, lo: int64, hi: int64) -> void {
+    nb: TyNode = ty_get((*tc).ty, base)
+    ne: TyNode = ty_get((*tc).ty, exp)
+    if nb.kind != tyk_int() || ne.kind != tyk_int() { return }
+    ok, v := const_int(tc, exp_expr)
+    if ok {
+        if v < 0 { tc_emit(tc, "'**' on integers needs a nonnegative exponent", lo, hi) }
+    }
+}
+
+export func check_shift_amount(tc: *TypeChecker, amount: int64, result: int64, lo: int64, hi: int64) -> void {
+    ok, v := const_int(tc, amount)
+    if !ok { return }
+    if v < 0 {
+        tc_emit(tc, "shift amount is negative", lo, hi)
+        return
+    }
+    nr: TyNode = ty_get((*tc).ty, result)
+    if nr.kind != tyk_int() { return }
+    mut w: int64 = nr.w
+    if w == 0 { w = 64 }
+    if v >= w {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "shift amount ")
+        sb_push_int(b, v)
+        sb_push(b, " is out of range for int")
+        sb_push_int(b, w)
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, lo, hi)
+    }
+}

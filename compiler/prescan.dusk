@@ -165,6 +165,19 @@ func trim_quotes(s: string) -> string {
     return substring(s, lo, hi)
 }
 
+// Builds a fault message of the shape "prefix payload'", quoting the offending
+// directive text the way stage0's prescan does.
+func quoted_msg(prefix: string, payload: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push(b, payload)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 // Processes one line. Returns true to keep scanning, false at the first code line,
 // where the sweep stops. Blank and comment lines are skipped; a directive updates
 // the collections; an unknown @directive is a recorded fault.
@@ -206,20 +219,20 @@ func process_line(src: string, n: int64, ls: int64, le: int64, p: Prescan) -> bo
     if str_eq(head, "@paradigm") {
         tag: int64 = para_lookup(rest)
         if tag < 0 {
-            vec_push(p.errors, located(ls, "unknown paradigm"))
+            vec_push(p.errors, located(ls, le, quoted_msg("unknown paradigm '", rest)))
         } else {
             vec_push(p.paradigms, tag)
         }
     } else if str_eq(head, "@import") {
         imp: string = trim_quotes(rest)
         if str_len(imp) == 0 {
-            vec_push(p.errors, located(ls, "empty import path"))
+            vec_push(p.errors, located(ls, le, "empty import path"))
             free(imp)
         } else {
             vec_push(p.imports, imp)
         }
     } else if bytes.byte_at(src, n, ts) == 64 {
-        vec_push(p.errors, located(ls, "unknown directive"))
+        vec_push(p.errors, located(ls, le, quoted_msg("unknown directive '", head)))
     } else {
         keep = false
     }

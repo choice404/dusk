@@ -1,0 +1,363 @@
+// tcown: ownership, must-handle helpers, and mutable place checks.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+
+export func is_managed_ty(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind != tyk_ptr() { return false }
+    inner: TyNode = ty_get((*tc).ty, n.a)
+    return inner.kind != tyk_unit()
+}
+
+export func ty_has_error(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_error() { return true }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if ty_has_error(tc, vec_get((*(*tc).ty).kids, n.off + i)) { return true }
+            i = i + 1
+        }
+    }
+    return false
+}
+
+export func check_ident_move_use(tc: *TypeChecker, name: string, lo: int64, hi: int64) -> void {
+    if (*tc).types_only { return }
+    if own_of(tc, name) == own_moved() {
+        tc_emit(tc, "use of a moved pointer", lo, hi)
+    }
+}
+
+func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
+    if expr_id < 0 { return }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() {
+        mark_err_handled(tc, ast_name(a, e.a))
+    } else if e.kind == xk_unary() {
+        mark_errs_in_rec(tc, e.b)
+    } else if e.kind == xk_binary() || e.kind == xk_range() {
+        mark_errs_in_rec(tc, e.b)
+        mark_errs_in_rec(tc, e.c)
+    } else if e.kind == xk_call() {
+        mark_errs_in_rec(tc, e.a)
+        mut i: int64 = 0
+        while i < e.c {
+            mark_errs_in_rec(tc, vec_get((*a).kids, e.b + i))
+            i = i + 1
+        }
+    } else if e.kind == xk_field() || e.kind == xk_index() {
+        mark_errs_in_rec(tc, e.a)
+        if e.kind == xk_index() { mark_errs_in_rec(tc, e.b) }
+    } else if e.kind == xk_tuple() || e.kind == xk_array() {
+        mut j: int64 = 0
+        while j < e.b {
+            mark_errs_in_rec(tc, vec_get((*a).kids, e.a + j))
+            j = j + 1
+        }
+    } else if e.kind == xk_struct_lit() {
+        mut k: int64 = 1
+        while k < e.c {
+            mark_errs_in_rec(tc, vec_get((*a).kids, e.b + k))
+            k = k + 2
+        }
+    } else if e.kind == xk_match() {
+        mark_errs_in_rec(tc, e.a)
+    } else if e.kind == xk_do() {
+        mut m: int64 = 0
+        while m < e.c {
+            d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + m))
+            mark_errs_in_rec(tc, d.expr)
+            m = m + 1
+        }
+    } else if e.kind == xk_await() {
+        mark_errs_in_rec(tc, e.a)
+    } else if e.kind == xk_collect() {
+        mark_errs_in_rec(tc, e.b)
+    }
+}
+
+export func mark_errs_in(tc: *TypeChecker, expr_id: int64) -> void {
+    if (*tc).types_only { return }
+    mark_errs_in_rec(tc, expr_id)
+}
+
+export func binding_own(tc: *TypeChecker, stmt: StmtNode, value: ExprNode, vt: int64) -> int64 {
+    if (stmt.d & 2) != 0 { return own_borrow() }
+    if value.kind == xk_call() {
+        if is_managed_ty(tc, vt) { return own_owner() }
+        return own_borrow()
+    }
+    if value.kind == xk_ident() {
+        src: string = ast_name((*tc).ast, value.a)
+        if own_of(tc, src) == own_owner() {
+            if !(*tc).types_only {
+                tc_emit(tc, "cannot copy an owning pointer; bind a `ref` alias or `move` it", value.lo, value.hi)
+            }
+            return own_owner()
+        }
+        return own_borrow()
+    }
+    return own_owner()
+}
+
+export func check_assign_ownership(tc: *TypeChecker, lhs_id: int64, rhs_id: int64, lhs_ty: int64) -> void {
+    if (*tc).types_only { return }
+    if !is_managed_ty(tc, lhs_ty) { return }
+    a: *Ast = (*tc).ast
+    lhs: ExprNode = vec_get((*a).exprs, lhs_id)
+    rhs: ExprNode = vec_get((*a).exprs, rhs_id)
+    if lhs.kind == xk_ident() && rhs.kind == xk_ident() {
+        src: string = ast_name(a, rhs.a)
+        if own_of(tc, src) == own_owner() {
+            tc_emit(tc, "cannot copy an owning pointer; bind a `ref` alias or `move` it", rhs.lo, rhs.hi)
+            return
+        }
+    }
+    if lhs.kind == xk_ident() {
+        dst: string = ast_name(a, lhs.a)
+        if own_of(tc, dst) == own_owner() {
+            tc_emit(tc, "cannot reassign an owning pointer; it leaks the allocation it holds, free it first or bind a new pointer", lhs.lo, lhs.hi)
+        }
+    }
+}
+
+func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64 {
+    sigs: *TypeSigs = (*tc).sigtab
+    mut i: int64 = 0
+    while i < st.len {
+        f: FieldSig = vec_get((*sigs).fields, st.off + i)
+        if str_eq(f.name, fname) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+func chain_field_ty(tc: *TypeChecker, base_ty: int64, fname: string) -> int64 {
+    n: TyNode = ty_get((*tc).ty, base_ty)
+    if n.kind == tyk_named() {
+        sname: string = ty_name((*tc).ty, base_ty)
+        structs: *Map<StructSig> = (*tc).structs
+        if !map_has(structs, sname) { return ty_unknown((*tc).ty) }
+        st: StructSig = sig_struct((*tc).sigtab, sname)
+        idx: int64 = struct_field_index(tc, st, fname)
+        if idx < 0 { return ty_unknown((*tc).ty) }
+        fld: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + idx)
+        return fld.ty
+    }
+    if n.kind == tyk_error() && str_eq(fname, "message") { return ty_str((*tc).ty) }
+    return ty_unknown((*tc).ty)
+}
+
+func own_chain_ty(tc: *TypeChecker, expr_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() { return lookup(tc, ast_name(a, e.a)) }
+    if e.kind == xk_field() {
+        return chain_field_ty(tc, own_chain_ty(tc, e.a), ast_name(a, e.b))
+    }
+    if e.kind == xk_index() {
+        base_ty: int64 = own_chain_ty(tc, e.a)
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        if idx.kind == xk_range() { return ty_slice((*tc).ty, elem_of((*tc).ty, base_ty)) }
+        return elem_of((*tc).ty, base_ty)
+    }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        pt: int64 = own_chain_ty(tc, e.b)
+        pn: TyNode = ty_get((*tc).ty, pt)
+        if pn.kind == tyk_ptr() || pn.kind == tyk_rawptr() || pn.kind == tyk_collector() { return pn.a }
+    }
+    return ty_unknown((*tc).ty)
+}
+
+func value_chain_root(tc: *TypeChecker, expr_id: int64) -> (bool, string, int64, int64) {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() { return (true, ast_name(a, e.a), e.lo, e.hi) }
+    if e.kind == xk_field() { return value_chain_root(tc, e.a) }
+    if e.kind == xk_index() {
+        bt: TyNode = ty_get((*tc).ty, own_chain_ty(tc, e.a))
+        if bt.kind == tyk_array() { return value_chain_root(tc, e.a) }
+    }
+    return (false, "", 0, 0)
+}
+
+export func check_assign_target(tc: *TypeChecker, lhs_id: int64) -> void {
+    a: *Ast = (*tc).ast
+    lhs: ExprNode = vec_get((*a).exprs, lhs_id)
+    if lhs.kind == xk_ident() { return }
+    if lhs.kind == xk_field() {
+        base_ty: TyNode = ty_get((*tc).ty, own_chain_ty(tc, lhs.a))
+        if base_ty.kind == tyk_ptr() || base_ty.kind == tyk_rawptr() {
+            tc_emit(tc, "a field store through a pointer needs an explicit dereference; write (*p).field", lhs.lo, lhs.hi)
+            return
+        }
+        if base_ty.kind == tyk_error() {
+            tc_emit(tc, "an error's message is read only; build a new error instead", lhs.lo, lhs.hi)
+            return
+        }
+    }
+    if lhs.kind == xk_index() {
+        idx: ExprNode = vec_get((*a).exprs, lhs.b)
+        base_ty2: TyNode = ty_get((*tc).ty, own_chain_ty(tc, lhs.a))
+        if idx.kind != xk_range() && base_ty2.kind == tyk_str() {
+            tc_emit(tc, "a string is immutable; build a new one with a StringBuilder", lhs.lo, lhs.hi)
+            return
+        }
+    }
+    ok, root, lo, hi := value_chain_root(tc, lhs_id)
+    if ok {
+        if !str_eq(root, "self") && !is_mutable(tc, root) {
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, "cannot assign through immutable '")
+            sb_push(b, root)
+            sb_push(b, "'; declare it 'mut'")
+            msg: string = substring(sb_cstr(b), 0, sb_size(b))
+            sb_free(b)
+            free(b)
+            tc_emit(tc, msg, lo, hi)
+        }
+    }
+}
+
+export func declare_await_bind(tc: *TypeChecker, b: BindNode, mutable: bool, pt: int64, lo: int64, hi: int64) -> void {
+    mut tyid: int64 = pt
+    if b.ty >= 0 { tyid = tc_type(tc, b.ty) } else { tyid = harden((*tc).ty, pt) }
+    name: string = ast_name((*tc).ast, b.name)
+    if mutable { declare_mut(tc, name) }
+    if is_managed_ty(tc, tyid) { declare_own(tc, name, own_owner()) }
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_error() { declare_err(tc, name, lo, hi) }
+    declare(tc, name, tyid)
+    set_esc(tc, name, false, false)
+}
+
+func scan_task_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>) -> void {
+    if expr_id < 0 { return }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_ident() && e.c > 0 {
+            cname: string = ast_name(a, callee.a)
+            arg0_id: int64 = vec_get((*a).kids, e.b)
+            arg0: ExprNode = vec_get((*a).exprs, arg0_id)
+            if arg0.kind == xk_ident() {
+                aname: string = ast_name(a, arg0.a)
+                if !map_has(bound, aname) && is_local(tc, aname) && is_managed_ty(tc, lookup(tc, aname)) && own_of(tc, aname) != own_moved() {
+                    if str_eq(cname, "free") {
+                        tc_emit(tc, "cannot free a borrowed pointer; only its owner frees it", arg0.lo, arg0.hi)
+                    } else if str_eq(cname, "move") {
+                        tc_emit(tc, "cannot move a borrowed pointer; only its owner can be moved", arg0.lo, arg0.hi)
+                    }
+                }
+            }
+        }
+        scan_task_expr(tc, e.a, bound)
+        mut i: int64 = 0
+        while i < e.c {
+            scan_task_expr(tc, vec_get((*a).kids, e.b + i), bound)
+            i = i + 1
+        }
+    } else if e.kind == xk_unary() {
+        scan_task_expr(tc, e.b, bound)
+    } else if e.kind == xk_binary() || e.kind == xk_range() {
+        scan_task_expr(tc, e.b, bound)
+        scan_task_expr(tc, e.c, bound)
+    } else if e.kind == xk_field() || e.kind == xk_index() {
+        scan_task_expr(tc, e.a, bound)
+        if e.kind == xk_index() { scan_task_expr(tc, e.b, bound) }
+    } else if e.kind == xk_tuple() || e.kind == xk_array() {
+        mut j: int64 = 0
+        while j < e.b {
+            scan_task_expr(tc, vec_get((*a).kids, e.a + j), bound)
+            j = j + 1
+        }
+    } else if e.kind == xk_struct_lit() {
+        mut k: int64 = 1
+        while k < e.c {
+            scan_task_expr(tc, vec_get((*a).kids, e.b + k), bound)
+            k = k + 2
+        }
+    } else if e.kind == xk_await() || e.kind == xk_collect() {
+        scan_task_expr(tc, e.a, bound)
+        if e.kind == xk_collect() { scan_task_expr(tc, e.b, bound) }
+    }
+}
+
+func scan_task_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>) -> void {
+    a: *Ast = (*tc).ast
+    s: StmtNode = vec_get((*a).stmts, stmt_id)
+    if s.kind == sk_let() {
+        scan_task_expr(tc, s.c, bound)
+        mut i: int64 = 0
+        while i < s.b {
+            b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
+            map_put(bound, ast_name(a, b.name), 1)
+            i = i + 1
+        }
+    } else if s.kind == sk_assign() {
+        scan_task_expr(tc, s.a, bound)
+        scan_task_expr(tc, s.b, bound)
+    } else if s.kind == sk_assign_op() {
+        scan_task_expr(tc, s.b, bound)
+        scan_task_expr(tc, s.c, bound)
+    } else if s.kind == sk_return() || s.kind == sk_defer() || s.kind == sk_expr() {
+        scan_task_expr(tc, s.a, bound)
+    } else if s.kind == sk_if() {
+        scan_task_expr(tc, s.a, bound)
+        scan_task_block(tc, s.b, bound)
+        if s.c >= 0 { scan_task_block(tc, s.c, bound) }
+    } else if s.kind == sk_while() {
+        scan_task_expr(tc, s.a, bound)
+        scan_task_block(tc, s.b, bound)
+    } else if s.kind == sk_for() {
+        scan_task_expr(tc, s.b, bound)
+        map_put(bound, ast_name(a, s.a), 1)
+        scan_task_block(tc, s.c, bound)
+    } else if s.kind == sk_match() {
+        scan_task_expr(tc, s.a, bound)
+        mut m: int64 = 0
+        while m < s.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + m))
+            scan_task_block(tc, arm.body, bound)
+            m = m + 1
+        }
+    }
+}
+
+func scan_task_block(tc: *TypeChecker, block_id: int64, bound: *Map<int64>) -> void {
+    a: *Ast = (*tc).ast
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    mut i: int64 = 0
+    while i < b.len {
+        scan_task_stmt(tc, vec_get((*a).kids, b.off + i), bound)
+        i = i + 1
+    }
+}
+
+export func check_task_lambda_ownership(tc: *TypeChecker, expr_id: int64) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind != xk_lambda() { return }
+    bound: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < e.b {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
+        map_put(bound, ast_name(a, p.name), 1)
+        i = i + 1
+    }
+    scan_task_block(tc, e.d, bound)
+}

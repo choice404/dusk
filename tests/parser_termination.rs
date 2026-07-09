@@ -114,7 +114,10 @@ fn corpus() -> Vec<String> {
     // Moderate-depth nested generics and parens with the closers deleted: a
     // malformed but linear parse the guards leave untouched. Depth is kept well
     // clear of the recursion-stack limit, which is a separate concern.
-    c.push(format!("func f() -> {}int {{ return }}", "Vec<".repeat(150)));
+    c.push(format!(
+        "func f() -> {}int {{ return }}",
+        "Vec<".repeat(150)
+    ));
     c.push(format!("func f() -> void {{ x := {}1 }}", "(".repeat(150)));
     c
 }
@@ -321,5 +324,8 @@ fn valid_program_still_parses_clean() {
     // with no parser diagnostics.
     let src = "func main() -> int32 {\n  x := 1 + 2 * 3\n  return x\n}\n";
     let msgs = parse_within(src);
-    assert!(msgs.is_empty(), "valid program spuriously rejected: {msgs:?}");
+    assert!(
+        msgs.is_empty(),
+        "valid program spuriously rejected: {msgs:?}"
+    );
 }

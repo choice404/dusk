@@ -130,7 +130,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn ident(&mut self, start: usize) {
-        while matches!(self.peek(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')) {
+        while matches!(
+            self.peek(),
+            Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_')
+        ) {
             self.pos += 1;
         }
         let text = self.text(start);
@@ -161,7 +164,10 @@ impl<'a> Lexer<'a> {
         let suffix = self.suffix();
         if let Some(s) = &suffix {
             if reserved_suffix(s) {
-                self.error("unsigned integers are reserved; use the signed widths", start);
+                self.error(
+                    "unsigned integers are reserved; use the signed widths",
+                    start,
+                );
             } else if !valid_suffix(s) {
                 self.error(format!("unknown literal suffix '{s}'"), start);
             }
@@ -634,10 +640,19 @@ mod tests {
         assert_eq!(
             kinds("1..=3 0..2 a...b"),
             vec![
-                TokenKind::Int { val: 1, suffix: None },
+                TokenKind::Int {
+                    val: 1,
+                    suffix: None
+                },
                 TokenKind::DotDotEq,
-                TokenKind::Int { val: 3, suffix: None },
-                TokenKind::Int { val: 0, suffix: None },
+                TokenKind::Int {
+                    val: 3,
+                    suffix: None
+                },
+                TokenKind::Int {
+                    val: 0,
+                    suffix: None
+                },
                 TokenKind::DotDot,
                 TokenKind::Int {
                     val: 2,
@@ -689,8 +704,14 @@ mod tests {
         assert_eq!(
             kinds("5i8 1..3"),
             vec![
-                TokenKind::Int { val: 5, suffix: Some("i8".into()) },
-                TokenKind::Int { val: 1, suffix: None },
+                TokenKind::Int {
+                    val: 5,
+                    suffix: Some("i8".into())
+                },
+                TokenKind::Int {
+                    val: 1,
+                    suffix: None
+                },
                 TokenKind::DotDot,
                 TokenKind::Int {
                     val: 3,
@@ -706,7 +727,8 @@ mod tests {
         for src in ["5u8", "5u16", "5u32", "5u64"] {
             let (_, errs) = lex(src);
             assert!(
-                errs.iter().any(|d| d.msg.contains("unsigned integers are reserved")),
+                errs.iter()
+                    .any(|d| d.msg.contains("unsigned integers are reserved")),
                 "{src} should be reserved: {errs:?}"
             );
         }
@@ -717,7 +739,10 @@ mod tests {
         assert_eq!(
             kinds("2.5f32"),
             vec![
-                TokenKind::Float { val: 2.5, suffix: Some("f32".into()) },
+                TokenKind::Float {
+                    val: 2.5,
+                    suffix: Some("f32".into())
+                },
                 TokenKind::Eof,
             ]
         );

@@ -1,0 +1,200 @@
+// tcstate: shared type-checker state and placeholders for later semantic cuts.
+
+@paradigm procedural
+
+@import std.vector
+@import std.map
+@import ast
+@import diag
+@import ty
+@import tysigs
+
+// S4: summary handles stay bottom in dusk1 until interprocedural enforcement lands.
+export struct SummaryHandle { empty: bool }
+export struct MutTupleEntry { ty: int64 }
+export struct LambdaSinkBind { sinks: int64, collect: int64 }
+export struct FlowProv { lo: int64, hi: int64, src: int64, dst: int64 }
+export struct ErrBind { lo: int64, hi: int64, pending: bool }
+export struct PendingErr { name: string, lo: int64, hi: int64 }
+
+export func own_owner() -> int64 { return 1 }
+export func own_borrow() -> int64 { return 2 }
+export func own_moved() -> int64 { return 3 }
+
+export struct TypeChecker {
+    ast: *Ast,
+    ty: *TyArena,
+    sigtab: *TypeSigs,
+    sigs: *Map<FnSig>,
+    async_fns: *Map<int64>,
+    ifaces: *Map<int64>,
+    enums: *Map<EnumSig>,
+    variant_payloads: *Map<VariantSig>,
+    variant_payloads_by_enum: *Map<VariantSig>,
+    structs: *Map<StructSig>,
+    iface_methods: *Map<MethodList>,
+    impls: *Map<int64>,
+    raw_sigs: *Map<TyList>,
+    embed_fields: *Map<TyList>,
+    scopes: *Vector<*Map<int64>>,
+    owns: *Vector<*Map<int64>>,
+    muts: *Vector<*Map<int64>>,
+    err_binds: *Vector<*Map<ErrBind>>,
+    esc_slices: *Vector<*Map<int64>>,
+    esc_closures: *Vector<*Map<int64>>,
+    iface_binds: *Vector<*Map<string>>,
+    enum_binds: *Vector<*Map<string>>,
+    slice_iface_elem: *Vector<*Map<int64>>,
+    alias_edges: *Vector<*Map<string>>,
+    branch_depth: int64,
+    suppress: int64,
+    in_async: bool,
+    in_method: bool,
+    cur_generics: *Map<int64>,
+    cur_ret: int64,
+    cur_raw_ret: int64,
+    future_elems: *Map<int64>,
+    types_only: bool,
+    summaries: *Map<SummaryHandle>,
+    method_summaries: *Map<SummaryHandle>,
+    method_params: *Map<TyList>,
+    iface_method_params: *Map<TyList>,
+    lambda_returns: *Map<int64>,
+    lambda_sinks: *Map<int64>,
+    lambda_collect_sinks: *Map<int64>,
+    lambda_sink_binds: *Vector<*Map<LambdaSinkBind>>,
+    lambda_capture_flows: *Map<int64>,
+    lambda_capture_binds: *Vector<*Map<int64>>,
+    resolvable_fn_binds: *Map<string>,
+    cur_params: *Map<int64>,
+    cur_param_index: *Map<int64>,
+    ptr_param_borrows: *Vector<*Map<int64>>,
+    flow_prov: *Map<FlowProv>,
+    mut_tuple_types: *Map<MutTupleEntry>,
+    summary: SummaryHandle,
+    errors: *Vector<SpanDiagnostic>,
+}
+
+export func tc_new(a: *Ast, types_only: bool, future_elems: *Map<int64>) -> *TypeChecker {
+    ta: *TyArena = ty_arena_new()
+    sigs: *TypeSigs = tysigs_new(a, ta)
+    collect_sigs(sigs)
+    scopes: *Vector<*Map<int64>> = alloc(vec_new())
+    owns: *Vector<*Map<int64>> = alloc(vec_new())
+    muts: *Vector<*Map<int64>> = alloc(vec_new())
+    err_binds: *Vector<*Map<ErrBind>> = alloc(vec_new())
+    esc_slices: *Vector<*Map<int64>> = alloc(vec_new())
+    esc_closures: *Vector<*Map<int64>> = alloc(vec_new())
+    iface_binds: *Vector<*Map<string>> = alloc(vec_new())
+    enum_binds: *Vector<*Map<string>> = alloc(vec_new())
+    slice_iface_elem: *Vector<*Map<int64>> = alloc(vec_new())
+    alias_edges: *Vector<*Map<string>> = alloc(vec_new())
+    summaries: *Map<SummaryHandle> = alloc(map_new())
+    method_summaries: *Map<SummaryHandle> = alloc(map_new())
+    lambda_returns: *Map<int64> = alloc(map_new())
+    lambda_sinks: *Map<int64> = alloc(map_new())
+    lambda_collect_sinks: *Map<int64> = alloc(map_new())
+    lambda_sink_binds: *Vector<*Map<LambdaSinkBind>> = alloc(vec_new())
+    lambda_capture_flows: *Map<int64> = alloc(map_new())
+    lambda_capture_binds: *Vector<*Map<int64>> = alloc(vec_new())
+    resolvable_fn_binds: *Map<string> = alloc(map_new())
+    cur_params: *Map<int64> = alloc(map_new())
+    cur_param_index: *Map<int64> = alloc(map_new())
+    ptr_param_borrows: *Vector<*Map<int64>> = alloc(vec_new())
+    flow_prov: *Map<FlowProv> = alloc(map_new())
+    mut_tuple_types: *Map<MutTupleEntry> = alloc(map_new())
+    cur_generics: *Map<int64> = alloc(map_new())
+    errors: *Vector<SpanDiagnostic> = alloc(vec_new())
+    return alloc(TypeChecker {
+        ast: a,
+        ty: ta,
+        sigtab: sigs,
+        sigs: (*sigs).fns,
+        async_fns: (*sigs).async_fns,
+        ifaces: (*sigs).ifaces,
+        enums: (*sigs).enums,
+        variant_payloads: (*sigs).variant_payloads,
+        variant_payloads_by_enum: (*sigs).variant_payloads_by_enum,
+        structs: (*sigs).structs,
+        iface_methods: (*sigs).iface_methods,
+        impls: (*sigs).impls,
+        raw_sigs: (*sigs).raw_sigs,
+        embed_fields: (*sigs).embed_fields,
+        scopes: scopes,
+        owns: owns,
+        muts: muts,
+        err_binds: err_binds,
+        esc_slices: esc_slices,
+        esc_closures: esc_closures,
+        iface_binds: iface_binds,
+        enum_binds: enum_binds,
+        slice_iface_elem: slice_iface_elem,
+        alias_edges: alias_edges,
+        branch_depth: 0,
+        suppress: 0,
+        in_async: false,
+        in_method: false,
+        cur_generics: cur_generics,
+        cur_ret: ty_unit(ta),
+        cur_raw_ret: ty_unit(ta),
+        future_elems: future_elems,
+        types_only: types_only,
+        summaries: summaries,
+        method_summaries: method_summaries,
+        method_params: (*sigs).method_params,
+        iface_method_params: (*sigs).iface_method_params,
+        lambda_returns: lambda_returns,
+        lambda_sinks: lambda_sinks,
+        lambda_collect_sinks: lambda_collect_sinks,
+        lambda_sink_binds: lambda_sink_binds,
+        lambda_capture_flows: lambda_capture_flows,
+        lambda_capture_binds: lambda_capture_binds,
+        resolvable_fn_binds: resolvable_fn_binds,
+        cur_params: cur_params,
+        cur_param_index: cur_param_index,
+        ptr_param_borrows: ptr_param_borrows,
+        flow_prov: flow_prov,
+        mut_tuple_types: mut_tuple_types,
+        summary: SummaryHandle { empty: true },
+        errors: errors,
+    })
+}
+
+export func tc_emit(tc: *TypeChecker, msg: string, lo: int64, hi: int64) -> void {
+    if (*tc).suppress > 0 {
+        return
+    }
+    vec_push((*tc).errors, span_diag(lo, hi, msg))
+}
+
+export func span_key(lo: int64, hi: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_int(b, lo)
+    sb_push_char(b, 58)
+    sb_push_int(b, hi)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func tc_type(tc: *TypeChecker, ast_ty: int64) -> int64 {
+    mut id: int64 = lower((*tc).ty, (*tc).ast, ast_ty, (*tc).cur_generics)
+    id = fix((*tc).sigtab, id)
+    return unmangle((*tc).ty, id, (*tc).future_elems)
+}
+
+export func tc_raw_type(tc: *TypeChecker, ast_ty: int64) -> int64 {
+    return lower((*tc).ty, (*tc).ast, ast_ty, (*tc).cur_generics)
+}
+
+export func set_cur_generics(tc: *TypeChecker, off: int64, len: int64) -> void {
+    a: *Ast = (*tc).ast
+    g: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < len {
+        map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
+        i = i + 1
+    }
+    (*tc).cur_generics = g
+}

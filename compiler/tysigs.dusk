@@ -1,0 +1,383 @@
+// tysigs: type-checker signature tables built before walking bodies.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+
+export struct TyList { off: int64, len: int64 }
+export struct FnSig { params: TyList, raw_params: TyList, ret: int64, raw_ret: int64, is_async: bool }
+export struct FieldSig { name: string, ty: int64, raw: int64 }
+export struct StructSig { is_gen: bool, off: int64, len: int64 }
+export struct VariantSig { owner: string, off: int64, len: int64 }
+export struct EnumSig { off: int64, len: int64 }
+export struct MethodReq { name: string, arity: int64 }
+export struct MethodList { off: int64, len: int64 }
+
+export struct TypeSigs {
+    ast: *Ast,
+    ty: *TyArena,
+    tys: *Vector<int64>,
+    fields: *Vector<FieldSig>,
+    names: *Vector<string>,
+    methods: *Vector<MethodReq>,
+    fns: *Map<FnSig>,
+    raw_sigs: *Map<TyList>,
+    async_fns: *Map<int64>,
+    structs: *Map<StructSig>,
+    enums: *Map<EnumSig>,
+    ifaces: *Map<int64>,
+    iface_methods: *Map<MethodList>,
+    impls: *Map<int64>,
+    foreigns: *Map<int64>,
+    variant_payloads: *Map<VariantSig>,
+    variant_payloads_by_enum: *Map<VariantSig>,
+    variant_owner: *Map<string>,
+    embed_fields: *Map<TyList>,
+    method_params: *Map<TyList>,
+    iface_method_params: *Map<TyList>,
+}
+
+export func tysigs_new(a: *Ast, t: *TyArena) -> *TypeSigs {
+    tys: *Vector<int64> = alloc(vec_new())
+    fields: *Vector<FieldSig> = alloc(vec_new())
+    names: *Vector<string> = alloc(vec_new())
+    methods: *Vector<MethodReq> = alloc(vec_new())
+    fns: *Map<FnSig> = alloc(map_new())
+    raw_sigs: *Map<TyList> = alloc(map_new())
+    async_fns: *Map<int64> = alloc(map_new())
+    structs: *Map<StructSig> = alloc(map_new())
+    enums: *Map<EnumSig> = alloc(map_new())
+    ifaces: *Map<int64> = alloc(map_new())
+    iface_methods: *Map<MethodList> = alloc(map_new())
+    impls: *Map<int64> = alloc(map_new())
+    foreigns: *Map<int64> = alloc(map_new())
+    variant_payloads: *Map<VariantSig> = alloc(map_new())
+    variant_payloads_by_enum: *Map<VariantSig> = alloc(map_new())
+    variant_owner: *Map<string> = alloc(map_new())
+    embed_fields: *Map<TyList> = alloc(map_new())
+    method_params: *Map<TyList> = alloc(map_new())
+    iface_method_params: *Map<TyList> = alloc(map_new())
+    return alloc(TypeSigs {
+        ast: a,
+        ty: t,
+        tys: tys,
+        fields: fields,
+        names: names,
+        methods: methods,
+        fns: fns,
+        raw_sigs: raw_sigs,
+        async_fns: async_fns,
+        structs: structs,
+        enums: enums,
+        ifaces: ifaces,
+        iface_methods: iface_methods,
+        impls: impls,
+        foreigns: foreigns,
+        variant_payloads: variant_payloads,
+        variant_payloads_by_enum: variant_payloads_by_enum,
+        variant_owner: variant_owner,
+        embed_fields: embed_fields,
+        method_params: method_params,
+        iface_method_params: iface_method_params,
+    })
+}
+
+export func empty_tylist() -> TyList {
+    return TyList { off: 0, len: 0 }
+}
+
+export func empty_fnsig(t: *TyArena) -> FnSig {
+    e: TyList = empty_tylist()
+    return FnSig { params: e, raw_params: e, ret: ty_unknown(t), raw_ret: ty_unknown(t), is_async: false }
+}
+
+export func empty_struct_sig() -> StructSig {
+    return StructSig { is_gen: false, off: 0, len: 0 }
+}
+
+export func empty_variant_sig() -> VariantSig {
+    return VariantSig { owner: "", off: 0, len: 0 }
+}
+
+func key2(a: string, b: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, a)
+    sb_push_char(s, 35)
+    sb_push(s, b)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+export func sig_pair_key(a: string, b: string) -> string {
+    return key2(a, b)
+}
+
+func new_set() -> *Map<int64> {
+    return alloc(map_new())
+}
+
+func generics_set(s: *TypeSigs, off: int64, len: int64) -> *Map<int64> {
+    g: *Map<int64> = new_set()
+    a: *Ast = (*s).ast
+    mut i: int64 = 0
+    while i < len {
+        map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
+        i = i + 1
+    }
+    return g
+}
+
+func push_tys(dst: *Vector<int64>, src: *Vector<int64>) -> TyList {
+    off: int64 = vec_len(dst)
+    mut i: int64 = 0
+    while i < vec_len(src) {
+        vec_push(dst, vec_get(src, i))
+        i = i + 1
+    }
+    return TyList { off: off, len: vec_len(src) }
+}
+
+func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>, fixed: bool) -> TyList {
+    vals: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*s).ast
+    mut i: int64 = 0
+    while i < len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, off + i))
+        mut id: int64 = lower((*s).ty, a, p.ty, gens)
+        if fixed { id = fix(s, id) }
+        vec_push(vals, id)
+        i = i + 1
+    }
+    return push_tys((*s).tys, vals)
+}
+
+func push_fields(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>) -> (int64, int64, TyList) {
+    fields_vec: *Vector<FieldSig> = (*s).fields
+    fields_off: int64 = vec_len(fields_vec)
+    raws: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*s).ast
+    mut i: int64 = 0
+    while i < len {
+        fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, off + i))
+        raw: int64 = lower((*s).ty, a, fld.ty, gens)
+        fixed: int64 = fix(s, raw)
+        vec_push(fields_vec, FieldSig { name: ast_name(a, fld.name), ty: fixed, raw: raw })
+        vec_push(raws, raw)
+        i = i + 1
+    }
+    raw_list: TyList = push_tys((*s).tys, raws)
+    return (fields_off, len, raw_list)
+}
+
+export func fix(s: *TypeSigs, id: int64) -> int64 {
+    t: *TyArena = (*s).ty
+    n: TyNode = ty_get(t, id)
+    if n.kind == tyk_named() {
+        name: string = ty_name(t, id)
+        ifaces: *Map<int64> = (*s).ifaces
+        if map_has(ifaces, name) { return ty_unknown(t) }
+        return id
+    }
+    if n.kind == tyk_ptr() { return ty_ptr(t, fix(s, n.a)) }
+    if n.kind == tyk_rawptr() { return ty_rawptr(t, fix(s, n.a)) }
+    if n.kind == tyk_slice() { return ty_slice(t, fix(s, n.a)) }
+    if n.kind == tyk_collector() { return ty_collector(t, fix(s, n.a)) }
+    if n.kind == tyk_future() { return ty_future(t, fix(s, n.a)) }
+    if n.kind == tyk_array() { return ty_array(t, fix(s, n.a), n.w) }
+    if n.kind == tyk_tuple() {
+        xs: *Vector<int64> = alloc(vec_new())
+        mut i: int64 = 0
+        while i < n.len {
+            vec_push(xs, fix(s, vec_get((*t).kids, n.off + i)))
+            i = i + 1
+        }
+        return ty_tuple(t, xs)
+    }
+    if n.kind == tyk_func() {
+        ps: *Vector<int64> = alloc(vec_new())
+        mut j: int64 = 0
+        while j < n.len {
+            vec_push(ps, fix(s, vec_get((*t).kids, n.off + j)))
+            j = j + 1
+        }
+        return ty_func(t, ps, fix(s, n.a))
+    }
+    return id
+}
+
+func collect_iface(s: *TypeSigs, id: int64) -> void {
+    a: *Ast = (*s).ast
+    iface: InterfaceNode = vec_get((*a).interfaces, id)
+    iname: string = ast_name(a, iface.name)
+    map_put((*s).ifaces, iname, 1)
+    gens: *Map<int64> = generics_set(s, iface.generics_off, iface.generics_len)
+    methods_vec: *Vector<MethodReq> = (*s).methods
+    moff: int64 = vec_len(methods_vec)
+    mut i: int64 = 0
+    while i < iface.methods_len {
+        m: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + i))
+        mname: string = ast_name(a, m.name)
+        vec_push(methods_vec, MethodReq { name: mname, arity: m.params_len })
+        params: TyList = push_params(s, m.params_off, m.params_len, gens, false)
+        map_put((*s).iface_method_params, key2(iname, mname), params)
+        i = i + 1
+    }
+    map_put((*s).iface_methods, iname, MethodList { off: moff, len: iface.methods_len })
+}
+
+func collect_enum(s: *TypeSigs, id: int64) -> void {
+    a: *Ast = (*s).ast
+    e: EnumNode = vec_get((*a).enums, id)
+    ename: string = ast_name(a, e.name)
+    gens: *Map<int64> = generics_set(s, e.generics_off, e.generics_len)
+    names_vec: *Vector<string> = (*s).names
+    noff: int64 = vec_len(names_vec)
+    embed: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < e.variants_len {
+        v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + i))
+        vname: string = ast_name(a, v.name)
+        vec_push(names_vec, vname)
+        map_put((*s).variant_owner, vname, ename)
+        payload: *Vector<int64> = alloc(vec_new())
+        mut j: int64 = 0
+        while j < v.fields_len {
+            fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, v.fields_off + j))
+            raw: int64 = lower((*s).ty, a, fld.ty, gens)
+            vec_push(payload, raw)
+            vec_push(embed, raw)
+            j = j + 1
+        }
+        list: TyList = push_tys((*s).tys, payload)
+        vs: VariantSig = VariantSig { owner: ename, off: list.off, len: list.len }
+        map_put((*s).variant_payloads, vname, vs)
+        map_put((*s).variant_payloads_by_enum, key2(ename, vname), vs)
+        i = i + 1
+    }
+    map_put((*s).enums, ename, EnumSig { off: noff, len: e.variants_len })
+    map_put((*s).embed_fields, ename, push_tys((*s).tys, embed))
+}
+
+func collect_impl(s: *TypeSigs, id: int64) -> void {
+    a: *Ast = (*s).ast
+    im: ImplNode = vec_get((*a).impls, id)
+    recv: string = ast_name(a, im.ty)
+    if im.iface >= 0 {
+        map_put((*s).impls, key2(ast_name(a, im.iface), recv), 1)
+    }
+    mut i: int64 = 0
+    while i < im.methods_len {
+        f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
+        gens: *Map<int64> = generics_set(s, f.generics_off, f.generics_len)
+        params: TyList = push_params(s, f.params_off, f.params_len, gens, false)
+        map_put((*s).method_params, key2(recv, ast_name(a, f.name)), params)
+        i = i + 1
+    }
+}
+
+func collect_func_sig(s: *TypeSigs, f: FuncNode) -> void {
+    a: *Ast = (*s).ast
+    name: string = ast_name(a, f.name)
+    gens: *Map<int64> = generics_set(s, f.generics_off, f.generics_len)
+    raw_params: TyList = push_params(s, f.params_off, f.params_len, gens, false)
+    params: TyList = push_params(s, f.params_off, f.params_len, gens, true)
+    raw_ret: int64 = lower((*s).ty, a, f.ret, gens)
+    mut ret: int64 = fix(s, raw_ret)
+    if f.is_async {
+        map_put((*s).async_fns, name, ret)
+        ret = ty_future((*s).ty, ret)
+    }
+    map_put((*s).raw_sigs, name, raw_params)
+    map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: f.is_async })
+}
+
+func collect_struct(s: *TypeSigs, id: int64) -> void {
+    a: *Ast = (*s).ast
+    st: StructNode = vec_get((*a).structs, id)
+    name: string = ast_name(a, st.name)
+    gens: *Map<int64> = generics_set(s, st.generics_off, st.generics_len)
+    off, len, raw := push_fields(s, st.fields_off, st.fields_len, gens)
+    map_put((*s).structs, name, StructSig { is_gen: st.generics_len > 0, off: off, len: len })
+    map_put((*s).embed_fields, name, raw)
+}
+
+func collect_foreign(s: *TypeSigs, id: int64) -> void {
+    a: *Ast = (*s).ast
+    fb: ForeignNode = vec_get((*a).foreigns, id)
+    gens: *Map<int64> = new_set()
+    mut i: int64 = 0
+    while i < fb.funcs_len {
+        ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + i))
+        name: string = ast_name(a, ff.name)
+        raw_params: TyList = push_params(s, ff.params_off, ff.params_len, gens, false)
+        params: TyList = push_params(s, ff.params_off, ff.params_len, gens, true)
+        raw_ret: int64 = lower((*s).ty, a, ff.ret, gens)
+        ret: int64 = fix(s, raw_ret)
+        map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: false })
+        map_put((*s).raw_sigs, name, raw_params)
+        map_put((*s).foreigns, name, 1)
+        i = i + 1
+    }
+}
+
+export func collect_sigs(s: *TypeSigs) -> void {
+    a: *Ast = (*s).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_interface() { collect_iface(s, it.id) }
+        if it.kind == ik_enum() { collect_enum(s, it.id) }
+        if it.kind == ik_impl() { collect_impl(s, it.id) }
+        i = i + 1
+    }
+    mut j: int64 = 0
+    while j < vec_len(items) {
+        it2: ItemNode = vec_get(items, j)
+        if it2.kind == ik_func() {
+            collect_func_sig(s, vec_get((*a).funcs, it2.id))
+        } else if it2.kind == ik_struct() {
+            collect_struct(s, it2.id)
+        } else if it2.kind == ik_foreign() {
+            collect_foreign(s, it2.id)
+        }
+        j = j + 1
+    }
+}
+
+export func sig_has_fn(s: *TypeSigs, name: string) -> bool {
+    fns: *Map<FnSig> = (*s).fns
+    return map_has(fns, name)
+}
+
+export func sig_fn(s: *TypeSigs, name: string) -> FnSig {
+    return unwrap_or(map_get((*s).fns, name), empty_fnsig((*s).ty))
+}
+
+export func sig_ty_at(s: *TypeSigs, list: TyList, i: int64) -> int64 {
+    if i < 0 || i >= list.len { return ty_unknown((*s).ty) }
+    return vec_get((*s).tys, list.off + i)
+}
+
+export func sig_struct(s: *TypeSigs, name: string) -> StructSig {
+    return unwrap_or(map_get((*s).structs, name), empty_struct_sig())
+}
+
+export func sig_variant(s: *TypeSigs, name: string) -> VariantSig {
+    return unwrap_or(map_get((*s).variant_payloads, name), empty_variant_sig())
+}
+
+export func sig_variant_for_enum(s: *TypeSigs, en: string, name: string) -> VariantSig {
+    return unwrap_or(map_get((*s).variant_payloads_by_enum, key2(en, name)), empty_variant_sig())
+}
+
+export func variant_owner(s: *TypeSigs, name: string) -> string {
+    return unwrap_or(map_get((*s).variant_owner, name), "")
+}

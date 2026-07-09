@@ -1,0 +1,800 @@
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tciface
+@import tcown
+
+export struct EscPair { slice: bool, closure: bool }
+
+func esc_none() -> EscPair { return EscPair { slice: false, closure: false } }
+func esc_pair(s: bool, c: bool) -> EscPair { return EscPair { slice: s, closure: c } }
+
+func esc_or(a: EscPair, b: EscPair) -> EscPair { return EscPair { slice: a.slice || b.slice, closure: a.closure || b.closure } }
+
+export func store_root(tc: *TypeChecker, expr_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() { return ast_name(a, e.a) }
+    if e.kind == xk_field() || e.kind == xk_index() { return store_root(tc, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return store_root(tc, e.b) }
+    return ""
+}
+
+func deref_root(tc: *TypeChecker, expr_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_field() || e.kind == xk_index() { return deref_root(tc, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return store_root(tc, e.b) }
+    return ""
+}
+
+func projection_root(tc: *TypeChecker, expr_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() { return ast_name(a, e.a) }
+    if e.kind == xk_field() || e.kind == xk_index() { return projection_root(tc, e.a) }
+    return ""
+}
+
+func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_ptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        return inner.kind != tyk_unit()
+    }
+    if n.kind == tyk_rawptr() { return false }
+    if n.kind == tyk_unknown() { return true }
+    if n.kind == tyk_slice() || n.kind == tyk_array() { return managed_reaches(tc, n.a, seen) }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if managed_reaches(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        structs: *Map<StructSig> = (*tc).structs
+        if map_has(structs, name) {
+            st: StructSig = sig_struct((*tc).sigtab, name)
+            mut j: int64 = 0
+            while j < st.len {
+                f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + j)
+                if managed_reaches(tc, f.ty, seen) { return true }
+                j = j + 1
+            }
+        }
+        enums: *Map<EnumSig> = (*tc).enums
+        if map_has(enums, name) {
+            es: EnumSig = unwrap_or(map_get(enums, name), EnumSig { off: 0, len: 0 })
+            mut k: int64 = 0
+            while k < es.len {
+                v: string = vec_get((*(*tc).sigtab).names, es.off + k)
+                vs: VariantSig = unwrap_or(map_get((*tc).variant_payloads, v), empty_variant_sig())
+                mut q: int64 = 0
+                while q < vs.len {
+                    if managed_reaches(tc, sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, q), seen) { return true }
+                    q = q + 1
+                }
+                k = k + 1
+            }
+        }
+    }
+    return false
+}
+
+export func ty_reaches_managed(tc: *TypeChecker, tyid: int64) -> bool {
+    seen: *Map<int64> = alloc(map_new())
+    return managed_reaches(tc, tyid, seen)
+}
+
+export func links_as_alias(tc: *TypeChecker, tyid: int64) -> bool {
+    if is_managed_ty(tc, tyid) { return true }
+    return ty_reaches_managed(tc, tyid)
+}
+
+export func member_carries_view(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_slice() || n.kind == tyk_func() || n.kind == tyk_tuple() { return true }
+    if n.kind == tyk_ptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        return inner.kind != tyk_unit()
+    }
+    if n.kind == tyk_rawptr() { return false }
+    if n.kind == tyk_array() { return member_carries_view(tc, n.a) }
+    if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        structs: *Map<StructSig> = (*tc).structs
+        enums: *Map<EnumSig> = (*tc).enums
+        ifaces: *Map<int64> = (*tc).ifaces
+        return map_has(structs, name) || map_has(enums, name) || map_has(ifaces, name)
+    }
+    return false
+}
+
+func view_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_slice() || n.kind == tyk_func() { return true }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_collector() { return false }
+    if n.kind == tyk_array() { return view_reaches(tc, n.a, seen) }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if view_reaches(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        ifaces: *Map<int64> = (*tc).ifaces
+        if map_has(ifaces, name) { return true }
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        embeds: *Map<TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if view_reaches(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
+                j = j + 1
+            }
+        }
+    }
+    return false
+}
+
+export func ty_reaches_view(tc: *TypeChecker, tyid: int64) -> bool {
+    seen: *Map<int64> = alloc(map_new())
+    return view_reaches(tc, tyid, seen)
+}
+
+func projection_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
+    if !member_carries_view(tc, chain_ty(tc, expr_id)) { return esc_none() }
+    mut s: bool = false
+    mut c: bool = false
+    root: string = projection_root(tc, expr_id)
+    if str_len(root) > 0 {
+        s = s || is_esc_slice(tc, root)
+        c = c || is_esc_closure(tc, root)
+    }
+    droot: string = deref_root(tc, expr_id)
+    if str_len(droot) > 0 {
+        s = s || is_esc_slice(tc, droot)
+        c = c || is_esc_closure(tc, droot)
+    }
+    return esc_pair(s, c)
+}
+
+func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
+    structs: *Map<StructSig> = (*tc).structs
+    if !map_has(structs, sname) { return ty_unknown((*tc).ty) }
+    st: StructSig = sig_struct((*tc).sigtab, sname)
+    mut i: int64 = 0
+    while i < st.len {
+        f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
+        if str_eq(f.name, fname) { return f.ty }
+        i = i + 1
+    }
+    return ty_unknown((*tc).ty)
+}
+
+func field_kind_escape(tc: *TypeChecker, expr_id: int64, fty: int64) -> EscPair {
+    fn: TyNode = ty_get((*tc).ty, fty)
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if fn.kind == tyk_array() && member_carries_view(tc, fn.a) {
+        if e.kind == xk_array() {
+            mut out: EscPair = esc_none()
+            mut i: int64 = 0
+            while i < e.b {
+                out = esc_or(out, field_kind_escape(tc, vec_get((*a).kids, e.a + i), fn.a))
+                i = i + 1
+            }
+            return out
+        }
+        return value_escape(tc, expr_id)
+    }
+    if member_carries_view(tc, fty) || fn.kind == tyk_unknown() { return value_escape(tc, expr_id) }
+    return esc_none()
+}
+
+func variant_name(tc: *TypeChecker, callee_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    f: ExprNode = vec_get((*a).exprs, callee_id)
+    if f.kind == xk_ident() {
+        name: string = ast_name(a, f.a)
+        payloads: *Map<VariantSig> = (*tc).variant_payloads
+        if map_has(payloads, name) { return name }
+    } else if f.kind == xk_field() {
+        base: ExprNode = vec_get((*a).exprs, f.a)
+        name2: string = ast_name(a, f.b)
+        enums: *Map<EnumSig> = (*tc).enums
+        payloads2: *Map<VariantSig> = (*tc).variant_payloads
+        if base.kind == xk_ident() {
+            if map_has(enums, ast_name(a, base.a)) && map_has(payloads2, name2) { return name2 }
+        }
+    }
+    return ""
+}
+
+func value_escape_call(tc: *TypeChecker, e: ExprNode) -> EscPair {
+    a: *Ast = (*tc).ast
+    vname: string = variant_name(tc, e.a)
+    if str_len(vname) > 0 {
+        vs: VariantSig = unwrap_or(map_get((*tc).variant_payloads, vname), empty_variant_sig())
+        mut out: EscPair = esc_none()
+        mut i: int64 = 0
+        while i < e.c && i < vs.len {
+            out = esc_or(out, field_kind_escape(tc, vec_get((*a).kids, e.b + i), sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)))
+            i = i + 1
+        }
+        return out
+    }
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind == xk_ident() && e.c > 0 {
+        name: string = ast_name(a, callee.a)
+        if (str_eq(name, "alloc") && !sig_has_fn((*tc).sigtab, name)) || str_eq(name, "move") || str_eq(name, "ptr_add") {
+            return value_escape(tc, vec_get((*a).kids, e.b))
+        }
+    }
+    // S4: call-result escape summaries, higher-order aliasing, and opaque TOP.
+    return esc_none()
+}
+
+func pat_binds_name(tc: *TypeChecker, pat_id: int64, name: string) -> bool {
+    a: *Ast = (*tc).ast
+    p: PatternNode = vec_get((*a).patterns, pat_id)
+    if p.kind == pk_ident() { return str_eq(ast_name(a, p.a), name) }
+    if p.kind == pk_variant() {
+        mut i: int64 = 0
+        while i < p.c {
+            if str_eq(ast_name(a, vec_get((*a).kids, p.b + i)), name) { return true }
+            i = i + 1
+        }
+    }
+    return false
+}
+
+func value_escape_match(tc: *TypeChecker, e: ExprNode) -> EscPair {
+    a: *Ast = (*tc).ast
+    scrut: EscPair = value_escape(tc, e.a)
+    mut out: EscPair = esc_none()
+    mut i: int64 = 0
+    while i < e.c {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
+        b: BlockNode = vec_get((*a).blocks, arm.body)
+        if b.len > 0 {
+            sid: int64 = vec_get((*a).kids, b.off + b.len - 1)
+            st: StmtNode = vec_get((*a).stmts, sid)
+            if st.kind == sk_expr() {
+                tail: ExprNode = vec_get((*a).exprs, st.a)
+                mut projects: bool = false
+                if tail.kind == xk_ident() { projects = pat_binds_name(tc, arm.pat, ast_name(a, tail.a)) }
+                if projects { out = esc_or(out, scrut) } else { out = esc_or(out, value_escape(tc, st.a)) }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+export func value_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
+    if (*tc).types_only { return esc_none() }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_array() { return esc_pair(true, false) }
+    if e.kind == xk_index() {
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        if idx.kind == xk_range() {
+            bt: TyNode = ty_get((*tc).ty, chain_ty(tc, e.a))
+            base: ExprNode = vec_get((*a).exprs, e.a)
+            mut local: bool = bt.kind == tyk_array()
+            if base.kind == xk_ident() { local = local || is_esc_slice(tc, ast_name(a, base.a)) }
+            local = local || value_escape(tc, e.a).slice
+            return esc_pair(local, false)
+        }
+        return projection_escape(tc, expr_id)
+    }
+    if e.kind == xk_lambda() { return esc_pair(false, lambda_captures_local(tc, e)) }
+    if e.kind == xk_ident() { return esc_pair(is_esc_slice(tc, ast_name(a, e.a)), is_esc_closure(tc, ast_name(a, e.a))) }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        if member_carries_view(tc, chain_ty(tc, expr_id)) {
+            root: string = store_root(tc, expr_id)
+            if str_len(root) > 0 { return esc_pair(is_esc_slice(tc, root), is_esc_closure(tc, root)) }
+        }
+        return esc_none()
+    }
+    if e.kind == xk_field() { return projection_escape(tc, expr_id) }
+    if e.kind == xk_tuple() {
+        mut out: EscPair = esc_none()
+        mut i: int64 = 0
+        while i < e.b {
+            out = esc_or(out, value_escape(tc, vec_get((*a).kids, e.a + i)))
+            i = i + 1
+        }
+        return out
+    }
+    if e.kind == xk_struct_lit() {
+        sname: string = ast_name(a, e.a)
+        mut out2: EscPair = esc_none()
+        mut j: int64 = 0
+        while j < e.c {
+            fname: string = ast_name(a, vec_get((*a).kids, e.b + j))
+            val: int64 = vec_get((*a).kids, e.b + j + 1)
+            out2 = esc_or(out2, field_kind_escape(tc, val, struct_field_ty(tc, sname, fname)))
+            j = j + 2
+        }
+        return out2
+    }
+    if e.kind == xk_call() { return value_escape_call(tc, e) }
+    if e.kind == xk_match() { return value_escape_match(tc, e) }
+    return esc_none()
+}
+
+func capture_add(tc: *TypeChecker, name: string, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+    if !map_has(bound, name) && is_local(tc, name) && !map_has(seen, name) {
+        map_put(seen, name, 1)
+        vec_push(out, name)
+    }
+}
+
+func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+    if expr_id < 0 { return }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() {
+        capture_add(tc, ast_name(a, e.a), bound, seen, out)
+    } else if e.kind == xk_unary() {
+        collect_capture_expr(tc, e.b, bound, seen, out)
+    } else if e.kind == xk_binary() || e.kind == xk_range() {
+        collect_capture_expr(tc, e.b, bound, seen, out)
+        collect_capture_expr(tc, e.c, bound, seen, out)
+    } else if e.kind == xk_call() {
+        collect_capture_expr(tc, e.a, bound, seen, out)
+        mut i: int64 = 0
+        while i < e.c {
+            collect_capture_expr(tc, vec_get((*a).kids, e.b + i), bound, seen, out)
+            i = i + 1
+        }
+    } else if e.kind == xk_field() || e.kind == xk_index() {
+        collect_capture_expr(tc, e.a, bound, seen, out)
+        if e.kind == xk_index() { collect_capture_expr(tc, e.b, bound, seen, out) }
+    } else if e.kind == xk_tuple() || e.kind == xk_array() {
+        mut j: int64 = 0
+        while j < e.b {
+            collect_capture_expr(tc, vec_get((*a).kids, e.a + j), bound, seen, out)
+            j = j + 1
+        }
+    } else if e.kind == xk_struct_lit() {
+        mut k: int64 = 1
+        while k < e.c {
+            collect_capture_expr(tc, vec_get((*a).kids, e.b + k), bound, seen, out)
+            k = k + 2
+        }
+    } else if e.kind == xk_lambda() {
+        mut p: int64 = 0
+        while p < e.b {
+            pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
+            map_put(bound, ast_name(a, pn.name), 1)
+            p = p + 1
+        }
+        collect_capture_block(tc, e.d, bound, seen, out)
+    } else if e.kind == xk_match() {
+        collect_capture_expr(tc, e.a, bound, seen, out)
+        mut m: int64 = 0
+        while m < e.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + m))
+            collect_capture_pat(tc, arm.pat, bound)
+            collect_capture_block(tc, arm.body, bound, seen, out)
+            m = m + 1
+        }
+    } else if e.kind == xk_await() {
+        collect_capture_expr(tc, e.a, bound, seen, out)
+    } else if e.kind == xk_collect() {
+        collect_capture_expr(tc, e.b, bound, seen, out)
+    }
+}
+
+func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<int64>) -> void {
+    a: *Ast = (*tc).ast
+    p: PatternNode = vec_get((*a).patterns, pat_id)
+    if p.kind == pk_ident() {
+        map_put(bound, ast_name(a, p.a), 1)
+    } else if p.kind == pk_variant() {
+        mut i: int64 = 0
+        while i < p.c {
+            map_put(bound, ast_name(a, vec_get((*a).kids, p.b + i)), 1)
+            i = i + 1
+        }
+    }
+}
+
+func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+    a: *Ast = (*tc).ast
+    s: StmtNode = vec_get((*a).stmts, stmt_id)
+    if s.kind == sk_let() {
+        collect_capture_expr(tc, s.c, bound, seen, out)
+        mut i: int64 = 0
+        while i < s.b {
+            b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
+            map_put(bound, ast_name(a, b.name), 1)
+            i = i + 1
+        }
+    } else if s.kind == sk_assign() {
+        collect_capture_expr(tc, s.a, bound, seen, out)
+        collect_capture_expr(tc, s.b, bound, seen, out)
+    } else if s.kind == sk_assign_op() {
+        collect_capture_expr(tc, s.b, bound, seen, out)
+        collect_capture_expr(tc, s.c, bound, seen, out)
+    } else if s.kind == sk_return() || s.kind == sk_defer() || s.kind == sk_expr() {
+        collect_capture_expr(tc, s.a, bound, seen, out)
+    } else if s.kind == sk_if() {
+        collect_capture_expr(tc, s.a, bound, seen, out)
+        collect_capture_block(tc, s.b, bound, seen, out)
+        if s.c >= 0 { collect_capture_block(tc, s.c, bound, seen, out) }
+    } else if s.kind == sk_while() {
+        collect_capture_expr(tc, s.a, bound, seen, out)
+        collect_capture_block(tc, s.b, bound, seen, out)
+    } else if s.kind == sk_for() {
+        collect_capture_expr(tc, s.b, bound, seen, out)
+        map_put(bound, ast_name(a, s.a), 1)
+        collect_capture_block(tc, s.c, bound, seen, out)
+    } else if s.kind == sk_match() {
+        collect_capture_expr(tc, s.a, bound, seen, out)
+        mut m: int64 = 0
+        while m < s.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + m))
+            collect_capture_pat(tc, arm.pat, bound)
+            collect_capture_block(tc, arm.body, bound, seen, out)
+            m = m + 1
+        }
+    }
+}
+
+func collect_capture_block(tc: *TypeChecker, block_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+    a: *Ast = (*tc).ast
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    mut i: int64 = 0
+    while i < b.len {
+        collect_capture_stmt(tc, vec_get((*a).kids, b.off + i), bound, seen, out)
+        i = i + 1
+    }
+}
+
+export func lambda_captures(tc: *TypeChecker, e: ExprNode) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    seen: *Map<int64> = alloc(map_new())
+    bound: *Map<int64> = alloc(map_new())
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < e.b {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
+        map_put(bound, ast_name(a, p.name), 1)
+        i = i + 1
+    }
+    collect_capture_block(tc, e.d, bound, seen, out)
+    return out
+}
+
+export func lambda_captures_local(tc: *TypeChecker, e: ExprNode) -> bool {
+    return vec_len(lambda_captures(tc, e)) > 0
+}
+
+func report_slice_escape(tc: *TypeChecker, expr_id: int64) -> void {
+    e: ExprNode = vec_get((*(*tc).ast).exprs, expr_id)
+    tc_emit(tc, "a slice into a local array escapes its frame; put the backing on the heap", e.lo, e.hi)
+}
+
+func report_closure_escape(tc: *TypeChecker, expr_id: int64) -> void {
+    e: ExprNode = vec_get((*(*tc).ast).exprs, expr_id)
+    tc_emit(tc, "a closure that captures a local escapes its frame; it cannot be returned", e.lo, e.hi)
+}
+
+func slice_escapes(tc: *TypeChecker, expr_id: int64, inferred: int64) -> bool {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_index() {
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        if idx.kind == xk_range() {
+            bt: TyNode = ty_get((*tc).ty, chain_ty(tc, e.a))
+            base: ExprNode = vec_get((*a).exprs, e.a)
+            mut local: bool = bt.kind == tyk_array()
+            if base.kind == xk_ident() { local = local || is_esc_slice(tc, ast_name(a, base.a)) }
+            return local || value_escape(tc, e.a).slice
+        }
+    }
+    if e.kind == xk_array() { return true }
+    if e.kind == xk_ident() {
+        if is_esc_slice(tc, ast_name(a, e.a)) { return true }
+    }
+    mut inferred_array: bool = false
+    if inferred >= 0 {
+        inf: TyNode = ty_get((*tc).ty, inferred)
+        inferred_array = inf.kind == tyk_array()
+    }
+    return inferred_array || value_escape(tc, expr_id).slice
+}
+
+func expr_is_local_closure(tc: *TypeChecker, expr_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_lambda() { return lambda_captures_local(tc, e) }
+    if e.kind == xk_ident() { return is_esc_closure(tc, ast_name(a, e.a)) }
+    return value_escape(tc, expr_id).closure
+}
+
+func escape_walk(tc: *TypeChecker, expr_id: int64, declared: int64, inferred: int64) -> void {
+    dn: TyNode = ty_get((*tc).ty, declared)
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if dn.kind == tyk_slice() {
+        if slice_escapes(tc, expr_id, inferred) { report_slice_escape(tc, expr_id) }
+    } else if dn.kind == tyk_func() {
+        if expr_is_local_closure(tc, expr_id) { report_closure_escape(tc, expr_id) }
+    } else if dn.kind == tyk_ptr() {
+        esc: EscPair = value_escape(tc, expr_id)
+        if esc.slice || esc.closure {
+            tc_emit(tc, "this returns a pointer to an object that stores a view of the current frame", e.lo, e.hi)
+        }
+    } else if dn.kind == tyk_tuple() {
+        if e.kind == xk_tuple() {
+            inf: TyNode = ty_get((*tc).ty, inferred)
+            mut i: int64 = 0
+            while i < e.b && i < dn.len {
+                mut it: int64 = ty_unknown((*tc).ty)
+                if inf.kind == tyk_tuple() && i < inf.len { it = vec_get((*(*tc).ty).kids, inf.off + i) }
+                escape_walk(tc, vec_get((*a).kids, e.a + i), vec_get((*(*tc).ty).kids, dn.off + i), it)
+                i = i + 1
+            }
+        } else {
+            esc2: EscPair = value_escape(tc, expr_id)
+            if esc2.slice { report_slice_escape(tc, expr_id) } else if esc2.closure { report_closure_escape(tc, expr_id) }
+        }
+    } else if dn.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, declared)
+        structs2: *Map<StructSig> = (*tc).structs
+        enums2: *Map<EnumSig> = (*tc).enums
+        if map_has(structs2, name) || map_has(enums2, name) {
+            esc3: EscPair = value_escape(tc, expr_id)
+            if esc3.slice { report_slice_escape(tc, expr_id) } else if esc3.closure { report_closure_escape(tc, expr_id) }
+        }
+    } else if dn.kind == tyk_array() && member_carries_view(tc, dn.a) {
+        if e.kind == xk_array() {
+            mut j: int64 = 0
+            while j < e.b {
+                escape_walk(tc, vec_get((*a).kids, e.a + j), dn.a, ty_unknown((*tc).ty))
+                j = j + 1
+            }
+        } else {
+            esc4: EscPair = value_escape(tc, expr_id)
+            if esc4.slice { report_slice_escape(tc, expr_id) } else if esc4.closure { report_closure_escape(tc, expr_id) }
+        }
+    }
+}
+
+export func check_escape(tc: *TypeChecker, expr_id: int64, inferred: int64) -> void {
+    if (*tc).types_only { return }
+    escape_walk(tc, expr_id, (*tc).cur_ret, inferred)
+}
+
+export func collect_embedded(tc: *TypeChecker, expr_id: int64, out: *Vector<string>) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() {
+        name: string = ast_name(a, e.a)
+        if links_as_alias(tc, lookup(tc, name)) { vec_push(out, name) }
+    } else if e.kind == xk_tuple() || e.kind == xk_array() {
+        mut i: int64 = 0
+        while i < e.b {
+            collect_embedded(tc, vec_get((*a).kids, e.a + i), out)
+            i = i + 1
+        }
+    } else if e.kind == xk_struct_lit() {
+        mut j: int64 = 1
+        while j < e.c {
+            collect_embedded(tc, vec_get((*a).kids, e.b + j), out)
+            j = j + 2
+        }
+    }
+}
+
+func binding_alias_targets(tc: *TypeChecker, expr_id: int64) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() {
+        src: string = ast_name(a, e.a)
+        if links_as_alias(tc, lookup(tc, src)) { vec_push(out, src) }
+    } else if e.kind == xk_field() || e.kind == xk_index() || (e.kind == xk_unary() && e.a == uop_deref()) {
+        if links_as_alias(tc, chain_ty(tc, expr_id)) {
+            root: string = store_root(tc, expr_id)
+            if str_len(root) > 0 { vec_push(out, root) }
+        }
+    } else if e.kind == xk_tuple() || e.kind == xk_array() {
+        mut i: int64 = 0
+        while i < e.b {
+            collect_embedded(tc, vec_get((*a).kids, e.a + i), out)
+            i = i + 1
+        }
+    } else if e.kind == xk_struct_lit() {
+        mut j: int64 = 1
+        while j < e.c {
+            collect_embedded(tc, vec_get((*a).kids, e.b + j), out)
+            j = j + 2
+        }
+    } else if e.kind == xk_call() {
+        vname: string = variant_name(tc, e.a)
+        if str_len(vname) > 0 {
+            mut k: int64 = 0
+            while k < e.c {
+                collect_embedded(tc, vec_get((*a).kids, e.b + k), out)
+                k = k + 1
+            }
+        } else {
+            callee: ExprNode = vec_get((*a).exprs, e.a)
+            if callee.kind == xk_ident() {
+                if e.c == 1 && str_eq(ast_name(a, callee.a), "alloc") && !sig_has_fn((*tc).sigtab, "alloc") {
+                    collect_embedded(tc, vec_get((*a).kids, e.b), out)
+                }
+            }
+        }
+    }
+    return out
+}
+
+export func link_binding_aliases(tc: *TypeChecker, name: string, expr_id: int64, reassign: bool) -> void {
+    if (*tc).types_only { return }
+    targets: *Vector<string> = binding_alias_targets(tc, expr_id)
+    if reassign && ((*tc).branch_depth == 0 || vec_len(targets) == 0) { alias_drop(tc, name) }
+    mut i: int64 = 0
+    while i < vec_len(targets) {
+        alias_link(tc, name, vec_get(targets, i))
+        i = i + 1
+    }
+}
+
+func slice_source_buries_view(tc: *TypeChecker, expr_id: int64) -> bool {
+    if (*tc).types_only { return false }
+    ptrs: *Vector<string> = alloc(vec_new())
+    root: string = store_root(tc, expr_id)
+    if str_len(root) > 0 {
+        group: *Vector<string> = alias_group(tc, root)
+        mut i: int64 = 0
+        while i < vec_len(group) {
+            vec_push(ptrs, vec_get(group, i))
+            i = i + 1
+        }
+    } else {
+        collect_embedded(tc, expr_id, ptrs)
+    }
+    mut j: int64 = 0
+    while j < vec_len(ptrs) {
+        name: string = vec_get(ptrs, j)
+        if is_managed_ty(tc, lookup(tc, name)) && (is_esc_slice(tc, name) || is_esc_closure(tc, name)) { return true }
+        j = j + 1
+    }
+    return false
+}
+
+func check_collect_escape(tc: *TypeChecker, arg_id: int64, elem: int64, lo: int64, hi: int64) -> void {
+    esc: EscPair = value_escape(tc, arg_id)
+    if !esc.slice && !esc.closure { return }
+    en: TyNode = ty_get((*tc).ty, elem)
+    if en.kind == tyk_ptr() {
+        tc_emit(tc, "this collects a pointer to an object that stores a view of the current frame; the collected block outlives the frame", lo, hi)
+    } else if esc.slice {
+        report_slice_escape(tc, arg_id)
+    } else {
+        report_closure_escape(tc, arg_id)
+    }
+}
+
+export func check_collect_captures(tc: *TypeChecker, arg_id: int64, lo: int64, hi: int64) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind != xk_lambda() {
+        tc_emit(tc, "a collected closure must be a lambda literal written at the mint", arg.lo, arg.hi)
+        return
+    }
+    caps: *Vector<string> = lambda_captures(tc, arg)
+    mut i: int64 = 0
+    while i < vec_len(caps) {
+        name: string = vec_get(caps, i)
+        if ty_reaches_view(tc, lookup(tc, name)) || is_esc_slice(tc, name) || is_esc_closure(tc, name) {
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, "cannot collect a closure that captures '")
+            sb_push(b, name)
+            sb_push(b, "': it may view a frame; collect '")
+            sb_push(b, name)
+            sb_push(b, "' first or capture heap owned data")
+            msg: string = substring(sb_cstr(b), 0, sb_size(b))
+            sb_free(b)
+            free(b)
+            tc_emit(tc, msg, lo, hi)
+        }
+        i = i + 1
+    }
+}
+
+export func check_collect_mint(tc: *TypeChecker, e: ExprNode, inner: int64) -> void {
+    if (*tc).types_only { return }
+    raw: int64 = tc_raw_type(tc, e.a)
+    rn: TyNode = ty_get((*tc).ty, raw)
+    if rn.kind == tyk_slice() {
+        if ty_reaches_view(tc, rn.a) {
+            tc_emit(tc, "a collected slice's element cannot itself hold a slice, function, or interface; collect the inner view first", e.lo, e.hi)
+        } else if ty_reaches_managed(tc, rn.a) && slice_source_buries_view(tc, e.b) {
+            tc_emit(tc, "a collected slice element holds a pointer to an object that stores a view of the current frame; the collected block outlives the frame, so heap own the pointee or collect it first", e.lo, e.hi)
+        }
+    } else if rn.kind == tyk_func() {
+        check_collect_captures(tc, e.b, e.lo, e.hi)
+    } else {
+        if ty_reaches_view(tc, raw) {
+            tc_emit(tc, "a collected value cannot hold a slice, function, or interface; collect a scalar, a pointer, or a struct of those", e.lo, e.hi)
+        }
+        check_collect_escape(tc, e.b, inner, e.lo, e.hi)
+    }
+}
+
+export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_id: int64, scrut: EscPair) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    p: PatternNode = vec_get((*a).patterns, pat_id)
+    if p.kind == pk_variant() {
+        vname: string = ast_name(a, p.a)
+        vs: VariantSig = unwrap_or(map_get((*tc).variant_payloads, vname), empty_variant_sig())
+        mut i: int64 = 0
+        while i < p.c {
+            bname: string = ast_name(a, vec_get((*a).kids, p.b + i))
+            set_esc(tc, bname, false, false)
+            pty: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
+            if (scrut.slice || scrut.closure) && member_carries_view(tc, pty) { set_esc(tc, bname, scrut.slice, scrut.closure) }
+            if links_as_alias(tc, pty) { link_binding_aliases(tc, bname, scrut_id, false) }
+            i = i + 1
+        }
+    } else if p.kind == pk_ident() {
+        name: string = ast_name(a, p.a)
+        set_esc(tc, name, false, false)
+        if scrut.slice || scrut.closure { set_esc(tc, name, scrut.slice, scrut.closure) }
+        link_binding_aliases(tc, name, scrut_id, false)
+    }
+}
+
+export func esc_snapshot(tc: *TypeChecker) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    snap_stack(b, (*tc).esc_slices)
+    sb_push_char(b, 124)
+    snap_stack(b, (*tc).esc_closures)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func snap_stack(b: *StringBuilder, stack: *Vector<*Map<int64>>) -> void {
+    mut i: int64 = 0
+    while i < vec_len(stack) {
+        m: *Map<int64> = vec_get(stack, i)
+        keys: *Vector<string> = map_keys(m)
+        mut j: int64 = 0
+        while j < vec_len(keys) {
+            k: string = vec_get(keys, j)
+            sb_push(b, k)
+            sb_push_char(b, 61)
+            sb_push_int(b, unwrap_or(map_get(m, k), 0))
+            sb_push_char(b, 59)
+            j = j + 1
+        }
+        sb_push_char(b, 47)
+        i = i + 1
+    }
+}

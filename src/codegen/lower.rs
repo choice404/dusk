@@ -20,10 +20,7 @@ use crate::parser::ast::{
 /// Compiles a module to LLVM IR text. Generics are monomorphized first. `muts`
 /// carries the reconciled storage types of the narrow mutable-tuple class, which
 /// mono stamps onto those bindings so their slots are sized as slices.
-pub fn compile(
-    module: &ast::Module,
-    muts: &crate::mono::MutTupleTypes,
-) -> Result<String, String> {
+pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> Result<String, String> {
     let expanded = crate::mono::expand(module, muts);
     let module = &expanded;
     let ctx = Ctx::new(module);
@@ -566,7 +563,10 @@ impl Ctx {
     }
 
     fn variant(&self, ename: &str, vname: &str) -> Option<&VariantDef> {
-        self.enum_def(ename)?.variants.iter().find(|v| v.name == vname)
+        self.enum_def(ename)?
+            .variants
+            .iter()
+            .find(|v| v.name == vname)
     }
 
     /// Size and alignment in bytes of a lowered type.
@@ -998,7 +998,9 @@ impl<'a> Fb<'a> {
             "{a} = insertvalue {{ ptr, i64 }} undef, ptr {data}, 0"
         ));
         let b = self.fresh();
-        self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {gen}, 1"));
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, i64 }} {a}, i64 {gen}, 1"
+        ));
         b
     }
 
@@ -1041,7 +1043,9 @@ impl<'a> Fb<'a> {
         // The header word is bumped atomically by free on any thread, so the
         // check reads it atomically too, keeping the machinery race free.
         let cur = self.fresh();
-        self.line(&format!("{cur} = load atomic i64, ptr {hp} seq_cst, align 8"));
+        self.line(&format!(
+            "{cur} = load atomic i64, ptr {hp} seq_cst, align 8"
+        ));
         let bad = self.fresh();
         self.line(&format!("{bad} = icmp ne i64 {cur}, {gen}"));
         let fault = self.new_label();
@@ -1118,7 +1122,11 @@ impl<'a> Fb<'a> {
         // fptrunc. Without this a float32 reaches a `double` sink (the f64 print
         // and stderr printers) still typed `float`, which clang rejects at link.
         if from.is_float() && to.is_float() {
-            let cast = if matches!(from, CTy::F64) { "fptrunc" } else { "fpext" };
+            let cast = if matches!(from, CTy::F64) {
+                "fptrunc"
+            } else {
+                "fpext"
+            };
             let d = self.fresh();
             self.line(&format!("{d} = {cast} {} {op} to {}", from.ll(), to.ll()));
             return d;
@@ -1280,7 +1288,9 @@ impl<'a> Fb<'a> {
         let slot = self.backing_slot(&v.ty);
         self.line(&format!("store {} {}, ptr {slot}", v.ty.ll(), v.op));
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, ptr }} undef, ptr {slot}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, ptr }} undef, ptr {slot}, 0"
+        ));
         let b = self.fresh();
         self.line(&format!(
             "{b} = insertvalue {{ ptr, ptr }} {a}, ptr @vtable.{iface}.{ty}, 1"
@@ -1316,7 +1326,10 @@ impl<'a> Fb<'a> {
         let av = self.adapt(v, &ret);
         self.emit_defers();
         let (res, ret_size) = {
-            let f = self.frame.as_ref().expect("async return outside async mode");
+            let f = self
+                .frame
+                .as_ref()
+                .expect("async return outside async mode");
             (f.res.clone(), f.ret_size)
         };
         let mut size = 0u64;
@@ -1334,8 +1347,15 @@ impl<'a> Fb<'a> {
     /// Completes the task with no value (bare return, void return, fall-off-end).
     fn gen_async_return_unit(&mut self) {
         self.emit_defers();
-        let res = self.frame.as_ref().expect("async return outside async mode").res.clone();
-        self.line(&format!("call void @cool_task_return(ptr %frame, ptr {res}, i64 0)"));
+        let res = self
+            .frame
+            .as_ref()
+            .expect("async return outside async mode")
+            .res
+            .clone();
+        self.line(&format!(
+            "call void @cool_task_return(ptr %frame, ptr {res}, i64 0)"
+        ));
         self.line("ret void");
         self.terminated = true;
     }
@@ -1358,9 +1378,17 @@ impl<'a> Fb<'a> {
         let el_cty = lower_ty(el_ty, &|n| self.ctx.nom(n));
         let futval = self.gen_expr(op);
         let d = self.fresh();
-        self.line(&format!("{d} = extractvalue {} {}, 0", futval.ty.ll(), futval.op));
+        self.line(&format!(
+            "{d} = extractvalue {} {}, 0",
+            futval.ty.ll(),
+            futval.op
+        ));
         let g = self.fresh();
-        self.line(&format!("{g} = extractvalue {} {}, 1", futval.ty.ll(), futval.op));
+        self.line(&format!(
+            "{g} = extractvalue {} {}, 1",
+            futval.ty.ll(),
+            futval.op
+        ));
         let (k, pend_d, pend_g) = {
             let f = self.frame.as_mut().expect("await outside async mode");
             f.await_count += 1;
@@ -1369,7 +1397,9 @@ impl<'a> Fb<'a> {
         self.line(&format!("store ptr {d}, ptr {pend_d}"));
         self.line(&format!("store i64 {g}, ptr {pend_g}"));
         self.line(&format!("store i64 {k}, ptr %frame"));
-        self.line(&format!("call void @cool_task_await(ptr %frame, ptr {d}, i64 {g})"));
+        self.line(&format!(
+            "call void @cool_task_await(ptr %frame, ptr {d}, i64 {g})"
+        ));
         self.line("ret void");
         self.terminated = true;
         let resume = format!("resume.{k}");
@@ -1550,10 +1580,7 @@ impl<'a> Fb<'a> {
             return;
         }
         let bind = &l.binds[0];
-        let declared = bind
-            .ty
-            .as_ref()
-            .map(|t| lower_ty(t, &|n| self.ctx.nom(n)));
+        let declared = bind.ty.as_ref().map(|t| lower_ty(t, &|n| self.ctx.nom(n)));
         let v = match (&l.value.kind, &declared) {
             (ExprKind::Array(elems), Some(CTy::Array(elem, _))) => {
                 let hint = (**elem).clone();
@@ -1566,8 +1593,7 @@ impl<'a> Fb<'a> {
             // `p: *T = alloc(...)` sizes the block from the declared pointee, per
             // the spec, so `p: *Big = alloc()` allocates all of Big rather than
             // the 8 byte default the argument free form would fall to.
-            (ExprKind::Call(f, cargs), Some(CTy::Ptr(inner)))
-                if matches!(&f.kind, ExprKind::Ident(n) if n == "alloc" && !self.ctx.fns.contains_key(n)) =>
+            (ExprKind::Call(f, cargs), Some(CTy::Ptr(inner))) if matches!(&f.kind, ExprKind::Ident(n) if n == "alloc" && !self.ctx.fns.contains_key(n)) =>
             {
                 let value = cargs.first().map(|a| self.gen_expr(a));
                 self.alloc_of((**inner).clone(), value)
@@ -1677,7 +1703,8 @@ impl<'a> Fb<'a> {
         self.line(&format!("store i64 {len}, ptr {len_slot}"));
         let ptr_ty = CTy::RawPtr(Box::new(CTy::Void));
         let slot = self.alloca(&elem);
-        self.locals.insert(f.var.clone(), (elem.clone(), slot.clone()));
+        self.locals
+            .insert(f.var.clone(), (elem.clone(), slot.clone()));
         let i = self.alloca_raw("i64");
         self.line(&format!("store i64 0, ptr {i}"));
         let cond = self.new_label();
@@ -1694,7 +1721,10 @@ impl<'a> Fb<'a> {
         let ivb = self.load(&CTy::Int(64), &i);
         let datav = self.load(&ptr_ty, &data_slot);
         let ep = self.fresh();
-        self.line(&format!("{ep} = getelementptr {}, ptr {datav}, i64 {ivb}", elem.ll()));
+        self.line(&format!(
+            "{ep} = getelementptr {}, ptr {datav}, i64 {ivb}",
+            elem.ll()
+        ));
         let ev = self.load(&elem, &ep);
         self.line(&format!("store {} {ev}, ptr {slot}", elem.ll()));
         self.gen_block(&f.body.stmts);
@@ -1788,20 +1818,29 @@ impl<'a> Fb<'a> {
                     self.bounds_check(i, &len);
                     let data = self.load(&CTy::RawPtr(elem.clone()), &bptr);
                     let p = self.fresh();
-                    self.line(&format!("{p} = getelementptr {}, ptr {data}, i64 {i}", elem.ll()));
+                    self.line(&format!(
+                        "{p} = getelementptr {}, ptr {data}, i64 {i}",
+                        elem.ll()
+                    ));
                     Some(((**elem).clone(), p))
                 }
                 CTy::RawPtr(elem) => {
                     let pv = self.load(&CTy::RawPtr(elem.clone()), &bptr);
                     let p = self.fresh();
-                    self.line(&format!("{p} = getelementptr {}, ptr {pv}, i64 {i}", elem.ll()));
+                    self.line(&format!(
+                        "{p} = getelementptr {}, ptr {pv}, i64 {i}",
+                        elem.ll()
+                    ));
                     Some(((**elem).clone(), p))
                 }
                 CTy::Ptr(elem) => {
                     let fat = self.load(&CTy::Ptr(elem.clone()), &bptr);
                     let pv = self.fat_checked(&fat);
                     let p = self.fresh();
-                    self.line(&format!("{p} = getelementptr {}, ptr {pv}, i64 {i}", elem.ll()));
+                    self.line(&format!(
+                        "{p} = getelementptr {}, ptr {pv}, i64 {i}",
+                        elem.ll()
+                    ));
                     Some(((**elem).clone(), p))
                 }
                 _ => None,
@@ -1814,20 +1853,33 @@ impl<'a> Fb<'a> {
                     self.line(&format!("{len} = extractvalue {{ ptr, i64 }} {}, 1", bv.op));
                     self.bounds_check(i, &len);
                     let data = self.fresh();
-                    self.line(&format!("{data} = extractvalue {{ ptr, i64 }} {}, 0", bv.op));
+                    self.line(&format!(
+                        "{data} = extractvalue {{ ptr, i64 }} {}, 0",
+                        bv.op
+                    ));
                     let p = self.fresh();
-                    self.line(&format!("{p} = getelementptr {}, ptr {data}, i64 {i}", elem.ll()));
+                    self.line(&format!(
+                        "{p} = getelementptr {}, ptr {data}, i64 {i}",
+                        elem.ll()
+                    ));
                     Some(((**elem).clone(), p))
                 }
                 CTy::RawPtr(elem) => {
                     let p = self.fresh();
-                    self.line(&format!("{p} = getelementptr {}, ptr {}, i64 {i}", elem.ll(), bv.op));
+                    self.line(&format!(
+                        "{p} = getelementptr {}, ptr {}, i64 {i}",
+                        elem.ll(),
+                        bv.op
+                    ));
                     Some(((**elem).clone(), p))
                 }
                 CTy::Ptr(elem) => {
                     let pv = self.fat_checked(&bv.op);
                     let p = self.fresh();
-                    self.line(&format!("{p} = getelementptr {}, ptr {pv}, i64 {i}", elem.ll()));
+                    self.line(&format!(
+                        "{p} = getelementptr {}, ptr {pv}, i64 {i}",
+                        elem.ll()
+                    ));
                     Some(((**elem).clone(), p))
                 }
                 _ => None,
@@ -1904,7 +1956,10 @@ impl<'a> Fb<'a> {
         let value = self.gen_expr(arg);
         let pointee = lower_ty(ty, &|n| self.ctx.nom(n));
         let szp = self.fresh();
-        self.line(&format!("{szp} = getelementptr {}, ptr null, i64 1", pointee.ll()));
+        self.line(&format!(
+            "{szp} = getelementptr {}, ptr null, i64 1",
+            pointee.ll()
+        ));
         let sz = self.fresh();
         self.line(&format!("{sz} = ptrtoint ptr {szp} to i64"));
         let p = self.fresh();
@@ -1945,7 +2000,10 @@ impl<'a> Fb<'a> {
         let fname = format!("@lambda.{id}");
         let env_ty = format!(
             "{{ {} }}",
-            caps.iter().map(|(_, t)| t.ll()).collect::<Vec<_>>().join(", ")
+            caps.iter()
+                .map(|(_, t)| t.ll())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let env = if caps.is_empty() {
             "null".to_string()
@@ -1971,16 +2029,22 @@ impl<'a> Fb<'a> {
             self.line(&format!("{e} = call ptr @cool_collect_alloc(i64 {sz})"));
             for (i, (cty, v)) in loaded.iter().enumerate() {
                 let slot = self.fresh();
-                self.line(&format!("{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"));
+                self.line(&format!(
+                    "{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"
+                ));
                 self.line(&format!("store {} {v}, ptr {slot}", cty.ll()));
             }
             e
         };
         self.emit_lambda_fn(&fname, &env_ty, &caps, &params, &ret, &l.body);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, ptr }} undef, ptr {env}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, ptr }} undef, ptr {env}, 0"
+        ));
         let b = self.fresh();
-        self.line(&format!("{b} = insertvalue {{ ptr, ptr }} {a}, ptr {fname}, 1"));
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, ptr }} {a}, ptr {fname}, 1"
+        ));
         let pt = params.iter().map(|(_, t)| t.clone()).collect();
         Val::new(CTy::Closure(pt, Box::new(ret)), b)
     }
@@ -2010,7 +2074,9 @@ impl<'a> Fb<'a> {
         let esz = self.elem_size(&elem);
         let total = self.op2("mul", "i64", &len, &esz);
         let out = self.fresh();
-        self.line(&format!("{out} = call ptr @cool_collect_alloc(i64 {total})"));
+        self.line(&format!(
+            "{out} = call ptr @cool_collect_alloc(i64 {total})"
+        ));
         // Element copy loop: out[i] = src[i]. No allocation runs in the loop, so
         // the backing stays unswept while it is filled.
         let i = self.alloca_raw("i64");
@@ -2026,19 +2092,29 @@ impl<'a> Fb<'a> {
         self.cond_br(&c, &body, &end);
         self.place_label(&body);
         let sp = self.fresh();
-        self.line(&format!("{sp} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        self.line(&format!(
+            "{sp} = getelementptr {}, ptr {data}, i64 {iv}",
+            elem.ll()
+        ));
         let ev = self.load(&elem, &sp);
         let dp = self.fresh();
-        self.line(&format!("{dp} = getelementptr {}, ptr {out}, i64 {iv}", elem.ll()));
+        self.line(&format!(
+            "{dp} = getelementptr {}, ptr {out}, i64 {iv}",
+            elem.ll()
+        ));
         self.line(&format!("store {} {ev}, ptr {dp}", elem.ll()));
         let ni = self.op2("add", "i64", &iv, "1");
         self.line(&format!("store i64 {ni}, ptr {i}"));
         self.br(&cond);
         self.place_label(&end);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {out}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, i64 }} undef, ptr {out}, 0"
+        ));
         let b = self.fresh();
-        self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"));
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"
+        ));
         Val::new(CTy::Slice(Box::new(elem)), b)
     }
 
@@ -2067,7 +2143,11 @@ impl<'a> Fb<'a> {
                 CTy::Struct(t) => {
                     if let Some((idx, fty)) = self.ctx.field(t, field) {
                         let d = self.fresh();
-                        self.line(&format!("{d} = extractvalue {} {}, {idx}", bv.ty.ll(), bv.op));
+                        self.line(&format!(
+                            "{d} = extractvalue {} {}, {idx}",
+                            bv.ty.ll(),
+                            bv.op
+                        ));
                         return Val::new(fty, d);
                     }
                 }
@@ -2078,7 +2158,10 @@ impl<'a> Fb<'a> {
                         _ => return Val::i0(),
                     };
                     let d = self.fresh();
-                    self.line(&format!("{d} = extractvalue {{ ptr, i64 }} {}, {idx}", bv.op));
+                    self.line(&format!(
+                        "{d} = extractvalue {{ ptr, i64 }} {}, {idx}",
+                        bv.op
+                    ));
                     return Val::new(fty, d);
                 }
                 // A fixed array carries its length in its type, so `.len` is the
@@ -2145,7 +2228,9 @@ impl<'a> Fb<'a> {
             let a64 = self.coerce(&av.ty, &av.op, &CTy::Int(64));
             let e64 = self.coerce(&bv.ty, &bv.op, &CTy::Int(64));
             let d = self.fresh();
-            self.line(&format!("{d} = call i64 @cool_pow_i64(i64 {a64}, i64 {e64})"));
+            self.line(&format!(
+                "{d} = call i64 @cool_pow_i64(i64 {a64}, i64 {e64})"
+            ));
             let back = self.coerce(&CTy::Int(64), &d, &ty);
             return Val::new(ty, back);
         }
@@ -2194,7 +2279,10 @@ impl<'a> Fb<'a> {
                     "llvm.pow.f64"
                 };
                 let d = self.fresh();
-                self.line(&format!("{d} = call {tyll} @{intr}({tyll} {}, {tyll} {bo})", av.op));
+                self.line(&format!(
+                    "{d} = call {tyll} @{intr}({tyll} {}, {tyll} {bo})",
+                    av.op
+                ));
                 Val::new(ty, d)
             }
         }
@@ -2378,12 +2466,19 @@ impl<'a> Fb<'a> {
         }
         let len = self.op2("sub", "i64", &hi_i, &lo_i);
         let data = self.fresh();
-        self.line(&format!("{data} = getelementptr {}, ptr {data0}, i64 {lo_i}", elem.ll()));
+        self.line(&format!(
+            "{data} = getelementptr {}, ptr {data0}, i64 {lo_i}",
+            elem.ll()
+        ));
         let sty = CTy::Slice(Box::new(elem));
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {data}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, i64 }} undef, ptr {data}, 0"
+        ));
         let b = self.fresh();
-        self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"));
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"
+        ));
         Val::new(sty, b)
     }
 
@@ -2394,7 +2489,10 @@ impl<'a> Fb<'a> {
             return match &bty {
                 CTy::Array(elem, n) => {
                     let p = self.fresh();
-                    self.line(&format!("{p} = getelementptr {}, ptr {bptr}, i64 0, i64 0", bty.ll()));
+                    self.line(&format!(
+                        "{p} = getelementptr {}, ptr {bptr}, i64 0, i64 0",
+                        bty.ll()
+                    ));
                     Some((p, Some(n.to_string()), (**elem).clone()))
                 }
                 CTy::Slice(elem) => {
@@ -2421,7 +2519,10 @@ impl<'a> Fb<'a> {
         match bv.ty.clone() {
             CTy::Slice(elem) => {
                 let data = self.fresh();
-                self.line(&format!("{data} = extractvalue {{ ptr, i64 }} {}, 0", bv.op));
+                self.line(&format!(
+                    "{data} = extractvalue {{ ptr, i64 }} {}, 0",
+                    bv.op
+                ));
                 let len = self.fresh();
                 self.line(&format!("{len} = extractvalue {{ ptr, i64 }} {}, 1", bv.op));
                 Some((data, Some(len), *elem))
@@ -2430,7 +2531,10 @@ impl<'a> Fb<'a> {
                 let slot = self.alloca(&bv.ty);
                 self.line(&format!("store {} {}, ptr {slot}", bv.ty.ll(), bv.op));
                 let p = self.fresh();
-                self.line(&format!("{p} = getelementptr {}, ptr {slot}, i64 0, i64 0", bv.ty.ll()));
+                self.line(&format!(
+                    "{p} = getelementptr {}, ptr {slot}, i64 0, i64 0",
+                    bv.ty.ll()
+                ));
                 Some((p, Some(n.to_string()), *elem))
             }
             CTy::RawPtr(elem) => Some((bv.op, None, *elem)),
@@ -2471,11 +2575,17 @@ impl<'a> Fb<'a> {
         };
         let slot = self.alloca(&ety);
         let tp = self.fresh();
-        self.line(&format!("{tp} = getelementptr {}, ptr {slot}, i32 0, i32 0", ety.ll()));
+        self.line(&format!(
+            "{tp} = getelementptr {}, ptr {slot}, i32 0, i32 0",
+            ety.ll()
+        ));
         self.line(&format!("store i{tag_bits} {tag}, ptr {tp}"));
         if !args.is_empty() {
             let pp = self.fresh();
-            self.line(&format!("{pp} = getelementptr {}, ptr {slot}, i32 0, i32 1", ety.ll()));
+            self.line(&format!(
+                "{pp} = getelementptr {}, ptr {slot}, i32 0, i32 1",
+                ety.ll()
+            ));
             for (i, a) in args.iter().enumerate() {
                 let Some(fty) = fields.get(i).cloned() else {
                     self.gen_expr(a);
@@ -2527,7 +2637,10 @@ impl<'a> Fb<'a> {
         };
         let tag_bits = self.ctx.enum_def(&ename).map(|d| d.tag_bits).unwrap_or(8);
         let tp = self.fresh();
-        self.line(&format!("{tp} = getelementptr {}, ptr {addr}, i32 0, i32 0", ety.ll()));
+        self.line(&format!(
+            "{tp} = getelementptr {}, ptr {addr}, i32 0, i32 0",
+            ety.ll()
+        ));
         let tag = self.fresh();
         self.line(&format!("{tag} = load i{tag_bits}, ptr {tp}"));
 
@@ -2554,7 +2667,9 @@ impl<'a> Fb<'a> {
             .map(|(t, l)| format!("i{tag_bits} {t}, label %{l}"))
             .collect::<Vec<_>>()
             .join(" ");
-        self.line(&format!("switch i{tag_bits} {tag}, label %{default} [ {cases_str} ]"));
+        self.line(&format!(
+            "switch i{tag_bits} {tag}, label %{default} [ {cases_str} ]"
+        ));
         self.terminated = true;
 
         for (arm, l) in arms.iter().zip(&labels) {
@@ -2586,7 +2701,10 @@ impl<'a> Fb<'a> {
             (fields, self.ctx.offsets(v))
         };
         let pp = self.fresh();
-        self.line(&format!("{pp} = getelementptr {}, ptr {addr}, i32 0, i32 1", ety.ll()));
+        self.line(&format!(
+            "{pp} = getelementptr {}, ptr {addr}, i32 0, i32 1",
+            ety.ll()
+        ));
         for (i, b) in binds.iter().enumerate() {
             let Some(fty) = fields.get(i).cloned() else {
                 break;
@@ -2668,7 +2786,12 @@ impl<'a> Fb<'a> {
             ExprKind::Unary(UnOp::Not, _) => CTy::Bool,
             ExprKind::Unary(UnOp::Neg, x) | ExprKind::Unary(UnOp::BitNot, x) => self.static_ty(x),
             ExprKind::Call(f, _) => match &f.kind {
-                ExprKind::Ident(n) => self.ctx.fns.get(n).map(|(r, _)| r.clone()).unwrap_or(CTy::Unknown),
+                ExprKind::Ident(n) => self
+                    .ctx
+                    .fns
+                    .get(n)
+                    .map(|(r, _)| r.clone())
+                    .unwrap_or(CTy::Unknown),
                 // A builtin error method resolves its return width here so a match
                 // whose every arm tail is `e.toString()` sizes as a string, not the
                 // i64 fallback that would store a pointer through an integer slot.
@@ -2682,7 +2805,11 @@ impl<'a> Fb<'a> {
                 _ => CTy::Unknown,
             },
             ExprKind::Field(base, name) => match self.static_ty(base) {
-                CTy::Struct(t) => self.ctx.field(&t, name).map(|(_, ty)| ty).unwrap_or(CTy::Unknown),
+                CTy::Struct(t) => self
+                    .ctx
+                    .field(&t, name)
+                    .map(|(_, ty)| ty)
+                    .unwrap_or(CTy::Unknown),
                 CTy::Slice(elem) => match name.as_str() {
                     "ptr" => CTy::RawPtr(elem),
                     "len" => CTy::Int(64),
@@ -2773,7 +2900,10 @@ impl<'a> Fb<'a> {
                 "alloc_bytes" => self.gen_alloc_bytes(args),
                 "ptr_add" => self.gen_ptr_add(args),
                 "debug_alloc" => {
-                    let n = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+                    let n = args
+                        .first()
+                        .map(|a| self.gen_expr(a))
+                        .unwrap_or_else(Val::i0);
                     let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
                     let p = self.fresh();
                     self.line(&format!("{p} = call ptr @cool_debug_alloc(i64 {ni})"));
@@ -2800,14 +2930,19 @@ impl<'a> Fb<'a> {
                     // Reinterpret a NUL terminated char buffer as a string view.
                     // Both are an LLVM ptr, so this relabels the type and emits
                     // no instruction.
-                    let v = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+                    let v = args
+                        .first()
+                        .map(|a| self.gen_expr(a))
+                        .unwrap_or_else(Val::i0);
                     Val::new(CTy::RawPtr(Box::new(CTy::Char)), v.op)
                 }
                 "move" => {
                     // move(x) transfers ownership to the caller. Its value is x's,
                     // a copy of the fat pointer; the source is invalidated by the
                     // static check, not at runtime.
-                    args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0)
+                    args.first()
+                        .map(|a| self.gen_expr(a))
+                        .unwrap_or_else(Val::i0)
                 }
                 "read_file" => self.gen_read_file(args),
                 "write_file" => self.gen_write_file(args),
@@ -2835,7 +2970,9 @@ impl<'a> Fb<'a> {
         let (tyname, selfptr) = match self.gen_place(base) {
             Some((CTy::Struct(t), pptr)) => (t, pptr),
             Some((CTy::Ptr(inner), pptr)) if matches!(*inner, CTy::Struct(_)) => {
-                let CTy::Struct(t) = *inner else { unreachable!() };
+                let CTy::Struct(t) = *inner else {
+                    unreachable!()
+                };
                 // Load the full fat pointer and check its generation before
                 // dispatch, so a method call on a freed receiver faults the same
                 // way an explicit dereference does.
@@ -2892,7 +3029,10 @@ impl<'a> Fb<'a> {
             return Some(Val::new(CTy::Void, ""));
         }
         let d = self.fresh();
-        self.line(&format!("{d} = call {} @{tyname}.{mname}({argstr})", ret.ll()));
+        self.line(&format!(
+            "{d} = call {} @{tyname}.{mname}({argstr})",
+            ret.ll()
+        ));
         Some(Val::new(ret, d))
     }
 
@@ -2906,7 +3046,10 @@ impl<'a> Fb<'a> {
         let isnull = self.fresh();
         self.line(&format!("{isnull} = icmp eq ptr {}, null", ev.op));
         let s = self.fresh();
-        self.line(&format!("{s} = select i1 {isnull}, ptr {empty}, ptr {}", ev.op));
+        self.line(&format!(
+            "{s} = select i1 {isnull}, ptr {empty}, ptr {}",
+            ev.op
+        ));
         Val::new(CTy::RawPtr(Box::new(CTy::Char)), s)
     }
 
@@ -2955,7 +3098,10 @@ impl<'a> Fb<'a> {
             (idx, m.ret.clone(), m.params.clone(), n)
         };
         let data = self.fresh();
-        self.line(&format!("{data} = extractvalue {{ ptr, ptr }} {}, 0", iv.op));
+        self.line(&format!(
+            "{data} = extractvalue {{ ptr, ptr }} {}, 0",
+            iv.op
+        ));
         let vt = self.fresh();
         self.line(&format!("{vt} = extractvalue {{ ptr, ptr }} {}, 1", iv.op));
         let slot = self.fresh();
@@ -3011,8 +3157,16 @@ impl<'a> Fb<'a> {
     /// the record pointer and its header generation, the spawn epilogue shape.
     fn gen_async_call(&mut self, name: &str, args: &[Expr]) -> Val {
         let (ret, params, fut_struct) = {
-            let info = self.ctx.async_fns.get(name).expect("async callee is registered");
-            (info.ret.clone(), info.params.clone(), info.fut_struct.clone())
+            let info = self
+                .ctx
+                .async_fns
+                .get(name)
+                .expect("async callee is registered");
+            (
+                info.ret.clone(),
+                info.params.clone(),
+                info.fut_struct.clone(),
+            )
         };
         let ret_sa = self.ctx.size_align(&ret);
         let param_sa: Vec<(u64, u64)> = params.iter().map(|p| self.ctx.size_align(p)).collect();
@@ -3044,7 +3198,10 @@ impl<'a> Fb<'a> {
         self.line(&format!("{g} = load atomic i64, ptr {hp} seq_cst, align 8"));
         let sty = CTy::Struct(fut_struct);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {} undef, ptr {fut}, 0", sty.ll()));
+        self.line(&format!(
+            "{a} = insertvalue {} undef, ptr {fut}, 0",
+            sty.ll()
+        ));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {} {a}, i64 {g}, 1", sty.ll()));
         Val::new(sty, b)
@@ -3070,13 +3227,23 @@ impl<'a> Fb<'a> {
         .unwrap_or(CTy::Int(32));
         let futval = self.gen_expr(arg);
         let h = self.fresh();
-        self.line(&format!("{h} = extractvalue {} {}, 0", futval.ty.ll(), futval.op));
+        self.line(&format!(
+            "{h} = extractvalue {} {}, 0",
+            futval.ty.ll(),
+            futval.op
+        ));
         let gen = self.fresh();
-        self.line(&format!("{gen} = extractvalue {} {}, 1", futval.ty.ll(), futval.op));
+        self.line(&format!(
+            "{gen} = extractvalue {} {}, 1",
+            futval.ty.ll(),
+            futval.op
+        ));
         let (rsize, _) = self.ctx.size_align(&ret);
         if matches!(ret, CTy::Void) {
             let out = self.alloca_raw("i64");
-            self.line(&format!("call void @cool_loop_run(ptr {h}, i64 {gen}, ptr {out}, i64 0)"));
+            self.line(&format!(
+                "call void @cool_loop_run(ptr {h}, i64 {gen}, ptr {out}, i64 0)"
+            ));
             return Val::new(CTy::Void, "");
         }
         let out = self.alloca(&ret);
@@ -3134,7 +3301,10 @@ impl<'a> Fb<'a> {
         let fname = format!("@lambda.{id}");
         let env_ty = format!(
             "{{ {} }}",
-            caps.iter().map(|(_, t)| t.ll()).collect::<Vec<_>>().join(", ")
+            caps.iter()
+                .map(|(_, t)| t.ll())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let env = if caps.is_empty() {
             "null".to_string()
@@ -3148,7 +3318,9 @@ impl<'a> Fb<'a> {
                 // so a multi-field env must never route through it.
                 let (size, _) = self.ctx.layout(&caps);
                 let p = self.fresh();
-                self.line(&format!("{p} = call ptr @cool_task_env_alloc(ptr %frame, i64 {size})"));
+                self.line(&format!(
+                    "{p} = call ptr @cool_task_env_alloc(ptr %frame, i64 {size})"
+                ));
                 p
             } else {
                 self.alloca_raw(&env_ty)
@@ -3157,16 +3329,22 @@ impl<'a> Fb<'a> {
                 let (lty, lptr) = self.locals.get(cname).cloned().unwrap();
                 let v = self.load(&lty, &lptr);
                 let slot = self.fresh();
-                self.line(&format!("{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"));
+                self.line(&format!(
+                    "{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"
+                ));
                 self.line(&format!("store {} {v}, ptr {slot}", cty.ll()));
             }
             e
         };
         self.emit_lambda_fn(&fname, &env_ty, &caps, &params, &ret, &l.body);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, ptr }} undef, ptr {env}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, ptr }} undef, ptr {env}, 0"
+        ));
         let b = self.fresh();
-        self.line(&format!("{b} = insertvalue {{ ptr, ptr }} {a}, ptr {fname}, 1"));
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, ptr }} {a}, ptr {fname}, 1"
+        ));
         let pt = params.iter().map(|(_, t)| t.clone()).collect();
         Val::new(CTy::Closure(pt, Box::new(ret)), b)
     }
@@ -3181,7 +3359,12 @@ impl<'a> Fb<'a> {
         body: &Block,
     ) {
         let sig = std::iter::once("ptr %env".to_string())
-            .chain(params.iter().enumerate().map(|(i, (_, t))| format!("{} %a{i}", t.ll())))
+            .chain(
+                params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, t))| format!("{} %a{i}", t.ll())),
+            )
             .collect::<Vec<_>>()
             .join(", ");
         let header = format!("define {} {fname}({sig}) {{", ret.ll());
@@ -3189,7 +3372,9 @@ impl<'a> Fb<'a> {
         fb.body.push_str("entry:\n");
         for (i, (cname, cty)) in caps.iter().enumerate() {
             let slot = fb.fresh();
-            fb.line(&format!("{slot} = getelementptr {env_ty}, ptr %env, i32 0, i32 {i}"));
+            fb.line(&format!(
+                "{slot} = getelementptr {env_ty}, ptr %env, i32 0, i32 {i}"
+            ));
             let v = fb.load(cty, &slot);
             let p = fb.alloca(cty);
             fb.line(&format!("store {} {v}, ptr {p}", cty.ll()));
@@ -3232,7 +3417,10 @@ impl<'a> Fb<'a> {
         let fname = format!("@lambda.{id}");
         let env_ty = format!(
             "{{ {} }}",
-            caps.iter().map(|(_, t)| t.ll()).collect::<Vec<_>>().join(", ")
+            caps.iter()
+                .map(|(_, t)| t.ll())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         let env = if caps.is_empty() {
             "null".to_string()
@@ -3249,7 +3437,9 @@ impl<'a> Fb<'a> {
                 let (lty, lptr) = self.locals.get(cname).cloned().unwrap();
                 let v = self.load(&lty, &lptr);
                 let slot = self.fresh();
-                self.line(&format!("{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"));
+                self.line(&format!(
+                    "{slot} = getelementptr {env_ty}, ptr {e}, i32 0, i32 {i}"
+                ));
                 self.line(&format!("store {} {v}, ptr {slot}", cty.ll()));
             }
             e
@@ -3273,7 +3463,9 @@ impl<'a> Fb<'a> {
         let l = l.clone();
         let (fname, env) = self.gen_task_env(&l);
         let rec = self.fresh();
-        self.line(&format!("{rec} = call ptr @cool_thread_spawn(ptr {fname}, ptr {env})"));
+        self.line(&format!(
+            "{rec} = call ptr @cool_thread_spawn(ptr {fname}, ptr {env})"
+        ));
         let hslot = self.alloca(&CTy::Thread);
         let eslot = self.alloca_raw("ptr");
         let isnull = self.fresh();
@@ -3301,7 +3493,10 @@ impl<'a> Fb<'a> {
         let h = self.load(&CTy::Thread, &hslot);
         let e = self.load(&CTy::Error, &eslot);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {} undef, {{ ptr, i64 }} {h}, 0", tty.ll()));
+        self.line(&format!(
+            "{a} = insertvalue {} undef, {{ ptr, i64 }} {h}, 0",
+            tty.ll()
+        ));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {} {a}, ptr {e}, 1", tty.ll()));
         Val::new(tty, b)
@@ -3321,7 +3516,9 @@ impl<'a> Fb<'a> {
         let l = l.clone();
         let (fname, env) = self.gen_task_env(&l);
         let rc = self.fresh();
-        self.line(&format!("{rc} = call i64 @cool_pool_submit(ptr {fname}, ptr {env})"));
+        self.line(&format!(
+            "{rc} = call i64 @cool_pool_submit(ptr {fname}, ptr {env})"
+        ));
         let bad = self.fresh();
         self.line(&format!("{bad} = icmp ne i64 {rc}, 0"));
         let msg = self.m.cstring("the thread pool is not running");
@@ -3343,7 +3540,9 @@ impl<'a> Fb<'a> {
         let gen = self.fresh();
         self.line(&format!("{gen} = extractvalue {{ ptr, i64 }} {}, 1", v.op));
         let rc = self.fresh();
-        self.line(&format!("{rc} = call i64 @cool_thread_join(ptr {data}, i64 {gen})"));
+        self.line(&format!(
+            "{rc} = call i64 @cool_thread_join(ptr {data}, i64 {gen})"
+        ));
         let bad = self.fresh();
         self.line(&format!("{bad} = icmp ne i64 {rc}, 0"));
         let msg = self.m.cstring("cannot join thread");
@@ -3367,7 +3566,9 @@ impl<'a> Fb<'a> {
             emit_funcval_thunk(self.m, name, &ret, &params);
         }
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, ptr }} undef, ptr null, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, ptr }} undef, ptr null, 0"
+        ));
         let b = self.fresh();
         self.line(&format!(
             "{b} = insertvalue {{ ptr, ptr }} {a}, ptr @{name}.funcval, 1"
@@ -3417,7 +3618,9 @@ impl<'a> Fb<'a> {
         let slot = self.backing_slot(&arr.ty);
         self.line(&format!("store {} {}, ptr {slot}", arr.ty.ll(), arr.op));
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {slot}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, i64 }} undef, ptr {slot}, 0"
+        ));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {n}, 1"));
         Val::new(CTy::Slice(Box::new(elem)), b)
@@ -3448,7 +3651,10 @@ impl<'a> Fb<'a> {
             _ => CTy::Int(64),
         };
         let data = self.fresh();
-        self.line(&format!("{data} = extractvalue {{ ptr, i64 }} {}, 0", sv.op));
+        self.line(&format!(
+            "{data} = extractvalue {{ ptr, i64 }} {}, 0",
+            sv.op
+        ));
         let len = self.fresh();
         self.line(&format!("{len} = extractvalue {{ ptr, i64 }} {}, 1", sv.op));
         (data, len, elem)
@@ -3484,7 +3690,10 @@ impl<'a> Fb<'a> {
         self.cond_br(&c, &body, &end);
         self.place_label(&body);
         let ep = self.fresh();
-        self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        self.line(&format!(
+            "{ep} = getelementptr {}, ptr {data}, i64 {iv}",
+            elem.ll()
+        ));
         let ev = self.load(&elem, &ep);
         self.invoke_closure(&cv, vec![Val::new(elem.clone(), ev)]);
         let ni = self.op2("add", "i64", &iv, "1");
@@ -3523,12 +3732,18 @@ impl<'a> Fb<'a> {
         self.cond_br(&c, &body, &end);
         self.place_label(&body);
         let ep = self.fresh();
-        self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        self.line(&format!(
+            "{ep} = getelementptr {}, ptr {data}, i64 {iv}",
+            elem.ll()
+        ));
         let ev = self.load(&elem, &ep);
         let rv = self.invoke_closure(&cv, vec![Val::new(elem.clone(), ev)]);
         let rop = self.adapt(rv, &out_elem).op;
         let op = self.fresh();
-        self.line(&format!("{op} = getelementptr {}, ptr {out}, i64 {iv}", out_elem.ll()));
+        self.line(&format!(
+            "{op} = getelementptr {}, ptr {out}, i64 {iv}",
+            out_elem.ll()
+        ));
         self.line(&format!("store {} {rop}, ptr {op}", out_elem.ll()));
         let ni = self.op2("add", "i64", &iv, "1");
         self.line(&format!("store i64 {ni}, ptr {i}"));
@@ -3536,9 +3751,13 @@ impl<'a> Fb<'a> {
         self.place_label(&end);
         let sty = CTy::Slice(Box::new(out_elem));
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {out}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, i64 }} undef, ptr {out}, 0"
+        ));
         let b = self.fresh();
-        self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"));
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, i64 }} {a}, i64 {len}, 1"
+        ));
         Val::new(sty, b)
     }
 
@@ -3571,7 +3790,10 @@ impl<'a> Fb<'a> {
         self.cond_br(&c, &body, &end);
         self.place_label(&body);
         let ep = self.fresh();
-        self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        self.line(&format!(
+            "{ep} = getelementptr {}, ptr {data}, i64 {iv}",
+            elem.ll()
+        ));
         let ev = self.load(&elem, &ep);
         let pv = self.invoke_closure(&cv, vec![Val::new(elem.clone(), ev.clone())]);
         let cb = self.coerce(&pv.ty, &pv.op, &CTy::Bool);
@@ -3579,7 +3801,10 @@ impl<'a> Fb<'a> {
         self.place_label(&keep);
         let kcnt = self.load(&CTy::Int(64), &cnt);
         let op = self.fresh();
-        self.line(&format!("{op} = getelementptr {}, ptr {out}, i64 {kcnt}", elem.ll()));
+        self.line(&format!(
+            "{op} = getelementptr {}, ptr {out}, i64 {kcnt}",
+            elem.ll()
+        ));
         self.line(&format!("store {} {ev}, ptr {op}", elem.ll()));
         let ncnt = self.op2("add", "i64", &kcnt, "1");
         self.line(&format!("store i64 {ncnt}, ptr {cnt}"));
@@ -3592,9 +3817,13 @@ impl<'a> Fb<'a> {
         let total_cnt = self.load(&CTy::Int(64), &cnt);
         let sty = CTy::Slice(Box::new(elem));
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {{ ptr, i64 }} undef, ptr {out}, 0"));
+        self.line(&format!(
+            "{a} = insertvalue {{ ptr, i64 }} undef, ptr {out}, 0"
+        ));
         let b = self.fresh();
-        self.line(&format!("{b} = insertvalue {{ ptr, i64 }} {a}, i64 {total_cnt}, 1"));
+        self.line(&format!(
+            "{b} = insertvalue {{ ptr, i64 }} {a}, i64 {total_cnt}, 1"
+        ));
         Val::new(sty, b)
     }
 
@@ -3627,7 +3856,10 @@ impl<'a> Fb<'a> {
         self.cond_br(&c, &body, &end);
         self.place_label(&body);
         let ep = self.fresh();
-        self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        self.line(&format!(
+            "{ep} = getelementptr {}, ptr {data}, i64 {iv}",
+            elem.ll()
+        ));
         let ev = self.load(&elem, &ep);
         let av = self.load(&acc_ty, &acc);
         let rv = self.invoke_closure(
@@ -3683,7 +3915,10 @@ impl<'a> Fb<'a> {
         self.cond_br(&c, &body, &done);
         self.place_label(&body);
         let ep = self.fresh();
-        self.line(&format!("{ep} = getelementptr {}, ptr {data}, i64 {iv}", elem.ll()));
+        self.line(&format!(
+            "{ep} = getelementptr {}, ptr {data}, i64 {iv}",
+            elem.ll()
+        ));
         let ev = self.load(&elem, &ep);
         let av = self.load(&elem, &acc);
         let rv = self.invoke_closure(
@@ -3700,7 +3935,11 @@ impl<'a> Fb<'a> {
         let e = self.load(&CTy::Error, &err);
         let tty = CTy::Tuple(vec![elem.clone(), CTy::Error]);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {} undef, {} {r}, 0", tty.ll(), elem.ll()));
+        self.line(&format!(
+            "{a} = insertvalue {} undef, {} {r}, 0",
+            tty.ll(),
+            elem.ll()
+        ));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {} {a}, ptr {e}, 1", tty.ll()));
         Val::new(tty, b)
@@ -3723,7 +3962,11 @@ impl<'a> Fb<'a> {
             // A bare println() prints just the newline.
             None if newline => {
                 let empty = self.m.cstring("");
-                let f = if errout { "cool_eprint_cstr" } else { "cool_println_cstr" };
+                let f = if errout {
+                    "cool_eprint_cstr"
+                } else {
+                    "cool_println_cstr"
+                };
                 self.line(&format!("call void @{f}(ptr {empty})"));
                 if errout {
                     self.print_newline(true);
@@ -3736,7 +3979,11 @@ impl<'a> Fb<'a> {
 
     fn print_newline(&mut self, errout: bool) {
         let nl = self.m.cstring("\n");
-        let f = if errout { "cool_eprint_cstr" } else { "cool_print_cstr" };
+        let f = if errout {
+            "cool_eprint_cstr"
+        } else {
+            "cool_print_cstr"
+        };
         self.line(&format!("call void @{f}(ptr {nl})"));
     }
 
@@ -3760,8 +4007,13 @@ impl<'a> Fb<'a> {
                         self.line(&format!("call void @cool_eprint_cstr(ptr {s})"));
                     }
                 }
-                CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void | CTy::Tuple(_)
-                | CTy::Thread | CTy::Unknown => {}
+                CTy::Enum(_)
+                | CTy::Slice(_)
+                | CTy::Array(..)
+                | CTy::Void
+                | CTy::Tuple(_)
+                | CTy::Thread
+                | CTy::Unknown => {}
                 _ => {
                     let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
                     self.line(&format!("call void @cool_eprint_i64(i64 {d})"));
@@ -3786,8 +4038,13 @@ impl<'a> Fb<'a> {
                     self.line(&format!("call void @cool_print{suffix}_cstr(ptr {s})"));
                 }
             }
-            CTy::Enum(_) | CTy::Slice(_) | CTy::Array(..) | CTy::Void | CTy::Tuple(_)
-            | CTy::Thread | CTy::Unknown => {}
+            CTy::Enum(_)
+            | CTy::Slice(_)
+            | CTy::Array(..)
+            | CTy::Void
+            | CTy::Tuple(_)
+            | CTy::Thread
+            | CTy::Unknown => {}
             _ => {
                 let d = self.coerce(&v.ty, &v.op, &CTy::Int(64));
                 self.line(&format!("call void @cool_print{suffix}_i64(i64 {d})"));
@@ -3822,7 +4079,11 @@ impl<'a> Fb<'a> {
             ExprKind::Str(s) => crate::fmt::parse(s).unwrap_or_default(),
             _ => Vec::new(),
         };
-        let lit_printer = if errout { "cool_eprint_cstr" } else { "cool_print_cstr" };
+        let lit_printer = if errout {
+            "cool_eprint_cstr"
+        } else {
+            "cool_print_cstr"
+        };
         let mut ai = 1;
         for seg in &segs {
             match seg {
@@ -3864,7 +4125,10 @@ impl<'a> Fb<'a> {
     /// alloc_bytes(n): raw, uninitialized n bytes through the in scope allocator,
     /// returned as `*int8`. The base primitive for arenas and growable buffers.
     fn gen_alloc_bytes(&mut self, args: &[Expr]) -> Val {
-        let n = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let n = args
+            .first()
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
         let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
         let p = self.gen_alloc_call(&ni, 8);
         Val::new(CTy::RawPtr(Box::new(CTy::Int(8))), p)
@@ -3875,7 +4139,10 @@ impl<'a> Fb<'a> {
     /// error carries a message, so the caller's must handle rule still fires.
     fn gen_read_file(&mut self, args: &[Expr]) -> Val {
         let str_ty = CTy::RawPtr(Box::new(CTy::Char));
-        let p = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let p = args
+            .first()
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
         let pp = self.coerce(&p.ty, &p.op, &str_ty);
         let buf = self.fresh();
         self.line(&format!("{buf} = call ptr @cool_read_file(ptr {pp})"));
@@ -3886,10 +4153,15 @@ impl<'a> Fb<'a> {
         let err = self.fresh();
         self.line(&format!("{err} = select i1 {isnull}, ptr {msg}, ptr null"));
         let data = self.fresh();
-        self.line(&format!("{data} = select i1 {isnull}, ptr {empty}, ptr {buf}"));
+        self.line(&format!(
+            "{data} = select i1 {isnull}, ptr {empty}, ptr {buf}"
+        ));
         let tty = CTy::Tuple(vec![str_ty, CTy::Error]);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {} undef, ptr {data}, 0", tty.ll()));
+        self.line(&format!(
+            "{a} = insertvalue {} undef, ptr {data}, 0",
+            tty.ll()
+        ));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {} {a}, ptr {err}, 1", tty.ll()));
         Val::new(tty, b)
@@ -3899,12 +4171,20 @@ impl<'a> Fb<'a> {
     /// `error` that exists when the write fails.
     fn gen_write_file(&mut self, args: &[Expr]) -> Val {
         let str_ty = CTy::RawPtr(Box::new(CTy::Char));
-        let path = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let path = args
+            .first()
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
         let pp = self.coerce(&path.ty, &path.op, &str_ty);
-        let data = args.get(1).map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let data = args
+            .get(1)
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
         let dp = self.coerce(&data.ty, &data.op, &str_ty);
         let rc = self.fresh();
-        self.line(&format!("{rc} = call i64 @cool_write_file(ptr {pp}, ptr {dp})"));
+        self.line(&format!(
+            "{rc} = call i64 @cool_write_file(ptr {pp}, ptr {dp})"
+        ));
         let bad = self.fresh();
         self.line(&format!("{bad} = icmp slt i64 {rc}, 0"));
         let msg = self.m.cstring("cannot write file");
@@ -3930,10 +4210,15 @@ impl<'a> Fb<'a> {
         let err = self.fresh();
         self.line(&format!("{err} = select i1 {isnull}, ptr {msg}, ptr null"));
         let data = self.fresh();
-        self.line(&format!("{data} = select i1 {isnull}, ptr {empty}, ptr {buf}"));
+        self.line(&format!(
+            "{data} = select i1 {isnull}, ptr {empty}, ptr {buf}"
+        ));
         let tty = CTy::Tuple(vec![str_ty, CTy::Error]);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {} undef, ptr {data}, 0", tty.ll()));
+        self.line(&format!(
+            "{a} = insertvalue {} undef, ptr {data}, 0",
+            tty.ll()
+        ));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {} {a}, ptr {err}, 1", tty.ll()));
         Val::new(tty, b)
@@ -3944,11 +4229,16 @@ impl<'a> Fb<'a> {
     /// whose error exists when the string is empty or not fully a number.
     fn gen_parse_float(&mut self, args: &[Expr]) -> Val {
         let str_ty = CTy::RawPtr(Box::new(CTy::Char));
-        let s = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let s = args
+            .first()
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
         let sp = self.coerce(&s.ty, &s.op, &str_ty);
         let okslot = self.alloca_raw("i64");
         let val = self.fresh();
-        self.line(&format!("{val} = call double @cool_parse_float(ptr {sp}, ptr {okslot})"));
+        self.line(&format!(
+            "{val} = call double @cool_parse_float(ptr {sp}, ptr {okslot})"
+        ));
         let ok = self.load(&CTy::Int(64), &okslot);
         let bad = self.fresh();
         self.line(&format!("{bad} = icmp eq i64 {ok}, 0"));
@@ -3957,7 +4247,10 @@ impl<'a> Fb<'a> {
         self.line(&format!("{err} = select i1 {bad}, ptr {msg}, ptr null"));
         let tty = CTy::Tuple(vec![CTy::F64, CTy::Error]);
         let a = self.fresh();
-        self.line(&format!("{a} = insertvalue {} undef, double {val}, 0", tty.ll()));
+        self.line(&format!(
+            "{a} = insertvalue {} undef, double {val}, 0",
+            tty.ll()
+        ));
         let b = self.fresh();
         self.line(&format!("{b} = insertvalue {} {a}, ptr {err}, 1", tty.ll()));
         Val::new(tty, b)
@@ -3966,8 +4259,14 @@ impl<'a> Fb<'a> {
     /// ptr_add(p, n): the pointer n bytes past p, keeping p's pointer type. Raw
     /// byte arithmetic for arenas and buffers.
     fn gen_ptr_add(&mut self, args: &[Expr]) -> Val {
-        let p = args.first().map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
-        let n = args.get(1).map(|a| self.gen_expr(a)).unwrap_or_else(Val::i0);
+        let p = args
+            .first()
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
+        let n = args
+            .get(1)
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
         let ni = self.coerce(&n.ty, &n.op, &CTy::Int(64));
         // ptr_add works in raw pointers. A managed *T is rejected in sema, but
         // drop its generation defensively here so a fat value never reaches a
@@ -3994,7 +4293,10 @@ impl<'a> Fb<'a> {
     fn alloc_of(&mut self, pointee: CTy, value: Option<Val>) -> Val {
         let align = self.ctx.size_align(&pointee).1;
         let szp = self.fresh();
-        self.line(&format!("{szp} = getelementptr {}, ptr null, i64 1", pointee.ll()));
+        self.line(&format!(
+            "{szp} = getelementptr {}, ptr null, i64 1",
+            pointee.ll()
+        ));
         let sz = self.fresh();
         self.line(&format!("{sz} = ptrtoint ptr {szp} to i64"));
         // The default heap is the generational allocator: it writes a generation
@@ -4094,7 +4396,9 @@ impl<'a> Fb<'a> {
         let vt = self.fresh();
         self.line(&format!("{vt} = extractvalue {{ ptr, ptr }} {iv}, 1"));
         let slot = self.fresh();
-        self.line(&format!("{slot} = getelementptr [{n} x ptr], ptr {vt}, i64 0, i64 {idx}"));
+        self.line(&format!(
+            "{slot} = getelementptr [{n} x ptr], ptr {vt}, i64 0, i64 {idx}"
+        ));
         let fp = self.fresh();
         self.line(&format!("{fp} = load ptr, ptr {slot}"));
         Some((data, fp))
@@ -4180,20 +4484,16 @@ mod tests {
 
     #[test]
     fn foreign_block_declares_and_calls() {
-        let out = ir(
-            "foreign \"C\" { func abs(n: int32) -> int32 }\n\
-             func main() -> int32 { return abs(-5) }",
-        );
+        let out = ir("foreign \"C\" { func abs(n: int32) -> int32 }\n\
+             func main() -> int32 { return abs(-5) }");
         assert!(out.contains("declare i32 @abs(i32)"), "{out}");
         assert!(out.contains("call i32 @abs("), "{out}");
     }
 
     #[test]
     fn scalar_core_still_works() {
-        let out = ir(
-            "func add(a: int64, b: int64) -> int64 { return a + b }\n\
-             func main() -> int32 { return add(1, 2) }",
-        );
+        let out = ir("func add(a: int64, b: int64) -> int64 { return a + b }\n\
+             func main() -> int32 { return add(1, 2) }");
         assert!(out.contains("define i64 @add(i64 %a0, i64 %a1)"));
         assert!(out.contains("call i64 @add"));
     }
@@ -4247,7 +4547,10 @@ mod tests {
             "func main() -> int32 {\n  mut xs: int64[3] = [10, 20, 30]\n  i := 1\n  xs[i] += 1\n  return 0\n}",
         );
         let geps = out.matches("getelementptr [3 x i64]").count();
-        assert_eq!(geps, 1, "expected one place computation, got {geps}:\n{out}");
+        assert_eq!(
+            geps, 1,
+            "expected one place computation, got {geps}:\n{out}"
+        );
         let checks = out.matches("call void @cool_bounds_fault()").count();
         assert_eq!(checks, 1, "expected one bounds check, got {checks}:\n{out}");
     }
@@ -4261,7 +4564,10 @@ mod tests {
         );
         let add_pos = out.find("add i64 3, 1").expect("expected the inclusive +1");
         let ugt_pos = out.find("icmp ugt").expect("expected a bounds compare");
-        assert!(add_pos < ugt_pos, "the +1 must precede the bounds checks:\n{out}");
+        assert!(
+            add_pos < ugt_pos,
+            "the +1 must precede the bounds checks:\n{out}"
+        );
     }
 
     #[test]
@@ -4286,11 +4592,9 @@ mod tests {
 
     #[test]
     fn struct_type_and_method() {
-        let out = ir(
-            "struct Point { x: int64, y: int64 }\n\
+        let out = ir("struct Point { x: int64, y: int64 }\n\
              impl Point { func sum() -> int64 { return self.x + self.y } }\n\
-             func main() -> int32 {\n  p := Point { x: 3, y: 4 }\n  return 0\n}",
-        );
+             func main() -> int32 {\n  p := Point { x: 3, y: 4 }\n  return 0\n}");
         assert!(out.contains("%Point = type { i64, i64 }"));
         assert!(out.contains("define i64 @Point.sum(ptr %a0)"));
         assert!(out.contains("insertvalue %Point"));
@@ -4298,11 +4602,9 @@ mod tests {
 
     #[test]
     fn method_takes_self_by_pointer_and_mutates_in_place() {
-        let out = ir(
-            "struct C { n: int64 }\n\
+        let out = ir("struct C { n: int64 }\n\
              impl C { func bump() -> void { self.n = self.n + 1 } }\n\
-             func main() -> int32 {\n  mut c := C { n: 0 }\n  c.bump()\n  return 0\n}",
-        );
+             func main() -> int32 {\n  mut c := C { n: 0 }\n  c.bump()\n  return 0\n}");
         // self is a pointer, the call passes the receiver address, and the
         // mutation writes through that pointer so it persists in the caller.
         assert!(out.contains("define void @C.bump(ptr %a0)"), "{out}");
@@ -4322,9 +4624,7 @@ mod tests {
 
     #[test]
     fn array_literal_and_index() {
-        let out = ir(
-            "func f() -> int32 {\n  xs: int32[3] = [1, 2, 3]\n  return xs[1]\n}",
-        );
+        let out = ir("func f() -> int32 {\n  xs: int32[3] = [1, 2, 3]\n  return xs[1]\n}");
         assert!(out.contains("alloca [3 x i32]"));
         assert!(out.contains("insertvalue [3 x i32]"));
         assert!(out.contains("getelementptr [3 x i32], ptr"));
@@ -4342,19 +4642,16 @@ mod tests {
 
     #[test]
     fn element_store() {
-        let out = ir(
-            "func f() -> int32 {\n  mut xs: int32[2] = [1, 2]\n  xs[0] = 9\n  return xs[0]\n}",
-        );
+        let out =
+            ir("func f() -> int32 {\n  mut xs: int32[2] = [1, 2]\n  xs[0] = 9\n  return xs[0]\n}");
         assert!(out.contains("store i32 "));
         assert!(out.contains("getelementptr [2 x i32], ptr"));
     }
 
     #[test]
     fn enum_type_and_construct() {
-        let out = ir(
-            "enum E { A, B(v: int64) }\n\
-             func f() -> int64 {\n  x := E.B(7)\n  return 0\n}",
-        );
+        let out = ir("enum E { A, B(v: int64) }\n\
+             func f() -> int64 {\n  x := E.B(7)\n  return 0\n}");
         assert!(out.contains("%E = type { i8, [1 x i64] }"));
         assert!(out.contains("store i8 1"));
     }
@@ -4371,13 +4668,11 @@ mod tests {
 
     #[test]
     fn interface_vtable_and_dispatch() {
-        let out = ir(
-            "struct Dog { s: int64 }\n\
+        let out = ir("struct Dog { s: int64 }\n\
              interface Animal { speak() -> int64 }\n\
              impl Animal for Dog { func speak() -> int64 { return self.s } }\n\
              func describe(a: Animal) -> int64 { return a.speak() }\n\
-             func main() -> int32 {\n  d := Dog { s: 7 }\n  return describe(d)\n}",
-        );
+             func main() -> int32 {\n  d := Dog { s: 7 }\n  return describe(d)\n}");
         assert!(out.contains("@vtable.Animal.Dog = constant [1 x ptr]"));
         assert!(out.contains("define i64 @thunk.Animal.Dog.speak(ptr %d"));
         assert!(out.contains("extractvalue { ptr, ptr }"));
@@ -4385,26 +4680,22 @@ mod tests {
 
     #[test]
     fn struct_boxes_into_interface_arg() {
-        let out = ir(
-            "struct Dog { s: int64 }\n\
+        let out = ir("struct Dog { s: int64 }\n\
              interface Animal { speak() -> int64 }\n\
              impl Animal for Dog { func speak() -> int64 { return self.s } }\n\
              func describe(a: Animal) -> int64 { return a.speak() }\n\
-             func main() -> int32 {\n  d := Dog { s: 7 }\n  return describe(d)\n}",
-        );
+             func main() -> int32 {\n  d := Dog { s: 7 }\n  return describe(d)\n}");
         assert!(out.contains("insertvalue { ptr, ptr } undef, ptr"));
         assert!(out.contains("ptr @vtable.Animal.Dog, 1"));
     }
 
     #[test]
     fn closure_captures_and_calls() {
-        let out = ir(
-            "func main() -> int32 {\n\
+        let out = ir("func main() -> int32 {\n\
                base := 100\n\
                add := lambda (x: int64) -> int64 { return x + base }\n\
                return add(5)\n\
-             }",
-        );
+             }");
         assert!(out.contains("define i64 @lambda.0(ptr %env, i64 %a0)"));
         assert!(out.contains("getelementptr { i64 }, ptr %env"));
         assert!(out.contains("insertvalue { ptr, ptr } undef, ptr"));
@@ -4412,25 +4703,24 @@ mod tests {
 
     #[test]
     fn closure_without_capture_uses_null_env() {
-        let out = ir(
-            "func main() -> int32 {\n\
+        let out = ir("func main() -> int32 {\n\
                f := lambda (a: int64, b: int64) -> int64 { return a * b }\n\
                return f(6, 7)\n\
-             }",
-        );
+             }");
         assert!(out.contains("define i64 @lambda.0(ptr %env, i64 %a0, i64 %a1)"));
         assert!(out.contains("insertvalue { ptr, ptr } undef, ptr null, 0"));
     }
 
     #[test]
     fn using_allocator_dispatches_statically() {
-        let out = ir(
-            "struct Heap { id: int64 }\n\
-             func work(using a: Heap) -> void {\n  p: *int64 = alloc(5)\n  free(p)\n}",
-        );
+        let out = ir("struct Heap { id: int64 }\n\
+             func work(using a: Heap) -> void {\n  p: *int64 = alloc(5)\n  free(p)\n}");
         assert!(out.contains("@Heap.alloc(ptr"), "{out}");
         assert!(out.contains("@Heap.free(ptr"), "{out}");
-        assert!(!out.contains("call ptr @cool_alloc"), "should not fall back to heap: {out}");
+        assert!(
+            !out.contains("call ptr @cool_alloc"),
+            "should not fall back to heap: {out}"
+        );
     }
 
     #[test]
@@ -4452,9 +4742,15 @@ mod tests {
         let out = ir(
             "func f(xs: int64[]) -> void {\n  ys := map(xs, lambda (n: int64) -> int64 { return n })\n}",
         );
-        assert!(out.contains("call ptr @cool_gen_alloc"), "map allocates result: {out}");
+        assert!(
+            out.contains("call ptr @cool_gen_alloc"),
+            "map allocates result: {out}"
+        );
         assert!(out.contains("icmp slt i64"), "map loops: {out}");
-        assert!(out.contains("call i64 "), "map invokes the closure indirectly: {out}");
+        assert!(
+            out.contains("call i64 "),
+            "map invokes the closure indirectly: {out}"
+        );
     }
 
     #[test]
@@ -4493,9 +4789,8 @@ mod tests {
 
     #[test]
     fn sizeof_and_alloc_bytes() {
-        let out = ir(
-            "func f() -> void {\n  n := sizeof(int64)\n  b := alloc_bytes(n)\n  free(b)\n}",
-        );
+        let out =
+            ir("func f() -> void {\n  n := sizeof(int64)\n  b := alloc_bytes(n)\n  free(b)\n}");
         // sizeof lowers to a null GEP + ptrtoint; alloc_bytes to a raw allocation.
         assert!(out.contains("getelementptr i64, ptr null, i64 1"), "{out}");
         assert!(out.contains("ptrtoint ptr"), "{out}");
@@ -4522,19 +4817,15 @@ mod tests {
     #[test]
     fn multi_bind_destructures_tuple() {
         // `q, e := f()` must extract both tuple elements into locals.
-        let out = ir(
-            "func f() -> (int64, error) { return (5, error {}) }\n\
-             func g() -> void {\n  q, e := f()\n  print(q)\n}",
-        );
+        let out = ir("func f() -> (int64, error) { return (5, error {}) }\n\
+             func g() -> void {\n  q, e := f()\n  print(q)\n}");
         assert!(out.contains("extractvalue"), "{out}");
     }
 
     #[test]
     fn error_exists_is_a_null_check() {
-        let out = ir(
-            "func f() -> (int64, error) { return (5, error {}) }\n\
-             func g() -> void {\n  q, e := f()\n  if e.exists() { print(q) }\n}",
-        );
+        let out = ir("func f() -> (int64, error) { return (5, error {}) }\n\
+             func g() -> void {\n  q, e := f()\n  if e.exists() { print(q) }\n}");
         assert!(out.contains("icmp ne ptr"), "{out}");
     }
 
@@ -4551,20 +4842,16 @@ mod tests {
 
     #[test]
     fn sizeof_of_struct_field_uses_field_type() {
-        let out = ir(
-            "struct S { a: int8, b: int64 }\n\
-             func f() -> void {\n  s := S { a: 3i8, b: 9 }\n  n := sizeof(s.a)\n  print(n)\n}",
-        );
+        let out = ir("struct S { a: int8, b: int64 }\n\
+             func f() -> void {\n  s := S { a: 3i8, b: 9 }\n  n := sizeof(s.a)\n  print(n)\n}");
         // The field is int8, so sizeof lowers through i8, not the i64 fallback.
         assert!(out.contains("getelementptr i8, ptr null, i64 1"), "{out}");
     }
 
     #[test]
     fn array_literal_coerces_to_slice_argument() {
-        let out = ir(
-            "func sum(xs: int64[]) -> int64 { return 0 }\n\
-             func f() -> int64 { return sum([1, 2, 3]) }",
-        );
+        let out = ir("func sum(xs: int64[]) -> int64 { return 0 }\n\
+             func f() -> int64 { return sum([1, 2, 3]) }");
         // The literal is spilled to a stack array and passed as a slice.
         assert!(out.contains("alloca [3 x i64]"), "{out}");
         assert!(out.contains("call i64 @sum({ ptr, i64 }"), "{out}");
@@ -4574,10 +4861,8 @@ mod tests {
     fn generic_sizeof_uses_concrete_type() {
         // sizeof(T) in a generic function must lower to the instantiated type's
         // size: int8 -> 1, int64 -> 8.
-        let out = ir(
-            "func sz<T>(x: T) -> int64 { return sizeof(T) }\n\
-             func main() -> int32 {\n  println(sz(5i8))\n  println(sz(5))\n  return 0\n}",
-        );
+        let out = ir("func sz<T>(x: T) -> int64 { return sizeof(T) }\n\
+             func main() -> int32 {\n  println(sz(5i8))\n  println(sz(5))\n  return 0\n}");
         assert!(out.contains("getelementptr i8, ptr null, i64 1"), "{out}");
         assert!(out.contains("getelementptr i64, ptr null, i64 1"), "{out}");
     }
@@ -4586,18 +4871,17 @@ mod tests {
     fn generic_sizeof_of_composite_type() {
         // sizeof(T) where T is a slice must size the { ptr, i64 } fat pointer (16),
         // not fall through to the i64 default (8).
-        let out = ir(
-            "func sz<T>(x: T) -> int64 { return sizeof(T) }\n\
-             func main() -> int32 {\n  a: int64[] = [1, 2, 3]\n  return sz(a)\n}",
+        let out = ir("func sz<T>(x: T) -> int64 { return sizeof(T) }\n\
+             func main() -> int32 {\n  a: int64[] = [1, 2, 3]\n  return sz(a)\n}");
+        assert!(
+            out.contains("getelementptr { ptr, i64 }, ptr null, i64 1"),
+            "{out}"
         );
-        assert!(out.contains("getelementptr { ptr, i64 }, ptr null, i64 1"), "{out}");
     }
 
     #[test]
     fn ptr_add_offsets_a_pointer() {
-        let out = ir(
-            "func f(p: *raw int8) -> *raw int8 {\n  return ptr_add(p, 16)\n}",
-        );
+        let out = ir("func f(p: *raw int8) -> *raw int8 {\n  return ptr_add(p, 16)\n}");
         assert!(out.contains("getelementptr i8, ptr"), "{out}");
     }
 

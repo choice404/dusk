@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use dusk::sema::summary;
 use dusk::{analyze, Analysis};
 use dusk::{desugar, driver, lexer, loader, parser, prescan};
-use dusk::sema::summary;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -1,0 +1,147 @@
+// tcmatch: enum match binding and coverage checks for S3b.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+
+func variant_in_enum(tc: *TypeChecker, es: EnumSig, name: string) -> bool {
+    sigs: *TypeSigs = (*tc).sigtab
+    mut i: int64 = 0
+    while i < es.len {
+        if str_eq(vec_get((*sigs).names, es.off + i), name) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func already_covered_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "unreachable match arm, '")
+    sb_push(b, name)
+    sb_push(b, "' is already covered")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func missing_variant_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "non exhaustive match, missing variant '")
+    sb_push(b, name)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func match_type_msg(prefix: string, rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push(b, rendered)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func match_not_enum_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "match needs an enum value, and ")
+    sb_push(b, rendered)
+    sb_push(b, " is not an enum")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func bind_match_arm(tc: *TypeChecker, pat_id: int64) -> void {
+    a: *Ast = (*tc).ast
+    p: PatternNode = vec_get((*a).patterns, pat_id)
+    if p.kind == pk_variant() {
+        mut i: int64 = 0
+        while i < p.c {
+            declare(tc, ast_name(a, vec_get((*a).kids, p.b + i)), ty_unknown((*tc).ty))
+            i = i + 1
+        }
+    } else if p.kind == pk_ident() {
+        declare(tc, ast_name(a, p.a), ty_unknown((*tc).ty))
+    }
+}
+
+export func check_match_coverage(tc: *TypeChecker, es: EnumSig, arm_off: int64, arm_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    covered: *Map<int64> = alloc(map_new())
+    mut catch_all: bool = false
+    mut i: int64 = 0
+    while i < arm_len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arm_off + i))
+        p: PatternNode = vec_get((*a).patterns, arm.pat)
+        if catch_all {
+            tc_emit(tc, "unreachable match arm after a catch all pattern", lo, hi)
+        } else if p.kind == pk_wildcard() {
+            catch_all = true
+        } else if p.kind == pk_ident() {
+            name: string = ast_name(a, p.a)
+            if !variant_in_enum(tc, es, name) {
+                catch_all = true
+            } else if map_has(covered, name) {
+                tc_emit(tc, already_covered_msg(name), lo, hi)
+            } else {
+                map_put(covered, name, 1)
+            }
+        } else if p.kind == pk_variant() {
+            name2: string = ast_name(a, p.a)
+            if map_has(covered, name2) {
+                tc_emit(tc, already_covered_msg(name2), lo, hi)
+            } else {
+                map_put(covered, name2, 1)
+            }
+        }
+        i = i + 1
+    }
+    if !catch_all {
+        sigs: *TypeSigs = (*tc).sigtab
+        mut j: int64 = 0
+        while j < es.len {
+            v: string = vec_get((*sigs).names, es.off + j)
+            if !map_has(covered, v) {
+                tc_emit(tc, missing_variant_msg(v), lo, hi)
+            }
+            j = j + 1
+        }
+    }
+}
+
+export func check_match_scrutinee(tc: *TypeChecker, st: int64, scrut_id: int64, arm_off: int64, arm_len: int64) -> void {
+    a: *Ast = (*tc).ast
+    scrut: ExprNode = vec_get((*a).exprs, scrut_id)
+    n: TyNode = ty_get((*tc).ty, st)
+    if n.kind == tyk_named() {
+        ename: string = ty_name((*tc).ty, st)
+        enums: *Map<EnumSig> = (*tc).enums
+        if map_has(enums, ename) {
+            check_match_coverage(tc, unwrap_or(map_get(enums, ename), EnumSig { off: 0, len: 0 }), arm_off, arm_len, scrut.lo, scrut.hi)
+        } else {
+            structs: *Map<StructSig> = (*tc).structs
+            ifaces: *Map<int64> = (*tc).ifaces
+            if map_has(structs, ename) || map_has(ifaces, ename) {
+                tc_emit(tc, match_not_enum_msg(ty_render((*tc).ty, st)), scrut.lo, scrut.hi)
+            }
+        }
+    } else if n.kind == tyk_unknown() {
+        return
+    } else {
+        tc_emit(tc, match_type_msg("match needs an enum value, not ", ty_render((*tc).ty, st)), scrut.lo, scrut.hi)
+    }
+}

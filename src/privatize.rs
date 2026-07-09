@@ -146,9 +146,7 @@ impl Renamer {
                     self.ty(a, skip);
                 }
             }
-            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => {
-                self.ty(b, skip)
-            }
+            Type::Ptr(b) | Type::RawPtr(b) | Type::Slice(b) | Type::Array(b, _) => self.ty(b, skip),
             Type::Tuple(ts) => {
                 for x in ts {
                     self.ty(x, skip);
@@ -351,10 +349,17 @@ mod tests {
         privatize(&mut m, "lib_1");
         let n = names(&m);
         assert!(n.contains(&"helper__lib_1".to_string()), "{n:?}");
-        assert!(n.contains(&"visible".to_string()), "exported name must not change: {n:?}");
+        assert!(
+            n.contains(&"visible".to_string()),
+            "exported name must not change: {n:?}"
+        );
         let Item::Func(v) = &m.items[1] else { panic!() };
-        let Stmt::Return(Some(e)) = &v.body.stmts[0] else { panic!() };
-        let ExprKind::Call(f, _) = &e.kind else { panic!() };
+        let Stmt::Return(Some(e)) = &v.body.stmts[0] else {
+            panic!()
+        };
+        let ExprKind::Call(f, _) = &e.kind else {
+            panic!()
+        };
         assert!(
             matches!(&f.kind, ExprKind::Ident(n) if n == "helper__lib_1"),
             "call must follow the rename: {:?}",
@@ -370,7 +375,9 @@ mod tests {
         );
         privatize(&mut m, "x_1");
         let Item::Func(f) = &m.items[1] else { panic!() };
-        let Stmt::Return(Some(e)) = &f.body.stmts[1] else { panic!() };
+        let Stmt::Return(Some(e)) = &f.body.stmts[1] else {
+            panic!()
+        };
         assert!(
             matches!(&e.kind, ExprKind::Ident(n) if n == "helper"),
             "the local shadows the renamed global: {:?}",
@@ -385,11 +392,19 @@ mod tests {
              export func mk() -> P {\n  return P { x: 1 }\n}",
         );
         privatize(&mut m, "s_2");
-        let Item::Struct(s) = &m.items[0] else { panic!() };
+        let Item::Struct(s) = &m.items[0] else {
+            panic!()
+        };
         assert_eq!(s.name, "P__s_2");
         let Item::Func(f) = &m.items[1] else { panic!() };
-        assert!(matches!(&f.ret, Type::Named(n, _) if n == "P__s_2"), "{:?}", f.ret);
-        let Stmt::Return(Some(e)) = &f.body.stmts[0] else { panic!() };
+        assert!(
+            matches!(&f.ret, Type::Named(n, _) if n == "P__s_2"),
+            "{:?}",
+            f.ret
+        );
+        let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
+            panic!()
+        };
         assert!(matches!(&e.kind, ExprKind::StructLit(n, _) if n == "P__s_2"));
     }
 
@@ -400,11 +415,17 @@ mod tests {
              export func f() -> int32 { return abs(-1) }",
         );
         privatize(&mut m, "ffi_1");
-        let Item::Foreign(fb) = &m.items[0] else { panic!() };
+        let Item::Foreign(fb) = &m.items[0] else {
+            panic!()
+        };
         assert_eq!(fb.funcs[0].name, "abs");
         let Item::Func(f) = &m.items[1] else { panic!() };
-        let Stmt::Return(Some(e)) = &f.body.stmts[0] else { panic!() };
-        let ExprKind::Call(callee, _) = &e.kind else { panic!() };
+        let Stmt::Return(Some(e)) = &f.body.stmts[0] else {
+            panic!()
+        };
+        let ExprKind::Call(callee, _) = &e.kind else {
+            panic!()
+        };
         assert!(matches!(&callee.kind, ExprKind::Ident(n) if n == "abs"));
     }
 }

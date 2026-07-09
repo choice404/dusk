@@ -1,0 +1,668 @@
+// tciface: S3b interface, covariance, print, async, and foreign checks.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+
+func msg2(a: string, b: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, a)
+    sb_push(s, b)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func msg3(a: string, b: string, c: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, a)
+    sb_push(s, b)
+    sb_push(s, c)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func tc_has_iface(tc: *TypeChecker, name: string) -> bool {
+    m: *Map<int64> = (*tc).ifaces
+    return map_has(m, name)
+}
+
+func tc_has_impl(tc: *TypeChecker, key: string) -> bool {
+    m: *Map<int64> = (*tc).impls
+    return map_has(m, key)
+}
+
+func tc_has_struct(tc: *TypeChecker, name: string) -> bool {
+    m: *Map<StructSig> = (*tc).structs
+    return map_has(m, name)
+}
+
+func tc_has_enum(tc: *TypeChecker, name: string) -> bool {
+    m: *Map<EnumSig> = (*tc).enums
+    return map_has(m, name)
+}
+
+func tc_has_embed(tc: *TypeChecker, name: string) -> bool {
+    m: *Map<TyList> = (*tc).embed_fields
+    return map_has(m, name)
+}
+
+func iface_impl_msg(concrete: string, iface: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push_char(s, 39)
+    sb_push(s, concrete)
+    sb_push(s, "' does not implement interface '")
+    sb_push(s, iface)
+    sb_push(s, "'; add an 'impl ")
+    sb_push(s, iface)
+    sb_push(s, " for ")
+    sb_push(s, concrete)
+    sb_push_char(s, 39)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func slice_cov_msg(concrete: string, iface: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "cannot pass a slice of '")
+    sb_push(s, concrete)
+    sb_push(s, "' as a slice of interface '")
+    sb_push(s, iface)
+    sb_push(s, "'; a slice of concrete values cannot be reinterpreted as a slice of interfaces")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func impl_missing_msg(iface: string, tyname: string, mname: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "impl ")
+    sb_push(s, iface)
+    sb_push(s, " for ")
+    sb_push(s, tyname)
+    sb_push(s, " is missing method '")
+    sb_push(s, mname)
+    sb_push_char(s, 39)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func impl_arity_msg(iface: string, tyname: string, mname: string, got: int64, want: int64) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "method '")
+    sb_push(s, mname)
+    sb_push(s, "' in impl ")
+    sb_push(s, iface)
+    sb_push(s, " for ")
+    sb_push(s, tyname)
+    sb_push(s, " has ")
+    sb_push_int(s, got)
+    sb_push(s, " parameter(s), the interface requires ")
+    sb_push_int(s, want)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func foreign_abi_msg(abi: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "unsupported foreign abi \"")
+    sb_push(s, abi)
+    sb_push(s, "\", only \"C\" is supported")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func foreign_ty_msg(fname: string, managed: bool) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "foreign function '")
+    sb_push(s, fname)
+    if managed {
+        sb_push(s, "' uses a managed pointer at the C boundary; use *raw T or *void, since a managed *T carries a generation C cannot read")
+    } else {
+        sb_push(s, "' uses a type the C boundary does not support yet; a foreign signature takes scalars and raw pointers, *raw T or *void")
+    }
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func async_take_msg(name: string, future: bool) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "an async func cannot take '")
+    sb_push(s, name)
+    if future {
+        sb_push(s, "': a future belongs to the event loop thread; await it in the caller instead")
+    } else {
+        sb_push(s, "': a slice, closure, or interface value may view the caller's frame, which the task outlives")
+    }
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func display_msg(name: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push_char(s, 39)
+    sb_push(s, name)
+    sb_push(s, "' has no Display impl; add 'impl Display for ")
+    sb_push(s, name)
+    sb_push(s, "' with 'toString() -> string' to print it")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func cannot_print_enum_msg(name: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "cannot print the enum '")
+    sb_push(s, name)
+    sb_push(s, "'; match on it and print its parts")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func cannot_print_msg(rendered: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "cannot print ")
+    sb_push(s, rendered)
+    sb_push(s, "; print its elements instead")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func format_holes_msg(holes: int64, given: int64) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "format string has ")
+    sb_push_int(s, holes)
+    sb_push(s, " hole(s) but ")
+    sb_push_int(s, given)
+    sb_push(s, " argument(s) were given")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+export func ty_is_managed(t: *TyArena, id: int64) -> bool {
+    n: TyNode = ty_get(t, id)
+    if n.kind != tyk_ptr() { return false }
+    inner: TyNode = ty_get(t, n.a)
+    return inner.kind != tyk_unit()
+}
+
+func foreign_ty_ok(t: *TyArena, id: int64) -> bool {
+    n: TyNode = ty_get(t, id)
+    if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_bool() || n.kind == tyk_char() || n.kind == tyk_rune() || n.kind == tyk_unit() { return true }
+    if n.kind == tyk_rawptr() { return true }
+    if n.kind == tyk_ptr() {
+        inner: TyNode = ty_get(t, n.a)
+        return inner.kind == tyk_unit()
+    }
+    return false
+}
+
+export func reject_collector_iface_box(tc: *TypeChecker, expected: int64, actual: int64, lo: int64, hi: int64) -> void {
+    en: TyNode = ty_get((*tc).ty, expected)
+    an: TyNode = ty_get((*tc).ty, actual)
+    if en.kind == tyk_named() && tc_has_iface(tc, ty_name((*tc).ty, expected)) && an.kind == tyk_collector() {
+        tc_emit(tc, "a collected value cannot be boxed into an interface; it stays on the main thread", lo, hi)
+        return
+    }
+    if (en.kind == tyk_array() || en.kind == tyk_slice()) && (an.kind == tyk_array() || an.kind == tyk_slice()) {
+        reject_collector_iface_box(tc, en.a, an.a, lo, hi)
+    } else if en.kind == tyk_tuple() && an.kind == tyk_tuple() && en.len == an.len {
+        mut i: int64 = 0
+        while i < en.len {
+            reject_collector_iface_box(tc, vec_get((*(*tc).ty).kids, en.off + i), vec_get((*(*tc).ty).kids, an.off + i), lo, hi)
+            i = i + 1
+        }
+    }
+}
+
+export func reject_iface_targ_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi: int64) -> void {
+    if tyid < 0 { return }
+    a: *Ast = (*tc).ast
+    n: TypeNode = vec_get((*a).types, tyid)
+    if n.kind == tk_named() {
+        mut i: int64 = 0
+        while i < n.c {
+            arg_id: int64 = vec_get((*a).kids, n.b + i)
+            arg: TypeNode = vec_get((*a).types, arg_id)
+            if arg.kind == tk_named() {
+                name: string = ast_name(a, arg.a)
+                ifaces: *Map<int64> = (*tc).ifaces
+                gens: *Map<int64> = (*tc).cur_generics
+                if map_has(ifaces, name) && !map_has(gens, name) {
+                    tc_emit(tc, "an interface cannot be a generic type argument; generics are monomorphized over concrete types", lo, hi)
+                }
+            }
+            reject_iface_targ_annot(tc, arg_id, lo, hi)
+            i = i + 1
+        }
+    } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
+        reject_iface_targ_annot(tc, n.a, lo, hi)
+    } else if n.kind == tk_tuple() {
+        mut j: int64 = 0
+        while j < n.b {
+            reject_iface_targ_annot(tc, vec_get((*a).kids, n.a + j), lo, hi)
+            j = j + 1
+        }
+    } else if n.kind == tk_func() {
+        mut k: int64 = 0
+        while k < n.b {
+            reject_iface_targ_annot(tc, vec_get((*a).kids, n.a + k), lo, hi)
+            k = k + 1
+        }
+        reject_iface_targ_annot(tc, n.c, lo, hi)
+    }
+}
+
+export func check_conformance(tc: *TypeChecker, expected: int64, actual: int64, lo: int64, hi: int64) -> void {
+    reject_collector_iface_box(tc, expected, actual, lo, hi)
+    en: TyNode = ty_get((*tc).ty, expected)
+    an: TyNode = ty_get((*tc).ty, actual)
+    if en.kind == tyk_named() && tc_has_iface(tc, ty_name((*tc).ty, expected)) && an.kind == tyk_collector() { return }
+    if en.kind == tyk_named() && an.kind == tyk_named() {
+        iface: string = ty_name((*tc).ty, expected)
+        concrete: string = ty_name((*tc).ty, actual)
+        if tc_has_iface(tc, iface) && !tc_has_iface(tc, concrete) && tc_has_struct(tc, concrete) {
+            if !tc_has_impl(tc, sig_pair_key(iface, concrete)) {
+                tc_emit(tc, iface_impl_msg(concrete, iface), lo, hi)
+            }
+        }
+    }
+}
+
+export func tuple_iface_mismatch(tc: *TypeChecker, expected: int64, actual: int64, lo: int64, hi: int64) -> bool {
+    en: TyNode = ty_get((*tc).ty, expected)
+    an: TyNode = ty_get((*tc).ty, actual)
+    if en.kind != tyk_tuple() || an.kind != tyk_tuple() || en.len != an.len { return false }
+    mut found: bool = false
+    mut i: int64 = 0
+    while i < en.len {
+        ex: int64 = vec_get((*(*tc).ty).kids, en.off + i)
+        ac: int64 = vec_get((*(*tc).ty).kids, an.off + i)
+        exn: TyNode = ty_get((*tc).ty, ex)
+        acn: TyNode = ty_get((*tc).ty, ac)
+        if exn.kind == tyk_tuple() {
+            if tuple_iface_mismatch(tc, ex, ac, lo, hi) { found = true }
+        } else if exn.kind == tyk_named() && tc_has_iface(tc, ty_name((*tc).ty, ex)) && acn.kind == tyk_named() {
+            if tc_has_struct(tc, ty_name((*tc).ty, ac)) {
+                tc_emit(tc, "an interface value inside a tuple is not supported; return or pass the concrete type, or box it outside the tuple", lo, hi)
+                found = true
+            }
+        }
+        i = i + 1
+    }
+    return found
+}
+
+export func check_slice_covariance(tc: *TypeChecker, expected: int64, actual: int64, value_id: int64, lo: int64, hi: int64) -> void {
+    en: TyNode = ty_get((*tc).ty, expected)
+    an: TyNode = ty_get((*tc).ty, actual)
+    if en.kind != tyk_slice() || an.kind != tyk_slice() { return }
+    ee: TyNode = ty_get((*tc).ty, en.a)
+    ae: TyNode = ty_get((*tc).ty, an.a)
+    if ee.kind != tyk_named() { return }
+    iface: string = ty_name((*tc).ty, en.a)
+    if !tc_has_iface(tc, iface) { return }
+    if value_id >= 0 {
+        v: ExprNode = vec_get((*(*tc).ast).exprs, value_id)
+        if v.kind == xk_array() { return }
+    }
+    if ae.kind == tyk_named() {
+        concrete: string = ty_name((*tc).ty, an.a)
+        if tc_has_struct(tc, concrete) && !tc_has_iface(tc, concrete) {
+            tc_emit(tc, slice_cov_msg(concrete, iface), lo, hi)
+        }
+    }
+}
+
+export func chain_ty(tc: *TypeChecker, expr_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() { return lookup(tc, ast_name(a, e.a)) }
+    if e.kind == xk_field() {
+        bt: int64 = chain_ty(tc, e.a)
+        bn: TyNode = ty_get((*tc).ty, bt)
+        fname: string = ast_name(a, e.b)
+        if bn.kind == tyk_named() && tc_has_struct(tc, ty_name((*tc).ty, bt)) {
+            st: StructSig = sig_struct((*tc).sigtab, ty_name((*tc).ty, bt))
+            mut i: int64 = 0
+            while i < st.len {
+                f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
+                if str_eq(f.name, fname) { return f.ty }
+                i = i + 1
+            }
+        }
+        if bn.kind == tyk_error() && str_eq(fname, "message") { return ty_str((*tc).ty) }
+        return ty_unknown((*tc).ty)
+    }
+    if e.kind == xk_index() {
+        bt2: int64 = chain_ty(tc, e.a)
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        if idx.kind == xk_range() { return ty_slice((*tc).ty, elem_of((*tc).ty, bt2)) }
+        return elem_of((*tc).ty, bt2)
+    }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        pt: int64 = chain_ty(tc, e.b)
+        pn: TyNode = ty_get((*tc).ty, pt)
+        if pn.kind == tyk_ptr() || pn.kind == tyk_rawptr() || pn.kind == tyk_collector() { return pn.a }
+    }
+    return ty_unknown((*tc).ty)
+}
+
+export func check_covariance_deep(tc: *TypeChecker, expected: int64, actual: int64, value_id: int64, lo: int64, hi: int64) -> void {
+    en: TyNode = ty_get((*tc).ty, expected)
+    an: TyNode = ty_get((*tc).ty, actual)
+    if en.kind == tyk_tuple() && an.kind == tyk_tuple() {
+        v: ExprNode = vec_get((*(*tc).ast).exprs, value_id)
+        if v.kind == xk_tuple() {
+            mut i: int64 = 0
+            while i < en.len && i < an.len && i < v.b {
+                sub: int64 = vec_get((*(*tc).ast).kids, v.a + i)
+                se: ExprNode = vec_get((*(*tc).ast).exprs, sub)
+                check_covariance_deep(tc, vec_get((*(*tc).ty).kids, en.off + i), vec_get((*(*tc).ty).kids, an.off + i), sub, se.lo, se.hi)
+                i = i + 1
+            }
+            return
+        }
+        check_slice_covariance(tc, expected, actual, value_id, lo, hi)
+    } else if (en.kind == tyk_array() || en.kind == tyk_slice()) && (an.kind == tyk_array() || an.kind == tyk_slice()) {
+        v2: ExprNode = vec_get((*(*tc).ast).exprs, value_id)
+        if v2.kind == xk_array() {
+            mut j: int64 = 0
+            while j < v2.b {
+                sub2: int64 = vec_get((*(*tc).ast).kids, v2.a + j)
+                se2: ExprNode = vec_get((*(*tc).ast).exprs, sub2)
+                at: int64 = chain_ty(tc, sub2)
+                check_covariance_deep(tc, en.a, at, sub2, se2.lo, se2.hi)
+                j = j + 1
+            }
+            return
+        }
+        check_slice_covariance(tc, expected, actual, value_id, lo, hi)
+    } else {
+        check_slice_covariance(tc, expected, actual, value_id, lo, hi)
+    }
+}
+
+export func check_printable(tc: *TypeChecker, tyid: int64, lo: int64, hi: int64) -> void {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_bool() || n.kind == tyk_char() || n.kind == tyk_rune() || n.kind == tyk_str() || n.kind == tyk_error() || n.kind == tyk_unknown() { return }
+    if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if tc_has_struct(tc, name) {
+            if !tc_has_impl(tc, sig_pair_key("Display", name)) {
+                tc_emit(tc, display_msg(name), lo, hi)
+            }
+        } else if tc_has_enum(tc, name) {
+            tc_emit(tc, cannot_print_enum_msg(name), lo, hi)
+        }
+        return
+    }
+    if n.kind == tyk_unit() {
+        tc_emit(tc, "cannot print a void value", lo, hi)
+    } else if n.kind == tyk_thread() {
+        tc_emit(tc, "cannot print a thread handle; join it instead", lo, hi)
+    } else if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+        tc_emit(tc, "cannot print a pointer; dereference it or print its fields", lo, hi)
+    } else {
+        tc_emit(tc, cannot_print_msg(ty_render((*tc).ty, tyid)), lo, hi)
+    }
+}
+
+func parse_format_string(fmt: string) -> (bool, int64, string) {
+    mut holes: int64 = 0
+    mut i: int64 = 0
+    while fmt[i] != 0 {
+        if fmt[i] == 92 {
+            if fmt[i + 1] == 117 {
+                if fmt[i + 2] == 123 {
+                    i = i + 3
+                    mut esc: bool = true
+                    while esc {
+                        if fmt[i] == 0 {
+                            esc = false
+                        } else if fmt[i] == 125 {
+                            i = i + 1
+                            esc = false
+                        } else {
+                            i = i + 1
+                        }
+                    }
+                } else {
+                    i = i + 2
+                }
+            } else {
+                i = i + 1
+            }
+        } else if fmt[i] == 123 {
+            if fmt[i + 1] == 123 {
+                i = i + 2
+            } else if fmt[i + 1] == 125 {
+                holes = holes + 1
+                i = i + 2
+            } else {
+                return (false, holes, "unmatched '{' in format string, write '{{' for a literal brace")
+            }
+        } else if fmt[i] == 125 {
+            if fmt[i + 1] == 125 {
+                i = i + 2
+            } else {
+                return (false, holes, "unmatched '}' in format string, write '}}' for a literal brace")
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    return (true, holes, "")
+}
+
+export func check_format(tc: *TypeChecker, arg_off: int64, arg_len: int64, first: ExprNode) -> void {
+    if arg_len == 0 { return }
+    fmt: string = ast_name((*tc).ast, first.a)
+    ok, holes, msg := parse_format_string(fmt)
+    if !ok {
+        tc_emit(tc, msg, first.lo, first.hi)
+        return
+    }
+    given: int64 = arg_len - 1
+    if holes != given {
+        tc_emit(tc, format_holes_msg(holes, given), first.lo, first.hi)
+    }
+    arg_off.ignore()
+}
+
+func method_index(a: *Ast, im: ImplNode, name: string) -> int64 {
+    mut i: int64 = 0
+    while i < im.methods_len {
+        f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
+        if str_eq(ast_name(a, f.name), name) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
+    if im.iface < 0 { return }
+    a: *Ast = (*tc).ast
+    iface: string = ast_name(a, im.iface)
+    iface_methods: *Map<MethodList> = (*tc).iface_methods
+    ml: MethodList = unwrap_or(map_get(iface_methods, iface), MethodList { off: 0, len: 0 })
+    tyname: string = ast_name(a, im.ty)
+    mut i: int64 = 0
+    while i < ml.len {
+        req: MethodReq = vec_get((*(*tc).sigtab).methods, ml.off + i)
+        idx: int64 = method_index(a, im, req.name)
+        if idx < 0 {
+            tc_emit(tc, impl_missing_msg(iface, tyname, req.name), im.lo, im.hi)
+        } else {
+            m: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + idx))
+            if m.params_len != req.arity {
+                tc_emit(tc, impl_arity_msg(iface, tyname, req.name, m.params_len, req.arity), m.lo, m.hi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+export func check_duplicate_impls(tc: *TypeChecker) -> void {
+    a: *Ast = (*tc).ast
+    seen: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    items: *Vector<ItemNode> = (*a).items
+    while i < vec_len(items) {
+        it: ItemNode = vec_get((*a).items, i)
+        if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            if im.iface >= 0 {
+                iface: string = ast_name(a, im.iface)
+                tyname: string = ast_name(a, im.ty)
+                key: string = sig_pair_key(iface, tyname)
+                if map_has(seen, key) {
+                    tc_emit(tc, msg3("duplicate 'impl ", iface, msg3(" for ", tyname, "'; merge the two blocks")), im.lo, im.hi)
+                } else {
+                    map_put(seen, key, 1)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+export func check_foreign(tc: *TypeChecker, fb: ForeignNode) -> void {
+    a: *Ast = (*tc).ast
+    abi: string = ast_name(a, fb.abi)
+    if !str_eq(abi, "C") {
+        tc_emit(tc, foreign_abi_msg(abi), fb.lo, fb.hi)
+    }
+    mut i: int64 = 0
+    while i < fb.funcs_len {
+        ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + i))
+        mut j: int64 = 0
+        while j < ff.params_len {
+            p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + j))
+            reject_reserved_uint(tc, p.ty, fb.lo, fb.hi)
+            tyid: int64 = tc_type(tc, p.ty)
+            if !foreign_ty_ok((*tc).ty, tyid) {
+                tc_emit(tc, foreign_ty_msg(ast_name(a, ff.name), ty_is_managed((*tc).ty, tyid)), fb.lo, fb.hi)
+            }
+            j = j + 1
+        }
+        reject_reserved_uint(tc, ff.ret, fb.lo, fb.hi)
+        rt: int64 = tc_type(tc, ff.ret)
+        if !foreign_ty_ok((*tc).ty, rt) {
+            tc_emit(tc, foreign_ty_msg(ast_name(a, ff.name), ty_is_managed((*tc).ty, rt)), fb.lo, fb.hi)
+        }
+        i = i + 1
+    }
+}
+
+func cross_ok() -> int64 { return 0 }
+func cross_future() -> int64 { return 1 }
+func cross_view() -> int64 { return 2 }
+
+func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> int64 {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_future() { return cross_future() }
+    if n.kind == tyk_slice() || n.kind == tyk_func() { return cross_view() }
+    if n.kind == tyk_array() { return async_cross_reason(tc, n.a, seen) }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            r: int64 = async_cross_reason(tc, vec_get((*(*tc).ty).kids, n.off + i), seen)
+            if r != cross_ok() { return r }
+            i = i + 1
+        }
+        return cross_ok()
+    }
+    if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if tc_has_iface(tc, name) { return cross_view() }
+        if map_has(seen, name) { return cross_ok() }
+        map_put(seen, name, 1)
+        if tc_has_embed(tc, name) {
+            embeds: *Map<TyList> = (*tc).embed_fields
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                r2: int64 = async_cross_reason(tc, sig_ty_at((*tc).sigtab, list, j), seen)
+                if r2 != cross_ok() { return r2 }
+                j = j + 1
+            }
+        }
+    }
+    return cross_ok()
+}
+
+export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
+    a: *Ast = (*tc).ast
+    if f.generics_len > 0 {
+        tc_emit(tc, "an async func cannot take type parameters", f.lo, f.hi)
+    }
+    mut i: int64 = 0
+    while i < f.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+        raw: int64 = tc_raw_type(tc, p.ty)
+        seen: *Map<int64> = alloc(map_new())
+        reason: int64 = async_cross_reason(tc, raw, seen)
+        if reason == cross_future() {
+            tc_emit(tc, async_take_msg(ast_name(a, p.name), true), f.lo, f.hi)
+        } else if reason == cross_view() {
+            tc_emit(tc, async_take_msg(ast_name(a, p.name), false), f.lo, f.hi)
+        }
+        i = i + 1
+    }
+    raw_ret: int64 = tc_raw_type(tc, f.ret)
+    seen_ret: *Map<int64> = alloc(map_new())
+    rr: int64 = async_cross_reason(tc, raw_ret, seen_ret)
+    if rr == cross_future() {
+        tc_emit(tc, "an async func cannot return a future; a future belongs to the event loop thread, so await it in the caller instead", f.lo, f.hi)
+    } else if rr == cross_view() {
+        tc_emit(tc, "an async func cannot return a slice, closure, or interface value; the value would outlive the task frame it views", f.lo, f.hi)
+    }
+}
+
+export func receiver_type_name(tc: *TypeChecker, base_id: int64) -> string {
+    mut t: int64 = chain_ty(tc, base_id)
+    mut going: bool = true
+    while going {
+        n: TyNode = ty_get((*tc).ty, t)
+        if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+            t = n.a
+        } else if n.kind == tyk_named() {
+            return ty_name((*tc).ty, t)
+        } else {
+            going = false
+        }
+    }
+    return ""
+}

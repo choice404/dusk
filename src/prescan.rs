@@ -112,7 +112,10 @@ func main() -> int32 { return 0 }
 @import ignored.after.decl";
         let (pre, errs) = scan(src);
         assert!(errs.is_empty(), "unexpected errors: {errs:?}");
-        assert_eq!(pre.paradigms, vec![Paradigm::Procedural, Paradigm::Functional]);
+        assert_eq!(
+            pre.paradigms,
+            vec![Paradigm::Procedural, Paradigm::Functional]
+        );
         assert_eq!(
             pre.imports,
             vec!["std.io".to_string(), "std.functional.maybe".to_string()]

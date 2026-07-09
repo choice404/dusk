@@ -1,0 +1,294 @@
+// tclet: let binding forms for the type checker.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tcbin
+@import tcexpr
+@import tciface
+@import tcown
+@import tcesc
+
+func is_reserved_uint_name(name: string) -> bool {
+    return str_eq(name, "uint8") || str_eq(name, "uint16") || str_eq(name, "uint32") || str_eq(name, "uint64")
+}
+
+func reject_reserved_uint_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi: int64) -> void {
+    if tyid < 0 { return }
+    a: *Ast = (*tc).ast
+    n: TypeNode = vec_get((*a).types, tyid)
+    if n.kind == tk_named() {
+        name: string = ast_name(a, n.a)
+        if is_reserved_uint_name(name) {
+            tc_emit(tc, "unsigned integers are reserved; use the signed widths", lo, hi)
+        }
+        mut i: int64 = 0
+        while i < n.c {
+            reject_reserved_uint_annot(tc, vec_get((*a).kids, n.b + i), lo, hi)
+            i = i + 1
+        }
+    } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
+        reject_reserved_uint_annot(tc, n.a, lo, hi)
+    } else if n.kind == tk_tuple() {
+        mut j: int64 = 0
+        while j < n.b {
+            reject_reserved_uint_annot(tc, vec_get((*a).kids, n.a + j), lo, hi)
+            j = j + 1
+        }
+    } else if n.kind == tk_func() {
+        mut k: int64 = 0
+        while k < n.b {
+            reject_reserved_uint_annot(tc, vec_get((*a).kids, n.a + k), lo, hi)
+            k = k + 1
+        }
+        reject_reserved_uint_annot(tc, n.c, lo, hi)
+    }
+}
+
+func annot_mismatch_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' has a type annotation that does not match its value")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func is_zero_arg_alloc(tc: *TypeChecker, expr: int64) -> bool {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr)
+    if e.kind != xk_call() || e.c != 0 { return false }
+    f: ExprNode = vec_get((*a).exprs, e.a)
+    if f.kind != xk_ident() { return false }
+    name: string = ast_name(a, f.a)
+    return str_eq(name, "alloc") && !sig_has_fn((*tc).sigtab, name)
+}
+
+func alloc_annot_ty(tc: *TypeChecker, bind: BindNode, value: ExprNode) -> int64 {
+    if bind.ty >= 0 {
+        reject_iface_targ_annot(tc, bind.ty, value.lo, value.hi)
+        reject_reserved_uint_annot(tc, bind.ty, value.lo, value.hi)
+        lt: int64 = tc_type(tc, bind.ty)
+        n: TyNode = ty_get((*tc).ty, lt)
+        if n.kind != tyk_ptr() {
+            tc_emit(tc, "alloc() with no value takes its size from a pointer annotation; write p: *T = alloc()", value.lo, value.hi)
+        }
+        return lt
+    }
+    tc_emit(tc, "alloc() with no value needs a pointer type annotation to size the allocation; write p: *T = alloc()", value.lo, value.hi)
+    return ty_unknown((*tc).ty)
+}
+
+func declare_one(tc: *TypeChecker, b: BindNode, tyid: int64, mutable: bool, value_lo: int64, value_hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    name: string = ast_name(a, b.name)
+    declare(tc, name, tyid)
+    set_esc(tc, name, false, false)
+    if mutable { declare_mut(tc, name) }
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_error() { declare_err(tc, name, value_lo, value_hi) }
+}
+
+func record_enum_bind(tc: *TypeChecker, name: string, value: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, value)
+    if e.kind != xk_call() { return }
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind != xk_field() { return }
+    base: ExprNode = vec_get((*a).exprs, callee.a)
+    if base.kind != xk_ident() { return }
+    en: string = ast_name(a, base.a)
+    enums: *Map<EnumSig> = (*tc).enums
+    if map_has(enums, en) {
+        declare_enum_bind(tc, name, en)
+    }
+}
+
+func record_mut_tuple(tc: *TypeChecker, stmt: StmtNode, bind: BindNode, tyid: int64) -> void {
+    if (*tc).types_only { return }
+    if (stmt.d & 1) == 0 { return }
+    if bind.ty >= 0 { return }
+    a: *Ast = (*tc).ast
+    val: ExprNode = vec_get((*a).exprs, stmt.c)
+    if val.kind != xk_tuple() { return }
+    mut has_array: bool = false
+    mut i: int64 = 0
+    while i < val.b {
+        m: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, val.a + i))
+        if m.kind == xk_array() { has_array = true }
+        i = i + 1
+    }
+    if !has_array { return }
+    map_put((*tc).mut_tuple_types, span_key(val.lo, val.hi), MutTupleEntry { ty: tyid })
+}
+
+func is_enum_ctor_call(tc: *TypeChecker, expr_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind != xk_call() { return false }
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind != xk_field() { return false }
+    base: ExprNode = vec_get((*a).exprs, callee.a)
+    if base.kind != xk_ident() { return false }
+    enums: *Map<EnumSig> = (*tc).enums
+    return map_has(enums, ast_name(a, base.a))
+}
+
+func tuple_has_error(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind != tyk_tuple() { return false }
+    mut i: int64 = 0
+    while i < n.len {
+        mt: TyNode = ty_get((*tc).ty, vec_get((*(*tc).ty).kids, n.off + i))
+        if mt.kind == tyk_error() { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
+    a: *Ast = (*tc).ast
+    b: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a))
+    value: ExprNode = vec_get((*a).exprs, stmt.c)
+    mut tyid: int64 = vt
+    if b.ty >= 0 {
+        reject_iface_targ_annot(tc, b.ty, value.lo, value.hi)
+        reject_reserved_uint_annot(tc, b.ty, value.lo, value.hi)
+        lt: int64 = tc_type(tc, b.ty)
+        if !compat((*tc).ty, lt, vt) {
+            tc_emit(tc, annot_mismatch_msg(ast_name(a, b.name)), value.lo, value.hi)
+        }
+        check_int_fits(tc, stmt.c, lt)
+        tyid = lt
+        raw: int64 = tc_raw_type(tc, b.ty)
+        check_conformance(tc, raw, vt, value.lo, value.hi)
+        check_covariance_deep(tc, raw, vt, stmt.c, value.lo, value.hi)
+        rn: TyNode = ty_get((*tc).ty, raw)
+        ifaces: *Map<int64> = (*tc).ifaces
+        if rn.kind == tyk_named() && map_has(ifaces, ty_name((*tc).ty, raw)) {
+            declare_iface_bind(tc, ast_name(a, b.name), ty_name((*tc).ty, raw))
+        }
+        if rn.kind == tyk_slice() {
+            el: TyNode = ty_get((*tc).ty, rn.a)
+            if el.kind == tyk_named() && map_has(ifaces, ty_name((*tc).ty, rn.a)) {
+                declare_slice_iface(tc, ast_name(a, b.name), raw)
+            }
+        }
+    } else {
+        tyid = harden((*tc).ty, vt)
+    }
+    declare_one(tc, b, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
+    if is_managed_ty(tc, tyid) {
+        declare_own(tc, ast_name(a, b.name), binding_own(tc, stmt, value, vt))
+    }
+    record_enum_bind(tc, ast_name(a, b.name), stmt.c)
+    record_mut_tuple(tc, stmt, b, tyid)
+    link_binding_aliases(tc, ast_name(a, b.name), stmt.c, false)
+    esc: EscPair = value_escape(tc, stmt.c)
+    set_esc(tc, ast_name(a, b.name), esc.slice, esc.closure)
+}
+
+func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
+    a: *Ast = (*tc).ast
+    value: ExprNode = vec_get((*a).exprs, stmt.c)
+    n: TyNode = ty_get((*tc).ty, vt)
+    parts: *Vector<int64> = alloc(vec_new())
+    if n.kind == tyk_tuple() && n.len == stmt.b {
+        mut i: int64 = 0
+        while i < n.len {
+            vec_push(parts, vec_get((*(*tc).ty).kids, n.off + i))
+            i = i + 1
+        }
+    } else if n.kind == tyk_unknown() {
+        mut j: int64 = 0
+        while j < stmt.b {
+            vec_push(parts, ty_unknown((*tc).ty))
+            j = j + 1
+        }
+    } else {
+        tc_emit(tc, "destructuring binding expects a tuple of matching arity", value.lo, value.hi)
+        mut k: int64 = 0
+        while k < stmt.b {
+            vec_push(parts, ty_unknown((*tc).ty))
+            k = k + 1
+        }
+    }
+    mut m: int64 = 0
+    while m < stmt.b {
+        b: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a + m))
+        mut tyid: int64 = vec_get(parts, m)
+        if b.ty >= 0 {
+            reject_iface_targ_annot(tc, b.ty, value.lo, value.hi)
+            reject_reserved_uint_annot(tc, b.ty, value.lo, value.hi)
+            tyid = tc_type(tc, b.ty)
+        } else {
+            tyid = harden((*tc).ty, tyid)
+        }
+        declare_one(tc, b, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
+        if is_managed_ty(tc, tyid) {
+            declare_own(tc, ast_name(a, b.name), own_owner())
+        }
+        m = m + 1
+    }
+    if value.kind == xk_tuple() && value.b == stmt.b {
+        mut n: int64 = 0
+        while n < stmt.b {
+            b2: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a + n))
+            member_id: int64 = vec_get((*a).kids, value.a + n)
+            esc: EscPair = value_escape(tc, member_id)
+            set_esc(tc, ast_name(a, b2.name), esc.slice, esc.closure)
+            link_binding_aliases(tc, ast_name(a, b2.name), member_id, false)
+            n = n + 1
+        }
+    } else {
+        whole: EscPair = value_escape(tc, stmt.c)
+        mut q: int64 = 0
+        while q < stmt.b {
+            b3: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a + q))
+            part: int64 = vec_get(parts, q)
+            if (whole.slice || whole.closure) && member_carries_view(tc, part) {
+                set_esc(tc, ast_name(a, b3.name), whole.slice, whole.closure)
+            }
+            if links_as_alias(tc, part) {
+                link_binding_aliases(tc, ast_name(a, b3.name), stmt.c, false)
+            }
+            q = q + 1
+        }
+    }
+}
+
+export func check_let(tc: *TypeChecker, stmt: StmtNode) -> void {
+    a: *Ast = (*tc).ast
+    value: ExprNode = vec_get((*a).exprs, stmt.c)
+    if is_zero_arg_alloc(tc, stmt.c) && stmt.b == 1 {
+        b0: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a))
+        tyid: int64 = alloc_annot_ty(tc, b0, value)
+        declare_one(tc, b0, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
+        if is_managed_ty(tc, tyid) {
+            declare_own(tc, ast_name(a, b0.name), own_owner())
+        }
+        return
+    }
+    vt: int64 = infer_expr(tc, stmt.c)
+    vn: TyNode = ty_get((*tc).ty, vt)
+    if (stmt.d & 2) != 0 && vn.kind == tyk_collector() {
+        tc_emit(tc, "a collected value is not borrowed with ref; copy it directly", value.lo, value.hi)
+    }
+    if stmt.b == 1 && !(*tc).types_only && value.kind == xk_call() && !is_enum_ctor_call(tc, stmt.c) && tuple_has_error(tc, vt) {
+        tc_emit(tc, "a fallible result must be destructured; bind the value and the error, as in `v, e := f()`", value.lo, value.hi)
+    }
+    if stmt.b == 1 {
+        single_bind(tc, stmt, vt)
+    } else {
+        destructure_bind(tc, stmt, vt)
+    }
+}

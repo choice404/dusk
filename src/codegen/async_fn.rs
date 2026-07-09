@@ -27,7 +27,11 @@ pub(crate) fn gen_async_func(m: &mut Module, ctx: &Ctx, f: &Func) -> String {
     let prefix = frame::frame_prefix(ret_sa, &param_sa);
     // sizeof(ret), the byte count the async return path copies; a void return
     // copies nothing.
-    let ret_size = if matches!(ret, CTy::Void) { 0 } else { ret_sa.0 };
+    let ret_size = if matches!(ret, CTy::Void) {
+        0
+    } else {
+        ret_sa.0
+    };
 
     let mut fb = Fb::new(m, ctx, ret);
     // Mint the prefix GEP names from the poll's SSA counter. The entry block
@@ -68,7 +72,14 @@ pub(crate) fn gen_async_func(m: &mut Module, ctx: &Ctx, f: &Func) -> String {
     // State 0 enters `start`; each await registered a resume case during body
     // emission. The switch dispatches every live state, faulting on any other.
     let mut cases = vec![(0u64, "start".to_string())];
-    cases.extend(fb.frame.as_ref().expect("async frame is set").resume_cases.iter().cloned());
+    cases.extend(
+        fb.frame
+            .as_ref()
+            .expect("async frame is set")
+            .resume_cases
+            .iter()
+            .cloned(),
+    );
     let entry = fb
         .frame
         .as_ref()

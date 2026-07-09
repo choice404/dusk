@@ -110,7 +110,10 @@ pub fn load(root_path: &str) -> Program {
             // through it can be checked against what the module actually exports.
             if let Some(modpath) = mod_ns {
                 if let Some(ex) = exports.get(&cfile) {
-                    ns_exports.entry(modpath).or_default().extend(ex.iter().cloned());
+                    ns_exports
+                        .entry(modpath)
+                        .or_default()
+                        .extend(ex.iter().cloned());
                 }
             }
             // A leaf import, like `std.io.print_line`, names a symbol. The parent
@@ -161,7 +164,13 @@ pub fn load(root_path: &str) -> Program {
 /// Shifts a parsed module's spans into the program wide coordinate space and
 /// records its source, so a later semantic diagnostic renders against the right
 /// file rather than the root.
-fn register(files: &mut Vec<FileSrc>, base: &mut u32, path: &str, src: String, module: &mut Module) {
+fn register(
+    files: &mut Vec<FileSrc>,
+    base: &mut u32,
+    path: &str,
+    src: String,
+    module: &mut Module,
+) {
     shift_module(module, *base);
     let len = src.len() as u32;
     files.push(FileSrc {
@@ -673,7 +682,11 @@ mod tests {
         let mut ns = HashSet::new();
         add_namespace(&mut ns, "std.io");
         let exports = HashMap::new();
-        let mut fold = FoldCtx { ns: &ns, exports: &exports, errs: Vec::new() };
+        let mut fold = FoldCtx {
+            ns: &ns,
+            exports: &exports,
+            errs: Vec::new(),
+        };
         for it in &mut m.items {
             fold_item(it, &mut fold);
         }
@@ -701,7 +714,11 @@ mod tests {
         let mut ns = HashSet::new();
         add_namespace(&mut ns, "std.functional.maybe");
         let exports = HashMap::new();
-        let mut fold = FoldCtx { ns: &ns, exports: &exports, errs: Vec::new() };
+        let mut fold = FoldCtx {
+            ns: &ns,
+            exports: &exports,
+            errs: Vec::new(),
+        };
         for it in &mut m.items {
             fold_item(it, &mut fold);
         }
@@ -722,12 +739,18 @@ mod tests {
         let mut ex = HashSet::new();
         ex.insert("visible".to_string());
         exports.insert("mylib".to_string(), ex);
-        let mut fold = FoldCtx { ns: &ns, exports: &exports, errs: Vec::new() };
+        let mut fold = FoldCtx {
+            ns: &ns,
+            exports: &exports,
+            errs: Vec::new(),
+        };
         for it in &mut m.items {
             fold_item(it, &mut fold);
         }
         assert!(
-            fold.errs.iter().any(|d| d.msg.contains("private to module 'mylib'")),
+            fold.errs
+                .iter()
+                .any(|d| d.msg.contains("private to module 'mylib'")),
             "a private qualified call should be rejected: {:?}",
             fold.errs
         );

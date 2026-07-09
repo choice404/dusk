@@ -1,0 +1,849 @@
+// tccall: call inference, builtin call shapes, and constructor checks.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tcbin
+@import tciface
+@import tcown
+@import tcesc
+
+func call_msg_count(want: int64, got: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "expected ")
+    sb_push_int(b, want)
+    sb_push(b, " argument(s), found ")
+    sb_push_int(b, got)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func arg_wrong_msg(i: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "argument ")
+    sb_push_int(b, i + 1)
+    sb_push(b, " has the wrong type")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func func_builtin_ret(tc: *TypeChecker, name: string) -> int64 {
+    t: *TyArena = (*tc).ty
+    if str_eq(name, "read_file") || str_eq(name, "read_line") || str_eq(name, "read_all") {
+        xs: *Vector<int64> = alloc(vec_new())
+        vec_push(xs, ty_str(t))
+        vec_push(xs, ty_error(t))
+        return ty_tuple(t, xs)
+    }
+    if str_eq(name, "parse_float") {
+        ys: *Vector<int64> = alloc(vec_new())
+        vec_push(ys, ty_float(t, 64))
+        vec_push(ys, ty_error(t))
+        return ty_tuple(t, ys)
+    }
+    if str_eq(name, "write_file") { return ty_error(t) }
+    if str_eq(name, "cstr") { return ty_str(t) }
+    if str_eq(name, "sizeof") { return ty_int(t, 64) }
+    return -1
+}
+
+func builtin_arity(tc: *TypeChecker, name: string, got: int64, lo: int64, hi: int64) -> bool {
+    mut want: int64 = -1
+    if str_eq(name, "fold") { want = 3 }
+    if str_eq(name, "map") || str_eq(name, "filter") || str_eq(name, "reduce") || str_eq(name, "foreach") { want = 2 }
+    if want < 0 { return false }
+    if got != want {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, name)
+        sb_push(b, " takes ")
+        sb_push_int(b, want)
+        sb_push(b, " argument(s), but ")
+        sb_push_int(b, got)
+        sb_push(b, " were given")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, lo, hi)
+    }
+    return true
+}
+
+func base_lookup(tc: *TypeChecker, id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        return lookup(tc, ast_name(a, e.a))
+    }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        pt: int64 = base_lookup(tc, e.b)
+        pn: TyNode = ty_get((*tc).ty, pt)
+        if pn.kind == tyk_ptr() || pn.kind == tyk_rawptr() { return pn.a }
+    }
+    return ty_unknown((*tc).ty)
+}
+
+func enum_contains_variant(tc: *TypeChecker, en: string, v: string) -> bool {
+    enums: *Map<EnumSig> = (*tc).enums
+    es: EnumSig = unwrap_or(map_get(enums, en), EnumSig { off: 0, len: 0 })
+    sigs: *TypeSigs = (*tc).sigtab
+    mut i: int64 = 0
+    while i < es.len {
+        if str_eq(vec_get((*sigs).names, es.off + i), v) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func ctor_arity_msg(en: string, v: string, want: int64, got: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, en)
+    sb_push_char(b, 46)
+    sb_push(b, v)
+    sb_push(b, "' takes ")
+    sb_push_int(b, want)
+    sb_push(b, " argument(s), but ")
+    sb_push_int(b, got)
+    sb_push(b, " were given")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func ctor_arg_msg(en: string, v: string, i: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "argument ")
+    sb_push_int(b, i + 1)
+    sb_push(b, " to '")
+    sb_push(b, en)
+    sb_push_char(b, 46)
+    sb_push(b, v)
+    sb_push(b, "' has the wrong type")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func check_variant_ctor_args(tc: *TypeChecker, en: string, v: string, arg_off: int64, arg_len: int64, arg_tys: *Vector<int64>, span_lo: int64, span_hi: int64) -> void {
+    if !enum_contains_variant(tc, en, v) { return }
+    vs: VariantSig = sig_variant_for_enum((*tc).sigtab, en, v)
+    if vs.len != arg_len {
+        tc_emit(tc, ctor_arity_msg(en, v, vs.len, arg_len), span_lo, span_hi)
+        return
+    }
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < vs.len {
+        p: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
+        av: int64 = vec_get(arg_tys, i)
+        arg_id: int64 = vec_get((*a).kids, arg_off + i)
+        arg: ExprNode = vec_get((*a).exprs, arg_id)
+        pn: TyNode = ty_get((*tc).ty, p)
+        mut skip_plain: bool = false
+        if pn.kind == tyk_named() {
+            ifaces: *Map<int64> = (*tc).ifaces
+            if map_has(ifaces, ty_name((*tc).ty, p)) {
+                skip_plain = true
+            }
+            structs: *Map<StructSig> = (*tc).structs
+            enums: *Map<EnumSig> = (*tc).enums
+            pname: string = ty_name((*tc).ty, p)
+            if !map_has(structs, pname) && !map_has(enums, pname) {
+                skip_plain = true
+            }
+        }
+        if pn.kind == tyk_slice() {
+            pe: TyNode = ty_get((*tc).ty, pn.a)
+            if pe.kind == tyk_named() {
+                ifaces2: *Map<int64> = (*tc).ifaces
+                if map_has(ifaces2, ty_name((*tc).ty, pn.a)) {
+                    skip_plain = true
+                }
+            }
+        }
+        if !skip_plain {
+            check_int_fits(tc, arg_id, p)
+            if !compat((*tc).ty, p, av) {
+                tc_emit(tc, ctor_arg_msg(en, v, i), arg.lo, arg.hi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+func unqualified_ctor_msg(en: string, v: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "use the qualified form '")
+    sb_push(b, en)
+    sb_push_char(b, 46)
+    sb_push(b, v)
+    sb_push(b, "' to construct an enum value; the unqualified variant name is not a constructor")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func enum_method_msg(en: string, mname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, mname)
+    sb_push(b, "' is not defined; methods on the enum '")
+    sb_push(b, en)
+    sb_push(b, "' are not supported, match on it instead")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func async_name_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is async; call it with await or start it with async_run")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func infer_async_run(tc: *TypeChecker, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> int64 {
+    if (*tc).in_async {
+        tc_emit(tc, "async_run cannot be called inside an async func; await the call instead", lo, hi)
+    }
+    a: *Ast = (*tc).ast
+    mut async_name: string = ""
+    if arg_len == 1 {
+        first_id: int64 = vec_get((*a).kids, arg_off)
+        first: ExprNode = vec_get((*a).exprs, first_id)
+        if first.kind == xk_call() {
+            callee: ExprNode = vec_get((*a).exprs, first.a)
+            if callee.kind == xk_ident() {
+                name: string = ast_name(a, callee.a)
+                asyncs: *Map<int64> = (*tc).async_fns
+                if map_has(asyncs, name) && !is_local(tc, name) {
+                    async_name = name
+                }
+            }
+        }
+    }
+    if str_len(async_name) > 0 {
+        asyncs2: *Map<int64> = (*tc).async_fns
+        return unwrap_or(map_get(asyncs2, async_name), ty_unknown((*tc).ty))
+    }
+    tc_emit(tc, "async_run takes a direct call of an async func, written at the call site", lo, hi)
+    return ty_unknown((*tc).ty)
+}
+
+func infer_call_args(tc: *TypeChecker, off: int64, len: int64) -> *Vector<int64> {
+    out: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        vec_push(out, infer_expr(tc, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return out
+}
+
+func task_one_arg_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " takes one argument, a lambda literal of type () -> void")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func task_literal_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " takes a lambda literal written at the call site; wrap a closure variable as lambda () -> void { g() }")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func task_shape_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a lambda passed to ")
+    sb_push(b, name)
+    sb_push(b, " takes no parameters and returns void; pass data by capture and results through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func task_future_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': a future belongs to the event loop thread")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func task_collector_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': a collected value stays on the main thread; it cannot cross to another thread")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func task_view_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "'; a slice, closure, or interface value may view the spawning frame, so move the data to the heap or send it through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func task_flow_msg(name: string, cap: string, src: int64, dst: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': argument ")
+    sb_push_int(b, src + 1)
+    sb_push(b, "'s view was stored into argument ")
+    sb_push_int(b, dst + 1)
+    sb_push(b, " here, leaving '")
+    sb_push(b, cap)
+    sb_push(b, "' viewing the spawning frame; move the backing to the heap")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func task_holds_view_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': it holds a view of the spawning frame, which the task outlives; move the backing to the heap or send it through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_future() { return true }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_slice() || n.kind == tyk_array() {
+        return ptr_reaches_future_ty(tc, n.a, seen)
+    }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if ptr_reaches_future_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        embeds: *Map<TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if ptr_reaches_future_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
+                j = j + 1
+            }
+        }
+    }
+    return false
+}
+
+func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_collector() { return true }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_slice() || n.kind == tyk_array() {
+        return ptr_reaches_collector_ty(tc, n.a, seen)
+    }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if ptr_reaches_collector_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        embeds: *Map<TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if ptr_reaches_collector_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
+                j = j + 1
+            }
+        }
+    }
+    return false
+}
+
+func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_future() || n.kind == tyk_collector() || n.kind == tyk_slice() || n.kind == tyk_func() {
+        return false
+    }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+        fseen: *Map<int64> = alloc(map_new())
+        cseen: *Map<int64> = alloc(map_new())
+        return !ptr_reaches_future_ty(tc, n.a, fseen) && !ptr_reaches_collector_ty(tc, n.a, cseen)
+    }
+    if n.kind == tyk_array() { return spawn_capturable_ty(tc, n.a, seen) }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if !spawn_capturable_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return false }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        ifaces: *Map<int64> = (*tc).ifaces
+        if map_has(ifaces, name) { return false }
+        if map_has(seen, name) { return true }
+        map_put(seen, name, 1)
+        embeds: *Map<TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if !spawn_capturable_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return false }
+                j = j + 1
+            }
+        }
+    }
+    return true
+}
+
+func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    if arg_len != 1 {
+        tc_emit(tc, task_one_arg_msg(name), lo, hi)
+        mut i: int64 = 0
+        while i < arg_len {
+            infer_expr(tc, vec_get((*a).kids, arg_off + i))
+            i = i + 1
+        }
+        return
+    }
+    arg_id: int64 = vec_get((*a).kids, arg_off)
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind != xk_lambda() {
+        tc_emit(tc, task_literal_msg(name), arg.lo, arg.hi)
+        infer_expr(tc, arg_id)
+        return
+    }
+    ret: int64 = tc_type(tc, arg.c)
+    rn: TyNode = ty_get((*tc).ty, ret)
+    if arg.b != 0 || rn.kind != tyk_unit() {
+        tc_emit(tc, task_shape_msg(name), arg.lo, arg.hi)
+    }
+    caps: *Vector<string> = lambda_captures(tc, arg)
+    borrowed: *Vector<string> = alloc(vec_new())
+    mut cidx: int64 = 0
+    while cidx < vec_len(caps) {
+        cap: string = vec_get(caps, cidx)
+        t: int64 = lookup(tc, cap)
+        seen: *Map<int64> = alloc(map_new())
+        fseen: *Map<int64> = alloc(map_new())
+        cseen: *Map<int64> = alloc(map_new())
+        reaches_collector: bool = ptr_reaches_collector_ty(tc, t, cseen)
+        if ptr_reaches_future_ty(tc, t, fseen) {
+            tc_emit(tc, task_future_msg(name, cap), arg.lo, arg.hi)
+        } else if reaches_collector {
+            tc_emit(tc, task_collector_msg(name, cap), arg.lo, arg.hi)
+        } else if !spawn_capturable_ty(tc, t, seen) || str_len(iface_bind_name(tc, cap)) > 0 {
+            tc_emit(tc, task_view_msg(name, cap), arg.lo, arg.hi)
+        } else if is_esc_slice(tc, cap) || is_esc_closure(tc, cap) {
+            fp: *Map<FlowProv> = (*tc).flow_prov
+            if map_has(fp, cap) {
+                prov: FlowProv = unwrap_or(map_get(fp, cap), FlowProv { lo: arg.lo, hi: arg.hi, src: 0, dst: 0 })
+                tc_emit(tc, task_flow_msg(name, cap, prov.src, prov.dst), prov.lo, prov.hi)
+            } else {
+                tc_emit(tc, task_holds_view_msg(name, cap), arg.lo, arg.hi)
+            }
+        }
+        if is_managed_ty(tc, t) && own_of(tc, cap) != own_moved() {
+            vec_push(borrowed, cap)
+        }
+        cidx = cidx + 1
+    }
+    infer_lambda_with_borrows(tc, arg, borrowed)
+}
+
+func self_value_in_ptr_position(tc: *TypeChecker, arg_id: int64, expected: int64) -> bool {
+    if !(*tc).in_method { return false }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, arg_id)
+    if e.kind != xk_ident() { return false }
+    if !str_eq(ast_name(a, e.a), "self") { return false }
+    en: TyNode = ty_get((*tc).ty, expected)
+    st: TyNode = ty_get((*tc).ty, lookup(tc, "self"))
+    if en.kind == tyk_ptr() && st.kind == tyk_named() {
+        tc_emit(tc, "cannot use 'self' where a pointer is required; 'self' is the receiver value, not a pointer to it", e.lo, e.hi)
+        return true
+    }
+    return false
+}
+
+func pump_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' pumps the event loop and cannot be called inside an async func; use the await statement")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    f: ExprNode = vec_get((*a).exprs, callee_id)
+    if f.kind == xk_field() {
+        mname: string = ast_name(a, f.b)
+        base: ExprNode = vec_get((*a).exprs, f.a)
+        base_ty: int64 = infer_expr(tc, f.a)
+        arg_tys: *Vector<int64> = infer_call_args(tc, arg_off, arg_len)
+        if base.kind == xk_ident() {
+            en: string = ast_name(a, base.a)
+            enums2: *Map<EnumSig> = (*tc).enums
+            if map_has(enums2, en) {
+                check_variant_ctor_args(tc, en, mname, arg_off, arg_len, arg_tys, f.lo, f.hi)
+                payloads: VariantSig = sig_variant_for_enum((*tc).sigtab, en, mname)
+                mut ci: int64 = 0
+                while ci < payloads.len && ci < arg_len {
+                    arg_id: int64 = vec_get((*a).kids, arg_off + ci)
+                    arg: ExprNode = vec_get((*a).exprs, arg_id)
+                    check_slice_covariance(tc, sig_ty_at((*tc).sigtab, TyList { off: payloads.off, len: payloads.len }, ci), vec_get(arg_tys, ci), arg_id, arg.lo, arg.hi)
+                    ci = ci + 1
+                }
+                return ty_unknown((*tc).ty)
+            }
+        }
+        bn_base: TyNode = ty_get((*tc).ty, base_ty)
+        mut recv_enum: string = ""
+        enums3: *Map<EnumSig> = (*tc).enums
+        if bn_base.kind == tyk_named() && map_has(enums3, ty_name((*tc).ty, base_ty)) {
+            recv_enum = ty_name((*tc).ty, base_ty)
+        } else if base.kind == xk_ident() {
+            recv_enum = enum_bind_name(tc, ast_name(a, base.a))
+        }
+        if str_len(recv_enum) > 0 {
+            tc_emit(tc, enum_method_msg(recv_enum, mname), f.lo, f.hi)
+            return ty_unknown((*tc).ty)
+        }
+        bn: TyNode = ty_get((*tc).ty, base_ty)
+        if bn.kind == tyk_error() {
+            if str_eq(mname, "exists") || str_eq(mname, "check") || str_eq(mname, "ignore") {
+                if base.kind == xk_ident() { mark_err_handled(tc, ast_name(a, base.a)) }
+            }
+            if str_eq(mname, "exists") { return ty_bool((*tc).ty) }
+            if str_eq(mname, "toString") { return ty_str((*tc).ty) }
+            if str_eq(mname, "check") || str_eq(mname, "ignore") { return ty_unit((*tc).ty) }
+            return ty_unknown((*tc).ty)
+        }
+        mut recv_name: string = receiver_type_name(tc, f.a)
+        if str_len(recv_name) == 0 {
+            if base.kind == xk_ident() {
+                recv_name = iface_bind_name(tc, ast_name(a, base.a))
+            }
+        }
+        if str_len(recv_name) > 0 {
+            key: string = sig_pair_key(recv_name, mname)
+            mut has_params: bool = false
+            mut params: TyList = empty_tylist()
+            method_params: *Map<TyList> = (*tc).method_params
+            iface_method_params: *Map<TyList> = (*tc).iface_method_params
+            if map_has(method_params, key) {
+                params = unwrap_or(map_get(method_params, key), empty_tylist())
+                has_params = true
+            } else if map_has(iface_method_params, key) {
+                params = unwrap_or(map_get(iface_method_params, key), empty_tylist())
+                has_params = true
+            }
+            if has_params {
+                mut mi: int64 = 0
+                while mi < params.len && mi < arg_len {
+                    arg_id2: int64 = vec_get((*a).kids, arg_off + mi)
+                    arg2: ExprNode = vec_get((*a).exprs, arg_id2)
+                    pty: int64 = sig_ty_at((*tc).sigtab, params, mi)
+                    self_value_in_ptr_position(tc, arg_id2, pty)
+                    check_slice_covariance(tc, pty, vec_get(arg_tys, mi), arg_id2, arg2.lo, arg2.hi)
+                    pn2: TyNode = ty_get((*tc).ty, pty)
+                    an2: TyNode = ty_get((*tc).ty, vec_get(arg_tys, mi))
+                    if pn2.kind == tyk_collector() {
+                        inner2: TyNode = ty_get((*tc).ty, pn2.a)
+                        if inner2.kind == tyk_func() && arg2.kind == xk_lambda() {
+                            tc_emit(tc, "a bare lambda cannot become a closure collector at a method argument; write the mint explicitly: collector<F>(lambda ...)", arg2.lo, arg2.hi)
+                        }
+                    }
+                    if pn2.kind == tyk_error() && an2.kind == tyk_error() && arg2.kind == xk_ident() {
+                        mark_err_handled(tc, ast_name(a, arg2.a))
+                    }
+                    mi = mi + 1
+                }
+            }
+        }
+        return ty_unknown((*tc).ty)
+    }
+    if f.kind == xk_ident() {
+        name: string = ast_name(a, f.a)
+        if (*tc).in_async && !is_local(tc, name) && (str_eq(name, "await") || str_eq(name, "await_timeout") || str_eq(name, "try_poll")) {
+            tc_emit(tc, pump_msg(name), f.lo, f.hi)
+        }
+        if !sig_has_fn((*tc).sigtab, name) {
+            if !is_local(tc, name) {
+                en2: string = variant_owner((*tc).sigtab, name)
+                if str_len(en2) > 0 {
+                    tc_emit(tc, unqualified_ctor_msg(en2, name), f.lo, f.hi)
+                    mut vi: int64 = 0
+                    while vi < arg_len {
+                        infer_expr(tc, vec_get((*a).kids, arg_off + vi))
+                        vi = vi + 1
+                    }
+                    return ty_unknown((*tc).ty)
+                }
+            }
+            if builtin_arity(tc, name, arg_len, f.lo, f.hi) {
+                mut bi: int64 = 0
+                while bi < arg_len {
+                    infer_expr(tc, vec_get((*a).kids, arg_off + bi))
+                    bi = bi + 1
+                }
+                return ty_unknown((*tc).ty)
+            }
+            br: int64 = func_builtin_ret(tc, name)
+            if br >= 0 {
+                mut bri: int64 = 0
+                while bri < arg_len {
+                    infer_expr(tc, vec_get((*a).kids, arg_off + bri))
+                    bri = bri + 1
+                }
+                return br
+            }
+            if str_eq(name, "print") || str_eq(name, "println") || str_eq(name, "printerr") {
+                arg_tys_print: *Vector<int64> = infer_call_args(tc, arg_off, arg_len)
+                mut value_start: int64 = 0
+                if arg_len > 0 {
+                    first_id: int64 = vec_get((*a).kids, arg_off)
+                    first: ExprNode = vec_get((*a).exprs, first_id)
+                    if first.kind == xk_str() {
+                        check_format(tc, arg_off, arg_len, first)
+                        value_start = 1
+                    }
+                }
+                mut pi: int64 = value_start
+                while pi < arg_len {
+                    arg_id: int64 = vec_get((*a).kids, arg_off + pi)
+                    arg: ExprNode = vec_get((*a).exprs, arg_id)
+                    check_printable(tc, vec_get(arg_tys_print, pi), arg.lo, arg.hi)
+                    pi = pi + 1
+                }
+                return ty_unit((*tc).ty)
+            }
+            if str_eq(name, "spawn") {
+                check_task_lambda(tc, name, arg_off, arg_len, f.lo, f.hi)
+                xs: *Vector<int64> = alloc(vec_new())
+                vec_push(xs, ty_thread((*tc).ty))
+                vec_push(xs, ty_error((*tc).ty))
+                return ty_tuple((*tc).ty, xs)
+            }
+            if str_eq(name, "submit") {
+                check_task_lambda(tc, name, arg_off, arg_len, f.lo, f.hi)
+                return ty_error((*tc).ty)
+            }
+            if str_eq(name, "join") {
+                mut jt: int64 = ty_unknown((*tc).ty)
+                if arg_len > 0 { jt = infer_expr(tc, vec_get((*a).kids, arg_off)) }
+                if arg_len != 1 || !compat((*tc).ty, ty_thread((*tc).ty), jt) {
+                    tc_emit(tc, "join takes one thread handle", f.lo, f.hi)
+                }
+                return ty_error((*tc).ty)
+            }
+            if str_eq(name, "async_run") {
+                return infer_async_run(tc, arg_off, arg_len, f.lo, f.hi)
+            }
+            if str_eq(name, "alloc") {
+                if arg_len == 0 {
+                    tc_emit(tc, "alloc() with no value is only valid as p: *T = alloc(), where the annotation sizes the allocation", f.lo, f.hi)
+                    return ty_ptr((*tc).ty, ty_unknown((*tc).ty))
+                }
+                inner_alloc: int64 = infer_expr(tc, vec_get((*a).kids, arg_off))
+                return ty_ptr((*tc).ty, inner_alloc)
+            }
+            if str_eq(name, "ptr_add") {
+                mut pt: int64 = ty_unknown((*tc).ty)
+                if arg_len > 0 { pt = infer_expr(tc, vec_get((*a).kids, arg_off)) }
+                pn: TyNode = ty_get((*tc).ty, pt)
+                if pn.kind == tyk_ptr() {
+                    innerp: TyNode = ty_get((*tc).ty, pn.a)
+                    if innerp.kind != tyk_unit() {
+                        tc_emit(tc, "ptr_add takes a raw pointer; use *raw T or *void, not a managed *T", f.lo, f.hi)
+                    }
+                }
+                mut pai: int64 = 1
+                while pai < arg_len {
+                    infer_expr(tc, vec_get((*a).kids, arg_off + pai))
+                    pai = pai + 1
+                }
+                return pt
+            }
+            if str_eq(name, "move") {
+                if arg_len > 0 {
+                    mt: int64 = infer_expr(tc, vec_get((*a).kids, arg_off))
+                    mn: TyNode = ty_get((*tc).ty, mt)
+                    arg0: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, arg_off))
+                    if mn.kind == tyk_collector() {
+                        tc_emit(tc, "a collected value is not owned; copy it directly", arg0.lo, arg0.hi)
+                        return mt
+                    }
+                    if arg0.kind == xk_ident() {
+                        src: string = ast_name(a, arg0.a)
+                        if !(*tc).types_only && own_of(tc, src) == own_borrow() {
+                            tc_emit(tc, "cannot move a borrowed pointer; only its owner can be moved", arg0.lo, arg0.hi)
+                        }
+                        set_moved(tc, src)
+                    }
+                    return mt
+                }
+                return ty_unknown((*tc).ty)
+            }
+            if str_eq(name, "free") {
+                if arg_len > 0 {
+                    ft: int64 = infer_expr(tc, vec_get((*a).kids, arg_off))
+                    fnode: TyNode = ty_get((*tc).ty, ft)
+                    farg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, arg_off))
+                    if fnode.kind == tyk_collector() {
+                        tc_emit(tc, "a collected value is not freed; the collector reclaims it", farg.lo, farg.hi)
+                    } else if is_managed_ty(tc, ft) && farg.kind == xk_ident() {
+                        pname: string = ast_name(a, farg.a)
+                        if !(*tc).types_only && own_of(tc, pname) == own_borrow() {
+                            tc_emit(tc, "cannot free a borrowed pointer; only its owner frees it", farg.lo, farg.hi)
+                        }
+                    }
+                }
+                return ty_unit((*tc).ty)
+            }
+        }
+    }
+    mut direct_toplevel2: bool = false
+    if f.kind == xk_ident() {
+        fname_direct: string = ast_name(a, f.a)
+        direct_toplevel2 = sig_has_fn((*tc).sigtab, fname_direct) && !is_local(tc, fname_direct)
+    }
+    mut callee_ty: int64 = ty_unknown((*tc).ty)
+    if direct_toplevel2 {
+        callee_ty = lookup(tc, ast_name(a, f.a))
+    } else {
+        callee_ty = infer_expr(tc, callee_id)
+    }
+    mut cn: TyNode = ty_get((*tc).ty, callee_ty)
+    if cn.kind == tyk_collector() {
+        inner: TyNode = ty_get((*tc).ty, cn.a)
+        if inner.kind == tyk_func() {
+            callee_ty = cn.a
+            cn = inner
+        }
+    }
+    arg_tys_generic: *Vector<int64> = infer_call_args(tc, arg_off, arg_len)
+    if cn.kind == tyk_func() {
+        if cn.len != arg_len {
+            tc_emit(tc, call_msg_count(cn.len, arg_len), f.lo, f.hi)
+        } else {
+            mut direct_toplevel: bool = false
+            if f.kind == xk_ident() {
+                fname0: string = ast_name(a, f.a)
+                direct_toplevel = sig_has_fn((*tc).sigtab, fname0) && !is_local(tc, fname0)
+            }
+            mut i: int64 = 0
+            while i < cn.len {
+                p: int64 = vec_get((*(*tc).ty).kids, cn.off + i)
+                av: int64 = vec_get(arg_tys_generic, i)
+                arg_id: int64 = vec_get((*a).kids, arg_off + i)
+                arg: ExprNode = vec_get((*a).exprs, arg_id)
+                pn: TyNode = ty_get((*tc).ty, p)
+                an: TyNode = ty_get((*tc).ty, av)
+                if pn.kind == tyk_error() && an.kind == tyk_error() && arg.kind == xk_ident() {
+                    mark_err_handled(tc, ast_name(a, arg.a))
+                }
+                mut collector_lambda: bool = false
+                if pn.kind == tyk_collector() {
+                    inner: TyNode = ty_get((*tc).ty, pn.a)
+                    if inner.kind == tyk_func() && arg.kind == xk_lambda() {
+                        av.ignore()
+                        collector_lambda = true
+                        if !direct_toplevel {
+                            tc_emit(tc, "a bare lambda cannot become a closure collector through an indirect call; write the mint explicitly: collector<F>(lambda ...)", arg.lo, arg.hi)
+                        } else {
+                            check_collect_captures(tc, arg_id, arg.lo, arg.hi)
+                        }
+                    }
+                }
+                if !collector_lambda && !compat((*tc).ty, p, av) && !self_value_in_ptr_position(tc, arg_id, p) {
+                    tc_emit(tc, arg_wrong_msg(i), arg.lo, arg.hi)
+                }
+                if !collector_lambda { check_int_fits(tc, arg_id, p) }
+                if !collector_lambda { check_slice_covariance(tc, p, av, arg_id, arg.lo, arg.hi) }
+                i = i + 1
+            }
+            if f.kind == xk_ident() {
+                name2: string = ast_name(a, f.a)
+                raw_sigs: *Map<TyList> = (*tc).raw_sigs
+                if map_has(raw_sigs, name2) {
+                    raw_params: TyList = unwrap_or(map_get(raw_sigs, name2), empty_tylist())
+                    mut ri: int64 = 0
+                    while ri < raw_params.len && ri < arg_len {
+                        rp: int64 = sig_ty_at((*tc).sigtab, raw_params, ri)
+                        av2: int64 = vec_get(arg_tys_generic, ri)
+                        arg_id2: int64 = vec_get((*a).kids, arg_off + ri)
+                        arg2: ExprNode = vec_get((*a).exprs, arg_id2)
+                        check_conformance(tc, rp, av2, f.lo, f.hi)
+                        tuple_iface_mismatch(tc, rp, av2, arg2.lo, arg2.hi)
+                        check_slice_covariance(tc, rp, av2, arg_id2, arg2.lo, arg2.hi)
+                        ri = ri + 1
+                    }
+                }
+            }
+        }
+        return cn.a
+    }
+    return ty_unknown((*tc).ty)
+}

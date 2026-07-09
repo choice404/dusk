@@ -283,7 +283,10 @@ pub enum ExprKind {
     /// stores it in a freshly minted collected block, and yields a `collector<T>`
     /// fat value. `ty` is the element type `T` the value checks against and the
     /// block is sized for; `arg` is the value stored.
-    Collect { ty: Type, arg: Box<Expr> },
+    Collect {
+        ty: Type,
+        arg: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +449,9 @@ mod tests {
         collect_stmt(&stmt, &mut used, &mut bound);
         assert!(used.contains(&"xs".to_string()), "xs must be captured");
         assert!(used.contains(&"i".to_string()), "i must be captured");
-        assert!(used.contains(&"one".to_string()), "the rhs must be captured");
+        assert!(
+            used.contains(&"one".to_string()),
+            "the rhs must be captured"
+        );
     }
 }

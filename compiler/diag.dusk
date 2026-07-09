@@ -53,13 +53,13 @@ export func span_diag(lo: int64, hi: int64, msg: string) -> SpanDiagnostic {
     return SpanDiagnostic { lo: lo, hi: hi, msg: msg }
 }
 
-// Renders a diagnostic as `file:line:col: error: message`, returning a fresh heap
+// Renders a diagnostic as `file: line:col: error: message`, returning a fresh heap
 // string the caller owns and frees. This is the header the stage0 compiler prints;
 // the caret block beneath it is not built yet.
 export func diag_render(d: Diagnostic) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, d.file)
-    sb_push_char(b, 58)
+    sb_push(b, ": ")
     sb_push_int(b, d.line)
     sb_push_char(b, 58)
     sb_push_int(b, d.col)
@@ -84,11 +84,12 @@ export func diag_emit(d: Diagnostic) -> void {
 // and column against the source only when the fault is printed.
 export struct Located {
     lo: int64,
+    hi: int64,
     msg: string,
 }
 
-export func located(lo: int64, msg: string) -> Located {
-    return Located { lo: lo, msg: msg }
+export func located(lo: int64, hi: int64, msg: string) -> Located {
+    return Located { lo: lo, hi: hi, msg: msg }
 }
 
 func is_boundary(src: string, n: int64, off: int64) -> bool {
@@ -292,11 +293,10 @@ export func render_diag(files: *Vector<FileSrc>, d: SpanDiagnostic) -> string {
     return out2
 }
 
-// Prints a located fault to stderr as `file:line:col: error: msg`, resolving the
-// offset against the source. Diagnostic text is not part of the dump contract, so
-// this need only be close to stage0, but the location is exact.
+// Prints a located fault through the same source-span renderer used by check
+// diagnostics, so parse/load-stage headers and caret blocks match stage0.
 export func emit_located(file: string, src: string, n: int64, e: Located) -> void {
-    l, c := line_col(src, n, e.lo)
-    d: Diagnostic = diag_new(file, l, c, e.msg)
-    diag_emit(d)
+    rendered: string = render_file_diag(file, src, n, span_diag(e.lo, e.hi, e.msg))
+    printerr(rendered)
+    free(rendered)
 }

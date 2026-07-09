@@ -46,8 +46,10 @@ pub fn check(module: &Module) -> (Vec<Diagnostic>, MutTupleTypes) {
         // re-checks exactly what gets built.
         let (ground, mono_diags, future_table) = crate::mono::expand_with_diags(module, &muts);
         d.extend(mono_diags);
-        let mut seen: HashSet<(u32, u32, String)> =
-            d.iter().map(|x| (x.span.lo, x.span.hi, x.msg.clone())).collect();
+        let mut seen: HashSet<(u32, u32, String)> = d
+            .iter()
+            .map(|x| (x.span.lo, x.span.hi, x.msg.clone()))
+            .collect();
         for g in typeck::check_ground(&ground, &future_table) {
             if seen.insert((g.span.lo, g.span.hi, g.msg.clone())) {
                 d.push(g);

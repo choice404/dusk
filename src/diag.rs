@@ -172,7 +172,11 @@ mod tests {
         let out = d.render(src);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3, "{out:?}");
-        assert!(lines[2].starts_with("  \t"), "pad must keep the tab: {:?}", lines[2]);
+        assert!(
+            lines[2].starts_with("  \t"),
+            "pad must keep the tab: {:?}",
+            lines[2]
+        );
         assert!(lines[2].ends_with("^~~"), "{:?}", lines[2]);
     }
 

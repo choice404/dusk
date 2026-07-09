@@ -1,0 +1,319 @@
+// tcstmt: statement and block checking for S3a.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import ty
+@import tcstate
+@import tcscope
+@import tcbin
+@import tcexpr
+@import tclet
+@import tciface
+@import tcmatch
+@import tcown
+@import tcesc
+
+func infer_await_operand(tc: *TypeChecker, await_expr: ExprNode) -> int64 {
+    ft: int64 = infer_expr(tc, await_expr.a)
+    fn: TyNode = ty_get((*tc).ty, ft)
+    if fn.kind == tyk_future() { return fn.a }
+    if fn.kind == tyk_unknown() { return ft }
+    if !(*tc).types_only {
+        tc_emit(tc, "the operand of await is not a future", await_expr.lo, await_expr.hi)
+    }
+    return ty_unknown((*tc).ty)
+}
+
+func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    mut t: int64 = ty_unknown((*tc).ty)
+    if e.kind == xk_await() {
+        t = infer_await_operand(tc, e)
+    } else {
+        t = infer_expr(tc, expr_id)
+    }
+    if !compat((*tc).ty, (*tc).cur_ret, t) {
+        rn: TyNode = ty_get((*tc).ty, (*tc).cur_raw_ret)
+        tn: TyNode = ty_get((*tc).ty, t)
+        mut handled: bool = false
+        ifaces: *Map<int64> = (*tc).ifaces
+        if rn.kind == tyk_named() && map_has(ifaces, ty_name((*tc).ty, (*tc).cur_raw_ret)) && tn.kind == tyk_named() {
+            check_conformance(tc, (*tc).cur_raw_ret, t, e.lo, e.hi)
+            handled = true
+        } else if tuple_iface_mismatch(tc, (*tc).cur_raw_ret, t, e.lo, e.hi) {
+            handled = true
+        }
+        if !handled {
+            tc_emit(tc, "return type does not match the function's return type", e.lo, e.hi)
+        }
+    }
+    check_int_fits(tc, expr_id, (*tc).cur_ret)
+    check_escape(tc, expr_id, t)
+    mark_errs_in(tc, expr_id)
+}
+
+func branch_block(tc: *TypeChecker, block_id: int64) -> void {
+    saved: *Vector<*Map<int64>> = clone_owns(tc)
+    (*tc).branch_depth = (*tc).branch_depth + 1
+    check_block(tc, block_id)
+    (*tc).branch_depth = (*tc).branch_depth - 1
+    restore_owns(tc, saved)
+}
+
+func loop_body_fixpoint(tc: *TypeChecker, block_id: int64) -> void {
+    (*tc).suppress = (*tc).suppress + 1
+    mut prev: string = esc_snapshot(tc)
+    mut i: int64 = 0
+    mut done: bool = false
+    while i < 64 && !done {
+        branch_block(tc, block_id)
+        now: string = esc_snapshot(tc)
+        if str_eq(now, prev) {
+            done = true
+        } else {
+            prev = now
+        }
+        i = i + 1
+    }
+    (*tc).suppress = (*tc).suppress - 1
+    branch_block(tc, block_id)
+}
+
+func check_match_stmt(tc: *TypeChecker, scrut: int64, off: int64, len: int64) -> void {
+    st: int64 = infer_expr(tc, scrut)
+    scrut_esc: EscPair = value_escape(tc, scrut)
+    a: *Ast = (*tc).ast
+    (*tc).branch_depth = (*tc).branch_depth + 1
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        push_scope(tc)
+        bind_match_arm(tc, arm.pat)
+        bind_match_arm_escape(tc, arm.pat, scrut, scrut_esc)
+        check_block_no_scope(tc, arm.body)
+        pop_scope(tc)
+        i = i + 1
+    }
+    (*tc).branch_depth = (*tc).branch_depth - 1
+    check_match_scrutinee(tc, st, scrut, off, len)
+}
+
+export func check_stmt(tc: *TypeChecker, id: int64) -> void {
+    a: *Ast = (*tc).ast
+    s: StmtNode = vec_get((*a).stmts, id)
+    if s.kind == sk_let() {
+        value: ExprNode = vec_get((*a).exprs, s.c)
+        if value.kind == xk_await() {
+            check_let_await(tc, s, value)
+        } else {
+            check_let(tc, s)
+        }
+    } else if s.kind == sk_assign() {
+        lt: int64 = infer_expr(tc, s.a)
+        rt: int64 = infer_expr(tc, s.b)
+        lhs: ExprNode = vec_get((*a).exprs, s.a)
+        if !compat((*tc).ty, lt, rt) {
+            tc_emit(tc, "assignment type mismatch", lhs.lo, lhs.hi)
+        }
+        check_int_fits(tc, s.b, lt)
+        if lhs.kind == xk_ident() {
+            raw: int64 = slice_iface_of(tc, ast_name(a, lhs.a))
+            if raw >= 0 {
+                rhs_expr: ExprNode = vec_get((*a).exprs, s.b)
+                check_slice_covariance(tc, raw, rt, s.b, rhs_expr.lo, rhs_expr.hi)
+            }
+        }
+        check_assign_target(tc, s.a)
+        check_assign_ownership(tc, s.a, s.b, lt)
+        if lhs.kind == xk_ident() {
+            dst: string = ast_name(a, lhs.a)
+            esc: EscPair = value_escape(tc, s.b)
+            assign_esc(tc, dst, esc.slice, esc.closure)
+            if links_as_alias(tc, lt) || links_as_alias(tc, chain_ty(tc, s.b)) {
+                link_binding_aliases(tc, dst, s.b, true)
+            }
+        } else {
+            root: string = store_root(tc, s.a)
+            if str_len(root) > 0 {
+                esc2: EscPair = value_escape(tc, s.b)
+                if esc2.slice || esc2.closure { raise_esc(tc, root, esc2.slice, esc2.closure) }
+            }
+        }
+    } else if s.kind == sk_assign_op() {
+        lt2: int64 = infer_expr(tc, s.b)
+        rt2: int64 = infer_expr(tc, s.c)
+        lhs2: ExprNode = vec_get((*a).exprs, s.b)
+        result: int64 = check_binary(tc, s.a, lt2, rt2, lhs2.lo, lhs2.hi)
+        if s.a == bop_shl() || s.a == bop_shr() { check_shift_amount(tc, s.c, lt2, lhs2.lo, lhs2.hi) }
+        if s.a == bop_pow() { check_pow_exponent(tc, lt2, rt2, s.c, lhs2.lo, lhs2.hi) }
+        if !compat((*tc).ty, result, lt2) {
+            tc_emit(tc, "assignment type mismatch", lhs2.lo, lhs2.hi)
+        }
+        check_int_fits(tc, s.c, lt2)
+        check_assign_target(tc, s.b)
+    } else if s.kind == sk_return() {
+        if s.a >= 0 {
+            re: ExprNode = vec_get((*a).exprs, s.a)
+            if re.kind == xk_await() {
+                el: int64 = infer_await_operand(tc, re)
+                if !compat((*tc).ty, (*tc).cur_ret, el) {
+                    tc_emit(tc, "return type does not match the function's return type", re.lo, re.hi)
+                }
+                mark_errs_in(tc, re.a)
+            } else {
+                check_return_value(tc, s.a)
+            }
+        } else if !compat((*tc).ty, (*tc).cur_ret, ty_unit((*tc).ty)) {
+            tc_emit(tc, "missing return value", 0, 0)
+        }
+    } else if s.kind == sk_defer() {
+        if (*tc).branch_depth > 0 {
+            de: ExprNode = vec_get((*a).exprs, s.a)
+            tc_emit(tc, "a defer inside a conditional or loop is not supported; register it at the top level of the function", de.lo, de.hi)
+        }
+        if s.a >= 0 { infer_expr(tc, s.a) }
+    } else if s.kind == sk_if() {
+        ct: int64 = infer_expr(tc, s.a)
+        cn: TyNode = ty_get((*tc).ty, ct)
+        cond: ExprNode = vec_get((*a).exprs, s.a)
+        if cn.kind != tyk_bool() && cn.kind != tyk_unknown() {
+            tc_emit(tc, "if condition must be a bool", cond.lo, cond.hi)
+        }
+        branch_block(tc, s.b)
+        if s.c >= 0 { branch_block(tc, s.c) }
+    } else if s.kind == sk_while() {
+        ct2: int64 = infer_expr(tc, s.a)
+        cn2: TyNode = ty_get((*tc).ty, ct2)
+        cond2: ExprNode = vec_get((*a).exprs, s.a)
+        if cn2.kind != tyk_bool() && cn2.kind != tyk_unknown() {
+            tc_emit(tc, "while condition must be a bool", cond2.lo, cond2.hi)
+        }
+        loop_body_fixpoint(tc, s.b)
+    } else if s.kind == sk_for() {
+        it: int64 = infer_expr(tc, s.b)
+        push_scope(tc)
+        declare(tc, ast_name(a, s.a), ty_unknown((*tc).ty))
+        set_esc(tc, ast_name(a, s.a), false, false)
+        elem: int64 = elem_of((*tc).ty, it)
+        if member_carries_view(tc, elem) {
+            esc3: EscPair = value_escape(tc, s.b)
+            set_esc(tc, ast_name(a, s.a), esc3.slice, esc3.closure)
+        }
+        if links_as_alias(tc, elem) {
+            link_binding_aliases(tc, ast_name(a, s.a), s.b, false)
+        }
+        loop_body_fixpoint(tc, s.c)
+        pop_scope(tc)
+    } else if s.kind == sk_match() {
+        check_match_stmt(tc, s.a, s.b, s.c)
+    } else {
+        e: ExprNode = vec_get((*a).exprs, s.a)
+        if e.kind == xk_await() {
+            el2: int64 = infer_await_operand(tc, e)
+            if !compat((*tc).ty, ty_unit((*tc).ty), el2) {
+                tc_emit(tc, "'await f' discards a value; bind it, as in v, e := await f", e.lo, e.hi)
+            }
+        } else {
+            if e.kind == xk_call() {
+                callee: ExprNode = vec_get((*a).exprs, e.a)
+                if callee.kind == xk_ident() {
+                    aname: string = ast_name(a, callee.a)
+                    asyncs: *Map<int64> = (*tc).async_fns
+                    if map_has(asyncs, aname) && !is_local(tc, aname) {
+                        tc_emit(tc, future_never_awaited_msg(aname), e.lo, e.hi)
+                    }
+                }
+            }
+            et: int64 = infer_expr(tc, s.a)
+            if ty_has_error(tc, et) {
+                tc_emit(tc, "this expression's error result is ignored; bind it and handle the error with exists, check, or ignore", e.lo, e.hi)
+            }
+        }
+    }
+}
+
+func future_never_awaited_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "the future from '")
+    sb_push(b, name)
+    sb_push(b, "' is never awaited; bind it so it can be awaited or released")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func await_shape_msg(values: int64, n: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "await destructures this future into ")
+    sb_push_int(b, values)
+    sb_push(b, " values, but ")
+    sb_push_int(b, n)
+    sb_push(b, " names are bound")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func check_let_await(tc: *TypeChecker, s: StmtNode, value: ExprNode) -> void {
+    a: *Ast = (*tc).ast
+    el: int64 = infer_await_operand(tc, value)
+    nbinds: int64 = s.b
+    en: TyNode = ty_get((*tc).ty, el)
+    if en.kind == tyk_tuple() && nbinds > 1 {
+        if en.len != nbinds {
+            tc_emit(tc, await_shape_msg(en.len, nbinds), value.lo, value.hi)
+        }
+        mut i: int64 = 0
+        while i < en.len && i < nbinds {
+            b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
+            declare_await_bind(tc, b, (s.d & 1) != 0, vec_get((*(*tc).ty).kids, en.off + i), value.lo, value.hi)
+            i = i + 1
+        }
+        while i < nbinds {
+            b2: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
+            declare(tc, ast_name(a, b2.name), ty_unknown((*tc).ty))
+            i = i + 1
+        }
+    } else if nbinds == 2 {
+        b0: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a))
+        b1: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + 1))
+        declare_await_bind(tc, b0, (s.d & 1) != 0, el, value.lo, value.hi)
+        declare_await_bind(tc, b1, (s.d & 1) != 0, ty_error((*tc).ty), value.lo, value.hi)
+    } else if nbinds == 1 {
+        b3: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a))
+        declare_await_bind(tc, b3, (s.d & 1) != 0, el, value.lo, value.hi)
+    } else {
+        mut values: int64 = 2
+        if en.kind == tyk_tuple() { values = en.len }
+        tc_emit(tc, await_shape_msg(values, nbinds), value.lo, value.hi)
+        mut j: int64 = 0
+        while j < nbinds {
+            bx: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + j))
+            declare(tc, ast_name(a, bx.name), ty_unknown((*tc).ty))
+            j = j + 1
+        }
+    }
+}
+
+export func check_block_no_scope(tc: *TypeChecker, block_id: int64) -> void {
+    a: *Ast = (*tc).ast
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    mut i: int64 = 0
+    while i < b.len {
+        check_stmt(tc, vec_get((*a).kids, b.off + i))
+        i = i + 1
+    }
+}
+
+export func check_block(tc: *TypeChecker, block_id: int64) -> void {
+    push_scope(tc)
+    check_block_no_scope(tc, block_id)
+    pop_scope(tc)
+}

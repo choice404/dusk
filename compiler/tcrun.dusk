@@ -1,0 +1,335 @@
+// tcrun: type-check pass runner and function entry checks.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import diag
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tcstmt
+@import tciface
+@import resolveexpr
+@import tcown
+
+func reserved_uint_msg() -> string {
+    return "unsigned integers are reserved; use the signed widths"
+}
+
+func unknown_type_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "unknown type '")
+    sb_push(b, name)
+    sb_push(b, "'; no type of that name is declared or imported")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func is_known_type_name(tc: *TypeChecker, name: string) -> bool {
+    if str_eq(name, "Future") { return true }
+    if str_eq(name, "int8") || str_eq(name, "uint8") { return true }
+    if str_eq(name, "int16") || str_eq(name, "uint16") { return true }
+    if str_eq(name, "int32") || str_eq(name, "uint32") { return true }
+    if str_eq(name, "int64") || str_eq(name, "uint64") { return true }
+    if str_eq(name, "float32") || str_eq(name, "float64") { return true }
+    if str_eq(name, "bool") || str_eq(name, "char") || str_eq(name, "rune") { return true }
+    if str_eq(name, "string") || str_eq(name, "void") || str_eq(name, "error") || str_eq(name, "thread") { return true }
+    gens: *Map<int64> = (*tc).cur_generics
+    structs: *Map<StructSig> = (*tc).structs
+    enums: *Map<EnumSig> = (*tc).enums
+    ifaces: *Map<int64> = (*tc).ifaces
+    if map_has(gens, name) { return true }
+    if map_has(structs, name) { return true }
+    if map_has(enums, name) { return true }
+    if map_has(ifaces, name) { return true }
+    return false
+}
+
+export func reject_reserved_uint(tc: *TypeChecker, tyid: int64, lo: int64, hi: int64) -> void {
+    if tyid < 0 { return }
+    a: *Ast = (*tc).ast
+    n: TypeNode = vec_get((*a).types, tyid)
+    if n.kind == tk_named() {
+        name: string = ast_name(a, n.a)
+        if is_reserved_uint(name) { tc_emit(tc, reserved_uint_msg(), lo, hi) }
+        mut i: int64 = 0
+        while i < n.c {
+            reject_reserved_uint(tc, vec_get((*a).kids, n.b + i), lo, hi)
+            i = i + 1
+        }
+    } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
+        reject_reserved_uint(tc, n.a, lo, hi)
+    } else if n.kind == tk_tuple() {
+        mut j: int64 = 0
+        while j < n.b {
+            reject_reserved_uint(tc, vec_get((*a).kids, n.a + j), lo, hi)
+            j = j + 1
+        }
+    } else if n.kind == tk_func() {
+        mut k: int64 = 0
+        while k < n.b {
+            reject_reserved_uint(tc, vec_get((*a).kids, n.a + k), lo, hi)
+            k = k + 1
+        }
+        reject_reserved_uint(tc, n.c, lo, hi)
+    }
+}
+
+func reject_unknown_param_type(tc: *TypeChecker, tyid: int64, lo: int64, hi: int64) -> void {
+    if (*tc).types_only { return }
+    if tyid < 0 { return }
+    a: *Ast = (*tc).ast
+    n: TypeNode = vec_get((*a).types, tyid)
+    if n.kind == tk_named() {
+        name: string = ast_name(a, n.a)
+        if !is_known_type_name(tc, name) {
+            tc_emit(tc, unknown_type_msg(name), lo, hi)
+        }
+        mut i: int64 = 0
+        while i < n.c {
+            reject_unknown_param_type(tc, vec_get((*a).kids, n.b + i), lo, hi)
+            i = i + 1
+        }
+    } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
+        reject_unknown_param_type(tc, n.a, lo, hi)
+    } else if n.kind == tk_tuple() {
+        mut j: int64 = 0
+        while j < n.b {
+            reject_unknown_param_type(tc, vec_get((*a).kids, n.a + j), lo, hi)
+            j = j + 1
+        }
+    } else if n.kind == tk_func() {
+        mut k: int64 = 0
+        while k < n.b {
+            reject_unknown_param_type(tc, vec_get((*a).kids, n.a + k), lo, hi)
+            k = k + 1
+        }
+        reject_unknown_param_type(tc, n.c, lo, hi)
+    }
+}
+
+export func check_main_sig(tc: *TypeChecker, f: FuncNode) -> void {
+    if f.is_async {
+        tc_emit(tc, "main cannot be async; call an async func with async_run instead", f.lo, f.hi)
+        return
+    }
+    if f.params_len == 0 { return }
+    a: *Ast = (*tc).ast
+    mut ok: bool = false
+    if f.params_len == 2 {
+        p0: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off))
+        p1: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + 1))
+        t0: int64 = tc_type(tc, p0.ty)
+        t1: int64 = tc_type(tc, p1.ty)
+        n0: TyNode = ty_get((*tc).ty, t0)
+        n1: TyNode = ty_get((*tc).ty, t1)
+        if !p0.is_using && !p1.is_using && n0.kind == tyk_int() && n0.w == 32 && n1.kind == tyk_slice() {
+            e1: TyNode = ty_get((*tc).ty, n1.a)
+            if e1.kind == tyk_str() { ok = true }
+        }
+    }
+    if !ok {
+        tc_emit(tc, "main takes no parameters or (argc: int32, argv: string[]); the allocator form is not supported yet", f.lo, f.hi)
+    }
+}
+
+func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < f.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+        reject_iface_targ_annot(tc, p.ty, f.lo, f.hi)
+        reject_reserved_uint(tc, p.ty, f.lo, f.hi)
+        reject_unknown_param_type(tc, p.ty, f.lo, f.hi)
+        tyid: int64 = tc_type(tc, p.ty)
+        raw: int64 = tc_raw_type(tc, p.ty)
+        rn: TyNode = ty_get((*tc).ty, raw)
+        ifaces: *Map<int64> = (*tc).ifaces
+        if rn.kind == tyk_named() && map_has(ifaces, ty_name((*tc).ty, raw)) {
+            declare_iface_bind(tc, ast_name(a, p.name), ty_name((*tc).ty, raw))
+        }
+        declare(tc, ast_name(a, p.name), tyid)
+        set_esc(tc, ast_name(a, p.name), false, false)
+        if is_managed_ty(tc, tyid) {
+            declare_own(tc, ast_name(a, p.name), own_borrow())
+        }
+        n: TyNode = ty_get((*tc).ty, tyid)
+        if n.kind == tyk_error() { declare_err(tc, ast_name(a, p.name), f.lo, f.hi) }
+        i = i + 1
+    }
+}
+
+export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
+    set_cur_generics(tc, f.generics_off, f.generics_len)
+    (*tc).cur_ret = tc_raw_type(tc, f.ret)
+    (*tc).cur_raw_ret = tc_raw_type(tc, f.ret)
+    (*tc).branch_depth = 0
+    (*tc).in_async = f.is_async
+    (*tc).in_method = str_len(self_ty) > 0
+    reject_iface_targ_annot(tc, f.ret, f.lo, f.hi)
+    reject_reserved_uint(tc, f.ret, f.lo, f.hi)
+    if str_len(ast_name((*tc).ast, f.name)) > 0 {
+        if str_eq(ast_name((*tc).ast, f.name), "main") { check_main_sig(tc, f) }
+    }
+    if f.is_async {
+        check_async_sig(tc, f)
+    } else {
+        raw_ret: TyNode = ty_get((*tc).ty, (*tc).cur_raw_ret)
+        ifaces2: *Map<int64> = (*tc).ifaces
+        if raw_ret.kind == tyk_named() && map_has(ifaces2, ty_name((*tc).ty, (*tc).cur_raw_ret)) {
+            tc_emit(tc, "returning an interface value is not supported; return the concrete type or a pointer to it", f.lo, f.hi)
+        }
+    }
+    push_scope(tc)
+    if str_len(self_ty) > 0 {
+        declare(tc, "self", named_ty((*tc).ty, self_ty))
+        declare_mut(tc, "self")
+    }
+    param_setup(tc, f)
+    check_block_no_scope(tc, f.body)
+    pop_scope(tc)
+    ret: TyNode = ty_get((*tc).ty, (*tc).cur_ret)
+    if ret.kind != tyk_unit() && !block_returns((*tc).ast, f.body) {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "not all paths in '")
+        sb_push(b, ast_name((*tc).ast, f.name))
+        sb_push(b, "' return a value")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, f.lo, f.hi)
+    }
+    (*tc).in_async = false
+}
+
+func stmt_returns(a: *Ast, sid: int64) -> bool {
+    s: StmtNode = vec_get((*a).stmts, sid)
+    if s.kind == sk_return() { return true }
+    if s.kind == sk_if() {
+        if s.c < 0 { return false }
+        return block_returns(a, s.b) && block_returns(a, s.c)
+    }
+    if s.kind == sk_match() {
+        if s.c == 0 { return false }
+        mut i: int64 = 0
+        while i < s.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
+            if !block_returns(a, arm.body) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    return false
+}
+
+export func block_returns(a: *Ast, bid: int64) -> bool {
+    b: BlockNode = vec_get((*a).blocks, bid)
+    mut i: int64 = 0
+    while i < b.len {
+        if stmt_returns(a, vec_get((*a).kids, b.off + i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func check_type_items(tc: *TypeChecker) -> void {
+    a: *Ast = (*tc).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_struct() {
+            st: StructNode = vec_get((*a).structs, it.id)
+            mut j: int64 = 0
+            while j < st.fields_len {
+                fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + j))
+                reject_reserved_uint(tc, fld.ty, 0, 0)
+                j = j + 1
+            }
+        } else if it.kind == ik_enum() {
+            en: EnumNode = vec_get((*a).enums, it.id)
+            mut k: int64 = 0
+            while k < en.variants_len {
+                v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, en.variants_off + k))
+                mut q: int64 = 0
+                while q < v.fields_len {
+                    fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, v.fields_off + q))
+                    reject_reserved_uint(tc, fld2.ty, 0, 0)
+                    q = q + 1
+                }
+                k = k + 1
+            }
+        } else if it.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            mut m: int64 = 0
+            while m < iface.methods_len {
+                ms: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + m))
+                mut p: int64 = 0
+                while p < ms.params_len {
+                    pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, ms.params_off + p))
+                    reject_reserved_uint(tc, pn.ty, 0, 0)
+                    p = p + 1
+                }
+                reject_reserved_uint(tc, ms.ret, 0, 0)
+                m = m + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+export func tc_run(tc: *TypeChecker) -> void {
+    check_type_items(tc)
+    check_duplicate_impls(tc)
+    a: *Ast = (*tc).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            check_func(tc, vec_get((*a).funcs, it.id), "")
+        } else if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            enums: *Map<EnumSig> = (*tc).enums
+            if map_has(enums, ast_name(a, im.ty)) {
+                b: *StringBuilder = alloc(sb_new())
+                sb_push(b, "methods on the enum '")
+                sb_push(b, ast_name(a, im.ty))
+                sb_push(b, "' are not supported; methods are supported on struct types only")
+                out: string = substring(sb_cstr(b), 0, sb_size(b))
+                sb_free(b)
+                free(b)
+                tc_emit(tc, out, im.lo, im.hi)
+            } else {
+                check_impl_complete(tc, im)
+                mut j: int64 = 0
+                while j < im.methods_len {
+                    check_func(tc, vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j)), ast_name(a, im.ty))
+                    j = j + 1
+                }
+            }
+        } else if it.kind == ik_foreign() {
+            check_foreign(tc, vec_get((*a).foreigns, it.id))
+        }
+        i = i + 1
+    }
+}
+
+export func typeck_check(a: *Ast) -> *Vector<SpanDiagnostic> {
+    empty_future: *Map<int64> = alloc(map_new())
+    tc: *TypeChecker = tc_new(a, false, empty_future)
+    tc_run(tc)
+    return (*tc).errors
+}
+
+export func typeck_check_ground(a: *Ast, future_elems: *Map<int64>) -> *Vector<SpanDiagnostic> {
+    tc: *TypeChecker = tc_new(a, true, future_elems)
+    tc_run(tc)
+    return (*tc).errors
+}

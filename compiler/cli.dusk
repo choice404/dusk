@@ -22,6 +22,7 @@
 @import loader
 @import desugar
 @import resolve
+@import tcrun
 
 func emit_errors(errs: *Vector<string>) -> void {
     mut i: int64 = 0
@@ -176,8 +177,8 @@ export func cmd_desugar(path: string, prog: string) -> int32 {
     return 0
 }
 
-// Runs load with the per-file paradigm gate, desugar, then name resolution.
-// Type checking is ported in later milestones.
+// Runs load with the per-file paradigm gate, desugar, name resolution, then the
+// S3a type layer. Resolve diagnostics render first; typeck appends after.
 export func cmd_check(path: string, prog: string) -> int32 {
     p: Program = load(path, prog)
     errs: *Vector<string> = p.errors
@@ -189,9 +190,14 @@ export func cmd_check(path: string, prog: string) -> int32 {
         return 1
     }
     desugar(p.module)
-    sema_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
-    emit_span_errors(p.files, sema_errs)
-    if vec_len(sema_errs) > 0 {
+    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
+    emit_span_errors(p.files, resolve_errs)
+    if vec_len(resolve_errs) > 0 {
+        return 1
+    }
+    type_errs: *Vector<SpanDiagnostic> = typeck_check(p.module)
+    emit_span_errors(p.files, type_errs)
+    if vec_len(type_errs) > 0 {
         return 1
     }
     b: *StringBuilder = alloc(sb_new())
@@ -205,8 +211,8 @@ export func cmd_check(path: string, prog: string) -> int32 {
     return 0
 }
 
-// Mono is still a command spine only. It shares check's load+desugar+resolve error
-// behavior and stays silent on success until the mono pipeline lands.
+// Mono is still a command spine only. It shares check's load+desugar+resolve+type
+// error behavior and stays silent on success until the mono pipeline lands.
 export func cmd_mono(path: string, prog: string) -> int32 {
     p: Program = load(path, prog)
     errs: *Vector<string> = p.errors
@@ -218,9 +224,14 @@ export func cmd_mono(path: string, prog: string) -> int32 {
         return 1
     }
     desugar(p.module)
-    sema_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
-    emit_span_errors(p.files, sema_errs)
-    if vec_len(sema_errs) > 0 {
+    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
+    emit_span_errors(p.files, resolve_errs)
+    if vec_len(resolve_errs) > 0 {
+        return 1
+    }
+    type_errs: *Vector<SpanDiagnostic> = typeck_check(p.module)
+    emit_span_errors(p.files, type_errs)
+    if vec_len(type_errs) > 0 {
         return 1
     }
     return 0

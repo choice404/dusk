@@ -50,7 +50,10 @@ fn cmd_get(path: Option<&String>) -> ExitCode {
 /// it when `run` is set.
 fn cmd_build(path: Option<&String>, run: bool) -> ExitCode {
     let Some(path) = path else {
-        eprintln!("usage: dawn {} <file.dusk>", if run { "run" } else { "build" });
+        eprintln!(
+            "usage: dawn {} <file.dusk>",
+            if run { "run" } else { "build" }
+        );
         return ExitCode::FAILURE;
     };
     if let Err(e) = fetch_imports(path) {
@@ -142,11 +145,17 @@ fn clone(url: &str, dest: &Path) -> Result<(), String> {
 }
 
 fn stem(path: &str) -> &str {
-    Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("out")
+    Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("out")
 }
 
 fn print_help() {
-    println!("dawn {} - package tool for the dusk language\n", env!("CARGO_PKG_VERSION"));
+    println!(
+        "dawn {} - package tool for the dusk language\n",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("usage:");
     println!("  dawn get <file.dusk>     clone the git packages a file imports");
     println!("  dawn build <file.dusk>   fetch packages, then compile");

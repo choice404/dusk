@@ -174,16 +174,12 @@ impl Desugar<'_> {
                 body: self.block(&l.body),
             }),
             ExprKind::Match(m) => ExprKind::Match(Box::new(self.match_(m))),
-            ExprKind::Await(op, ty) => {
-                ExprKind::Await(Box::new(self.expr(op)), ty.clone())
-            }
+            ExprKind::Await(op, ty) => ExprKind::Await(Box::new(self.expr(op)), ty.clone()),
             ExprKind::Collect { ty, arg } => ExprKind::Collect {
                 ty: ty.clone(),
                 arg: Box::new(self.expr(arg)),
             },
-            ExprKind::Do(monad, binds) => {
-                return self.do_to_calls(monad.as_deref(), binds, e.span)
-            }
+            ExprKind::Do(monad, binds) => return self.do_to_calls(monad.as_deref(), binds, e.span),
             other => other.clone(),
         };
         Expr { kind, span: e.span }
@@ -263,7 +259,12 @@ mod tests {
     }
 
     fn main_first_stmt(m: &Module) -> Stmt {
-        let Item::Func(f) = m.items.iter().find(|it| matches!(it, Item::Func(f) if f.name == "main")).unwrap() else {
+        let Item::Func(f) = m
+            .items
+            .iter()
+            .find(|it| matches!(it, Item::Func(f) if f.name == "main"))
+            .unwrap()
+        else {
             panic!()
         };
         f.body.stmts[0].clone()

@@ -157,8 +157,7 @@ impl Gate {
         match &e.kind {
             ExprKind::Call(f, args) => {
                 if let ExprKind::Ident(name) = &f.kind {
-                    if FUNCTIONAL_BUILTINS.contains(&name.as_str())
-                        && !self.user_fns.contains(name)
+                    if FUNCTIONAL_BUILTINS.contains(&name.as_str()) && !self.user_fns.contains(name)
                     {
                         self.need_functional(&format!("the '{name}' builtin"), e.span);
                     }
@@ -228,7 +227,10 @@ mod tests {
             "@paradigm procedural\n\
              func main() -> int32 {\n  xs := map(ys, f)\n  return 0\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("functional paradigm")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("functional paradigm")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -253,14 +255,15 @@ mod tests {
              func map(x: int64) -> int64 { return x }\n\
              func main() -> int32 {\n  z := map(5)\n  return 0\n}",
         );
-        assert!(e.is_empty(), "user function named map must stay agnostic: {e:?}");
+        assert!(
+            e.is_empty(),
+            "user function named map must stay agnostic: {e:?}"
+        );
     }
 
     #[test]
     fn procedural_do_rejected() {
-        let e = errs(
-            "func main() -> int32 {\n  r := do {\n    a <- 1\n    a\n  }\n  return 0\n}",
-        );
+        let e = errs("func main() -> int32 {\n  r := do {\n    a <- 1\n    a\n  }\n  return 0\n}");
         assert!(e.iter().any(|d| d.msg.contains("do notation")), "{e:?}");
     }
 
@@ -270,15 +273,20 @@ mod tests {
             "@paradigm functional\n\
              func main() -> int32 {\n  mut i: int64 = 0\n  while i < 3 { i = i + 1 }\n  return 0\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("procedural paradigm")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("procedural paradigm")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn functional_mut_rejected() {
-        let e = errs(
-            "@paradigm functional\nfunc main() -> int32 {\n  mut i: int64 = 0\n  return 0\n}",
+        let e =
+            errs("@paradigm functional\nfunc main() -> int32 {\n  mut i: int64 = 0\n  return 0\n}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("procedural paradigm")),
+            "{e:?}"
         );
-        assert!(e.iter().any(|d| d.msg.contains("procedural paradigm")), "{e:?}");
     }
 
     #[test]
@@ -313,7 +321,12 @@ mod tests {
         let e = errs(
             "monad M {\n  func bind(x: int64, f: (int64) -> int64) -> int64 { return f(x) }\n  func unit(x: int64) -> int64 { return x }\n}\nfunc main() -> int32 { return 0 }",
         );
-        assert!(e.iter().any(|d| d.msg.contains("monad block requires the functional paradigm")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d
+                .msg
+                .contains("monad block requires the functional paradigm")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -343,9 +356,7 @@ mod tests {
     #[test]
     fn default_paradigm_interface_rejected() {
         // Default is procedural, which does not unlock interfaces.
-        let e = errs(
-            "interface Foo {\n  bar() -> void\n}\nfunc main() -> int32 { return 0 }",
-        );
+        let e = errs("interface Foo {\n  bar() -> void\n}\nfunc main() -> int32 { return 0 }");
         assert!(e.iter().any(|d| d.msg.contains("oop paradigm")), "{e:?}");
     }
 

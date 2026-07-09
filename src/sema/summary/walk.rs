@@ -44,7 +44,11 @@ impl Summarizer {
     /// Re-derives one function's summary from its body under the current summary
     /// table. Pure in the table: it reads callee summaries and writes only local
     /// state, returning the fresh summary.
-    pub(super) fn transfer(&self, f: &Func, summaries: &HashMap<String, EscapeSummary>) -> EscapeSummary {
+    pub(super) fn transfer(
+        &self,
+        f: &Func,
+        summaries: &HashMap<String, EscapeSummary>,
+    ) -> EscapeSummary {
         let mut st = FnState::new(self, summaries, f);
         st.block(&f.body);
         st.finish()
@@ -86,7 +90,8 @@ impl Summarizer {
     ) {
         let mut st = FnState::new(self, summaries, f);
         st.block(&f.body);
-        st.frame_stores.sort_unstable_by_key(|&(s, j)| (s.lo, s.hi, j));
+        st.frame_stores
+            .sort_unstable_by_key(|&(s, j)| (s.lo, s.hi, j));
         st.frame_stores.dedup();
         (
             st.lambda_returns,
@@ -186,7 +191,11 @@ pub(super) struct FnState<'a> {
 }
 
 impl<'a> FnState<'a> {
-    pub(super) fn new(s: &'a Summarizer, summaries: &'a HashMap<String, EscapeSummary>, f: &Func) -> Self {
+    pub(super) fn new(
+        s: &'a Summarizer,
+        summaries: &'a HashMap<String, EscapeSummary>,
+        f: &Func,
+    ) -> Self {
         let generics: HashSet<String> = f.generics.iter().cloned().collect();
         let mut param_index = HashMap::new();
         let mut dest = HashSet::new();
@@ -274,7 +283,11 @@ impl<'a> FnState<'a> {
     /// Every update is a join (raise, never clear), so the state climbs a finite
     /// lattice and converges; the cap guards a future non-monotone change.
     fn loop_fixpoint(&mut self, body: &Block) {
-        let cap = self.param_index.len().saturating_add(self.locals.len()).saturating_add(4);
+        let cap = self
+            .param_index
+            .len()
+            .saturating_add(self.locals.len())
+            .saturating_add(4);
         let mut prev = self.loop_state();
         for _ in 0..cap {
             self.block(body);
@@ -291,7 +304,18 @@ impl<'a> FnState<'a> {
     /// and the frame-store count are included, so a loop inside a lambda body
     /// converges on those too.
     #[allow(clippy::type_complexity)]
-    fn loop_state(&self) -> (Vec<(String, (bool, u64, u64))>, u64, usize, u64, (bool, u64, u64), usize, u64, u64) {
+    fn loop_state(
+        &self,
+    ) -> (
+        Vec<(String, (bool, u64, u64))>,
+        u64,
+        usize,
+        u64,
+        (bool, u64, u64),
+        usize,
+        u64,
+        u64,
+    ) {
         let mut env: Vec<(String, (bool, u64, u64))> = self
             .env
             .iter()
@@ -471,7 +495,11 @@ impl<'a> FnState<'a> {
                     origins = origins.union(self.eval(el).origins);
                 }
                 // A local array literal materializes on this frame.
-                AbsVal { frame: true, origins, reads: ParamSet::default() }
+                AbsVal {
+                    frame: true,
+                    origins,
+                    reads: ParamSet::default(),
+                }
             }
             ExprKind::Tuple(xs) => {
                 let mut v = AbsVal::default();
@@ -821,4 +849,3 @@ impl<'a> FnState<'a> {
         }
     }
 }
-

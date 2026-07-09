@@ -196,7 +196,6 @@ impl<'a> Mono<'a> {
         self.gstructs.contains_key(name) || self.genums.contains_key(name)
     }
 
-
     fn enqueue(&mut self, name: &str, args: &[Type], span: Span) {
         let m = mangle(name, args);
         // Guard against runaway polymorphic recursion, where each instantiation
@@ -305,7 +304,6 @@ impl<'a> Mono<'a> {
         self.emit_ty(&applied, span)
     }
 
-
     /// Mangles ground generic references and requests their instantiation. The
     /// span travels to `enqueue` so a backstop the requested instantiation trips
     /// points at the requesting site.
@@ -346,7 +344,6 @@ impl<'a> Mono<'a> {
             }
         }
     }
-
 
     fn rewrite_item(&mut self, item: &Item) {
         match item {
@@ -500,7 +497,13 @@ impl<'a> Mono<'a> {
     /// mangled name grows without bound. Each descent gets its own path copy, so a
     /// sibling instantiation of the same generic with a different, non-crossable
     /// argument is judged on its own and never masked by a crossable sibling.
-    fn crossable(&self, t: &Type, ban_future: bool, allow_collector: bool, path: &HashSet<String>) -> bool {
+    fn crossable(
+        &self,
+        t: &Type,
+        ban_future: bool,
+        allow_collector: bool,
+        path: &HashSet<String>,
+    ) -> bool {
         match t {
             Type::Slice(_) | Type::Func(..) => false,
             // A collected value stays on the anchor thread. A channel or spawn
@@ -529,43 +532,57 @@ impl<'a> Mono<'a> {
                 }
             }
             Type::Array(b, _) => self.crossable(b, ban_future, allow_collector, path),
-            Type::Tuple(ts) => ts.iter().all(|x| self.crossable(x, ban_future, allow_collector, path)),
+            Type::Tuple(ts) => ts
+                .iter()
+                .all(|x| self.crossable(x, ban_future, allow_collector, path)),
             Type::Named(n, targs) => {
                 if path.contains(n) {
                     return true;
                 }
                 let mut child = path.clone();
                 child.insert(n.clone());
-                if !targs.iter().all(|x| self.crossable(x, ban_future, allow_collector, &child)) {
+                if !targs
+                    .iter()
+                    .all(|x| self.crossable(x, ban_future, allow_collector, &child))
+                {
                     return false;
                 }
                 if let Some(s) = self.gstructs.get(n.as_str()).copied() {
                     let subst = bind(&s.generics, targs);
                     return s.fields.iter().all(|fl| {
-                        self.crossable(&subst_apply(&fl.ty, &subst), ban_future, allow_collector, &child)
+                        self.crossable(
+                            &subst_apply(&fl.ty, &subst),
+                            ban_future,
+                            allow_collector,
+                            &child,
+                        )
                     });
                 }
                 if let Some(e) = self.genums.get(n.as_str()).copied() {
                     let subst = bind(&e.generics, targs);
                     return e.variants.iter().all(|v| {
                         v.fields.iter().all(|fl| {
-                            self.crossable(&subst_apply(&fl.ty, &subst), ban_future, allow_collector, &child)
+                            self.crossable(
+                                &subst_apply(&fl.ty, &subst),
+                                ban_future,
+                                allow_collector,
+                                &child,
+                            )
                         })
                     });
                 }
                 for item in self.items {
                     match item {
                         Item::Struct(s) if s.name == *n => {
-                            return s
-                                .fields
-                                .iter()
-                                .all(|fl| self.crossable(&fl.ty, ban_future, allow_collector, &child));
+                            return s.fields.iter().all(|fl| {
+                                self.crossable(&fl.ty, ban_future, allow_collector, &child)
+                            });
                         }
                         Item::Enum(e) if e.name == *n => {
                             return e.variants.iter().all(|v| {
-                                v.fields
-                                    .iter()
-                                    .all(|fl| self.crossable(&fl.ty, ban_future, allow_collector, &child))
+                                v.fields.iter().all(|fl| {
+                                    self.crossable(&fl.ty, ban_future, allow_collector, &child)
+                                })
                             });
                         }
                         Item::Interface(i) if i.name == *n => return false,
@@ -623,11 +640,16 @@ impl<'a> Mono<'a> {
                 for item in self.items {
                     match item {
                         Item::Struct(s) if s.name == *n => {
-                            return s.fields.iter().any(|fl| self.ptr_reaches_future(&fl.ty, &child));
+                            return s
+                                .fields
+                                .iter()
+                                .any(|fl| self.ptr_reaches_future(&fl.ty, &child));
                         }
                         Item::Enum(e) if e.name == *n => {
                             return e.variants.iter().any(|v| {
-                                v.fields.iter().any(|fl| self.ptr_reaches_future(&fl.ty, &child))
+                                v.fields
+                                    .iter()
+                                    .any(|fl| self.ptr_reaches_future(&fl.ty, &child))
                             });
                         }
                         _ => {}
@@ -666,27 +688,31 @@ impl<'a> Mono<'a> {
                 }
                 if let Some(s) = self.gstructs.get(n.as_str()).copied() {
                     let subst = bind(&s.generics, targs);
-                    return s
-                        .fields
-                        .iter()
-                        .any(|fl| self.ptr_reaches_collector(&subst_apply(&fl.ty, &subst), &child));
+                    return s.fields.iter().any(|fl| {
+                        self.ptr_reaches_collector(&subst_apply(&fl.ty, &subst), &child)
+                    });
                 }
                 if let Some(e) = self.genums.get(n.as_str()).copied() {
                     let subst = bind(&e.generics, targs);
                     return e.variants.iter().any(|v| {
-                        v.fields
-                            .iter()
-                            .any(|fl| self.ptr_reaches_collector(&subst_apply(&fl.ty, &subst), &child))
+                        v.fields.iter().any(|fl| {
+                            self.ptr_reaches_collector(&subst_apply(&fl.ty, &subst), &child)
+                        })
                     });
                 }
                 for item in self.items {
                     match item {
                         Item::Struct(s) if s.name == *n => {
-                            return s.fields.iter().any(|fl| self.ptr_reaches_collector(&fl.ty, &child));
+                            return s
+                                .fields
+                                .iter()
+                                .any(|fl| self.ptr_reaches_collector(&fl.ty, &child));
                         }
                         Item::Enum(e) if e.name == *n => {
                             return e.variants.iter().any(|v| {
-                                v.fields.iter().any(|fl| self.ptr_reaches_collector(&fl.ty, &child))
+                                v.fields
+                                    .iter()
+                                    .any(|fl| self.ptr_reaches_collector(&fl.ty, &child))
                             });
                         }
                         _ => {}
@@ -849,9 +875,7 @@ impl<'a> Mono<'a> {
                     }
                 }
                 let value = self.rw_expr(&l.value, subst, env, exp.as_ref());
-                let vt = exp
-                    .clone()
-                    .or_else(|| self.static_ty(&l.value, subst, env));
+                let vt = exp.clone().or_else(|| self.static_ty(&l.value, subst, env));
                 // A destructuring bind takes its tuple's element types, one per
                 // name; recording the whole tuple against each name would make a
                 // later generic call unify against the tuple and instantiate the
@@ -864,11 +888,12 @@ impl<'a> Mono<'a> {
                 // if the surface pass recorded this binding. Present only for a
                 // single unannotated mutable binding whose value is a tuple with an
                 // array-literal member, so no ordinary binding is reshaped.
-                let table_ty: Option<Type> = if l.mutable && l.binds.len() == 1 && l.binds[0].ty.is_none() {
-                    self.mut_tuple_types.get(&l.value.span).cloned()
-                } else {
-                    None
-                };
+                let table_ty: Option<Type> =
+                    if l.mutable && l.binds.len() == 1 && l.binds[0].ty.is_none() {
+                        self.mut_tuple_types.get(&l.value.span).cloned()
+                    } else {
+                        None
+                    };
                 let mut binds = Vec::with_capacity(l.binds.len());
                 for (i, b) in l.binds.iter().enumerate() {
                     let ty = match &b.ty {
@@ -878,13 +903,12 @@ impl<'a> Mono<'a> {
                         }
                         None => table_ty.as_ref().map(|t| self.emit_ty(t, l.value.span)),
                     };
-                    let bt = b
-                        .ty
-                        .as_ref()
-                        .map(|t| subst_apply(t, subst))
-                        .or_else(|| table_ty.clone())
-                        .or_else(|| parts.as_ref().map(|p| p[i].clone()))
-                        .or_else(|| if l.binds.len() == 1 { vt.clone() } else { None });
+                    let bt =
+                        b.ty.as_ref()
+                            .map(|t| subst_apply(t, subst))
+                            .or_else(|| table_ty.clone())
+                            .or_else(|| parts.as_ref().map(|p| p[i].clone()))
+                            .or_else(|| if l.binds.len() == 1 { vt.clone() } else { None });
                     if let Some(t) = bt {
                         env.insert(b.name.clone(), t);
                     }
@@ -1017,7 +1041,10 @@ impl<'a> Mono<'a> {
                     if self.genums.contains_key(g) && self.enum_has_variant(g, name) {
                         let (targs, missing) = self.enum_args(g, expected, &[], subst, env, name);
                         self.report_missing(&missing, g, base.span);
-                        let mg = node(ExprKind::Ident(self.instantiate(g, &targs, base.span)), base.span);
+                        let mg = node(
+                            ExprKind::Ident(self.instantiate(g, &targs, base.span)),
+                            base.span,
+                        );
                         return node(ExprKind::Field(Box::new(mg), name.clone()), e.span);
                     }
                 }
@@ -1040,9 +1067,11 @@ impl<'a> Mono<'a> {
                 Box::new(self.rw_expr(b, subst, env, None)),
                 *incl,
             ),
-            ExprKind::Tuple(xs) => {
-                ExprKind::Tuple(xs.iter().map(|x| self.rw_expr(x, subst, env, None)).collect())
-            }
+            ExprKind::Tuple(xs) => ExprKind::Tuple(
+                xs.iter()
+                    .map(|x| self.rw_expr(x, subst, env, None))
+                    .collect(),
+            ),
             ExprKind::Array(xs) => {
                 // An annotated array threads its element type to each element, so a
                 // ctor element whose own value cannot pin it,
@@ -1052,7 +1081,11 @@ impl<'a> Mono<'a> {
                     Some(Type::Array(b, _)) | Some(Type::Slice(b)) => Some(&**b),
                     _ => None,
                 };
-                ExprKind::Array(xs.iter().map(|x| self.rw_expr(x, subst, env, elem)).collect())
+                ExprKind::Array(
+                    xs.iter()
+                        .map(|x| self.rw_expr(x, subst, env, elem))
+                        .collect(),
+                )
             }
             ExprKind::Lambda(l) => {
                 let mut e2 = env.clone();
@@ -1084,7 +1117,9 @@ impl<'a> Mono<'a> {
                 // awaited slot from. It is left None by the parser and typeck; the
                 // concrete operand type is first known here.
                 let rop = self.rw_expr(op, subst, env, None);
-                let el = self.await_element_ty(op, subst, env).map(|t| self.emit_ty(&t, e.span));
+                let el = self
+                    .await_element_ty(op, subst, env)
+                    .map(|t| self.emit_ty(&t, e.span));
                 if el.is_none() {
                     self.diags.push(Diagnostic::new(
                         "the element type of this await could not be inferred; bind the future with an annotation first",
@@ -1144,14 +1179,22 @@ impl<'a> Mono<'a> {
                         .variants
                         .iter()
                         .find(|va| &va.name == v)
-                        .map(|va| va.fields.iter().map(|fld| subst_apply(&fld.ty, &fsubst)).collect())
+                        .map(|va| {
+                            va.fields
+                                .iter()
+                                .map(|fld| subst_apply(&fld.ty, &fsubst))
+                                .collect()
+                        })
                         .unwrap_or_default();
                     let cargs: Vec<Expr> = args
                         .iter()
                         .enumerate()
                         .map(|(i, a)| self.rw_expr(a, subst, env, field_tys.get(i)))
                         .collect();
-                    let mg = node(ExprKind::Ident(self.instantiate(g, &targs, base.span)), base.span);
+                    let mg = node(
+                        ExprKind::Ident(self.instantiate(g, &targs, base.span)),
+                        base.span,
+                    );
                     let nc = node(ExprKind::Field(Box::new(mg), v.clone()), callee.span);
                     return ExprKind::Call(Box::new(nc), cargs);
                 }
@@ -1194,9 +1237,14 @@ impl<'a> Mono<'a> {
                 let cargs: Vec<Expr> = args
                     .iter()
                     .enumerate()
-                    .map(|(i, a)| self.rw_arg(a, gf.params.get(i).map(|p| &p.ty), &inf_full, subst, env))
+                    .map(|(i, a)| {
+                        self.rw_arg(a, gf.params.get(i).map(|p| &p.ty), &inf_full, subst, env)
+                    })
                     .collect();
-                let mg = node(ExprKind::Ident(self.instantiate(f, &targs, callee.span)), callee.span);
+                let mg = node(
+                    ExprKind::Ident(self.instantiate(f, &targs, callee.span)),
+                    callee.span,
+                );
                 return ExprKind::Call(Box::new(mg), cargs);
             }
             if f == "alloc" && args.len() == 1 {
@@ -1235,7 +1283,10 @@ impl<'a> Mono<'a> {
                 return ExprKind::Call(Box::new(c), a);
             }
         }
-        let a = args.iter().map(|x| self.rw_expr(x, subst, env, None)).collect();
+        let a = args
+            .iter()
+            .map(|x| self.rw_expr(x, subst, env, None))
+            .collect();
         ExprKind::Call(Box::new(c), a)
     }
 
@@ -1258,7 +1309,11 @@ impl<'a> Mono<'a> {
             let new_fields: Vec<(String, Expr)> = fields
                 .iter()
                 .map(|(n, v)| {
-                    let exp = gs.fields.iter().find(|f| &f.name == n).map(|f| subst_apply(&f.ty, &fsubst));
+                    let exp = gs
+                        .fields
+                        .iter()
+                        .find(|f| &f.name == n)
+                        .map(|f| subst_apply(&f.ty, &fsubst));
                     (n.clone(), self.rw_expr(v, subst, env, exp.as_ref()))
                 })
                 .collect();
@@ -1270,7 +1325,6 @@ impl<'a> Mono<'a> {
             .collect();
         ExprKind::StructLit(name.to_string(), new_fields)
     }
-
 
     /// Infers a generic function's type arguments at one call site, seeing
     /// through continuation lambdas. Non-lambda arguments and the expected type
@@ -1311,12 +1365,20 @@ impl<'a> Mono<'a> {
         // that lives only in the lambda's result type.
         for (i, decl) in gf.params.iter().enumerate() {
             let Some(a) = args.get(i) else { continue };
-            let ExprKind::Lambda(l) = &a.kind else { continue };
+            let ExprKind::Lambda(l) = &a.kind else {
+                continue;
+            };
             // A continuation may be declared as a bare function type or wrapped in a
             // collector, as a lazy monad's `bind` takes its continuation. Unwrap the
             // collector so both shapes pin the lambda's parameters and return type.
-            let dty = if let Type::Collector(b) = &decl.ty { &**b } else { &decl.ty };
-            let Type::Func(pdecl, rdecl) = dty else { continue };
+            let dty = if let Type::Collector(b) = &decl.ty {
+                &**b
+            } else {
+                &decl.ty
+            };
+            let Type::Func(pdecl, rdecl) = dty else {
+                continue;
+            };
             let merged = union(subst, &inf);
             let mut env2 = env.clone();
             for (j, lp) in l.params.iter().enumerate() {
@@ -1416,7 +1478,13 @@ impl<'a> Mono<'a> {
     fn rw_collect_lambda(&mut self, arg: &Expr, fty: &Type, subst: &Subst, env: &Env) -> Expr {
         let lam = self.rw_lambda_pinned(arg, fty, subst, env);
         let cty = self.emit_ty(fty, arg.span);
-        node(ExprKind::Collect { ty: cty, arg: Box::new(lam) }, arg.span)
+        node(
+            ExprKind::Collect {
+                ty: cty,
+                arg: Box::new(lam),
+            },
+            arg.span,
+        )
     }
 
     fn infer_struct_args(
@@ -1429,7 +1497,10 @@ impl<'a> Mono<'a> {
     ) -> (Vec<Type>, Vec<String>) {
         if let Some(Type::Named(en, eargs)) = expected {
             if en == &gs.name && !eargs.is_empty() {
-                return (eargs.iter().map(|t| subst_apply(t, subst)).collect(), Vec::new());
+                return (
+                    eargs.iter().map(|t| subst_apply(t, subst)).collect(),
+                    Vec::new(),
+                );
             }
         }
         let params: HashSet<String> = gs.generics.iter().cloned().collect();
@@ -1456,7 +1527,10 @@ impl<'a> Mono<'a> {
         let ge = self.genums[g];
         if let Some(Type::Named(en, eargs)) = expected {
             if en == g && !eargs.is_empty() {
-                return (eargs.iter().map(|t| subst_apply(t, subst)).collect(), Vec::new());
+                return (
+                    eargs.iter().map(|t| subst_apply(t, subst)).collect(),
+                    Vec::new(),
+                );
             }
         }
         let params: HashSet<String> = ge.generics.iter().cloned().collect();
@@ -1560,7 +1634,10 @@ impl<'a> Mono<'a> {
                             // and is reported there, unchanged from before.
                             let (targs, missing) = self.enum_args(g, None, args, subst, env, v);
                             let generics = self.genums[g].generics.clone();
-                            return Some(Type::Named(g.clone(), speculative(&generics, targs, &missing)));
+                            return Some(Type::Named(
+                                g.clone(),
+                                speculative(&generics, targs, &missing),
+                            ));
                         }
                     }
                     None
@@ -1572,7 +1649,10 @@ impl<'a> Mono<'a> {
                     if self.genums.contains_key(g) && self.enum_has_variant(g, name) {
                         let (targs, missing) = self.enum_args(g, None, &[], subst, env, name);
                         let generics = self.genums[g].generics.clone();
-                        return Some(Type::Named(g.clone(), speculative(&generics, targs, &missing)));
+                        return Some(Type::Named(
+                            g.clone(),
+                            speculative(&generics, targs, &missing),
+                        ));
                     }
                 }
                 if let Type::Named(s, sargs) = self.static_ty(base, subst, env)? {
@@ -1590,14 +1670,15 @@ impl<'a> Mono<'a> {
                     // literal's fields pins is re-marked `Infer`, the poison
                     // `unify` skips, rather than left at `solve`'s int64 default.
                     let (targs, missing) = self.infer_struct_args(gs, fields, None, subst, env);
-                    Some(Type::Named(name.clone(), speculative(&gs.generics, targs, &missing)))
+                    Some(Type::Named(
+                        name.clone(),
+                        speculative(&gs.generics, targs, &missing),
+                    ))
                 } else {
                     Some(named(name))
                 }
             }
-            ExprKind::Collect { ty, .. } => {
-                Some(Type::Collector(Box::new(subst_apply(ty, subst))))
-            }
+            ExprKind::Collect { ty, .. } => Some(Type::Collector(Box::new(subst_apply(ty, subst)))),
             _ => None,
         }
     }
@@ -1630,7 +1711,10 @@ impl<'a> Mono<'a> {
             .iter()
             .filter_map(|it| match it {
                 Item::Func(f) if f.is_async => Some((
-                    f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
+                    f.params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.ty.clone()))
+                        .collect(),
                     f.ret.clone(),
                     f.span,
                 )),
@@ -1690,7 +1774,6 @@ fn builtin_ret(name: &str) -> Option<Type> {
         _ => None,
     }
 }
-
 
 fn node(kind: ExprKind, span: Span) -> Expr {
     Expr { kind, span }
@@ -1801,7 +1884,13 @@ fn speculative(generics: &[String], targs: Vec<Type>, missing: &[String]) -> Vec
     generics
         .iter()
         .zip(targs)
-        .map(|(g, t)| if missing.iter().any(|m| m == g) { Type::Infer } else { t })
+        .map(|(g, t)| {
+            if missing.iter().any(|m| m == g) {
+                Type::Infer
+            } else {
+                t
+            }
+        })
         .collect()
 }
 
@@ -1810,9 +1899,10 @@ fn subst_apply(ty: &Type, subst: &Subst) -> Type {
         Type::Named(n, args) if args.is_empty() => {
             subst.get(n).cloned().unwrap_or_else(|| named(n))
         }
-        Type::Named(n, args) => {
-            Type::Named(n.clone(), args.iter().map(|a| subst_apply(a, subst)).collect())
-        }
+        Type::Named(n, args) => Type::Named(
+            n.clone(),
+            args.iter().map(|a| subst_apply(a, subst)).collect(),
+        ),
         Type::Ptr(b) => Type::Ptr(Box::new(subst_apply(b, subst))),
         Type::RawPtr(b) => Type::RawPtr(Box::new(subst_apply(b, subst))),
         Type::Slice(b) => Type::Slice(Box::new(subst_apply(b, subst))),
@@ -1964,7 +2054,10 @@ mod tests {
         );
         assert!(n.contains(&"id$int64".to_string()), "{n:?}");
         assert!(n.contains(&"id$float64".to_string()), "{n:?}");
-        assert!(!n.contains(&"id".to_string()), "generic def must not survive: {n:?}");
+        assert!(
+            !n.contains(&"id".to_string()),
+            "generic def must not survive: {n:?}"
+        );
     }
 
     #[test]
@@ -2042,7 +2135,9 @@ mod tests {
                         assert!(
                             !a.is_empty() || n != "T" && n != "A",
                             "LEAK: func {} param {} typed bare param {}",
-                            f.name, p.name, n
+                            f.name,
+                            p.name,
+                            n
                         );
                     }
                 }
@@ -2050,7 +2145,8 @@ mod tests {
                     assert!(
                         n != "T" && n != "A",
                         "LEAK: func {} returns bare param {}",
-                        f.name, n
+                        f.name,
+                        n
                     );
                 }
             }
@@ -2069,7 +2165,10 @@ mod tests {
              }",
         );
         eprintln!("EMITTED NAMES: {n:?}");
-        assert!(n.contains(&"Pair$int64$int64".to_string()), "missing Pair$int64$int64: {n:?}");
+        assert!(
+            n.contains(&"Pair$int64$int64".to_string()),
+            "missing Pair$int64$int64: {n:?}"
+        );
         assert!(
             n.contains(&"identity$Pair$int64$int64".to_string()),
             "MISSING correct identity monomorph: {n:?}"
@@ -2152,7 +2251,10 @@ mod tests {
                return 0\n}",
         );
         assert!(n.iter().any(|x| x == "bind$int64$int64"), "{n:?}");
-        assert!(!n.iter().any(|x| x.contains('A')), "a raw generic name leaked into a mangled instance: {n:?}");
+        assert!(
+            !n.iter().any(|x| x.contains('A')),
+            "a raw generic name leaked into a mangled instance: {n:?}"
+        );
     }
 
     #[test]
@@ -2179,7 +2281,11 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        expand_with_diags(&m, &MutTupleTypes::new()).1.into_iter().map(|d| d.msg).collect()
+        expand_with_diags(&m, &MutTupleTypes::new())
+            .1
+            .into_iter()
+            .map(|d| d.msg)
+            .collect()
     }
 
     #[test]
@@ -2192,7 +2298,8 @@ mod tests {
              func main() -> int32 {\n  x := Opt.None\n  return 0\n}",
         );
         assert!(
-            d.iter().any(|m| m.contains("cannot infer the type parameter 'T' for 'Opt'")),
+            d.iter()
+                .any(|m| m.contains("cannot infer the type parameter 'T' for 'Opt'")),
             "{d:?}"
         );
     }
@@ -2220,7 +2327,8 @@ mod tests {
              func main() -> int32 {\n  r := pick(Opt.None, Opt.Some(2.5))\n  return 0\n}",
         );
         assert!(
-            !d.iter().any(|m| m.contains("cannot infer") || m.contains("could not infer")),
+            !d.iter()
+                .any(|m| m.contains("cannot infer") || m.contains("could not infer")),
             "{d:?}"
         );
         let n = names(
@@ -2243,7 +2351,8 @@ mod tests {
              func main() -> int32 {\n  r := take(Opt.None)\n  println(r)\n  return 0\n}",
         );
         assert!(
-            d.iter().any(|m| m.contains("cannot infer the type parameter 'T' for 'take'")),
+            d.iter()
+                .any(|m| m.contains("cannot infer the type parameter 'T' for 'take'")),
             "{d:?}"
         );
     }
@@ -2274,7 +2383,10 @@ mod tests {
             "enum Opt<T> { Some(v: T), None }\n\
              func main() -> int32 {\n  x: Opt<Opt<float64>> = Opt.Some(Opt.None)\n  return 0\n}",
         );
-        assert!(n.iter().any(|x| x == "Opt$float64"), "inner None must be Opt$float64: {n:?}");
+        assert!(
+            n.iter().any(|x| x == "Opt$float64"),
+            "inner None must be Opt$float64: {n:?}"
+        );
     }
 
     #[test]
@@ -2284,7 +2396,8 @@ mod tests {
              func main() -> int32 {\n  x := pick()\n  println(x)\n  return 0\n}",
         );
         assert!(
-            d.iter().any(|m| m.contains("cannot infer the type parameter 'T' for 'pick'")),
+            d.iter()
+                .any(|m| m.contains("cannot infer the type parameter 'T' for 'pick'")),
             "{d:?}"
         );
     }
@@ -2306,7 +2419,8 @@ mod tests {
              func main() -> int32 { return 0 }",
         );
         assert!(
-            d.iter().any(|m| m.contains("methods on the generic type 'Box'")),
+            d.iter()
+                .any(|m| m.contains("methods on the generic type 'Box'")),
             "{d:?}"
         );
     }
@@ -2405,7 +2519,11 @@ mod tests {
              async func amain() -> int64 {{\n  a := await val(3)\n  return a\n}}"
         ));
         assert!(found, "an await must be present");
-        assert_eq!(ty, Some(named("int64")), "element is the async func's declared return");
+        assert_eq!(
+            ty,
+            Some(named("int64")),
+            "element is the async func's declared return"
+        );
     }
 
     #[test]
@@ -2415,7 +2533,11 @@ mod tests {
              async func amain() -> int64 {{\n  fa: Future<int64> = fnew()\n  a := await fa\n  return a\n}}"
         ));
         assert!(found);
-        assert_eq!(ty, Some(named("int64")), "element unwraps the annotated Future<int64>");
+        assert_eq!(
+            ty,
+            Some(named("int64")),
+            "element unwraps the annotated Future<int64>"
+        );
     }
 
     #[test]
@@ -2439,7 +2561,8 @@ mod tests {
              async func amain() -> int64 {{\n  a := await fwrap(nullh())\n  return a\n}}"
         ));
         assert!(
-            d.iter().any(|m| m.contains("the element type of this await could not be inferred")),
+            d.iter()
+                .any(|m| m.contains("the element type of this await could not be inferred")),
             "{d:?}"
         );
     }
@@ -2451,7 +2574,8 @@ mod tests {
              func main() -> int32 {\n  r := async_run(amain())\n  println(r)\n  return 0\n}",
         );
         assert!(
-            d.iter().any(|m| m.contains("calling an async func needs Future from std.async.future")),
+            d.iter()
+                .any(|m| m.contains("calling an async func needs Future from std.async.future")),
             "{d:?}"
         );
     }
@@ -2467,7 +2591,8 @@ mod tests {
              func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
         ));
         assert!(
-            d.iter().any(|m| m.contains("an async func cannot take 'b'") && m.contains("view the caller's frame")),
+            d.iter().any(|m| m.contains("an async func cannot take 'b'")
+                && m.contains("view the caller's frame")),
             "{d:?}"
         );
     }
@@ -2480,7 +2605,11 @@ mod tests {
              async func amain() -> int64 {{ return 1 }}\n\
              func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
         ));
-        assert!(d.iter().any(|m| m.contains("an async func cannot take 'b'")), "{d:?}");
+        assert!(
+            d.iter()
+                .any(|m| m.contains("an async func cannot take 'b'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2490,7 +2619,10 @@ mod tests {
              async func g() -> Box<int64[]> {{ return Box {{ x: [] }} }}\n\
              func main() -> int32 {{ r := async_run(g())\n  println(1)\n  return 0 }}"
         ));
-        assert!(d.iter().any(|m| m.contains("an async func cannot return")), "{d:?}");
+        assert!(
+            d.iter().any(|m| m.contains("an async func cannot return")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2499,7 +2631,10 @@ mod tests {
             "struct Box<T> { x: T }\n\
              func main() -> int32 {\n  b: Box<int64[]> = Box { x: [1, 2] }\n  t, e := spawn(lambda () -> void {\n    println(b.x.len)\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n  return 0\n}",
         );
-        assert!(d.iter().any(|m| m.contains("spawn cannot capture 'b'")), "{d:?}");
+        assert!(
+            d.iter().any(|m| m.contains("spawn cannot capture 'b'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2508,7 +2643,10 @@ mod tests {
             "struct Box<T> { x: T }\n\
              func main() -> int32 {\n  b: Box<int64[]> = Box { x: [1, 2] }\n  s := submit(lambda () -> void {\n    println(b.x.len)\n  })\n  s.ignore()\n  return 0\n}",
         );
-        assert!(d.iter().any(|m| m.contains("submit cannot capture 'b'")), "{d:?}");
+        assert!(
+            d.iter().any(|m| m.contains("submit cannot capture 'b'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2518,7 +2656,11 @@ mod tests {
         let d = diags(&format!(
             "{FUTURE_DECL}func main() -> int32 {{\n  fs: Future<int64[]> = Future {{ h: hh(), gen: 0 }}\n  return 0\n}}"
         ));
-        assert!(d.iter().any(|m| m.contains("a future element cannot contain a slice")), "{d:?}");
+        assert!(
+            d.iter()
+                .any(|m| m.contains("a future element cannot contain a slice")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2548,7 +2690,11 @@ mod tests {
              async func amain() -> int64 {{ return 1 }}\n\
              func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
         ));
-        assert!(!d.iter().any(|m| m.contains("an async func cannot take 'x'")), "{d:?}");
+        assert!(
+            !d.iter()
+                .any(|m| m.contains("an async func cannot take 'x'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2575,7 +2721,11 @@ mod tests {
              async func amain() -> int64 {{ return 1 }}\n\
              func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
         ));
-        assert!(d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+        assert!(
+            d.iter()
+                .any(|m| m.contains("an async func cannot take 'p'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2584,7 +2734,10 @@ mod tests {
             "{FUTURE_DECL}async func amain() -> int64 {{\n  return 1\n}}\n\
              func main() -> int32 {{\n  r := async_run(amain())\n  println(r)\n  return 0\n}}"
         ));
-        assert!(n.contains(&"Future$int64".to_string()), "the Future<int64> instance must be forced: {n:?}");
+        assert!(
+            n.contains(&"Future$int64".to_string()),
+            "the Future<int64> instance must be forced: {n:?}"
+        );
     }
 
     #[test]
@@ -2601,8 +2754,14 @@ mod tests {
              func main() -> int32 { return 0 }",
         );
         eprintln!("MATCH PAYLOAD NAMES = {n:?}");
-        assert!(n.contains(&"id$float64".to_string()), "expected id$float64, got {n:?}");
-        assert!(!n.contains(&"id$int64".to_string()), "wrong int64 monomorph present: {n:?}");
+        assert!(
+            n.contains(&"id$float64".to_string()),
+            "expected id$float64, got {n:?}"
+        );
+        assert!(
+            !n.contains(&"id$int64".to_string()),
+            "wrong int64 monomorph present: {n:?}"
+        );
     }
 
     fn diag_msgs(src: &str) -> Vec<String> {
@@ -2662,12 +2821,17 @@ mod tests {
                return 0\n\
              }",
         );
-        let backstop = d
-            .iter()
-            .find(|x| x.msg.contains("an interface cannot be a generic type argument"));
+        let backstop = d.iter().find(|x| {
+            x.msg
+                .contains("an interface cannot be a generic type argument")
+        });
         assert!(backstop.is_some(), "backstop must fire: {d:?}");
         let s = backstop.unwrap().span;
-        assert_ne!((s.lo, s.hi), (0, 0), "the backstop must point at a real site: {s:?}");
+        assert_ne!(
+            (s.lo, s.hi),
+            (0, 0),
+            "the backstop must point at a real site: {s:?}"
+        );
     }
 
     #[test]
@@ -2680,7 +2844,11 @@ mod tests {
              async func amain() -> int64 {{ return 1 }}\n\
              func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
         ));
-        assert!(d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+        assert!(
+            d.iter()
+                .any(|m| m.contains("an async func cannot take 'p'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2694,7 +2862,11 @@ mod tests {
              async func amain() -> int64 {{ return 1 }}\n\
              func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
         ));
-        assert!(d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+        assert!(
+            d.iter()
+                .any(|m| m.contains("an async func cannot take 'p'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2708,7 +2880,11 @@ mod tests {
              async func amain() -> int64 {{ return 1 }}\n\
              func main() -> int32 {{ r := async_run(amain())\n  println(r)\n  return 0 }}"
         ));
-        assert!(!d.iter().any(|m| m.contains("an async func cannot take 'p'")), "{d:?}");
+        assert!(
+            !d.iter()
+                .any(|m| m.contains("an async func cannot take 'p'")),
+            "{d:?}"
+        );
     }
 
     #[test]
@@ -2723,8 +2899,11 @@ mod tests {
         let muts = MutTupleTypes::new();
         let mut mono = Mono::new(&m, &muts);
         for i in 0..(INSTANTIATION_LIMIT + 5) {
-            mono.worklist
-                .push((format!("Runaway{i}"), Vec::new(), Span::new(i as u32 + 1, i as u32 + 2)));
+            mono.worklist.push((
+                format!("Runaway{i}"),
+                Vec::new(),
+                Span::new(i as u32 + 1, i as u32 + 2),
+            ));
         }
         let _ = mono.run();
         let limit = mono

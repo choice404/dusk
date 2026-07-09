@@ -1,0 +1,436 @@
+// tcexpr: expression inference for the S3a type layer.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tcbin
+@import tccall
+@import tciface
+@import tcmatch
+@import tcown
+@import tcesc
+
+func ident_variant_value_msg(en: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "use the qualified form '")
+    sb_push(b, en)
+    sb_push_char(b, 46)
+    sb_push(b, name)
+    sb_push(b, "' to name an enum value; the unqualified variant name is not one")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func field_dup_msg(fname: string, sname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "field '")
+    sb_push(b, fname)
+    sb_push(b, "' is set more than once in '")
+    sb_push(b, sname)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func no_field_msg(sname: string, fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, sname)
+    sb_push(b, "' has no field '")
+    sb_push(b, fname)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func wrong_field_msg(sname: string, fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "field '")
+    sb_push(b, fname)
+    sb_push(b, "' of '")
+    sb_push(b, sname)
+    sb_push(b, "' is set to a value of the wrong type")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func missing_field_msg(sname: string, fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "struct literal for '")
+    sb_push(b, sname)
+    sb_push(b, "' is missing field '")
+    sb_push(b, fname)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func array_field_msg(fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a fixed array has no field '")
+    sb_push(b, fname)
+    sb_push(b, "'; only '.len' is available")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func error_field_msg(fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "error has no field '")
+    sb_push(b, fname)
+    sb_push(b, "'; it carries only 'message'")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64 {
+    sigs: *TypeSigs = (*tc).sigtab
+    mut i: int64 = 0
+    while i < st.len {
+        f: FieldSig = vec_get((*sigs).fields, st.off + i)
+        if str_eq(f.name, fname) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
+    structs: *Map<StructSig> = (*tc).structs
+    if !map_has(structs, sname) { return ty_unknown((*tc).ty) }
+    st: StructSig = sig_struct((*tc).sigtab, sname)
+    idx: int64 = struct_field_index(tc, st, fname)
+    if idx < 0 { return ty_unknown((*tc).ty) }
+    f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + idx)
+    return f.ty
+}
+
+func base_named_field_ty(tc: *TypeChecker, base_ty: int64, fname: string) -> int64 {
+    n: TyNode = ty_get((*tc).ty, base_ty)
+    if n.kind == tyk_named() {
+        return struct_field_ty(tc, ty_name((*tc).ty, base_ty), fname)
+    }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        if inner.kind == tyk_named() {
+            return struct_field_ty(tc, ty_name((*tc).ty, n.a), fname)
+        }
+    }
+    return ty_unknown((*tc).ty)
+}
+
+func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    vals: *Vector<int64> = alloc(vec_new())
+    mut vi: int64 = 0
+    while vi < len {
+        val_id: int64 = vec_get((*a).kids, off + vi + 1)
+        vec_push(vals, infer_expr(tc, val_id))
+        vi = vi + 2
+    }
+    structs: *Map<StructSig> = (*tc).structs
+    if !map_has(structs, name) { return }
+    st: StructSig = sig_struct((*tc).sigtab, name)
+    mut i: int64 = 0
+    while i < len {
+        fname: string = ast_name(a, vec_get((*a).kids, off + i))
+        mut j: int64 = i + 2
+        while j < len {
+            if str_eq(fname, ast_name(a, vec_get((*a).kids, off + j))) {
+                tc_emit(tc, field_dup_msg(fname, name), lo, hi)
+            }
+            j = j + 2
+        }
+        i = i + 2
+    }
+    mut k: int64 = 0
+    while k < len {
+        fname2: string = ast_name(a, vec_get((*a).kids, off + k))
+        val_id2: int64 = vec_get((*a).kids, off + k + 1)
+        val: ExprNode = vec_get((*a).exprs, val_id2)
+        idx: int64 = struct_field_index(tc, st, fname2)
+        if idx < 0 {
+            tc_emit(tc, no_field_msg(name, fname2), val.lo, val.hi)
+        } else if !st.is_gen {
+            fld: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + idx)
+            actual: int64 = vec_get(vals, k / 2)
+            if !compat((*tc).ty, fld.ty, actual) {
+                tc_emit(tc, wrong_field_msg(name, fname2), val.lo, val.hi)
+            }
+            check_int_fits(tc, val_id2, fld.ty)
+            embeds: *Map<TyList> = (*tc).embed_fields
+            if map_has(embeds, name) {
+                raws: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+                raw: int64 = sig_ty_at((*tc).sigtab, raws, idx)
+                check_slice_covariance(tc, raw, actual, val_id2, val.lo, val.hi)
+                reject_collector_iface_box(tc, raw, actual, val.lo, val.hi)
+            }
+        }
+        k = k + 2
+    }
+    mut m: int64 = 0
+    while m < st.len {
+        fld2: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + m)
+        mut found: bool = false
+        mut n: int64 = 0
+        while n < len {
+            if str_eq(fld2.name, ast_name(a, vec_get((*a).kids, off + n))) { found = true }
+            n = n + 2
+        }
+        if !found { tc_emit(tc, missing_field_msg(name, fld2.name), lo, hi) }
+        m = m + 1
+    }
+}
+
+func infer_array(tc: *TypeChecker, off: int64, len: int64) -> int64 {
+    mut elem: int64 = ty_unknown((*tc).ty)
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        elem = infer_expr(tc, vec_get((*a).kids, off + i))
+        i = i + 1
+    }
+    return ty_slice((*tc).ty, elem)
+}
+
+func infer_tuple(tc: *TypeChecker, off: int64, len: int64) -> int64 {
+    xs: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        vec_push(xs, infer_expr(tc, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return ty_tuple((*tc).ty, xs)
+}
+
+func infer_args(tc: *TypeChecker, off: int64, len: int64) -> *Vector<int64> {
+    out: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        vec_push(out, infer_expr(tc, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return out
+}
+
+export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *Vector<string>) -> int64 {
+    a: *Ast = (*tc).ast
+    ps: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < e.b {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
+        vec_push(ps, tc_type(tc, p.ty))
+        i = i + 1
+    }
+    saved_ret: int64 = (*tc).cur_ret
+    saved_raw_ret: int64 = (*tc).cur_raw_ret
+    saved_depth: int64 = (*tc).branch_depth
+    (*tc).cur_ret = tc_raw_type(tc, e.c)
+    (*tc).cur_raw_ret = tc_raw_type(tc, e.c)
+    (*tc).branch_depth = 0
+    push_scope(tc)
+    mut j: int64 = 0
+    while j < e.b {
+        p2: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + j))
+        pname: string = ast_name(a, p2.name)
+        declare(tc, pname, vec_get(ps, j))
+        set_esc(tc, pname, false, false)
+        j = j + 1
+    }
+    mut b: int64 = 0
+    while b < vec_len(borrowed) {
+        declare_own(tc, vec_get(borrowed, b), own_borrow())
+        b = b + 1
+    }
+    check_block_no_scope(tc, e.d)
+    pop_scope(tc)
+    ret: int64 = (*tc).cur_ret
+    rn: TyNode = ty_get((*tc).ty, ret)
+    if rn.kind != tyk_unit() && !block_returns(a, e.d) {
+        tc_emit(tc, "not all paths in this lambda return a value", e.lo, e.hi)
+    }
+    (*tc).cur_ret = saved_ret
+    (*tc).cur_raw_ret = saved_raw_ret
+    (*tc).branch_depth = saved_depth
+    return ty_func((*tc).ty, ps, ret)
+}
+
+func infer_lambda_sig(tc: *TypeChecker, e: ExprNode) -> int64 {
+    borrowed: *Vector<string> = alloc(vec_new())
+    return infer_lambda_with_borrows(tc, e, borrowed)
+}
+
+func walk_match_expr(tc: *TypeChecker, e: ExprNode) -> void {
+    st: int64 = infer_expr(tc, e.a)
+    scrut_esc: EscPair = value_escape(tc, e.a)
+    a: *Ast = (*tc).ast
+    (*tc).branch_depth = (*tc).branch_depth + 1
+    mut i: int64 = 0
+    while i < e.c {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
+        push_scope(tc)
+        bind_match_arm(tc, arm.pat)
+        bind_match_arm_escape(tc, arm.pat, e.a, scrut_esc)
+        check_block_no_scope(tc, arm.body)
+        pop_scope(tc)
+        i = i + 1
+    }
+    (*tc).branch_depth = (*tc).branch_depth - 1
+    check_match_scrutinee(tc, st, e.a, e.b, e.c)
+}
+
+export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_int() {
+        mut w: int64 = 0
+        if e.b >= 0 { w = int_suffix_width(ast_name(a, e.b)) }
+        if w != 0 { check_int_value_fits(tc, e.a, w, e.lo, e.hi) }
+        return ty_int((*tc).ty, w)
+    }
+    if e.kind == xk_float() {
+        mut fw: int64 = 0
+        if e.b >= 0 { fw = float_suffix_width(ast_name(a, e.b)) }
+        return ty_float((*tc).ty, fw)
+    }
+    if e.kind == xk_bool() { return ty_bool((*tc).ty) }
+    if e.kind == xk_char() { return ty_char((*tc).ty) }
+    if e.kind == xk_rune() { return ty_rune((*tc).ty) }
+    if e.kind == xk_str() { return ty_str((*tc).ty) }
+    if e.kind == xk_ident() {
+        name: string = ast_name(a, e.a)
+        check_ident_move_use(tc, name, e.lo, e.hi)
+        asyncs: *Map<int64> = (*tc).async_fns
+        if map_has(asyncs, name) && !is_local(tc, name) {
+            bmsg: *StringBuilder = alloc(sb_new())
+            sb_push_char(bmsg, 39)
+            sb_push(bmsg, name)
+            sb_push(bmsg, "' is async; call it with await or start it with async_run")
+            outmsg: string = substring(sb_cstr(bmsg), 0, sb_size(bmsg))
+            sb_free(bmsg)
+            free(bmsg)
+            tc_emit(tc, outmsg, e.lo, e.hi)
+        }
+        if !is_local(tc, name) && !sig_has_fn((*tc).sigtab, name) {
+            en: string = variant_owner((*tc).sigtab, name)
+            if str_len(en) > 0 {
+                tc_emit(tc, ident_variant_value_msg(en, name), e.lo, e.hi)
+            }
+        }
+        return lookup(tc, name)
+    }
+    if e.kind == xk_unary() {
+        t: int64 = infer_expr(tc, e.b)
+        return check_unary(tc, e.a, t, e.lo, e.hi)
+    }
+    if e.kind == xk_binary() {
+        lt: int64 = infer_expr(tc, e.b)
+        rt: int64 = infer_expr(tc, e.c)
+        res: int64 = check_binary(tc, e.a, lt, rt, e.lo, e.hi)
+        if e.a == bop_shl() || e.a == bop_shr() { check_shift_amount(tc, e.c, res, e.lo, e.hi) }
+        if e.a == bop_pow() { check_pow_exponent(tc, lt, rt, e.c, e.lo, e.hi) }
+        return res
+    }
+    if e.kind == xk_call() {
+        return infer_call(tc, e.a, e.b, e.c)
+    }
+    if e.kind == xk_field() {
+        base_ty: int64 = infer_expr(tc, e.a)
+        fname: string = ast_name(a, e.b)
+        bn: TyNode = ty_get((*tc).ty, base_ty)
+        if bn.kind == tyk_array() {
+            if str_eq(fname, "len") { return ty_int((*tc).ty, 64) }
+            tc_emit(tc, array_field_msg(fname), e.lo, e.hi)
+            return ty_unknown((*tc).ty)
+        }
+        if bn.kind == tyk_error() {
+            if str_eq(fname, "message") { return ty_str((*tc).ty) }
+            tc_emit(tc, error_field_msg(fname), e.lo, e.hi)
+            return ty_str((*tc).ty)
+        }
+        return ty_unknown((*tc).ty)
+    }
+    if e.kind == xk_index() {
+        base_ty2: int64 = infer_expr(tc, e.a)
+        infer_expr(tc, e.b)
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        bn2: TyNode = ty_get((*tc).ty, base_ty2)
+        if idx.kind == xk_range() { return ty_slice((*tc).ty, elem_of((*tc).ty, base_ty2)) }
+        if bn2.kind == tyk_slice() || bn2.kind == tyk_array() || bn2.kind == tyk_str() || bn2.kind == tyk_collector() || bn2.kind == tyk_unknown() {
+            return elem_of((*tc).ty, base_ty2)
+        }
+        // Stage0 currently leaves non-indexable scalar indexing permissive here;
+        // this stays aligned rather than inventing a new diagnostic in S3a.
+        return ty_unknown((*tc).ty)
+    }
+    if e.kind == xk_range() {
+        infer_expr(tc, e.a)
+        infer_expr(tc, e.b)
+        return ty_unknown((*tc).ty)
+    }
+    if e.kind == xk_tuple() { return infer_tuple(tc, e.a, e.b) }
+    if e.kind == xk_array() { return infer_array(tc, e.a, e.b) }
+    if e.kind == xk_struct_lit() {
+        name2: string = ast_name(a, e.a)
+        check_struct_lit(tc, name2, e.b, e.c, e.lo, e.hi)
+        if str_eq(name2, "Future") { return ty_future((*tc).ty, ty_unknown((*tc).ty)) }
+        return named_ty((*tc).ty, name2)
+    }
+    if e.kind == xk_lambda() { return infer_lambda_sig(tc, e) }
+    if e.kind == xk_match() {
+        walk_match_expr(tc, e)
+        return ty_unknown((*tc).ty)
+    }
+    if e.kind == xk_do() {
+        mut i: int64 = 0
+        while i < e.c {
+            d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + i))
+            infer_expr(tc, d.expr)
+            i = i + 1
+        }
+        return ty_unknown((*tc).ty)
+    }
+    if e.kind == xk_await() {
+        infer_expr(tc, e.a)
+        if !(*tc).types_only {
+            tc_emit(tc, "'await' cannot appear mid-expression; give the awaited value a name, as in v, e := await f", e.lo, e.hi)
+        }
+        return ty_unknown((*tc).ty)
+    }
+    if e.kind == xk_sizeof_type() { return ty_int((*tc).ty, 64) }
+    if e.kind == xk_collect() {
+        inner: int64 = tc_type(tc, e.a)
+        actual: int64 = infer_expr(tc, e.b)
+        arg: ExprNode = vec_get((*a).exprs, e.b)
+        if !compat((*tc).ty, inner, actual) {
+            tc_emit(tc, "the collected value's type does not match the collector element type", arg.lo, arg.hi)
+        }
+        check_int_fits(tc, e.b, inner)
+        check_collect_mint(tc, e, inner)
+        return ty_collector((*tc).ty, inner)
+    }
+    return ty_unknown((*tc).ty)
+}

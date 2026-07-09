@@ -45,7 +45,10 @@ mod tests {
         // share directory does not exist and the baked crate root wins.
         let lib = asset_dir("lib");
         assert!(lib.ends_with("lib"), "{lib:?}");
-        assert!(lib.join("std").is_dir(), "the checkout stdlib should exist: {lib:?}");
+        assert!(
+            lib.join("std").is_dir(),
+            "the checkout stdlib should exist: {lib:?}"
+        );
     }
 
     #[test]

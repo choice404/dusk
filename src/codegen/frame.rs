@@ -51,7 +51,11 @@ pub struct Prefix {
 /// with the same signature inputs from both sides, is what keeps the poll's
 /// parameter GEPs and the call site's argument stores at identical offsets.
 pub fn frame_prefix(ret: (u64, u64), params: &[(u64, u64)]) -> Prefix {
-    assert!(ret.1 <= 8, "an async return type wants alignment {} > 8", ret.1);
+    assert!(
+        ret.1 <= 8,
+        "an async return type wants alignment {} > 8",
+        ret.1
+    );
     let result_region = align_up(ret.0.max(1), 8);
     let mut off = RESULT_OFF + result_region;
     let mut param_offs = Vec::with_capacity(params.len());
@@ -134,7 +138,9 @@ impl FrameCtx {
 }
 
 fn push_gep(s: &mut String, name: &str, off: u64) {
-    s.push_str(&format!("  {name} = getelementptr i8, ptr %frame, i64 {off}\n"));
+    s.push_str(&format!(
+        "  {name} = getelementptr i8, ptr %frame, i64 {off}\n"
+    ));
 }
 
 #[cfg(test)]

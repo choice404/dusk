@@ -23,7 +23,10 @@ use super::ParamSet;
 /// than once, or introduced by a loop or match binder is excluded, which keeps
 /// the resolution sound without modeling a branch join: a name that survives is
 /// bound to one fixed function over the whole body, so its call is that function.
-pub(crate) fn resolvable_fn_binds(f: &Func, module_fns: &HashSet<String>) -> HashMap<String, String> {
+pub(crate) fn resolvable_fn_binds(
+    f: &Func,
+    module_fns: &HashSet<String>,
+) -> HashMap<String, String> {
     let mut candidate: HashMap<String, String> = HashMap::new();
     let mut poisoned: HashSet<String> = HashSet::new();
     collect_fn_binds_block(&f.body, module_fns, &mut candidate, &mut poisoned);
@@ -208,7 +211,11 @@ impl FnState<'_> {
             }
         }
         let _ = self.walk_lambda_inline(l, &[]);
-        AbsVal { frame, origins, reads }
+        AbsVal {
+            frame,
+            origins,
+            reads,
+        }
     }
 
     /// Runs the ordinary function transfer over the lambda body as if it were a
@@ -234,7 +241,8 @@ impl FnState<'_> {
             body: l.body.clone(),
         };
         let (sum, caps) = self.s.transfer_lambda(&syn, self.summaries);
-        self.lambda_returns.insert(span, sum.returns_alias.union(sum.reads_through));
+        self.lambda_returns
+            .insert(span, sum.returns_alias.union(sum.reads_through));
         self.lambda_sinks.insert(span, sum.sinks);
         // The collect subset rides beside the full sink set, so a direct call of a
         // local bound to a minting lambda names the mint, not a channel.
@@ -281,7 +289,8 @@ impl FnState<'_> {
             // reads that synthetic transfer while the frame-store walk reads this
             // inline one; seeding a scalar parameter here over-approximated an
             // identity map into a false frame-store the return gate never saw.
-            let seed = if self.s.is_view(&p.ty, &self.generics) || self.s.reaches_managed_ptr(&p.ty) {
+            let seed = if self.s.is_view(&p.ty, &self.generics) || self.s.reaches_managed_ptr(&p.ty)
+            {
                 seeds.get(i).copied().unwrap_or_default()
             } else {
                 AbsVal::default()
@@ -320,7 +329,12 @@ impl FnState<'_> {
     /// `foreach` returns nothing but still runs its function over the elements,
     /// so its body's stores are recorded. None for any other name, so the
     /// builtin falls back to its audited summary.
-    pub(super) fn higher_order_val(&mut self, name: &str, args: &[Expr], argvals: &[AbsVal]) -> Option<AbsVal> {
+    pub(super) fn higher_order_val(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        argvals: &[AbsVal],
+    ) -> Option<AbsVal> {
         match name {
             "map" if args.len() == 2 => Some(self.mapper_result(&args[1], &[argvals[0]])),
             "filter" if args.len() == 2 => {
@@ -332,8 +346,12 @@ impl FnState<'_> {
                     Some(AbsVal::default())
                 }
             }
-            "fold" if args.len() == 3 => Some(self.mapper_result(&args[2], &[argvals[1], argvals[0]])),
-            "reduce" if args.len() == 2 => Some(self.mapper_result(&args[1], &[argvals[0], argvals[0]])),
+            "fold" if args.len() == 3 => {
+                Some(self.mapper_result(&args[2], &[argvals[1], argvals[0]]))
+            }
+            "reduce" if args.len() == 2 => {
+                Some(self.mapper_result(&args[1], &[argvals[0], argvals[0]]))
+            }
             "foreach" if args.len() == 2 => {
                 let _ = self.mapper_result(&args[1], &[argvals[0]]);
                 Some(AbsVal::default())
@@ -351,9 +369,7 @@ impl FnState<'_> {
     fn mapper_result(&mut self, fexpr: &Expr, seeds: &[AbsVal]) -> AbsVal {
         match &fexpr.kind {
             ExprKind::Lambda(l) => self.walk_lambda_inline(l, seeds),
-            ExprKind::Ident(n)
-                if !self.locals.contains(n) && !self.param_index.contains_key(n) =>
-            {
+            ExprKind::Ident(n) if !self.locals.contains(n) && !self.param_index.contains_key(n) => {
                 match self.summaries.get(n).cloned() {
                     Some(sum) => {
                         let mut r = AbsVal::default();

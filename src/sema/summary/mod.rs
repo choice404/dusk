@@ -282,10 +282,7 @@ fn render_flows(flows: &[(u8, u8)]) -> String {
     let mut flows = flows.to_vec();
     flows.sort_unstable();
     flows.dedup();
-    let parts: Vec<String> = flows
-        .iter()
-        .map(|(i, j)| format!("({i},{j})"))
-        .collect();
+    let parts: Vec<String> = flows.iter().map(|(i, j)| format!("({i},{j})")).collect();
     format!("[{}]", parts.join(","))
 }
 
@@ -316,7 +313,10 @@ fn method_as_fn(ty: &str, m: &Func) -> Func {
     let mut params = Vec::with_capacity(m.params.len() + 1);
     params.push(self_param);
     params.extend(m.params.iter().cloned());
-    Func { params, ..m.clone() }
+    Func {
+        params,
+        ..m.clone()
+    }
 }
 
 impl Summarizer {
@@ -334,7 +334,11 @@ impl Summarizer {
                 }
                 Item::Struct(st) => {
                     let gens: HashSet<String> = st.generics.iter().cloned().collect();
-                    let fields = st.fields.iter().map(|f| (f.name.clone(), f.ty.clone())).collect();
+                    let fields = st
+                        .fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect();
                     structs.insert(st.name.clone(), (gens, fields));
                 }
                 Item::Enum(en) => {
@@ -347,8 +351,10 @@ impl Summarizer {
                     enums.insert(en.name.clone(), (gens, all));
                     for v in &en.variants {
                         if !v.fields.is_empty() {
-                            variant_payloads
-                                .insert(v.name.clone(), v.fields.iter().map(|f| f.ty.clone()).collect());
+                            variant_payloads.insert(
+                                v.name.clone(),
+                                v.fields.iter().map(|f| f.ty.clone()).collect(),
+                            );
                         }
                     }
                 }
@@ -389,8 +395,11 @@ impl Summarizer {
                 _ => None,
             })
             .collect();
-        let mut summaries: HashMap<String, EscapeSummary> =
-            self.order.iter().map(|n| (n.clone(), EscapeSummary::default())).collect();
+        let mut summaries: HashMap<String, EscapeSummary> = self
+            .order
+            .iter()
+            .map(|n| (n.clone(), EscapeSummary::default()))
+            .collect();
         let mut queue: VecDeque<String> = self.order.iter().cloned().collect();
         let mut queued: HashSet<String> = self.order.iter().cloned().collect();
         // Termination is guaranteed by monotonicity; the cap only guards against a
@@ -473,7 +482,13 @@ impl Summarizer {
         }
         frame_stores.sort_unstable_by_key(|&(s, j)| (s.lo, s.hi, j));
         frame_stores.dedup();
-        (lambda_returns, lambda_sinks, lambda_collect_sinks, frame_stores, lambda_capture_flows)
+        (
+            lambda_returns,
+            lambda_sinks,
+            lambda_collect_sinks,
+            frame_stores,
+            lambda_capture_flows,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -528,7 +543,12 @@ impl Summarizer {
         self.is_view_rec(t, generics, &mut seen)
     }
 
-    fn is_view_rec(&self, t: &Type, generics: &HashSet<String>, seen: &mut HashSet<String>) -> bool {
+    fn is_view_rec(
+        &self,
+        t: &Type,
+        generics: &HashSet<String>,
+        seen: &mut HashSet<String>,
+    ) -> bool {
         match t {
             Type::Slice(_) | Type::Func(..) => true,
             Type::Array(e, _) => self.is_view_rec(e, generics, seen),
@@ -554,7 +574,9 @@ impl Summarizer {
                     if !seen.insert(n.clone()) {
                         return false;
                     }
-                    return fields.iter().any(|(_, ft)| self.is_view_rec(ft, sgen, seen));
+                    return fields
+                        .iter()
+                        .any(|(_, ft)| self.is_view_rec(ft, sgen, seen));
                 }
                 if let Some((egen, fields)) = self.enums.get(n) {
                     if !seen.insert(n.clone()) {
@@ -604,10 +626,14 @@ impl Summarizer {
                     return false;
                 }
                 if let Some((_, fields)) = self.structs.get(n) {
-                    return fields.iter().any(|(_, ft)| self.reaches_managed_ptr_rec(ft, seen));
+                    return fields
+                        .iter()
+                        .any(|(_, ft)| self.reaches_managed_ptr_rec(ft, seen));
                 }
                 if let Some((_, fields)) = self.enums.get(n) {
-                    return fields.iter().any(|ft| self.reaches_managed_ptr_rec(ft, seen));
+                    return fields
+                        .iter()
+                        .any(|ft| self.reaches_managed_ptr_rec(ft, seen));
                 }
                 false
             }
@@ -660,18 +686,22 @@ pub(crate) fn builtin_summary(name: &str) -> Option<EscapeSummary> {
             sinks: ParamSet::default(),
             collect_sinks: ParamSet::default(),
         }),
-        "free" | "print" | "println" | "printerr" | "sizeof" | "alloc_bytes"
-        | "ptr_add" | "map" | "filter" | "reduce" | "fold" | "foreach" | "debug_alloc"
-        | "debug_free" | "debug_leaks" | "debug_double_frees" | "read_file" | "write_file"
-        | "read_line" | "read_all" | "parse_float" | "cstr" | "spawn" | "join" | "submit"
-        | "async_run" => Some(EscapeSummary::default()),
+        "free" | "print" | "println" | "printerr" | "sizeof" | "alloc_bytes" | "ptr_add"
+        | "map" | "filter" | "reduce" | "fold" | "foreach" | "debug_alloc" | "debug_free"
+        | "debug_leaks" | "debug_double_frees" | "read_file" | "write_file" | "read_line"
+        | "read_all" | "parse_float" | "cstr" | "spawn" | "join" | "submit" | "async_run" => {
+            Some(EscapeSummary::default())
+        }
         _ => None,
     }
 }
 
 /// The direct callees of each summarized function, inverted so a grown callee
 /// summary re-enqueues its callers.
-fn build_callers(module: &Module, module_fns: &HashSet<String>) -> HashMap<String, HashSet<String>> {
+fn build_callers(
+    module: &Module,
+    module_fns: &HashSet<String>,
+) -> HashMap<String, HashSet<String>> {
     let mut callers: HashMap<String, HashSet<String>> = HashMap::new();
     for item in &module.items {
         if let Item::Func(f) = item {

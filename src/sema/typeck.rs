@@ -473,7 +473,8 @@ impl TypeChecker {
                             // walk reads only the top-level shape.
                             let payloads: Vec<Ty> =
                                 v.fields.iter().map(|f| lower(&f.ty, &gens)).collect();
-                            self.variant_payloads.insert(v.name.clone(), payloads.clone());
+                            self.variant_payloads
+                                .insert(v.name.clone(), payloads.clone());
                             self.variant_payloads_by_enum
                                 .insert((e.name.clone(), v.name.clone()), payloads);
                         }
@@ -483,7 +484,10 @@ impl TypeChecker {
                     if let Some(iface) = &im.iface {
                         if !self.impls.insert((iface.clone(), im.ty.clone())) {
                             self.err(
-                                format!("duplicate 'impl {iface} for {}'; merge the two blocks", im.ty),
+                                format!(
+                                    "duplicate 'impl {iface} for {}'; merge the two blocks",
+                                    im.ty
+                                ),
                                 im.span,
                             );
                         }
@@ -506,8 +510,10 @@ impl TypeChecker {
             match item {
                 Item::Func(f) => {
                     let gens: HashSet<String> = f.generics.iter().cloned().collect();
-                    self.raw_sigs
-                        .insert(f.name.clone(), f.params.iter().map(|p| lower(&p.ty, &gens)).collect());
+                    self.raw_sigs.insert(
+                        f.name.clone(),
+                        f.params.iter().map(|p| lower(&p.ty, &gens)).collect(),
+                    );
                     let params = f
                         .params
                         .iter()
@@ -679,7 +685,10 @@ impl TypeChecker {
     fn check_foreign(&mut self, fb: &Foreign) {
         if fb.abi != "C" {
             self.err(
-                format!("unsupported foreign abi \"{}\", only \"C\" is supported", fb.abi),
+                format!(
+                    "unsupported foreign abi \"{}\", only \"C\" is supported",
+                    fb.abi
+                ),
                 fb.span,
             );
         }
@@ -727,7 +736,10 @@ impl TypeChecker {
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
                 if fields[i].0 == fields[j].0 {
-                    self.err(format!("field '{}' is set more than once in '{name}'", fields[i].0), span);
+                    self.err(
+                        format!("field '{}' is set more than once in '{name}'", fields[i].0),
+                        span,
+                    );
                 }
             }
         }
@@ -740,9 +752,14 @@ impl TypeChecker {
                 Some((_, dty)) => {
                     if !is_gen && !compatible(dty, vty) {
                         self.err(
-                            format!("field '{fname}' of '{name}' is set to a value of the wrong type"),
+                            format!(
+                                "field '{fname}' of '{name}' is set to a value of the wrong type"
+                            ),
                             fexpr.span,
                         );
+                    }
+                    if !is_gen {
+                        self.check_int_fits(fexpr, dty);
                     }
                     if let Some(idx) = declared.iter().position(|(dn, _)| dn == fname) {
                         if let Some(raw) = raw_fields.get(idx) {
@@ -759,7 +776,10 @@ impl TypeChecker {
         }
         for (dn, _) in &declared {
             if !fields.iter().any(|(fname, _)| fname == dn) {
-                self.err(format!("struct literal for '{name}' is missing field '{dn}'"), span);
+                self.err(
+                    format!("struct literal for '{name}' is missing field '{dn}'"),
+                    span,
+                );
             }
         }
     }
@@ -771,7 +791,12 @@ impl TypeChecker {
         self.in_async = f.is_async;
         self.in_method = self_ty.is_some();
         self.cur_params = f.params.iter().map(|p| p.name.clone()).collect();
-        self.cur_param_index = f.params.iter().enumerate().map(|(i, p)| (p.name.clone(), i)).collect();
+        self.cur_param_index = f
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.name.clone(), i))
+            .collect();
         self.flow_prov = HashMap::new();
         // The locals this function binds once to a module function, so the
         // leaf-frame send check resolves a call of such a name to that function's
@@ -779,8 +804,7 @@ impl TypeChecker {
         // keys are exactly the module functions; the ground pass has none, so the
         // map is empty there and the send class stays off.
         let module_fns: HashSet<String> = self.summaries.keys().cloned().collect();
-        self.resolvable_fn_binds =
-            crate::sema::summary::resolvable_fn_binds(f, &module_fns);
+        self.resolvable_fn_binds = crate::sema::summary::resolvable_fn_binds(f, &module_fns);
         // The signature is the first place a generic instantiation over an
         // interface can be spelled, `func take(b: Box<Speaker>)` or a return of
         // one; reject it here so the monomorphizer never receives a request with
@@ -1028,7 +1052,10 @@ impl TypeChecker {
         match t {
             Type::Named(n, args) => {
                 if matches!(n.as_str(), "uint8" | "uint16" | "uint32" | "uint64") {
-                    self.err("unsigned integers are reserved; use the signed widths", span);
+                    self.err(
+                        "unsigned integers are reserved; use the signed widths",
+                        span,
+                    );
                 }
                 for a in args {
                     self.reject_reserved_uint(a, span);
@@ -1148,9 +1175,8 @@ impl TypeChecker {
         if let Some(pending) = self.err_binds.pop() {
             if !self.types_only {
                 let mut pending: Vec<(String, Span)> = pending.into_iter().collect();
-                pending.sort_by(|(an, aspan), (bn, bspan)| {
-                    aspan.lo.cmp(&bspan.lo).then(an.cmp(bn))
-                });
+                pending
+                    .sort_by(|(an, aspan), (bn, bspan)| aspan.lo.cmp(&bspan.lo).then(an.cmp(bn)));
                 for (name, span) in pending {
                     self.err(
                         format!(
@@ -1195,7 +1221,10 @@ impl TypeChecker {
     /// names one. An enum local types as Unknown, so this recovers the enum for
     /// the enum-receiver method reject.
     fn enum_bind_name(&self, name: &str) -> Option<String> {
-        self.enum_binds.iter().rev().find_map(|s| s.get(name).cloned())
+        self.enum_binds
+            .iter()
+            .rev()
+            .find_map(|s| s.get(name).cloned())
     }
 
     /// The interface a binding was annotated with, when it names one. The receiver
@@ -1262,7 +1291,12 @@ impl TypeChecker {
         Self::update_owner(&mut self.esc_closures, name, closure, conditional);
     }
 
-    fn update_owner(scopes: &mut [HashMap<String, bool>], name: &str, flag: bool, conditional: bool) {
+    fn update_owner(
+        scopes: &mut [HashMap<String, bool>],
+        name: &str,
+        flag: bool,
+        conditional: bool,
+    ) {
         for scope in scopes.iter_mut().rev() {
             if let Some(entry) = scope.get_mut(name) {
                 *entry = if conditional { *entry || flag } else { flag };
@@ -1305,8 +1339,14 @@ impl TypeChecker {
             return;
         }
         if let Some(scope) = self.alias_edges.last_mut() {
-            scope.entry(a.to_string()).or_default().insert(b.to_string());
-            scope.entry(b.to_string()).or_default().insert(a.to_string());
+            scope
+                .entry(a.to_string())
+                .or_default()
+                .insert(b.to_string());
+            scope
+                .entry(b.to_string())
+                .or_default()
+                .insert(a.to_string());
         }
     }
 
@@ -1432,7 +1472,11 @@ impl TypeChecker {
             // callee returns one of its frame-view arguments (M5, interprocedural).
             ExprKind::Call(callee, args) => {
                 if let Some(vname) = self.variant_name(callee) {
-                    let payloads = self.variant_payloads.get(vname).cloned().unwrap_or_default();
+                    let payloads = self
+                        .variant_payloads
+                        .get(vname)
+                        .cloned()
+                        .unwrap_or_default();
                     let mut slice = false;
                     let mut closure = false;
                     for (arg, pty) in args.iter().zip(&payloads) {
@@ -1662,7 +1706,9 @@ impl TypeChecker {
             // purpose rather than falling through the wildcard.
             Ty::RawPtr(_) => false,
             Ty::Named(n) => {
-                self.structs.contains_key(n) || self.enums.contains_key(n) || self.ifaces.contains(n)
+                self.structs.contains_key(n)
+                    || self.enums.contains_key(n)
+                    || self.ifaces.contains(n)
             }
             Ty::Array(e, _) => self.member_carries_view(e),
             _ => false,
@@ -1690,7 +1736,10 @@ impl TypeChecker {
         if let Some((s, i, j)) = self.value_flow_prov(arg) {
             self.emit_flow_escape(s, i, j);
         } else if matches!(elem, Ty::Ptr(_)) {
-            let s = self.call_frame_origin(arg).map(|(sp, _)| sp).unwrap_or(span);
+            let s = self
+                .call_frame_origin(arg)
+                .map(|(sp, _)| sp)
+                .unwrap_or(span);
             self.emit_escape(
                 "this collects a pointer to an object that stores a view of the current frame; the collected block outlives the frame".to_string(),
                 s,
@@ -1743,8 +1792,7 @@ impl TypeChecker {
             // A bare Ident's escape is exactly its two per-binding view flags, so a
             // managed pointer whose pointee was tainted with a frame view is caught
             // here without walking the value again. Surface only.
-            let flow_views =
-                !self.types_only && (self.is_esc_slice(&n) || self.is_esc_closure(&n));
+            let flow_views = !self.types_only && (self.is_esc_slice(&n) || self.is_esc_closure(&n));
             if type_views || flow_views {
                 self.err(
                     format!(
@@ -1901,10 +1949,21 @@ impl TypeChecker {
     /// mangled enum name (`Opt$int32`), which is unique per instantiation, so a
     /// variant name shared across instantiations still checks against the right
     /// declaration. The display name is demangled so the message reads `Opt.Some`.
-    fn check_variant_ctor_args(&mut self, en: &str, v: &str, args: &[Expr], arg_tys: &[Ty], span: Span) {
+    fn check_variant_ctor_args(
+        &mut self,
+        en: &str,
+        v: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        span: Span,
+    ) {
         // Only a real variant of this enum is a constructor; a mistyped member
         // name is not one and is not shaped here.
-        if !self.enums.get(en).is_some_and(|vs| vs.iter().any(|x| x == v)) {
+        if !self
+            .enums
+            .get(en)
+            .is_some_and(|vs| vs.iter().any(|x| x == v))
+        {
             return;
         }
         // Keyed by the enum this constructor names, so a variant name two enums
@@ -1947,7 +2006,10 @@ impl TypeChecker {
             }
             if !compatible(p, a) {
                 let s = args.get(i).map(|x| x.span).unwrap_or(span);
-                self.err(format!("argument {} to '{disp}.{v}' has the wrong type", i + 1), s);
+                self.err(
+                    format!("argument {} to '{disp}.{v}' has the wrong type", i + 1),
+                    s,
+                );
             }
         }
     }
@@ -1999,7 +2061,12 @@ impl TypeChecker {
     fn summary_alias_indices(&self, callee: &Expr, args_len: usize) -> Vec<usize> {
         match self.callee_esc(callee) {
             CalleeEsc::Known(sum) => {
-                let mut v: Vec<usize> = sum.returns_alias.to_vec().iter().map(|&i| i as usize).collect();
+                let mut v: Vec<usize> = sum
+                    .returns_alias
+                    .to_vec()
+                    .iter()
+                    .map(|&i| i as usize)
+                    .collect();
                 for j in sum.reads_through.to_vec() {
                     v.push(j as usize);
                 }
@@ -2118,7 +2185,8 @@ impl TypeChecker {
             "reduce" if args.len() == 2 => {
                 // reduce's seed is the collection's first element, so both the
                 // accumulator and the element parameter lead back to argument 0.
-                let (s, c) = if self.mapper_aliases(&args[1], 0) || self.mapper_aliases(&args[1], 1) {
+                let (s, c) = if self.mapper_aliases(&args[1], 0) || self.mapper_aliases(&args[1], 1)
+                {
                     self.value_escape(&args[0])
                 } else {
                     (false, false)
@@ -2275,7 +2343,10 @@ impl TypeChecker {
     fn report_slice_escape(&mut self, e: &Expr) {
         if let Some((span, n)) = self.call_frame_origin(e) {
             self.emit_escape(
-                format!("this call may return a view of argument {}, which views the current frame", n + 1),
+                format!(
+                    "this call may return a view of argument {}, which views the current frame",
+                    n + 1
+                ),
                 span,
             );
         } else if let Some((span, i, j)) = self.returned_flow_prov(e) {
@@ -2294,7 +2365,10 @@ impl TypeChecker {
     fn report_closure_escape(&mut self, e: &Expr) {
         if let Some((span, n)) = self.call_frame_origin(e) {
             self.emit_escape(
-                format!("this call may return a view of argument {}, which views the current frame", n + 1),
+                format!(
+                    "this call may return a view of argument {}, which views the current frame",
+                    n + 1
+                ),
                 span,
             );
         } else if let Some((span, i, j)) = self.returned_flow_prov(e) {
@@ -2388,9 +2462,9 @@ impl TypeChecker {
         // Gate on the impl-method context, not the spelling: a function-local
         // binding named `self` is an ordinary value, and a mismatch on it earns
         // the plain message, not the misleading receiver-value one.
-        let is_self =
-            self.in_method && matches!(&e.kind, ExprKind::Ident(n) if n == "self");
-        if is_self && matches!(expected, Ty::Ptr(_)) && matches!(self.lookup("self"), Ty::Named(_)) {
+        let is_self = self.in_method && matches!(&e.kind, ExprKind::Ident(n) if n == "self");
+        if is_self && matches!(expected, Ty::Ptr(_)) && matches!(self.lookup("self"), Ty::Named(_))
+        {
             self.err(
                 "cannot use 'self' where a pointer is required; 'self' is the receiver value, not a pointer to it",
                 e.span,
@@ -2478,7 +2552,8 @@ impl TypeChecker {
             stack
                 .iter()
                 .map(|m| {
-                    let mut v: Vec<(String, bool)> = m.iter().map(|(k, &b)| (k.clone(), b)).collect();
+                    let mut v: Vec<(String, bool)> =
+                        m.iter().map(|(k, &b)| (k.clone(), b)).collect();
                     v.sort();
                     v
                 })
@@ -2676,9 +2751,9 @@ impl TypeChecker {
                 }
                 if let Some(variants) = self.enums.get(n) {
                     return variants.iter().any(|v| {
-                        self.variant_payloads
-                            .get(v)
-                            .is_some_and(|ps| ps.iter().any(|pt| self.ty_reaches_managed_rec(pt, seen)))
+                        self.variant_payloads.get(v).is_some_and(|ps| {
+                            ps.iter().any(|pt| self.ty_reaches_managed_rec(pt, seen))
+                        })
                     });
                 }
                 false
@@ -2776,7 +2851,11 @@ impl TypeChecker {
                     if let ExprKind::Lambda(_) = &rhs.kind {
                         let bind = self.lambda_sink_bind_of(rhs.span);
                         self.rebind_lambda_sink(dst, bind);
-                        let cf = self.lambda_capture_flows.get(&rhs.span).cloned().unwrap_or_default();
+                        let cf = self
+                            .lambda_capture_flows
+                            .get(&rhs.span)
+                            .cloned()
+                            .unwrap_or_default();
                         self.rebind_lambda_capture(dst, cf);
                     } else {
                         self.drop_lambda_sink(dst);
@@ -2852,7 +2931,8 @@ impl TypeChecker {
                 // Returning a concrete struct where an interface is declared is
                 // the boxing site; it needs an impl, checked precisely here, and
                 // the plain mismatch error would misfire on the valid case.
-                let iface_ret = matches!((&ret, &t), (Ty::Named(i), Ty::Named(_)) if self.ifaces.contains(i));
+                let iface_ret =
+                    matches!((&ret, &t), (Ty::Named(i), Ty::Named(_)) if self.ifaces.contains(i));
                 if iface_ret {
                     self.check_conformance(&ret, &t, e.span);
                 } else if self.tuple_iface_mismatch(&ret, &t, e.span) {
@@ -2864,7 +2944,10 @@ impl TypeChecker {
                     // precise self-value message; the generic mismatch would double
                     // it.
                 } else if !compatible(&ret, &t) {
-                    self.err("return type does not match the function's return type", e.span);
+                    self.err(
+                        "return type does not match the function's return type",
+                        e.span,
+                    );
                 }
                 self.check_int_fits(e, &ret);
                 self.check_escape(e, &t);
@@ -3061,13 +3144,20 @@ impl TypeChecker {
                     }
                     // Remember a slice-of-interface binding so a later assignment
                     // of a slice of concrete structs is caught as covariance.
-                    if matches!(&raw, Ty::Slice(el) if matches!(&**el, Ty::Named(n) if self.ifaces.contains(n))) {
+                    if matches!(&raw, Ty::Slice(el) if matches!(&**el, Ty::Named(n) if self.ifaces.contains(n)))
+                    {
                         if let Some(scope) = self.slice_iface_elem.last_mut() {
                             scope.insert(b.name.clone(), raw.clone());
                         }
                     }
                     if !compatible(&lt, &vt) {
-                        self.err(format!("'{}' has a type annotation that does not match its value", b.name), l.value.span);
+                        self.err(
+                            format!(
+                                "'{}' has a type annotation that does not match its value",
+                                b.name
+                            ),
+                            l.value.span,
+                        );
                     }
                     self.check_int_fits(&l.value, &lt);
                     lt
@@ -3184,7 +3274,11 @@ impl TypeChecker {
                 // so a direct call of the name raises each captured binding's flag
                 // when the matching argument is a frame view: the capture store the
                 // argument-to-argument flow model cannot see through a closure.
-                let cf = self.lambda_capture_flows.get(&l.value.span).cloned().unwrap_or_default();
+                let cf = self
+                    .lambda_capture_flows
+                    .get(&l.value.span)
+                    .cloned()
+                    .unwrap_or_default();
                 if let Some(scope) = self.lambda_capture_binds.last_mut() {
                     scope.insert(b.name.clone(), cf);
                 }
@@ -3196,7 +3290,10 @@ impl TypeChecker {
             Ty::Tuple(ts) if ts.len() == l.binds.len() => ts.clone(),
             Ty::Unknown => vec![Ty::Unknown; l.binds.len()],
             _ => {
-                self.err("destructuring binding expects a tuple of matching arity", l.value.span);
+                self.err(
+                    "destructuring binding expects a tuple of matching arity",
+                    l.value.span,
+                );
                 vec![Ty::Unknown; l.binds.len()]
             }
         };
@@ -3554,7 +3651,9 @@ impl TypeChecker {
             // A literal escapes when a field or payload initializer views a frame
             // local; a binding, alias, or match reflects the flags recorded on it.
             // Both are decided by value_escape, one shape over from the tuple case.
-            Ty::Named(sname) if self.structs.contains_key(sname) || self.enums.contains_key(sname) => {
+            Ty::Named(sname)
+                if self.structs.contains_key(sname) || self.enums.contains_key(sname) =>
+            {
                 let (esc_s, esc_c) = self.value_escape(e);
                 if esc_s {
                     self.report_slice_escape(e);
@@ -3675,7 +3774,9 @@ impl TypeChecker {
                 // sees a future behind a pointer too, so a `*Future<T>` smuggled
                 // into the frame names this same reason, not the slice rule.
                 self.err(
-                    format!("{name} cannot capture '{c}': a future belongs to the event loop thread"),
+                    format!(
+                        "{name} cannot capture '{c}': a future belongs to the event loop thread"
+                    ),
                     args[0].span,
                 );
             } else if reaches_collector {
@@ -3838,7 +3939,13 @@ impl TypeChecker {
     /// (`check_method_call_escape`, whose effective argument 0 is the receiver)
     /// both route through here, so a self-sink method is caught on a polluted
     /// receiver with the identical message a `relay(ch, c)` helper earns.
-    fn check_summary_sinks(&mut self, cname: &str, sum: &EscapeSummary, args: &[Expr], call_span: Span) {
+    fn check_summary_sinks(
+        &mut self,
+        cname: &str,
+        sum: &EscapeSummary,
+        args: &[Expr],
+        call_span: Span,
+    ) {
         for j in sum.sinks.to_vec() {
             let Some(arg) = args.get(j as usize) else {
                 continue;
@@ -3992,7 +4099,11 @@ impl TypeChecker {
     fn lambda_sink_bind_of(&self, span: Span) -> LambdaSinkBind {
         LambdaSinkBind {
             sinks: self.lambda_sinks.get(&span).copied().unwrap_or_default(),
-            collect: self.lambda_collect_sinks.get(&span).copied().unwrap_or_default(),
+            collect: self
+                .lambda_collect_sinks
+                .get(&span)
+                .copied()
+                .unwrap_or_default(),
         }
     }
 
@@ -4176,8 +4287,7 @@ impl TypeChecker {
         let ExprKind::Field(base, mname) = &callee.kind else {
             return false;
         };
-        matches!(self.chain_ty(base), Ty::Error)
-            && matches!(mname.as_str(), "check" | "ignore")
+        matches!(self.chain_ty(base), Ty::Error) && matches!(mname.as_str(), "check" | "ignore")
     }
 
     fn callee_is_opaque(&self, callee: &Expr) -> bool {
@@ -4213,8 +4323,7 @@ impl TypeChecker {
                 if !self.is_local(name) {
                     // A module function carries a computed summary; a builtin a
                     // library one. Both name their sinks precisely.
-                    return !(self.summaries.contains_key(name)
-                        || builtin_summary(name).is_some());
+                    return !(self.summaries.contains_key(name) || builtin_summary(name).is_some());
                 }
                 // A local proven bound to one module function, or bound to a lambda
                 // literal, is a known callee the precise checks handle.
@@ -4333,7 +4442,8 @@ impl TypeChecker {
             Ty::Ptr(b) | Ty::RawPtr(b) => {
                 let mut fseen = HashSet::new();
                 let mut cseen = HashSet::new();
-                !self.ptr_reaches_future(b, &mut fseen) && !self.ptr_reaches_collector(b, &mut cseen)
+                !self.ptr_reaches_future(b, &mut fseen)
+                    && !self.ptr_reaches_collector(b, &mut cseen)
             }
             Ty::Array(e, _) => self.spawn_capturable(e, seen),
             Ty::Tuple(ts) => ts.iter().all(|x| self.spawn_capturable(x, seen)),
@@ -4656,9 +4766,7 @@ impl TypeChecker {
                                 "a collected slice's element cannot itself hold a slice, function, or interface; collect the inner view first",
                                 e.span,
                             );
-                        } else if self.ty_reaches_managed(u)
-                            && self.slice_source_buries_view(arg)
-                        {
+                        } else if self.ty_reaches_managed(u) && self.slice_source_buries_view(arg) {
                             // The deep copy immortalizes the element storage but not
                             // each pointee, so an element reaching a managed pointer
                             // whose pointee stores a frame view still dangles once the
@@ -4812,9 +4920,7 @@ impl TypeChecker {
                             // `error` is that method's to inspect. Only a bare binding
                             // at the argument counts, so a laundered error stays
                             // pending.
-                            if matches!(p, Ty::Error)
-                                && matches!(arg_tys.get(i), Some(Ty::Error))
-                            {
+                            if matches!(p, Ty::Error) && matches!(arg_tys.get(i), Some(Ty::Error)) {
                                 if let ExprKind::Ident(n) = &arg.kind {
                                     self.mark_err_handled(n);
                                 }
@@ -4895,11 +5001,17 @@ impl TypeChecker {
                 // operands and ignores any surplus, so a stray extra argument
                 // sails past inference and lowers to invalid IR. Range the arity
                 // here so the miscount is a diagnostic, not a backend fault.
-                if matches!(name.as_str(), "map" | "filter" | "reduce" | "fold" | "foreach") {
+                if matches!(
+                    name.as_str(),
+                    "map" | "filter" | "reduce" | "fold" | "foreach"
+                ) {
                     let want = if name == "fold" { 3 } else { 2 };
                     if args.len() != want {
                         self.err(
-                            format!("{name} takes {want} argument(s), but {} were given", args.len()),
+                            format!(
+                                "{name} takes {want} argument(s), but {} were given",
+                                args.len()
+                            ),
                             f.span,
                         );
                     }
@@ -4992,18 +5104,13 @@ impl TypeChecker {
                     // generic is still caught once mono makes it concrete.
                     if matches!(t, Ty::Collector(_)) {
                         if let Some(a) = args.first() {
-                            self.err(
-                                "a collected value is not owned; copy it directly",
-                                a.span,
-                            );
+                            self.err("a collected value is not owned; copy it directly", a.span);
                         }
                         return t;
                     }
                     if let Some(a) = args.first() {
                         if let ExprKind::Ident(src) = &a.kind {
-                            if !self.types_only
-                                && matches!(self.own_of(src), Some(Own::Borrow))
-                            {
+                            if !self.types_only && matches!(self.own_of(src), Some(Own::Borrow)) {
                                 self.err(
                                     "cannot move a borrowed pointer; only its owner can be moved",
                                     a.span,
@@ -5029,9 +5136,7 @@ impl TypeChecker {
                             );
                         } else if is_managed(&t) {
                             if let ExprKind::Ident(p) = &a.kind {
-                                if !self.types_only
-                                    && matches!(self.own_of(p), Some(Own::Borrow))
-                                {
+                                if !self.types_only && matches!(self.own_of(p), Some(Own::Borrow)) {
                                     self.err(
                                         "cannot free a borrowed pointer; only its owner frees it",
                                         a.span,
@@ -5071,7 +5176,11 @@ impl TypeChecker {
         if let Ty::Func(params, ret) = callee {
             if params.len() != arg_tys.len() {
                 self.err(
-                    format!("expected {} argument(s), found {}", params.len(), arg_tys.len()),
+                    format!(
+                        "expected {} argument(s), found {}",
+                        params.len(),
+                        arg_tys.len()
+                    ),
                     f.span,
                 );
             } else {
@@ -5126,7 +5235,10 @@ impl TypeChecker {
                     // self-value message; only when that does not apply does the
                     // generic argument mismatch fire.
                     if !compatible(p, a) && !self.self_value_in_ptr_position(&args[i], p) {
-                        self.err(format!("argument {} has the wrong type", i + 1), args[i].span);
+                        self.err(
+                            format!("argument {} has the wrong type", i + 1),
+                            args[i].span,
+                        );
                     }
                     // A function-value call is indirect, so the direct-call
                     // interface-preserving `raw_sigs` check below never runs for it.
@@ -5308,7 +5420,8 @@ impl TypeChecker {
         if matches!(&value.kind, ExprKind::Array(_)) {
             return;
         }
-        if matches!(&**act_elem, Ty::Named(c) if self.structs.contains_key(c) && !self.ifaces.contains(c)) {
+        if matches!(&**act_elem, Ty::Named(c) if self.structs.contains_key(c) && !self.ifaces.contains(c))
+        {
             let concrete = match &**act_elem {
                 Ty::Named(c) => c.as_str(),
                 _ => "",
@@ -5401,7 +5514,9 @@ impl TypeChecker {
                 let given = args.len() - 1;
                 if holes != given {
                     self.err(
-                        format!("format string has {holes} hole(s) but {given} argument(s) were given"),
+                        format!(
+                            "format string has {holes} hole(s) but {given} argument(s) were given"
+                        ),
                         args[0].span,
                     );
                 }
@@ -5443,9 +5558,10 @@ impl TypeChecker {
             }
             Ty::Unit => self.err("cannot print a void value", span),
             Ty::Thread => self.err("cannot print a thread handle; join it instead", span),
-            Ty::Ptr(_) | Ty::RawPtr(_) => {
-                self.err("cannot print a pointer; dereference it or print its fields", span)
-            }
+            Ty::Ptr(_) | Ty::RawPtr(_) => self.err(
+                "cannot print a pointer; dereference it or print its fields",
+                span,
+            ),
             _ => self.err(
                 format!("cannot print {}; print its elements instead", ty_str(t)),
                 span,
@@ -5499,7 +5615,11 @@ impl TypeChecker {
             self.push_scope();
             match &arm.pat {
                 Pattern::Variant(vname, binds) => {
-                    let payloads = self.variant_payloads.get(vname).cloned().unwrap_or_default();
+                    let payloads = self
+                        .variant_payloads
+                        .get(vname)
+                        .cloned()
+                        .unwrap_or_default();
                     for (i, b) in binds.iter().enumerate() {
                         self.declare(b, Ty::Unknown);
                         if scrut_s || scrut_c {
@@ -5560,7 +5680,10 @@ impl TypeChecker {
                     self.check_coverage(&variants, &m.arms, m.scrut.span);
                 } else if self.structs.contains_key(ename) || self.ifaces.contains(ename) {
                     self.err(
-                        format!("match needs an enum value, and {} is not an enum", ty_str(&st)),
+                        format!(
+                            "match needs an enum value, and {} is not an enum",
+                            ty_str(&st)
+                        ),
                         m.scrut.span,
                     );
                 }
@@ -5588,7 +5711,10 @@ impl TypeChecker {
                 Pattern::Ident(n) if !variants.contains(n) => catch_all = true,
                 Pattern::Ident(n) | Pattern::Variant(n, _) => {
                     if !covered.insert(n.clone()) {
-                        self.err(format!("unreachable match arm, '{n}' is already covered"), span);
+                        self.err(
+                            format!("unreachable match arm, '{n}' is already covered"),
+                            span,
+                        );
                     }
                 }
             }
@@ -5652,7 +5778,11 @@ impl TypeChecker {
         match op {
             Add | Sub | Mul | Div | Mod => {
                 if unknown {
-                    return if matches!(a, Ty::Unknown) { b.clone() } else { a.clone() };
+                    return if matches!(a, Ty::Unknown) {
+                        b.clone()
+                    } else {
+                        a.clone()
+                    };
                 }
                 match (a, b) {
                     // Same kind: the widths must agree, with a bare literal
@@ -5661,7 +5791,11 @@ impl TypeChecker {
                     (Ty::Int(x), Ty::Int(y)) | (Ty::Float(x), Ty::Float(y)) => {
                         if x == y || *x == 0 || *y == 0 {
                             let w = (*x).max(*y);
-                            if matches!(a, Ty::Int(_)) { Ty::Int(w) } else { Ty::Float(w) }
+                            if matches!(a, Ty::Int(_)) {
+                                Ty::Int(w)
+                            } else {
+                                Ty::Float(w)
+                            }
                         } else {
                             self.err(
                                 format!(
@@ -5675,7 +5809,10 @@ impl TypeChecker {
                         }
                     }
                     _ => {
-                        self.err("arithmetic needs two operands of the same numeric type", span);
+                        self.err(
+                            "arithmetic needs two operands of the same numeric type",
+                            span,
+                        );
                         Ty::Unknown
                     }
                 }
@@ -5694,7 +5831,11 @@ impl TypeChecker {
             }
             BitAnd | BitOr | BitXor | Shl | Shr => {
                 if unknown {
-                    return if matches!(a, Ty::Unknown) { b.clone() } else { a.clone() };
+                    return if matches!(a, Ty::Unknown) {
+                        b.clone()
+                    } else {
+                        a.clone()
+                    };
                 }
                 match (a, b) {
                     // Bitwise and shift operators take integers only, both the
@@ -5729,7 +5870,11 @@ impl TypeChecker {
             }
             Pow => {
                 if unknown {
-                    return if matches!(a, Ty::Unknown) { b.clone() } else { a.clone() };
+                    return if matches!(a, Ty::Unknown) {
+                        b.clone()
+                    } else {
+                        a.clone()
+                    };
                 }
                 match (a, b) {
                     // Both integer, same width (a literal adapting), wraps like the
@@ -5737,7 +5882,11 @@ impl TypeChecker {
                     (Ty::Int(x), Ty::Int(y)) | (Ty::Float(x), Ty::Float(y)) => {
                         if x == y || *x == 0 || *y == 0 {
                             let w = (*x).max(*y);
-                            if matches!(a, Ty::Int(_)) { Ty::Int(w) } else { Ty::Float(w) }
+                            if matches!(a, Ty::Int(_)) {
+                                Ty::Int(w)
+                            } else {
+                                Ty::Float(w)
+                            }
                         } else {
                             self.err(
                                 format!(
@@ -5955,9 +6104,7 @@ fn compatible(a: &Ty, b: &Ty) -> bool {
         // A width of 0 is a bare literal, which adapts to any width of its kind.
         // Two concrete widths must match, so an int32 never silently truncates
         // an int64 or widens into one.
-        (Ty::Int(x), Ty::Int(y)) | (Ty::Float(x), Ty::Float(y)) => {
-            *x == 0 || *y == 0 || x == y
-        }
+        (Ty::Int(x), Ty::Int(y)) | (Ty::Float(x), Ty::Float(y)) => *x == 0 || *y == 0 || x == y,
         (Ty::Array(x, _), Ty::Slice(y)) | (Ty::Slice(x), Ty::Array(y, _)) => compatible(x, y),
         (Ty::Slice(x), Ty::Slice(y)) => compatible(x, y),
         (Ty::Array(x, n), Ty::Array(y, m)) if n == m => compatible(x, y),
@@ -6224,11 +6371,10 @@ mod tests {
 
     #[test]
     fn bitwise_width_mix_rejected() {
-        let e = errs(
-            "func f() -> int64 {\n  x: int32 = 5\n  y: int64 = 7\n  return x & y\n}",
-        );
+        let e = errs("func f() -> int64 {\n  x: int32 = 5\n  y: int64 = 7\n  return x & y\n}");
         assert!(
-            e.iter().any(|d| d.msg == "'&' mixes int32 and int64; match the widths"),
+            e.iter()
+                .any(|d| d.msg == "'&' mixes int32 and int64; match the widths"),
             "{e:?}"
         );
     }
@@ -6237,7 +6383,8 @@ mod tests {
     fn bitwise_on_bool_rejected() {
         let e = errs("func f() -> bool { return true & false }");
         assert!(
-            e.iter().any(|d| d.msg == "bitwise operators need integer operands"),
+            e.iter()
+                .any(|d| d.msg == "bitwise operators need integer operands"),
             "{e:?}"
         );
     }
@@ -6246,7 +6393,8 @@ mod tests {
     fn shift_on_float_rejected() {
         let e = errs("func f() -> int64 {\n  x: float64 = 1.0\n  return x << 2\n}");
         assert!(
-            e.iter().any(|d| d.msg == "shift operators need integer operands"),
+            e.iter()
+                .any(|d| d.msg == "shift operators need integer operands"),
             "{e:?}"
         );
     }
@@ -6273,7 +6421,8 @@ mod tests {
     fn oversize_constant_shift_rejected() {
         let e = errs("func f() -> int32 {\n  x: int32 = 1\n  return x << 32\n}");
         assert!(
-            e.iter().any(|d| d.msg == "shift amount 32 is out of range for int32"),
+            e.iter()
+                .any(|d| d.msg == "shift amount 32 is out of range for int32"),
             "{e:?}"
         );
     }
@@ -6299,7 +6448,8 @@ mod tests {
     fn pow_mixing_int_and_float_rejected() {
         let e = errs("func f() -> int64 {\n  x: int64 = 2\n  return x ** 2.0\n}");
         assert!(
-            e.iter().any(|d| d.msg == "'**' needs two operands of the same numeric type"),
+            e.iter()
+                .any(|d| d.msg == "'**' needs two operands of the same numeric type"),
             "{e:?}"
         );
     }
@@ -6308,7 +6458,8 @@ mod tests {
     fn pow_negative_constant_exponent_rejected() {
         let e = errs("func f() -> int64 { return 2 ** -1 }");
         assert!(
-            e.iter().any(|d| d.msg == "'**' on integers needs a nonnegative exponent"),
+            e.iter()
+                .any(|d| d.msg == "'**' on integers needs a nonnegative exponent"),
             "{e:?}"
         );
     }
@@ -6323,9 +6474,8 @@ mod tests {
 
     #[test]
     fn compound_assignment_width_mix_rejected() {
-        let e = errs(
-            "func f() -> void {\n  mut x: int32 = 1\n  y: int64 = 2\n  x += y\n  return\n}",
-        );
+        let e =
+            errs("func f() -> void {\n  mut x: int32 = 1\n  y: int64 = 2\n  x += y\n  return\n}");
         assert!(
             e.iter().any(|d| d.msg.contains("mixes int32 and int64")),
             "{e:?}"
@@ -6342,11 +6492,10 @@ mod tests {
 
     #[test]
     fn compound_oversize_shift_rejected() {
-        let e = errs(
-            "func f() -> void {\n  mut x: int32 = 1\n  x <<= 40\n  return\n}",
-        );
+        let e = errs("func f() -> void {\n  mut x: int32 = 1\n  x <<= 40\n  return\n}");
         assert!(
-            e.iter().any(|d| d.msg == "shift amount 40 is out of range for int32"),
+            e.iter()
+                .any(|d| d.msg == "shift amount 40 is out of range for int32"),
             "{e:?}"
         );
     }
@@ -6357,7 +6506,8 @@ mod tests {
             "foreign \"C\" { func bad(p: *int64) -> int32 }\nfunc main() -> int32 { return 0 }",
         );
         assert!(
-            e.iter().any(|d| d.msg.contains("managed pointer at the C boundary")),
+            e.iter()
+                .any(|d| d.msg.contains("managed pointer at the C boundary")),
             "{e:?}"
         );
     }
@@ -6367,7 +6517,10 @@ mod tests {
         let e = errs(
             "foreign \"Rust\" { func abs(n: int32) -> int32 }\nfunc main() -> int32 { return 0 }",
         );
-        assert!(e.iter().any(|d| d.msg.contains("only \"C\" is supported")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("only \"C\" is supported")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6376,19 +6529,26 @@ mod tests {
             "foreign \"C\" { func memset(dst: *raw int8, c: int32, n: int64) -> *void }\n\
              func main() -> int32 { return 0 }",
         );
-        assert!(e.is_empty(), "raw pointer boundary should be accepted: {e:?}");
+        assert!(
+            e.is_empty(),
+            "raw pointer boundary should be accepted: {e:?}"
+        );
     }
 
     #[test]
     fn struct_literal_unknown_field_rejected() {
-        let e = errs("struct S { x: int64 }\nfunc main() -> int32 {\n  s := S { y: 5 }\n  return 0\n}");
+        let e =
+            errs("struct S { x: int64 }\nfunc main() -> int32 {\n  s := S { y: 5 }\n  return 0\n}");
         assert!(e.iter().any(|d| d.msg.contains("no field 'y'")), "{e:?}");
     }
 
     #[test]
     fn struct_literal_missing_field_rejected() {
         let e = errs("struct S { x: int64, y: int64 }\nfunc main() -> int32 {\n  s := S { x: 1 }\n  return 0\n}");
-        assert!(e.iter().any(|d| d.msg.contains("missing field 'y'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("missing field 'y'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6400,31 +6560,47 @@ mod tests {
     #[test]
     fn passing_struct_without_impl_is_rejected() {
         let e = errs("interface I { get() -> int64 }\nstruct S { x: int64 }\nfunc take(i: I) -> int64 { return i.get() }\nfunc f() -> void {\n  s := S { x: 1 }\n  take(s)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("does not implement interface 'I'")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("does not implement interface 'I'")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn incomplete_impl_is_rejected() {
         let e = errs("interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { }");
-        assert!(e.iter().any(|d| d.msg.contains("missing method 'get'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("missing method 'get'")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn struct_with_impl_satisfies_interface() {
         let e = errs("interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return self.x } }\nfunc take(i: I) -> int64 { return i.get() }\nfunc f() -> void {\n  s := S { x: 1 }\n  take(s)\n}");
-        assert!(!e.iter().any(|d| d.msg.contains("implement interface")), "{e:?}");
+        assert!(
+            !e.iter().any(|d| d.msg.contains("implement interface")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn discarding_a_fallible_call_is_rejected() {
         let e = errs("func fail() -> error { return error { message: \"x\" } }\nfunc f() -> void {\n  fail()\n}");
-        assert!(e.iter().any(|d| d.msg.contains("error result is ignored")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("error result is ignored")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn handling_a_fallible_result_is_ok() {
         let e = errs("func fail() -> error { return error { message: \"x\" } }\nfunc f() -> void {\n  e := fail()\n  e.ignore()\n}");
-        assert!(!e.iter().any(|d| d.msg.contains("error result is ignored")), "{e:?}");
+        assert!(
+            !e.iter().any(|d| d.msg.contains("error result is ignored")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6441,7 +6617,8 @@ mod tests {
 
     #[test]
     fn arg_count_mismatch() {
-        let e = errs("func g(a: int64) -> int64 { return a }\nfunc f() -> int64 { return g(1, 2) }");
+        let e =
+            errs("func g(a: int64) -> int64 { return a }\nfunc f() -> int64 { return g(1, 2) }");
         assert!(e.iter().any(|d| d.msg.contains("argument")));
     }
 
@@ -6454,7 +6631,10 @@ mod tests {
     #[test]
     fn copying_an_owner_is_rejected() {
         let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  q: *int64 = p\n  free(q)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("copy an owning pointer")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("copy an owning pointer")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6466,7 +6646,10 @@ mod tests {
     #[test]
     fn freeing_a_borrow_is_rejected() {
         let e = errs("func sink(p: *int64) -> void {\n  free(p)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("borrowed pointer")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("borrowed pointer")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6487,13 +6670,21 @@ mod tests {
     #[test]
     fn assignment_copy_of_owner_is_rejected() {
         let e = errs("func f() -> void {\n  p: *int64 = alloc(5)\n  mut q: *int64 = alloc(9)\n  q = p\n  free(p)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("copy an owning pointer")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("copy an owning pointer")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn reassigning_an_owner_is_rejected() {
-        let e = errs("func f() -> void {\n  mut p: *int64 = alloc(5)\n  p = alloc(9)\n  free(p)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("reassign an owning pointer")), "{e:?}");
+        let e =
+            errs("func f() -> void {\n  mut p: *int64 = alloc(5)\n  p = alloc(9)\n  free(p)\n}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("reassign an owning pointer")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6502,7 +6693,8 @@ mod tests {
         // may advance without tripping the reassignment or copy rules.
         let e = errs("func walk(head: *int64) -> void {\n  mut cur: *int64 = head\n  cur = head\n  println(*cur)\n}");
         assert!(
-            !e.iter().any(|d| d.msg.contains("reassign") || d.msg.contains("owning")),
+            !e.iter()
+                .any(|d| d.msg.contains("reassign") || d.msg.contains("owning")),
             "{e:?}"
         );
     }
@@ -6510,7 +6702,10 @@ mod tests {
     #[test]
     fn moving_a_borrow_is_rejected() {
         let e = errs("func sink(p: *int64) -> void {\n  q: *int64 = move(p)\n  free(q)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("move a borrowed pointer")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("move a borrowed pointer")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6518,7 +6713,10 @@ mod tests {
         // alloc infers to a managed pointer, so the inferred `:=` form is tracked
         // and a copy of it is the single owner violation.
         let e = errs("func f() -> void {\n  x := alloc(5)\n  y := x\n  free(x)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("copy an owning pointer")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("copy an owning pointer")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6532,7 +6730,10 @@ mod tests {
     #[test]
     fn slice_into_local_array_cannot_escape() {
         let e = errs("func f() -> int64[] {\n  xs: int64[3] = [1, 2, 3]\n  return xs[0..3]\n}");
-        assert!(e.iter().any(|d| d.msg.contains("escapes its frame")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("escapes its frame")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6540,7 +6741,10 @@ mod tests {
         let e = errs(
             "func f() -> (int64) -> int64 {\n  x: int64 = 10\n  return lambda (n: int64) -> int64 { return n + x }\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("escapes its frame")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("escapes its frame")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6582,7 +6786,8 @@ mod tests {
         );
         let e = errs(&src);
         assert!(
-            e.iter().any(|d| d.msg.contains("'ship' sends 'c' across a channel")),
+            e.iter()
+                .any(|d| d.msg.contains("'ship' sends 'c' across a channel")),
             "{e:?}"
         );
     }
@@ -6600,7 +6805,10 @@ mod tests {
              }}"
         );
         let e = errs(&src);
-        assert!(!e.iter().any(|d| d.msg.contains("across a channel")), "{e:?}");
+        assert!(
+            !e.iter().any(|d| d.msg.contains("across a channel")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6625,7 +6833,8 @@ mod tests {
              }";
         let e = errs(src);
         assert!(
-            e.iter().any(|d| d.msg.contains("chan_send cannot send 'c'")),
+            e.iter()
+                .any(|d| d.msg.contains("chan_send cannot send 'c'")),
             "{e:?}"
         );
     }
@@ -6688,39 +6897,53 @@ mod tests {
         let e = errs(
             "func f() -> void {\n  a: int32 = 5\n  b: int64 = 9\n  c := a + b\n  println(c)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("mixes int32 and int64")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("mixes int32 and int64")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn literal_adapts_to_any_width() {
-        let e = errs(
-            "func f() -> int32 {\n  a: int32 = 5\n  b := a + 1\n  return b\n}",
-        );
+        let e = errs("func f() -> int32 {\n  a: int32 = 5\n  b := a + 1\n  return b\n}");
         assert!(e.is_empty(), "{e:?}");
     }
 
     #[test]
     fn cross_width_assignment_is_rejected() {
         let e = errs("func f(w: int64) -> void {\n  x: int8 = w\n  println(x)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("annotation that does not match")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("annotation that does not match")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn literal_too_wide_for_annotation_is_rejected() {
         let e = errs("func f() -> void {\n  x: int8 = 300\n  println(x)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("does not fit in 8 bits")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("does not fit in 8 bits")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn suffixed_literal_out_of_range_is_rejected() {
         let e = errs("func f() -> void {\n  x := 300i8\n  println(x)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("does not fit in 8 bits")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("does not fit in 8 bits")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn signed_int8_bound_rejects_128_accepts_127() {
         let bad = errs("func f() -> void {\n  x: int8 = 128\n  println(x)\n}");
-        assert!(bad.iter().any(|d| d.msg.contains("does not fit in 8 bits")), "{bad:?}");
+        assert!(
+            bad.iter().any(|d| d.msg.contains("does not fit in 8 bits")),
+            "{bad:?}"
+        );
         let good = errs("func f() -> void {\n  x: int8 = 127\n  println(x)\n}");
         assert!(good.is_empty(), "{good:?}");
     }
@@ -6730,19 +6953,29 @@ mod tests {
         let e = errs(
             "enum E { Has(v: int32), Nope }\nfunc f() -> void {\n  e := E.Has(4294967297)\n  match e { Has(v) => println(v), Nope => println(0) }\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("does not fit in 32 bits")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("does not fit in 32 bits")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn a_parameter_of_an_undeclared_type_is_rejected() {
         let e = errs("func work(c: Collector) -> int64 { return 0 }");
-        assert!(e.iter().any(|d| d.msg.contains("unknown type 'Collector'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("unknown type 'Collector'")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn a_reserved_unsigned_type_in_a_parameter_is_rejected() {
         let e = errs("func work(c: uint8) -> int64 { return 0 }");
-        assert!(e.iter().any(|d| d.msg.contains("unsigned integers are reserved")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("unsigned integers are reserved")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6750,7 +6983,10 @@ mod tests {
         let bad = errs(
             "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\nfunc f() -> void {\n  p := fail()\n  sink(p)\n}\nfunc sink(t: (int64, error)) -> void { }",
         );
-        assert!(bad.iter().any(|d| d.msg.contains("must be destructured")), "{bad:?}");
+        assert!(
+            bad.iter().any(|d| d.msg.contains("must be destructured")),
+            "{bad:?}"
+        );
         let good = errs(
             "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\nfunc f() -> void {\n  v, e := fail()\n  e.ignore()\n  println(v)\n}",
         );
@@ -6762,7 +6998,12 @@ mod tests {
         let e = errs(
             "enum Maybe { Just(v: int64), Nothing }\nfunc f() -> void {\n  m := Maybe.Just(5)\n  println(m.unwrap())\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("methods on the enum 'Maybe' are not supported")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d
+                .msg
+                .contains("methods on the enum 'Maybe' are not supported")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6770,7 +7011,10 @@ mod tests {
         let e = errs(
             "func f() -> void {\n  xs: int64[3] = [1, 2, 3]\n  r := fold(xs[0..3], 0, lambda (a: int64, x: int64) -> int64 { return a + x }, 9)\n  println(r)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("fold takes 3 argument(s)")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("fold takes 3 argument(s)")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6778,19 +7022,28 @@ mod tests {
         let e = errs(
             "async func w() -> int64 {\n  f: Future<int64> = future_new()\n  v, e := try_poll(f)\n  e.ignore()\n  return v\n}\nfunc main() -> int32 { return 0 }",
         );
-        assert!(e.iter().any(|d| d.msg.contains("pumps the event loop")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("pumps the event loop")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn returning_an_array_literal_as_a_slice_is_rejected() {
         let e = errs("func make() -> int64[] { return [1, 2, 3] }");
-        assert!(e.iter().any(|d| d.msg.contains("escapes its frame")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("escapes its frame")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn unsized_alloc_needs_a_pointer_annotation() {
         let e = errs("func f() -> void {\n  x := alloc()\n  free(x)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("pointer type annotation")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("pointer type annotation")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6801,8 +7054,14 @@ mod tests {
 
     #[test]
     fn element_store_into_immutable_array_is_rejected() {
-        let e = errs("func f() -> void {\n  xs: int64[3] = [1, 2, 3]\n  xs[0] = 99\n  println(xs[0])\n}");
-        assert!(e.iter().any(|d| d.msg.contains("assign through immutable 'xs'")), "{e:?}");
+        let e = errs(
+            "func f() -> void {\n  xs: int64[3] = [1, 2, 3]\n  xs[0] = 99\n  println(xs[0])\n}",
+        );
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("assign through immutable 'xs'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6810,12 +7069,18 @@ mod tests {
         let e = errs(
             "struct P { x: int64 }\nfunc f() -> void {\n  p := P { x: 1 }\n  p.x = 42\n  println(p.x)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("assign through immutable 'p'")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("assign through immutable 'p'")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn element_store_into_mut_array_is_ok() {
-        let e = errs("func f() -> void {\n  mut xs: int64[3] = [1, 2, 3]\n  xs[0] = 99\n  println(xs[0])\n}");
+        let e = errs(
+            "func f() -> void {\n  mut xs: int64[3] = [1, 2, 3]\n  xs[0] = 99\n  println(xs[0])\n}",
+        );
         assert!(e.is_empty(), "{e:?}");
     }
 
@@ -6823,18 +7088,17 @@ mod tests {
     fn store_through_a_pointer_deref_is_ok() {
         // Mutation through a pointer writes the pointee, not the binding, so the
         // binding's immutability does not apply.
-        let e = errs(
-            "struct P { x: int64 }\nfunc f(p: *P) -> void {\n  (*p).x = 42\n}",
-        );
+        let e = errs("struct P { x: int64 }\nfunc f(p: *P) -> void {\n  (*p).x = 42\n}");
         assert!(!e.iter().any(|d| d.msg.contains("immutable")), "{e:?}");
     }
 
     #[test]
     fn field_store_through_pointer_needs_explicit_deref() {
-        let e = errs(
-            "struct P { x: int64 }\nfunc f(p: *P) -> void {\n  p.x = 42\n}",
+        let e = errs("struct P { x: int64 }\nfunc f(p: *P) -> void {\n  p.x = 42\n}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("explicit dereference")),
+            "{e:?}"
         );
-        assert!(e.iter().any(|d| d.msg.contains("explicit dereference")), "{e:?}");
     }
 
     #[test]
@@ -6842,7 +7106,11 @@ mod tests {
         let e = errs(
             "interface I { get() -> int64 }\nstruct S { x: int64 }\nfunc f() -> void {\n  s := S { x: 7 }\n  i: I = s\n  println(i.get())\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("does not implement interface 'I'")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("does not implement interface 'I'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6850,7 +7118,10 @@ mod tests {
         let e = errs(
             "interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return self.x } }\nfunc f() -> void {\n  s := S { x: 7 }\n  i: I = s\n  println(i.get())\n}",
         );
-        assert!(!e.iter().any(|d| d.msg.contains("implement interface")), "{e:?}");
+        assert!(
+            !e.iter().any(|d| d.msg.contains("implement interface")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6858,7 +7129,11 @@ mod tests {
         let e = errs(
             "interface I { get() -> int64 }\nstruct S { x: int64 }\nfunc mk() -> I {\n  return S { x: 7 }\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("does not implement interface 'I'")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("does not implement interface 'I'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6866,15 +7141,21 @@ mod tests {
         let e = errs(
             "func f() -> void {\n  x := 5\n  match x {\n    a => println(1),\n    b => println(2),\n  }\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("match needs an enum value")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("match needs an enum value")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn defer_inside_a_conditional_is_rejected() {
-        let e = errs(
-            "func f() -> void {\n  if true {\n    defer println(1)\n  }\n  println(2)\n}",
+        let e = errs("func f() -> void {\n  if true {\n    defer println(1)\n  }\n  println(2)\n}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("defer inside a conditional or loop")),
+            "{e:?}"
         );
-        assert!(e.iter().any(|d| d.msg.contains("defer inside a conditional or loop")), "{e:?}");
     }
 
     #[test]
@@ -6889,7 +7170,10 @@ mod tests {
             "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
              func f() -> void {\n  v, e := fail()\n  println(v)\n  println(e)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("'e' is never handled")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6900,7 +7184,10 @@ mod tests {
             "func fail() -> (int64, error) { return (0, error { message: \"x\" }) }\n\
              func f() -> void {\n  v, e := fail()\n  println(v)\n  s := e.message\n  println(s)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("'e' is never handled")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -6922,7 +7209,8 @@ mod tests {
              func f() -> void {\n  v, e := fail()\n  println(v)\n  n := e.code\n  println(n)\n  e.ignore()\n}",
         );
         assert!(
-            e.iter().any(|d| d.msg == "error has no field 'code'; it carries only 'message'"),
+            e.iter()
+                .any(|d| d.msg == "error has no field 'code'; it carries only 'message'"),
             "{e:?}"
         );
     }
@@ -6935,7 +7223,8 @@ mod tests {
             "func f() -> void {\n  mut e := error { message: \"x\" }\n  e.message = \"y\"\n  e.ignore()\n}",
         );
         assert!(
-            e.iter().any(|d| d.msg == "an error's message is read only; build a new error instead"),
+            e.iter()
+                .any(|d| d.msg == "an error's message is read only; build a new error instead"),
             "{e:?}"
         );
     }
@@ -6956,7 +7245,9 @@ mod tests {
              func go(s: Summer, arr: Sq[]) -> int64 { return s.total(arr) }",
         );
         assert!(
-            e.iter().any(|d| d.msg.contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'")),
+            e.iter().any(|d| d
+                .msg
+                .contains("cannot pass a slice of 'Sq' as a slice of interface 'Shape'")),
             "{e:?}"
         );
     }
@@ -6993,7 +7284,10 @@ mod tests {
              func take(n: int64) -> void { println(n) }\n\
              func f() -> void {\n  v, e := fail()\n  take(v)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("'e' is never handled")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7008,8 +7302,14 @@ mod tests {
              func sink(err: error) -> void { err.ignore() }\n\
              func f() -> void {\n  v, e := fail()\n  w, e2 := fail()\n  println(v)\n  println(w)\n  sink(fst(e, e2))\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("'e' is never handled")), "{e:?}");
-        assert!(e.iter().any(|d| d.msg.contains("'e2' is never handled")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("'e' is never handled")),
+            "{e:?}"
+        );
+        assert!(
+            e.iter().any(|d| d.msg.contains("'e2' is never handled")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7017,16 +7317,19 @@ mod tests {
         // FIX-1: an error parameter carries the same must-handle obligation a
         // let-bound error does, so a callee that never inspects it is rejected.
         let e = errs("func swallow(err: error) -> void { }");
-        assert!(e.iter().any(|d| d.msg.contains("the error 'err' is never handled")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("the error 'err' is never handled")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn an_error_parameter_inspected_by_the_callee_is_clean() {
         // FIX-1 accept twin: inspecting the error parameter discharges its
         // obligation, so no report fires.
-        let e = errs(
-            "func check_it(err: error) -> int64 { if err.exists() { return 1 }\n  return 0 }",
-        );
+        let e =
+            errs("func check_it(err: error) -> int64 { if err.exists() { return 1 }\n  return 0 }");
         assert!(!e.iter().any(|d| d.msg.contains("never handled")), "{e:?}");
     }
 
@@ -7057,9 +7360,8 @@ mod tests {
 
     #[test]
     fn printing_a_struct_without_display_is_rejected() {
-        let e = errs(
-            "struct P { x: int64 }\nfunc f() -> void {\n  p := P { x: 1 }\n  println(p)\n}",
-        );
+        let e =
+            errs("struct P { x: int64 }\nfunc f() -> void {\n  p := P { x: 1 }\n  println(p)\n}");
         assert!(e.iter().any(|d| d.msg.contains("no Display impl")), "{e:?}");
     }
 
@@ -7074,13 +7376,21 @@ mod tests {
     #[test]
     fn single_argument_format_string_is_checked() {
         let e = errs("func f() -> void {\n  println(\"{}\")\n}");
-        assert!(e.iter().any(|d| d.msg.contains("1 hole(s) but 0 argument(s)")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("1 hole(s) but 0 argument(s)")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn missing_return_on_a_path_is_rejected() {
         let e = errs("func f() -> int64 {\n  println(1)\n}");
-        assert!(e.iter().any(|d| d.msg.contains("not all paths in 'f' return")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("not all paths in 'f' return")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7096,15 +7406,21 @@ mod tests {
         let e = errs(
             "interface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return 1 } }\nimpl I for S { func get() -> int64 { return 2 } }",
         );
-        assert!(e.iter().any(|d| d.msg.contains("duplicate 'impl I for S'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("duplicate 'impl I for S'")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn allocator_main_form_is_rejected_for_now() {
-        let e = errs(
-            "func main(argc: int32, argv: string[], using a: int64) -> int32 { return 0 }",
+        let e =
+            errs("func main(argc: int32, argv: string[], using a: int64) -> int32 { return 0 }");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("allocator form is not supported yet")),
+            "{e:?}"
         );
-        assert!(e.iter().any(|d| d.msg.contains("allocator form is not supported yet")), "{e:?}");
     }
 
     #[test]
@@ -7134,7 +7450,11 @@ mod tests {
         let e = errs(
             "func f() -> void {\n  t, e := spawn(lambda (n: int64) -> void { println(n) })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("no parameters and returns void")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("no parameters and returns void")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7142,7 +7462,10 @@ mod tests {
         let e = errs(
             "func f(xs: int64[]) -> void {\n  t, e := spawn(lambda () -> void {\n    println(xs[0])\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'xs'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("cannot capture 'xs'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7150,7 +7473,10 @@ mod tests {
         let e = errs(
             "func f() -> void {\n  p: *int64 = alloc(5)\n  t, e := spawn(lambda () -> void {\n    free(p)\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n  free(p)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("borrowed pointer")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("borrowed pointer")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7158,7 +7484,10 @@ mod tests {
         let e = errs(
             "func f() -> void {\n  t, e := spawn(lambda () -> void { println(1) })\n  e.ignore()\n  join(t)\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("error result is ignored")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("error result is ignored")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7166,7 +7495,10 @@ mod tests {
         let e = errs(
             "struct Wrap { s: int64[] }\nfunc f(xs: int64[]) -> void {\n  w := Wrap { s: xs }\n  t, e := spawn(lambda () -> void {\n    println(w.s[0])\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'w'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("cannot capture 'w'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7174,7 +7506,10 @@ mod tests {
         let e = errs(
             "@paradigm oop\ninterface I { get() -> int64 }\nstruct S { x: int64 }\nimpl I for S { func get() -> int64 { return self.x } }\nfunc f() -> void {\n  s := S { x: 1 }\n  i: I = s\n  t, e := spawn(lambda () -> void {\n    println(i.get())\n  })\n  e.ignore()\n  je := join(t)\n  je.ignore()\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'i'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("cannot capture 'i'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7279,7 +7614,10 @@ mod tests {
              async func amain() -> int64 {{\n  v, e := await leaf()\n  e.ignore()\n  a := await val(v)\n  return a\n}}\n\
              func main() -> int32 {{\n  r := async_run(amain())\n  println(r)\n  return 0\n}}"
         ));
-        assert!(e.is_empty(), "a legal async program must check clean: {e:?}");
+        assert!(
+            e.is_empty(),
+            "a legal async program must check clean: {e:?}"
+        );
     }
 
     #[test]
@@ -7291,20 +7629,30 @@ mod tests {
     #[test]
     fn async_func_cannot_take_type_parameters() {
         let e = errs("async func g<T>(x: T) -> T { return x }");
-        assert!(e.iter().any(|d| d.msg == "an async func cannot take type parameters"), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg == "an async func cannot take type parameters"),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn async_func_cannot_take_a_slice_param() {
         let e = errs("async func g(xs: int64[]) -> void { return }");
-        assert!(e.iter().any(|d| d.msg.contains("an async func cannot take 'xs'")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("an async func cannot take 'xs'")),
+            "{e:?}"
+        );
     }
 
     #[test]
     fn async_func_cannot_take_a_future_param() {
         let e = errs("async func g(f: Future<int64>) -> void { return }");
         assert!(
-            e.iter().any(|d| d.msg.contains("a future belongs to the event loop thread; await it in the caller instead")),
+            e.iter().any(|d| d.msg.contains(
+                "a future belongs to the event loop thread; await it in the caller instead"
+            )),
             "{e:?}"
         );
     }
@@ -7313,11 +7661,12 @@ mod tests {
     fn async_param_with_a_directly_buried_future_reports_the_future_message() {
         // A future buried in a non-generic struct field reports the future reason,
         // not the generic slice/closure/interface message.
-        let e = errs(
-            "struct FBox { x: Future<int64> }\nasync func g(b: FBox) -> int64 { return 1 }",
-        );
+        let e =
+            errs("struct FBox { x: Future<int64> }\nasync func g(b: FBox) -> int64 { return 1 }");
         assert!(
-            e.iter().any(|d| d.msg.contains("an async func cannot take 'b'") && d.msg.contains("a future belongs to the event loop thread")),
+            e.iter()
+                .any(|d| d.msg.contains("an async func cannot take 'b'")
+                    && d.msg.contains("a future belongs to the event loop thread")),
             "{e:?}"
         );
     }
@@ -7337,7 +7686,8 @@ mod tests {
             "{ASYNC_PRELUDE}func main() -> int32 {{\n  h := val\n  return 0\n}}"
         ));
         assert!(
-            e.iter().any(|d| d.msg == "'val' is async; call it with await or start it with async_run"),
+            e.iter()
+                .any(|d| d.msg == "'val' is async; call it with await or start it with async_run"),
             "{e:?}"
         );
     }
@@ -7359,7 +7709,8 @@ mod tests {
             "{ASYNC_PRELUDE}async func amain() -> int64 {{\n  await val(3)\n  return 0\n}}"
         ));
         assert!(
-            e.iter().any(|d| d.msg == "'await f' discards a value; bind it, as in v, e := await f"),
+            e.iter()
+                .any(|d| d.msg == "'await f' discards a value; bind it, as in v, e := await f"),
             "{e:?}"
         );
     }
@@ -7370,7 +7721,11 @@ mod tests {
         let e = errs(&format!(
             "{ASYNC_PRELUDE}async func amain() -> int64 {{\n  a, e := await val(3)\n  return a\n}}"
         ));
-        assert!(e.iter().any(|d| d.msg.contains("the error 'e' is never handled")), "{e:?}");
+        assert!(
+            e.iter()
+                .any(|d| d.msg.contains("the error 'e' is never handled")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7388,7 +7743,8 @@ mod tests {
             "{ASYNC_PRELUDE}async func amain() -> int64 {{\n  r := async_run(val(3))\n  return r\n}}"
         ));
         assert!(
-            e.iter().any(|d| d.msg == "async_run cannot be called inside an async func; await the call instead"),
+            e.iter().any(|d| d.msg
+                == "async_run cannot be called inside an async func; await the call instead"),
             "{e:?}"
         );
     }
@@ -7399,7 +7755,8 @@ mod tests {
             "{ASYNC_PRELUDE}func main() -> int32 {{\n  fa: Future<int64> = fnew()\n  r := async_run(fa)\n  println(r)\n  return 0\n}}"
         ));
         assert!(
-            e.iter().any(|d| d.msg == "async_run takes a direct call of an async func, written at the call site"),
+            e.iter().any(|d| d.msg
+                == "async_run takes a direct call of an async func, written at the call site"),
             "{e:?}"
         );
     }
@@ -7410,7 +7767,9 @@ mod tests {
             "func main() -> int32 {\n  f: Future<int64> = fnew()\n  t, s := spawn(lambda () -> void {\n    use(f)\n  })\n  s.ignore()\n  return 0\n}",
         );
         assert!(
-            e.iter().any(|d| d.msg == "spawn cannot capture 'f': a future belongs to the event loop thread"),
+            e.iter()
+                .any(|d| d.msg
+                    == "spawn cannot capture 'f': a future belongs to the event loop thread"),
             "{e:?}"
         );
     }
@@ -7421,7 +7780,9 @@ mod tests {
             "func main() -> int32 {\n  f: Future<int64> = fnew()\n  s := submit(lambda () -> void {\n    use(f)\n  })\n  s.ignore()\n  return 0\n}",
         );
         assert!(
-            e.iter().any(|d| d.msg == "submit cannot capture 'f': a future belongs to the event loop thread"),
+            e.iter()
+                .any(|d| d.msg
+                    == "submit cannot capture 'f': a future belongs to the event loop thread"),
             "{e:?}"
         );
     }
@@ -7436,7 +7797,9 @@ mod tests {
             "func main() -> int32 {\n  f: Future<int64> = fnew()\n  p: *Future<int64> = alloc(f)\n  t, s := spawn(lambda () -> void {\n    use(p)\n  })\n  s.ignore()\n  return 0\n}",
         );
         assert!(
-            e.iter().any(|d| d.msg == "spawn cannot capture 'p': a future belongs to the event loop thread"),
+            e.iter()
+                .any(|d| d.msg
+                    == "spawn cannot capture 'p': a future belongs to the event loop thread"),
             "{e:?}"
         );
     }
@@ -7463,7 +7826,10 @@ mod tests {
             "struct Holder { s: int64[] }\n\
              func main() -> int32 {\n  h: Holder = Holder { s: [1, 2] }\n  p: *Holder = alloc(h)\n  t, s := spawn(lambda () -> void {\n    use(p)\n  })\n  s.ignore()\n  return 0\n}",
         );
-        assert!(e.iter().any(|d| d.msg.contains("cannot capture 'p'")), "{e:?}");
+        assert!(
+            e.iter().any(|d| d.msg.contains("cannot capture 'p'")),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -7480,7 +7846,10 @@ mod tests {
              func main() -> int32 {\n  rc := async_run(amain())\n  return rc\n}",
         );
         assert!(!e.iter().any(|d| d.msg.contains("wrong type")), "{e:?}");
-        assert!(e.is_empty(), "the bare-future generic pin must check clean: {e:?}");
+        assert!(
+            e.is_empty(),
+            "the bare-future generic pin must check clean: {e:?}"
+        );
     }
 
     #[test]
@@ -7495,7 +7864,10 @@ mod tests {
              func main() -> int32 {\n  rc := async_run(amain())\n  return rc\n}",
         );
         assert!(!e.iter().any(|d| d.msg.contains("wrong type")), "{e:?}");
-        assert!(e.is_empty(), "a future arg in a multi-parameter generic must check clean: {e:?}");
+        assert!(
+            e.is_empty(),
+            "a future arg in a multi-parameter generic must check clean: {e:?}"
+        );
     }
 
     #[test]
@@ -7679,7 +8051,9 @@ mod tests {
             "{e:?}"
         );
         assert_eq!(
-            e.iter().filter(|d| d.msg.contains("is not a constructor")).count(),
+            e.iter()
+                .filter(|d| d.msg.contains("is not a constructor"))
+                .count(),
             1,
             "single diagnostic: {e:?}"
         );
@@ -7719,7 +8093,8 @@ mod tests {
              func main() -> int32 { o := Opt.Some() match o { Some(v) => println(v), None => println(-1) } return 0 }",
         );
         assert!(
-            e.iter().any(|d| d.msg == "'Opt.Some' takes 1 argument(s), but 0 were given"),
+            e.iter()
+                .any(|d| d.msg == "'Opt.Some' takes 1 argument(s), but 0 were given"),
             "{e:?}"
         );
     }
@@ -7731,7 +8106,8 @@ mod tests {
              func main() -> int32 { o := Opt.Some(true) match o { Some(v) => println(v), None => println(-1) } return 0 }",
         );
         assert!(
-            e.iter().any(|d| d.msg == "argument 1 to 'Opt.Some' has the wrong type"),
+            e.iter()
+                .any(|d| d.msg == "argument 1 to 'Opt.Some' has the wrong type"),
             "{e:?}"
         );
     }
