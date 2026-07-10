@@ -104,8 +104,24 @@ export func p_expect(p: *Parser, k: int64) -> bool {
     if p_eat(p, k) {
         return true
     }
-    p_error(p, "expected token")
+    p_error(p, expected_found(kind_name(k), p))
     return false
+}
+
+// "expected <what>, found <token>", the current token rendered in stage0's Debug
+// form, so a parser diagnostic reads exactly as stage0's.
+export func expected_found(what: string, p: *Parser) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "expected ")
+    sb_push(b, what)
+    sb_push(b, ", found ")
+    found: string = token_found((*p).src, (*p).n, p_tok(p))
+    sb_push(b, found)
+    free(found)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 export func p_kw(p: *Parser, lit: string) -> bool {
@@ -155,7 +171,7 @@ export func p_ident(p: *Parser) -> int64 {
         p_bump(p)
         return id
     }
-    p_error(p, "expected identifier")
+    p_error(p, expected_found("identifier", p))
     return intern_id((*(*p).ast).interner, "")
 }
 
@@ -217,7 +233,7 @@ export func p_expect_gt(p: *Parser) -> void {
         t.lo = rest_lo
         vec_set((*p).toks, (*p).pos, t)
     } else {
-        p_error(p, "expected '>'")
+        p_error(p, expected_found("'>'", p))
     }
 }
 

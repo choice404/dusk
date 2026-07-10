@@ -1,0 +1,685 @@
+// tcesc2: the interprocedural escape enforcement that reads the S4 summaries. The
+// summary pass in summary/sumwalk/sumhof/sumfix computes, per function, how its
+// view-typed parameters relate to its return value and to one another; this file
+// applies those relations at each call site so a view laundered through a call, a
+// frame view stored through a pointer argument, or a polluted value sunk into a
+// channel is caught with the intraprocedural walk in tcesc left unchanged. Split
+// from tcesc to keep each file under the size limit.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tciface
+@import tcesc
+@import summary
+
+func esc_none() -> EscPair { return EscPair { slice: false, closure: false } }
+func esc_or(a: EscPair, b: EscPair) -> EscPair { return EscPair { slice: a.slice || b.slice, closure: a.closure || b.closure } }
+
+// The escape relation of a call's target: the known summary of a top-level
+// function or a builtin, or the conservative TOP of an opaque callee.
+export struct CalleeEsc { opaque: bool, sum: SummaryHandle }
+
+// A local of function type shadows any module function of the same name, so its
+// call is opaque; a local proven bound once to one module function resolves to
+// that function's relation.
+export func tc_callee_esc(tc: *TypeChecker, callee_id: int64) -> CalleeEsc {
+    a: *Ast = (*tc).ast
+    c: ExprNode = vec_get((*a).exprs, callee_id)
+    if c.kind == xk_ident() {
+        name: string = ast_name(a, c.a)
+        sums: *Map<SummaryHandle> = (*tc).summaries
+        if !is_local(tc, name) {
+            if map_has(sums, name) {
+                return CalleeEsc { opaque: false, sum: unwrap_or(map_get(sums, name), empty_summary()) }
+            }
+            bs: SummaryHandle = builtin_summary(name)
+            if !bs.empty { return CalleeEsc { opaque: false, sum: bs } }
+        } else {
+            rfb: *Map<string> = (*tc).resolvable_fn_binds
+            if map_has(rfb, name) {
+                g: string = unwrap_or(map_get(rfb, name), "")
+                if map_has(sums, g) {
+                    return CalleeEsc { opaque: false, sum: unwrap_or(map_get(sums, g), empty_summary()) }
+                }
+            }
+        }
+    }
+    return CalleeEsc { opaque: true, sum: empty_summary() }
+}
+
+// The frame-view kind of a plain call's result: it views a frame when the callee
+// returns one of its arguments or reads a view back through a pointer argument, and
+// that argument is itself a frame-local view or a polluted pointer. An opaque
+// callee may return any argument. Higher-order builtins are element-aware.
+export func call_result_escape(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> EscPair {
+    if (*tc).types_only { return esc_none() }
+    a: *Ast = (*tc).ast
+    ht: TaintRes = higher_order_taint(tc, callee_id, arg_off, arg_len)
+    if ht.has { return ht.esc }
+    ce: CalleeEsc = tc_callee_esc(tc, callee_id)
+    mut out: EscPair = esc_none()
+    if ce.opaque {
+        mut i: int64 = 0
+        while i < arg_len && i < 64 {
+            out = esc_or(out, value_escape(tc, vec_get((*a).kids, arg_off + i)))
+            i = i + 1
+        }
+    } else {
+        mask: int64 = ce.sum.returns_alias | ce.sum.reads_through
+        mut j: int64 = 0
+        while j < arg_len && j < 64 {
+            if ps_has(mask, j) { out = esc_or(out, value_escape(tc, vec_get((*a).kids, arg_off + j))) }
+            j = j + 1
+        }
+    }
+    return out
+}
+
+// If a call's result views a frame through a returned or read-back argument, the
+// call span and the 0-based index of the first such argument, for the
+// interprocedural return diagnostic.
+export struct FrameOrigin { has: bool, lo: int64, hi: int64, idx: int64 }
+
+export func call_frame_origin(tc: *TypeChecker, e: ExprNode) -> FrameOrigin {
+    if (*tc).types_only { return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 } }
+    a: *Ast = (*tc).ast
+    if str_len(variant_name(tc, e.a)) > 0 { return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 } }
+    ht: TaintRes = higher_order_taint(tc, e.a, e.b, e.c)
+    if ht.has {
+        if ht.esc.slice || ht.esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: ht.idx } }
+        return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 }
+    }
+    ce: CalleeEsc = tc_callee_esc(tc, e.a)
+    if ce.opaque {
+        mut i: int64 = 0
+        while i < e.c && i < 64 {
+            esc: EscPair = value_escape(tc, vec_get((*a).kids, e.b + i))
+            if esc.slice || esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: i } }
+            i = i + 1
+        }
+    } else {
+        mask: int64 = ce.sum.returns_alias | ce.sum.reads_through
+        mut j: int64 = 0
+        while j < e.c && j < 64 {
+            if ps_has(mask, j) {
+                esc: EscPair = value_escape(tc, vec_get((*a).kids, e.b + j))
+                if esc.slice || esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: j } }
+            }
+            j = j + 1
+        }
+    }
+    return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 }
+}
+
+// The frame-view taint of a higher-order builtin result, with the argument index
+// the diagnostic names, or has=false when the callee is not one (or is shadowed by
+// a local or a module function of the same name).
+export struct TaintRes { has: bool, esc: EscPair, idx: int64 }
+
+func no_taint() -> TaintRes { return TaintRes { has: false, esc: esc_none(), idx: 0 } }
+
+export func higher_order_taint(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> TaintRes {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return no_taint() }
+    name: string = ast_name(a, callee.a)
+    sums: *Map<SummaryHandle> = (*tc).summaries
+    if is_local(tc, name) || map_has(sums, name) { return no_taint() }
+    if str_eq(name, "map") && arg_len == 2 {
+        mut esc: EscPair = esc_none()
+        if mapper_aliases(tc, vec_get((*a).kids, arg_off + 1), 0) { esc = value_escape(tc, vec_get((*a).kids, arg_off)) }
+        return TaintRes { has: true, esc: esc, idx: 0 }
+    }
+    if str_eq(name, "filter") && arg_len == 2 {
+        elem: int64 = elem_of((*tc).ty, chain_ty(tc, vec_get((*a).kids, arg_off)))
+        en: TyNode = ty_get((*tc).ty, elem)
+        mut esc: EscPair = esc_none()
+        if member_carries_view(tc, elem) || en.kind == tyk_unknown() { esc = value_escape(tc, vec_get((*a).kids, arg_off)) }
+        return TaintRes { has: true, esc: esc, idx: 0 }
+    }
+    if str_eq(name, "fold") && arg_len == 3 {
+        if mapper_aliases(tc, vec_get((*a).kids, arg_off + 2), 0) {
+            esc: EscPair = value_escape(tc, vec_get((*a).kids, arg_off + 1))
+            if esc.slice || esc.closure { return TaintRes { has: true, esc: esc, idx: 1 } }
+        }
+        mut esc2: EscPair = esc_none()
+        if mapper_aliases(tc, vec_get((*a).kids, arg_off + 2), 1) { esc2 = value_escape(tc, vec_get((*a).kids, arg_off)) }
+        return TaintRes { has: true, esc: esc2, idx: 0 }
+    }
+    if str_eq(name, "reduce") && arg_len == 2 {
+        mut esc: EscPair = esc_none()
+        if mapper_aliases(tc, vec_get((*a).kids, arg_off + 1), 0) || mapper_aliases(tc, vec_get((*a).kids, arg_off + 1), 1) {
+            esc = value_escape(tc, vec_get((*a).kids, arg_off))
+        }
+        return TaintRes { has: true, esc: esc, idx: 0 }
+    }
+    return no_taint()
+}
+
+// Whether a higher-order builtin's function may hand parameter i (or its pointee)
+// back through its result: a lambda literal answered by the summary module's
+// per-span table, a named module function by its computed summary, an opaque
+// function value by its declared result type.
+export func mapper_aliases(tc: *TypeChecker, fexpr_id: int64, i: int64) -> bool {
+    a: *Ast = (*tc).ast
+    f: ExprNode = vec_get((*a).exprs, fexpr_id)
+    if f.kind == xk_lambda() {
+        lr: *Map<int64> = (*tc).lambda_returns
+        key: string = span_key(f.lo, f.hi)
+        if map_has(lr, key) { return ps_has(unwrap_or(map_get(lr, key), 0), i) }
+        return true
+    }
+    if f.kind == xk_ident() {
+        name: string = ast_name(a, f.a)
+        if !is_local(tc, name) {
+            sums: *Map<SummaryHandle> = (*tc).summaries
+            if map_has(sums, name) {
+                sum: SummaryHandle = unwrap_or(map_get(sums, name), empty_summary())
+                return ps_has(sum.returns_alias, i) || ps_has(sum.reads_through, i)
+            }
+        }
+    }
+    return func_ret_viewy(tc, fexpr_id)
+}
+
+func func_ret_viewy(tc: *TypeChecker, fexpr_id: int64) -> bool {
+    ct: int64 = chain_ty(tc, fexpr_id)
+    n: TyNode = ty_get((*tc).ty, ct)
+    if n.kind == tyk_func() { return member_carries_view(tc, n.a) }
+    return false
+}
+
+// The store-edge provenance of a returned bare name, if a call stored a frame view
+// into it.
+export func returned_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    if e.kind == xk_ident() {
+        name: string = ast_name(a, e.a)
+        if map_has(fp, name) { return unwrap_or(map_get(fp, name), no_flow_prov()) }
+    }
+    return no_flow_prov()
+}
+
+export func no_flow_prov() -> FlowProv { return FlowProv { lo: -1, hi: -1, src: 0, dst: 0 } }
+
+// The store-edge provenance behind a returned struct literal's pointer or slice
+// field that a call polluted with a frame view.
+export func struct_lit_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind != xk_struct_lit() { return no_flow_prov() }
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    mut j: int64 = 1
+    while j < e.c {
+        init: int64 = vec_get((*a).kids, e.b + j)
+        ie: ExprNode = vec_get((*a).exprs, init)
+        if ie.kind == xk_ident() {
+            name: string = ast_name(a, ie.a)
+            if map_has(fp, name) { return unwrap_or(map_get(fp, name), no_flow_prov()) }
+        }
+        j = j + 2
+    }
+    return no_flow_prov()
+}
+
+export func emit_flow_escape(tc: *TypeChecker, lo: int64, hi: int64, i: int64, j: int64) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "argument ")
+    sb_push_int(b, i + 1)
+    sb_push(b, "'s view is stored into argument ")
+    sb_push_int(b, j + 1)
+    sb_push(b, " and may outlive this frame")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    tc_emit(tc, out, lo, hi)
+}
+
+func call_return_view_msg(n: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "this call may return a view of argument ")
+    sb_push_int(b, n + 1)
+    sb_push(b, ", which views the current frame")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The frame-escape diagnostic for a returned slice: the interprocedural message
+// when the value comes from a call that returns a frame argument, the store-edge
+// message when a call stored a frame view into the returned local, else the
+// intraprocedural message existing tests depend on.
+export func report_slice_escape(tc: *TypeChecker, expr_id: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    fo: FrameOrigin = maybe_call_origin(tc, expr_id)
+    if fo.has {
+        tc_emit(tc, call_return_view_msg(fo.idx), fo.lo, fo.hi)
+        return
+    }
+    rp: FlowProv = returned_flow_prov(tc, expr_id)
+    if rp.lo >= 0 {
+        emit_flow_escape(tc, rp.lo, rp.hi, rp.src, rp.dst)
+        return
+    }
+    sp: FlowProv = struct_lit_flow_prov(tc, expr_id)
+    if sp.lo >= 0 {
+        emit_flow_escape(tc, sp.lo, sp.hi, sp.src, sp.dst)
+        return
+    }
+    tc_emit(tc, "a slice into a local array escapes its frame; put the backing on the heap", e.lo, e.hi)
+}
+
+export func report_closure_escape(tc: *TypeChecker, expr_id: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    fo: FrameOrigin = maybe_call_origin(tc, expr_id)
+    if fo.has {
+        tc_emit(tc, call_return_view_msg(fo.idx), fo.lo, fo.hi)
+        return
+    }
+    rp: FlowProv = returned_flow_prov(tc, expr_id)
+    if rp.lo >= 0 {
+        emit_flow_escape(tc, rp.lo, rp.hi, rp.src, rp.dst)
+        return
+    }
+    tc_emit(tc, "a closure that captures a local escapes its frame; it cannot be returned", e.lo, e.hi)
+}
+
+func maybe_call_origin(tc: *TypeChecker, expr_id: int64) -> FrameOrigin {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind != xk_call() { return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 } }
+    return call_frame_origin(tc, e)
+}
+
+// The binding a sent value roots at, peeling a move wrapper and rooting a
+// projection through fields, indexes, and dereferences.
+export func send_value_root(tc: *TypeChecker, expr_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_call() && e.c == 1 {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_ident() {
+            if str_eq(ast_name(a, callee.a), "move") { return send_value_root(tc, vec_get((*a).kids, e.b)) }
+        }
+    }
+    if e.kind == xk_ident() { return ast_name(a, e.a) }
+    if e.kind == xk_field() || e.kind == xk_index() { return store_root(tc, expr_id) }
+    return ""
+}
+
+// The whole interprocedural call escape at a call site, in stage0's order: the
+// sink check first (a polluted argument in a callee's sink position), then the
+// store-edge routing (a frame view laundered into an argument's place), then the
+// leaf channel send for a direct chan_send in the sending frame.
+export func enforce_call_escape(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    if (*tc).types_only { return }
+    check_call_sinks(tc, callee_id, arg_off, arg_len, lo, hi)
+    check_lambda_call_sinks(tc, callee_id, arg_off, arg_len, lo, hi)
+    check_opaque_call_send(tc, callee_id, arg_off, arg_len, lo, hi)
+    apply_lambda_capture_flows(tc, callee_id, arg_off, arg_len, lo, hi)
+    apply_call_flows(tc, callee_id, arg_off, arg_len, lo, hi)
+    check_method_call_escape(tc, callee_id, arg_off, arg_len, lo, hi)
+    check_chan_send_flow(tc, callee_id, arg_off, arg_len)
+}
+
+func has_method_summary(tc: *TypeChecker, callee_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() { return false }
+    tname: string = receiver_type_name(tc, callee.a)
+    if str_len(tname) == 0 { return false }
+    ms: *Map<SummaryHandle> = (*tc).method_summaries
+    return map_has(ms, method_key(tname, ast_name(a, callee.b)))
+}
+
+// A synchronous error handler (e.check(h), e.ignore()) invokes its function
+// argument in place and never stores it, so it is not opaque.
+func callee_is_sync_handler(tc: *TypeChecker, callee_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() { return false }
+    bt: TyNode = ty_get((*tc).ty, chain_ty(tc, callee.a))
+    if bt.kind != tyk_error() { return false }
+    mname: string = ast_name(a, callee.b)
+    return str_eq(mname, "check") || str_eq(mname, "ignore")
+}
+
+// Whether a call's callee is opaque to the send analysis: dusk cannot see which
+// arguments it may hand to a channel or store through its own captures. A
+// summarized module function, a builtin, a resolvable-bound local, a
+// lambda-bound local, a variant constructor, a method with a summary, and a
+// synchronous error handler are all not opaque; every other callee is.
+func callee_is_opaque(tc: *TypeChecker, callee_id: int64) -> bool {
+    if str_len(variant_name(tc, callee_id)) > 0 { return false }
+    if has_method_summary(tc, callee_id) { return false }
+    if callee_is_sync_handler(tc, callee_id) { return false }
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind == xk_ident() {
+        name: string = ast_name(a, callee.a)
+        sums: *Map<SummaryHandle> = (*tc).summaries
+        if !is_local(tc, name) {
+            if map_has(sums, name) { return false }
+            if !builtin_summary(name).empty { return false }
+            return true
+        }
+        rfb: *Map<string> = (*tc).resolvable_fn_binds
+        if map_has(rfb, name) { return false }
+        if lambda_sink_bind_lookup(tc, name).found { return false }
+        return true
+    }
+    return true
+}
+
+// The leaf-frame counterpart of the summary and lambda sink checks: an opaque
+// callee may hand any argument to a channel the receiver outlives or store it
+// through one of its own captures. A managed pointer whose object a store edge
+// polluted, a bare frame slice, and a frame-capturing closure are each refused.
+func check_opaque_call_send(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    if !callee_is_opaque(tc, callee_id) { return }
+    a: *Ast = (*tc).ast
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    mut i: int64 = 0
+    while i < arg_len {
+        arg_id: int64 = vec_get((*a).kids, arg_off + i)
+        root: string = send_value_root(tc, arg_id)
+        mut handled: bool = false
+        if str_len(root) > 0 {
+            if is_managed_ty(tc, lookup(tc, root)) {
+                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
+                    emit_opaque_send(tc, root, unwrap_or(map_get(fp, root), no_flow_prov()), lo, hi)
+                    handled = true
+                }
+            }
+        }
+        if !handled {
+            esc: EscPair = value_escape(tc, arg_id)
+            if esc.slice {
+                tc_emit(tc, "this call may store a view of the current frame beyond it; put the backing on the heap", lo, hi)
+            } else if esc.closure {
+                tc_emit(tc, "this call may store a closure that captures the current frame beyond it; put the captured backing on the heap", lo, hi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+func emit_opaque_send(tc: *TypeChecker, root: string, prov: FlowProv, lo: int64, hi: int64) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "this call may send '")
+    sb_push(b, root)
+    if prov.lo >= 0 {
+        sb_push(b, "' across a channel, but argument ")
+        sb_push_int(b, prov.src + 1)
+        sb_push(b, "'s view was stored into argument ")
+        sb_push_int(b, prov.dst + 1)
+        sb_push(b, " here, leaving '")
+        sb_push(b, root)
+        sb_push(b, "' viewing the current frame; move the backing to the heap")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, prov.lo, prov.hi)
+    } else {
+        sb_push(b, "' across a channel; '")
+        sb_push(b, root)
+        sb_push(b, "' holds a view of the current frame, which the receiver outlives; move the backing to the heap or send heap owned data")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, lo, hi)
+    }
+}
+
+// A parameter's view stored through a captured binding is an escape edge the
+// argument-to-argument store model cannot see, since the captured place is not an
+// argument. At a direct call of a lambda-bound local whose argument in that
+// position is a frame view, the captured binding escapes if it outlives the frame
+// (a parameter or a pointer that borrows one), else its own flag is raised for its
+// later egress check.
+func apply_lambda_capture_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return }
+    cname: string = ast_name(a, callee.a)
+    cl: CapLookup = lambda_capture_bind_lookup(tc, cname)
+    if !cl.found { return }
+    caps: string = cl.edges
+    cps: *Map<int64> = (*tc).cur_params
+    mut p: int64 = 0
+    while caps[p] != 0 {
+        mut idx: int64 = 0
+        while caps[p] != 44 {
+            digit: int64 = caps[p]
+            idx = idx * 10 + (digit - 48)
+            p = p + 1
+        }
+        p = p + 1
+        cb: *StringBuilder = alloc(sb_new())
+        while caps[p] != 59 {
+            sb_push_char(cb, caps[p])
+            p = p + 1
+        }
+        p = p + 1
+        bname: string = substring(sb_cstr(cb), 0, sb_size(cb))
+        sb_free(cb)
+        free(cb)
+        if idx < arg_len {
+            arg_id: int64 = vec_get((*a).kids, arg_off + idx)
+            esc: EscPair = value_escape(tc, arg_id)
+            if esc.slice || esc.closure {
+                if map_has(cps, bname) || param_alias_of(tc, bname) >= 0 {
+                    tc_emit(tc, "this call stores a view of the current frame into a place that outlives it; put the backing on the heap", lo, hi)
+                } else {
+                    raise_esc(tc, bname, esc.slice, esc.closure)
+                }
+            }
+        }
+    }
+}
+
+// For each sink parameter j of a callee's summary, reject a polluted argument in
+// that position. The channel-send builtins defer to the leaf check below, which
+// owns the send in the frame that holds the value.
+func check_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return }
+    cname: string = ast_name(a, callee.a)
+    if str_eq(cname, "chan_send") || str_eq(cname, "chan_try_send") { return }
+    sums: *Map<SummaryHandle> = (*tc).summaries
+    mut target: string = cname
+    if is_local(tc, cname) {
+        rfb: *Map<string> = (*tc).resolvable_fn_binds
+        if !map_has(rfb, cname) { return }
+        target = unwrap_or(map_get(rfb, cname), "")
+    }
+    if !map_has(sums, target) { return }
+    sum: SummaryHandle = unwrap_or(map_get(sums, target), empty_summary())
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    mut j: int64 = 0
+    while j < arg_len && j < 64 {
+        if ps_has(sum.sinks, j) {
+            arg_id: int64 = vec_get((*a).kids, arg_off + j)
+            root: string = send_value_root(tc, arg_id)
+            if str_len(root) > 0 {
+                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
+                    prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+                    emit_sink_reject(tc, cname, root, ps_has(sum.collect_sinks, j), prov, lo, hi)
+                }
+            }
+        }
+        j = j + 1
+    }
+}
+
+// For a local bound to a lambda literal, reject a polluted argument in one of the
+// lambda's own sink positions (its body sends the parameter across a channel or
+// mints it into a collector), the interprocedural send the leaf check cannot see
+// through a closure.
+func check_lambda_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return }
+    cname: string = ast_name(a, callee.a)
+    sl: SinkLookup = lambda_sink_bind_lookup(tc, cname)
+    if !sl.found { return }
+    sinks: int64 = sl.sinks
+    collect: int64 = sl.collect
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    mut j: int64 = 0
+    while j < arg_len && j < 64 {
+        if ps_has(sinks, j) {
+            arg_id: int64 = vec_get((*a).kids, arg_off + j)
+            root: string = send_value_root(tc, arg_id)
+            if str_len(root) > 0 {
+                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
+                    prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+                    emit_sink_reject(tc, cname, root, ps_has(collect, j), prov, lo, hi)
+                }
+            }
+        }
+        j = j + 1
+    }
+}
+
+// The interprocedural sink reject. collect selects the wording; the store edge
+// that polluted the argument names its site when one is recorded, else the call
+// site is blamed. The escape decision is made before this; only the message
+// differs. Each variant mirrors stage0's emit_sink_reject byte for byte.
+export func emit_sink_reject(tc: *TypeChecker, cname: string, root: string, collect: bool, prov: FlowProv, lo: int64, hi: int64) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "'")
+    sb_push(b, cname)
+    if collect {
+        sb_push(b, "' collects '")
+        sb_push(b, root)
+        sb_push(b, "', but ")
+    } else {
+        sb_push(b, "' sends '")
+        sb_push(b, root)
+        sb_push(b, "' across a channel, but ")
+    }
+    if prov.lo >= 0 {
+        sb_push(b, "argument ")
+        sb_push_int(b, prov.src + 1)
+        sb_push(b, "'s view was stored into argument ")
+        sb_push_int(b, prov.dst + 1)
+        sb_push(b, " here, leaving '")
+        sb_push(b, root)
+        if collect {
+            sb_push(b, "' viewing the frame; move the backing to the heap")
+        } else {
+            sb_push(b, "' viewing the sending frame; move the backing to the heap")
+        }
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, prov.lo, prov.hi)
+    } else {
+        if collect {
+            sb_push(b, "it holds a view of the frame, which the collected value outlives; move the backing to the heap")
+        } else {
+            sb_push(b, "it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data")
+        }
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, lo, hi)
+    }
+}
+
+// Applies a call's store edges to the caller: for each edge (i, j) where argument
+// i is a frame-local view, the view flows into argument j's place. A place rooted
+// at a parameter escapes at once; a place rooted at a local raises that local's
+// flag and records the store provenance for its own later egress check.
+func apply_call_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    if str_len(variant_name(tc, callee_id)) > 0 { return }
+    ce: CalleeEsc = tc_callee_esc(tc, callee_id)
+    // Snapshot every argument's frame-view kind before any edge raises a flag, so
+    // an edge reads the pre-call state (a `two(s, x, y)` that stores s into x then
+    // reads x back into y sees x clean at both edges).
+    src: *Vector<EscPair> = alloc(vec_new())
+    mut s: int64 = 0
+    while s < arg_len {
+        vec_push(src, value_escape(tc, vec_get((*a).kids, arg_off + s)))
+        s = s + 1
+    }
+    mut x: int64 = 0
+    while x < arg_len && x < 64 {
+        src_esc: EscPair = vec_get(src, x)
+        if src_esc.slice || src_esc.closure {
+            mut y: int64 = 0
+            while y < arg_len && y < 64 {
+                mut edge: bool = false
+                if ce.opaque {
+                    if x != y { edge = true }
+                } else {
+                    if flow_has(ce.sum.flows, x, y) { edge = true }
+                }
+                if edge {
+                    route_flow_edge(tc, x, y, src_esc, vec_get((*a).kids, arg_off + y), lo, hi)
+                }
+                y = y + 1
+            }
+        }
+        x = x + 1
+    }
+}
+
+// The leaf channel send: a direct chan_send in the frame that holds the value. A
+// sent value whose binding holds, or whose heap object a store edge polluted with,
+// a view of this frame would dangle in the receiver.
+func check_chan_send_flow(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> void {
+    if arg_len != 2 { return }
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return }
+    name: string = ast_name(a, callee.a)
+    if !str_eq(name, "chan_send") && !str_eq(name, "chan_try_send") { return }
+    arg_id: int64 = vec_get((*a).kids, arg_off + 1)
+    root: string = send_value_root(tc, arg_id)
+    if str_len(root) == 0 { return }
+    if !is_esc_slice(tc, root) && !is_esc_closure(tc, root) { return }
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot send '")
+    sb_push(b, root)
+    if map_has(fp, root) {
+        prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+        sb_push(b, "': argument ")
+        sb_push_int(b, prov.src + 1)
+        sb_push(b, "'s view was stored into argument ")
+        sb_push_int(b, prov.dst + 1)
+        sb_push(b, " here, leaving '")
+        sb_push(b, root)
+        sb_push(b, "' viewing the sending frame; move the backing to the heap")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, prov.lo, prov.hi)
+    } else {
+        sb_push(b, "': it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        arg: ExprNode = vec_get((*a).exprs, arg_id)
+        tc_emit(tc, out, arg.lo, arg.hi)
+    }
+}

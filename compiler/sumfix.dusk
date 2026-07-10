@@ -1,0 +1,631 @@
+// sumfix: the fixpoint driver, the method summaries, the lambda and frame-store
+// collection pass, the top-level compute entry, and the canonical dump renderer.
+// The per-function summaries climb a monotone lattice from bottom by chaotic
+// iteration over the module order until stable; the lambda tables and frame-store
+// sites come from one walk of every function and method under the settled table.
+// Every dump line mirrors stage0's render_escape_info byte for byte.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import tcstate
+@import summary
+@import sumwalk
+@import sumplace
+@import sumhof
+
+func build_gens(a: *Ast, off: int64, len: int64) -> *Map<int64> {
+    g: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < len {
+        map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
+        i = i + 1
+    }
+    return g
+}
+
+// One function's summary under the current summary table. Pure in the table: it
+// reads callee summaries and writes only local state. When lret/fs point at the
+// shared outputs the caller keeps the lambda tables and frame stores; the fixpoint
+// passes throwaway ones.
+func transfer_func(t: *SumTables, summaries: *Map<SummaryHandle>, f: FuncNode, self_ty: string, lret: *Map<int64>, lsink: *Map<int64>, lcoll: *Map<int64>, lcap: *Map<string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> SummaryHandle {
+    a: *Ast = (*t).ast
+    gens: *Map<int64> = build_gens(a, f.generics_off, f.generics_len)
+    fnb: *Map<string> = sum_resolvable_fn_binds(t, f.body)
+    c: *SumCtx = ctx_new(t, summaries, gens, fnb, lret, lsink, lcoll, lcap, lspans, fs)
+    mut idx: int64 = 0
+    if str_len(self_ty) > 0 {
+        ctx_bind_self(c, self_ty, 0)
+        idx = 1
+    }
+    mut i: int64 = 0
+    while i < f.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+        ctx_bind_param(c, ast_name(a, p.name), p.ty, idx)
+        idx = idx + 1
+        i = i + 1
+    }
+    sum_block(c, f.body)
+    return ctx_summary(c)
+}
+
+func throwaway_transfer(t: *SumTables, summaries: *Map<SummaryHandle>, f: FuncNode, self_ty: string) -> SummaryHandle {
+    lret: *Map<int64> = alloc(map_new())
+    lsink: *Map<int64> = alloc(map_new())
+    lcoll: *Map<int64> = alloc(map_new())
+    lcap: *Map<string> = alloc(map_new())
+    lspans: *Vector<SpanKey> = alloc(vec_new())
+    fs: *Vector<FlowProv> = alloc(vec_new())
+    return transfer_func(t, summaries, f, self_ty, lret, lsink, lcoll, lcap, lspans, fs)
+}
+
+func sum_eq(a: SummaryHandle, b: SummaryHandle) -> bool {
+    if a.returns_alias != b.returns_alias { return false }
+    if a.reads_through != b.reads_through { return false }
+    if a.sinks != b.sinks { return false }
+    if a.collect_sinks != b.collect_sinks { return false }
+    return str_eq(a.flows, b.flows)
+}
+
+// The names carrying a computed summary, in declaration order with the first
+// occurrence kept, paired with a funcs map from name to the last function of that
+// name (a duplicate name in an invalid program resolves to the latter definition,
+// matching stage0's HashMap of func references).
+func build_funcs_order(a: *Ast, funcs: *Map<int64>, order: *Vector<string>) -> void {
+    items: *Vector<ItemNode> = (*a).items
+    seen: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            name: string = ast_name(a, f.name)
+            map_put(funcs, name, it.id)
+            if !map_has(seen, name) {
+                map_put(seen, name, 1)
+                vec_push(order, name)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// The direct module-function callees of each summarized function, inverted so a
+// grown callee summary re-enqueues exactly its callers. Duplicate caller entries
+// are harmless: the queued set prevents a double enqueue.
+func build_callers(t: *SumTables, funcs: *Map<int64>, callers: *Map<string>) -> void {
+    a: *Ast = (*t).ast
+    mfns: *Map<int64> = (*t).module_fns
+    keys: *Vector<string> = map_keys(funcs)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        fname: string = vec_get(keys, i)
+        f: FuncNode = vec_get((*a).funcs, unwrap_or(map_get(funcs, fname), 0))
+        callees: *Map<int64> = alloc(map_new())
+        collect_callees_block(t, mfns, f.body, callees)
+        cks: *Vector<string> = map_keys(callees)
+        mut j: int64 = 0
+        while j < vec_len(cks) {
+            c: string = vec_get(cks, j)
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, unwrap_or(map_get(callers, c), ""))
+            sb_push(b, fname)
+            sb_push_char(b, 10)
+            map_put(callers, c, substring(sb_cstr(b), 0, sb_size(b)))
+            sb_free(b)
+            free(b)
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+func solve_fns(t: *SumTables, summaries: *Map<SummaryHandle>) -> void {
+    a: *Ast = (*t).ast
+    funcs: *Map<int64> = alloc(map_new())
+    order: *Vector<string> = alloc(vec_new())
+    build_funcs_order(a, funcs, order)
+    callers: *Map<string> = alloc(map_new())
+    build_callers(t, funcs, callers)
+    queue: *Vector<string> = alloc(vec_new())
+    queued: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < vec_len(order) {
+        name: string = vec_get(order, i)
+        map_put(summaries, name, empty_summary())
+        vec_push(queue, name)
+        map_put(queued, name, 1)
+        i = i + 1
+    }
+    // Termination is guaranteed by monotonicity; the cap only guards against a
+    // future bug turning the walk non-monotone.
+    cap: int64 = vec_len(order) * 4200 + 10000
+    mut head: int64 = 0
+    mut steps: int64 = 0
+    while head < vec_len(queue) {
+        name: string = vec_get(queue, head)
+        head = head + 1
+        map_remove(queued, name).ignore()
+        steps = steps + 1
+        if steps > cap { return }
+        if map_has(funcs, name) {
+            f: FuncNode = vec_get((*a).funcs, unwrap_or(map_get(funcs, name), 0))
+            now: SummaryHandle = throwaway_transfer(t, summaries, f, "")
+            old: SummaryHandle = unwrap_or(map_get(summaries, name), empty_summary())
+            if !sum_eq(old, now) {
+                map_put(summaries, name, now)
+                enqueue_callers(callers, name, queue, queued)
+            }
+        }
+    }
+}
+
+func enqueue_callers(callers: *Map<string>, name: string, queue: *Vector<string>, queued: *Map<int64>) -> void {
+    if !map_has(callers, name) { return }
+    list: string = unwrap_or(map_get(callers, name), "")
+    mut start: int64 = 0
+    mut j: int64 = 0
+    while list[j] != 0 {
+        if list[j] == 10 {
+            c: string = substring(list, start, j)
+            if str_len(c) > 0 && !map_has(queued, c) {
+                map_put(queued, c, 1)
+                vec_push(queue, c)
+            }
+            start = j + 1
+        }
+        j = j + 1
+    }
+}
+
+func collect_callees_block(t: *SumTables, mfns: *Map<int64>, bid: int64, out: *Map<int64>) -> void {
+    if bid < 0 { return }
+    a: *Ast = (*t).ast
+    blocks: *Vector<BlockNode> = (*a).blocks
+    if bid >= vec_len(blocks) { return }
+    b: BlockNode = vec_get(blocks, bid)
+    mut i: int64 = 0
+    while i < b.len {
+        collect_callees_stmt(t, mfns, vec_get((*a).kids, b.off + i), out)
+        i = i + 1
+    }
+}
+
+func collect_callees_stmt(t: *SumTables, mfns: *Map<int64>, sid: int64, out: *Map<int64>) -> void {
+    a: *Ast = (*t).ast
+    s: StmtNode = vec_get((*a).stmts, sid)
+    if s.kind == sk_let() {
+        collect_callees_expr(t, mfns, s.c, out)
+    } else if s.kind == sk_assign() {
+        collect_callees_expr(t, mfns, s.a, out)
+        collect_callees_expr(t, mfns, s.b, out)
+    } else if s.kind == sk_assign_op() {
+        collect_callees_expr(t, mfns, s.b, out)
+        collect_callees_expr(t, mfns, s.c, out)
+    } else if s.kind == sk_return() || s.kind == sk_defer() || s.kind == sk_expr() {
+        collect_callees_expr(t, mfns, s.a, out)
+    } else if s.kind == sk_if() {
+        collect_callees_expr(t, mfns, s.a, out)
+        collect_callees_block(t, mfns, s.b, out)
+        if s.c >= 0 { collect_callees_block(t, mfns, s.c, out) }
+    } else if s.kind == sk_while() {
+        collect_callees_expr(t, mfns, s.a, out)
+        collect_callees_block(t, mfns, s.b, out)
+    } else if s.kind == sk_for() {
+        collect_callees_expr(t, mfns, s.b, out)
+        collect_callees_block(t, mfns, s.c, out)
+    } else if s.kind == sk_match() {
+        collect_callees_match(t, mfns, s.a, s.b, s.c, out)
+    }
+}
+
+func collect_callees_match(t: *SumTables, mfns: *Map<int64>, scrut: int64, arms_off: int64, arms_len: int64, out: *Map<int64>) -> void {
+    a: *Ast = (*t).ast
+    collect_callees_expr(t, mfns, scrut, out)
+    mut i: int64 = 0
+    while i < arms_len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + i))
+        collect_callees_block(t, mfns, arm.body, out)
+        i = i + 1
+    }
+}
+
+func collect_callees_expr(t: *SumTables, mfns: *Map<int64>, id: int64, out: *Map<int64>) -> void {
+    if id < 0 { return }
+    a: *Ast = (*t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_ident() {
+            name: string = ast_name(a, callee.a)
+            if map_has(mfns, name) { map_put(out, name, 1) }
+        }
+        collect_callees_expr(t, mfns, e.a, out)
+        mut i: int64 = 0
+        while i < e.c {
+            collect_callees_expr(t, mfns, vec_get((*a).kids, e.b + i), out)
+            i = i + 1
+        }
+    } else if e.kind == xk_unary() {
+        collect_callees_expr(t, mfns, e.b, out)
+    } else if e.kind == xk_field() || e.kind == xk_await() {
+        collect_callees_expr(t, mfns, e.a, out)
+    } else if e.kind == xk_binary() {
+        collect_callees_expr(t, mfns, e.b, out)
+        collect_callees_expr(t, mfns, e.c, out)
+    } else if e.kind == xk_index() || e.kind == xk_range() {
+        collect_callees_expr(t, mfns, e.a, out)
+        collect_callees_expr(t, mfns, e.b, out)
+    } else if e.kind == xk_tuple() || e.kind == xk_array() {
+        mut i: int64 = 0
+        while i < e.b {
+            collect_callees_expr(t, mfns, vec_get((*a).kids, e.a + i), out)
+            i = i + 1
+        }
+    } else if e.kind == xk_struct_lit() {
+        mut i: int64 = 1
+        while i < e.c {
+            collect_callees_expr(t, mfns, vec_get((*a).kids, e.b + i), out)
+            i = i + 2
+        }
+    } else if e.kind == xk_lambda() {
+        collect_callees_block(t, mfns, e.d, out)
+    } else if e.kind == xk_match() {
+        collect_callees_match(t, mfns, e.a, e.b, e.c, out)
+    } else if e.kind == xk_collect() {
+        collect_callees_expr(t, mfns, e.b, out)
+    } else if e.kind == xk_do() {
+        mut i: int64 = 0
+        while i < e.c {
+            db: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + i))
+            collect_callees_expr(t, mfns, db.expr, out)
+            i = i + 1
+        }
+    }
+}
+
+func collect_methods(t: *SumTables, summaries: *Map<SummaryHandle>, method_summaries: *Map<SummaryHandle>) -> void {
+    a: *Ast = (*t).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            recv: string = ast_name(a, im.ty)
+            mut j: int64 = 0
+            while j < im.methods_len {
+                m: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
+                sum: SummaryHandle = throwaway_transfer(t, summaries, m, recv)
+                map_put(method_summaries, method_key(recv, ast_name(a, m.name)), sum)
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// One walk of every function and impl method under the settled summary table,
+// keeping the per-lambda tables and the frame-store sites the checker enforces.
+func collect_pass(t: *SumTables, summaries: *Map<SummaryHandle>, info: EscapeInfo) -> void {
+    a: *Ast = (*t).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            collect_one(t, summaries, vec_get((*a).funcs, it.id), "", info)
+        } else if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            recv: string = ast_name(a, im.ty)
+            mut j: int64 = 0
+            while j < im.methods_len {
+                collect_one(t, summaries, vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j)), recv, info)
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    sort_frame_stores(info.frame_stores)
+}
+
+func collect_one(t: *SumTables, summaries: *Map<SummaryHandle>, f: FuncNode, self_ty: string, info: EscapeInfo) -> void {
+    transfer_func(t, summaries, f, self_ty, info.lambda_returns, info.lambda_sinks, info.lambda_collect_sinks, info.lambda_capture_flows, info.lambda_spans, info.frame_stores).ignore()
+}
+
+export func method_key(recv: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, recv)
+    sb_push_char(b, 35)
+    sb_push(b, name)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func sort_frame_stores(fs: *Vector<FlowProv>) -> void {
+    mut i: int64 = 1
+    while i < vec_len(fs) {
+        key: FlowProv = vec_get(fs, i)
+        mut j: int64 = i - 1
+        mut placed: bool = false
+        while j >= 0 && !placed {
+            cur: FlowProv = vec_get(fs, j)
+            if fp_less(key, cur) {
+                vec_set(fs, j + 1, cur)
+                j = j - 1
+            } else {
+                placed = true
+            }
+        }
+        vec_set(fs, j + 1, key)
+        i = i + 1
+    }
+    dedup_frame_stores(fs)
+}
+
+// Collapses adjacent equal (lo, hi, dst) entries after the sort, so the vector the
+// checker iterates carries each store site once, matching stage0's frame_stores
+// dedup.
+func dedup_frame_stores(fs: *Vector<FlowProv>) -> void {
+    n: int64 = vec_len(fs)
+    if n <= 1 { return }
+    mut write: int64 = 1
+    mut read: int64 = 1
+    while read < n {
+        cur: FlowProv = vec_get(fs, read)
+        prev: FlowProv = vec_get(fs, write - 1)
+        if !fp_eq(cur, prev) {
+            vec_set(fs, write, cur)
+            write = write + 1
+        }
+        read = read + 1
+    }
+    (*fs).len = write
+}
+
+func fp_less(x: FlowProv, y: FlowProv) -> bool {
+    if x.lo != y.lo { return x.lo < y.lo }
+    if x.hi != y.hi { return x.hi < y.hi }
+    return x.dst < y.dst
+}
+
+func fp_eq(x: FlowProv, y: FlowProv) -> bool {
+    return x.lo == y.lo && x.hi == y.hi && x.dst == y.dst
+}
+
+export func compute_escape_info(a: *Ast) -> EscapeInfo {
+    t: *SumTables = sum_tables_new(a)
+    summaries: *Map<SummaryHandle> = alloc(map_new())
+    solve_fns(t, summaries)
+    method_summaries: *Map<SummaryHandle> = alloc(map_new())
+    collect_methods(t, summaries, method_summaries)
+    lret: *Map<int64> = alloc(map_new())
+    lsink: *Map<int64> = alloc(map_new())
+    lcoll: *Map<int64> = alloc(map_new())
+    lcap: *Map<string> = alloc(map_new())
+    lspans: *Vector<SpanKey> = alloc(vec_new())
+    fs: *Vector<FlowProv> = alloc(vec_new())
+    rfb: *Map<string> = alloc(map_new())
+    info: EscapeInfo = EscapeInfo {
+        summaries: summaries, method_summaries: method_summaries,
+        lambda_returns: lret, lambda_sinks: lsink, lambda_collect_sinks: lcoll,
+        lambda_capture_flows: lcap, lambda_spans: lspans, frame_stores: fs,
+        resolvable_fn_binds: rfb,
+    }
+    collect_pass(t, summaries, info)
+    return info
+}
+
+func render_mask(m: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 48)
+    sb_push_char(b, 120)
+    mut k: int64 = 15
+    while k > 0 && ((m >> (4 * k)) & 15) == 0 { k = k - 1 }
+    while k >= 0 {
+        d: int64 = (m >> (4 * k)) & 15
+        mut ch: int64 = 48 + d
+        if d >= 10 { ch = 87 + d }
+        sb_push_char(b, ch)
+        k = k - 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func render_flows(flows: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 91)
+    mut first: bool = true
+    mut i: int64 = 0
+    while i < 64 {
+        mut j: int64 = 0
+        while j < 64 {
+            if flow_has(flows, i, j) {
+                if !first { sb_push_char(b, 44) }
+                sb_push_char(b, 40)
+                sb_push_int(b, i)
+                sb_push_char(b, 44)
+                sb_push_int(b, j)
+                sb_push_char(b, 41)
+                first = false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    sb_push_char(b, 93)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func render_capture(s: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 91)
+    mut first: bool = true
+    mut p: int64 = 0
+    while s[p] != 0 {
+        if !first { sb_push_char(b, 44) }
+        sb_push_char(b, 40)
+        while s[p] != 44 {
+            sb_push_char(b, s[p])
+            p = p + 1
+        }
+        sb_push_char(b, 44)
+        p = p + 1
+        while s[p] != 59 {
+            sb_push_char(b, s[p])
+            p = p + 1
+        }
+        p = p + 1
+        sb_push_char(b, 41)
+        first = false
+    }
+    sb_push_char(b, 93)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func render_summary(b: *StringBuilder, sum: SummaryHandle) -> void {
+    sb_push(b, "returns_alias=")
+    sb_push(b, render_mask(sum.returns_alias))
+    sb_push(b, " reads_through=")
+    sb_push(b, render_mask(sum.reads_through))
+    sb_push(b, " sinks=")
+    sb_push(b, render_mask(sum.sinks))
+    sb_push(b, " collect_sinks=")
+    sb_push(b, render_mask(sum.collect_sinks))
+    sb_push(b, " flows=")
+    sb_push(b, render_flows(sum.flows))
+}
+
+func sort_spans(v: *Vector<SpanKey>) -> void {
+    mut i: int64 = 1
+    while i < vec_len(v) {
+        key: SpanKey = vec_get(v, i)
+        mut j: int64 = i - 1
+        mut placed: bool = false
+        while j >= 0 && !placed {
+            cur: SpanKey = vec_get(v, j)
+            if span_less(key, cur) {
+                vec_set(v, j + 1, cur)
+                j = j - 1
+            } else {
+                placed = true
+            }
+        }
+        vec_set(v, j + 1, key)
+        i = i + 1
+    }
+}
+
+func span_less(x: SpanKey, y: SpanKey) -> bool {
+    if x.lo != y.lo { return x.lo < y.lo }
+    return x.hi < y.hi
+}
+
+func lambda_line(b: *StringBuilder, lo: int64, hi: int64, table: string, value: string) -> void {
+    sb_push(b, "lambda ")
+    sb_push_int(b, lo)
+    sb_push_char(b, 58)
+    sb_push_int(b, hi)
+    sb_push_char(b, 32)
+    sb_push(b, table)
+    sb_push_char(b, 61)
+    sb_push(b, value)
+    sb_push_char(b, 10)
+}
+
+// Renders the escape-analysis oracle: functions by name, methods by (recv, name),
+// lambda tables by (lo, hi, table name), and the frame-store sites. Every line ends
+// with a newline; the command prints the result verbatim so the byte stream matches
+// stage0's println of its joined lines.
+export func render_escape_info(info: EscapeInfo) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sums: *Map<SummaryHandle> = info.summaries
+    msums: *Map<SummaryHandle> = info.method_summaries
+    lcap: *Map<string> = info.lambda_capture_flows
+    lcoll: *Map<int64> = info.lambda_collect_sinks
+    lret: *Map<int64> = info.lambda_returns
+    lsink: *Map<int64> = info.lambda_sinks
+    spans: *Vector<SpanKey> = info.lambda_spans
+    fkeys: *Vector<string> = map_keys(sums)
+    sort_strings(fkeys)
+    mut i: int64 = 0
+    while i < vec_len(fkeys) {
+        k: string = vec_get(fkeys, i)
+        sb_push(b, "fn ")
+        sb_push(b, k)
+        sb_push_char(b, 32)
+        render_summary(b, unwrap_or(map_get(sums, k), empty_summary()))
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    mkeys: *Vector<string> = map_keys(msums)
+    sort_strings(mkeys)
+    i = 0
+    while i < vec_len(mkeys) {
+        mk: string = vec_get(mkeys, i)
+        sb_push(b, "method ")
+        sb_push(b, mk)
+        sb_push_char(b, 32)
+        render_summary(b, unwrap_or(map_get(msums, mk), empty_summary()))
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    sort_spans(spans)
+    i = 0
+    while i < vec_len(spans) {
+        sp: SpanKey = vec_get(spans, i)
+        key: string = sum_span_key(sp.lo, sp.hi)
+        if map_has(lcap, key) {
+            lambda_line(b, sp.lo, sp.hi, "lambda_capture_flows", render_capture(unwrap_or(map_get(lcap, key), "")))
+        }
+        lambda_line(b, sp.lo, sp.hi, "lambda_collect_sinks", render_mask(unwrap_or(map_get(lcoll, key), 0)))
+        lambda_line(b, sp.lo, sp.hi, "lambda_returns", render_mask(unwrap_or(map_get(lret, key), 0)))
+        lambda_line(b, sp.lo, sp.hi, "lambda_sinks", render_mask(unwrap_or(map_get(lsink, key), 0)))
+        i = i + 1
+    }
+    stores: *Vector<FlowProv> = info.frame_stores
+    mut prev_set: bool = false
+    mut prev: FlowProv = FlowProv { lo: 0, hi: 0, src: 0, dst: 0 }
+    i = 0
+    while i < vec_len(stores) {
+        st: FlowProv = vec_get(stores, i)
+        mut skip: bool = false
+        if prev_set && fp_eq(st, prev) { skip = true }
+        if !skip {
+            sb_push(b, "store ")
+            sb_push_int(b, st.lo)
+            sb_push_char(b, 58)
+            sb_push_int(b, st.hi)
+            sb_push_char(b, 32)
+            sb_push_int(b, st.dst)
+            sb_push_char(b, 10)
+        }
+        prev = st
+        prev_set = true
+        i = i + 1
+    }
+    // stage0 joins its lines with newlines and lets println add the trailing one;
+    // this builds each line with a trailing newline, so drop the final one to match
+    // the joined form and let the command's println supply the terminator.
+    mut sz: int64 = sb_size(b)
+    if sz > 0 { sz = sz - 1 }
+    out: string = substring(sb_cstr(b), 0, sz)
+    sb_free(b)
+    free(b)
+    return out
+}

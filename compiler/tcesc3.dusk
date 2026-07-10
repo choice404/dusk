@@ -1,0 +1,521 @@
+// tcesc3: the method-call escape check, the pointer-borrow tracking a store edge
+// reads, and the shared flow-edge routing. A method call hides its receiver from
+// the named-call checks (the callee is a field expression, the receiver is not in
+// the argument list), so its receiver is threaded as effective argument 0 and the
+// method's summary applied. A pointer local that borrows a parameter carries the
+// borrow so a frame view stored through it names the borrowed parameter, and a
+// pointer returned as a call result aliases the argument it came from. Split from
+// tcesc2 to keep each file under the size limit.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tciface
+@import tcesc
+@import tcesc2
+@import sumfix
+@import summary
+
+// The full and collect sink sets a lambda literal at the given span carries.
+func lambda_sink_bind_of(tc: *TypeChecker, key: string) -> LambdaSinkBind {
+    ls: *Map<int64> = (*tc).lambda_sinks
+    lcs: *Map<int64> = (*tc).lambda_collect_sinks
+    return LambdaSinkBind { sinks: unwrap_or(map_get(ls, key), 0), collect: unwrap_or(map_get(lcs, key), 0) }
+}
+
+func sink_last_put(tc: *TypeChecker, name: string, sb: LambdaSinkBind) -> void {
+    stack: *Vector<*Map<LambdaSinkBind>> = (*tc).lambda_sink_binds
+    n: int64 = vec_len(stack)
+    if n > 0 { map_put(vec_get(stack, n - 1), name, sb) }
+}
+
+func cap_last_put(tc: *TypeChecker, name: string, cf: string) -> void {
+    stack: *Vector<*Map<string>> = (*tc).lambda_capture_binds
+    n: int64 = vec_len(stack)
+    if n > 0 { map_put(vec_get(stack, n - 1), name, cf) }
+}
+
+// Records a lambda literal freshly bound to a name (a let): the new binding's sink
+// set and capture-flow edges go into the current scope.
+export func record_lambda_let(tc: *TypeChecker, name: string, value_id: int64) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    val: ExprNode = vec_get((*a).exprs, value_id)
+    if val.kind != xk_lambda() { return }
+    key: string = span_key(val.lo, val.hi)
+    sink_last_put(tc, name, lambda_sink_bind_of(tc, key))
+    lcf: *Map<string> = (*tc).lambda_capture_flows
+    cap_last_put(tc, name, unwrap_or(map_get(lcf, key), ""))
+}
+
+// Records a lambda literal reassigned to an existing name: at straight line the new
+// sets replace the old, inside a branch they may-join; a reassign to any other
+// value drops the record so the binding falls to the opaque conservative reject.
+export func record_lambda_assign(tc: *TypeChecker, name: string, value_id: int64) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    val: ExprNode = vec_get((*a).exprs, value_id)
+    if val.kind == xk_lambda() {
+        key: string = span_key(val.lo, val.hi)
+        rebind_lambda_sink(tc, name, lambda_sink_bind_of(tc, key))
+        lcf: *Map<string> = (*tc).lambda_capture_flows
+        rebind_lambda_capture(tc, name, unwrap_or(map_get(lcf, key), ""))
+    } else {
+        drop_lambda_sink(tc, name)
+        drop_lambda_capture(tc, name)
+    }
+}
+
+func rebind_lambda_sink(tc: *TypeChecker, name: string, sb: LambdaSinkBind) -> void {
+    conditional: bool = (*tc).branch_depth > 0
+    stack: *Vector<*Map<LambdaSinkBind>> = (*tc).lambda_sink_binds
+    mut i: int64 = vec_len(stack) - 1
+    while i >= 0 {
+        m: *Map<LambdaSinkBind> = vec_get(stack, i)
+        if map_has(m, name) {
+            if conditional {
+                old: LambdaSinkBind = unwrap_or(map_get(m, name), LambdaSinkBind { sinks: 0, collect: 0 })
+                map_put(m, name, LambdaSinkBind { sinks: old.sinks | sb.sinks, collect: old.collect | sb.collect })
+            } else {
+                map_put(m, name, sb)
+            }
+            return
+        }
+        i = i - 1
+    }
+    sink_last_put(tc, name, sb)
+}
+
+func drop_lambda_sink(tc: *TypeChecker, name: string) -> void {
+    stack: *Vector<*Map<LambdaSinkBind>> = (*tc).lambda_sink_binds
+    mut i: int64 = vec_len(stack) - 1
+    while i >= 0 {
+        m: *Map<LambdaSinkBind> = vec_get(stack, i)
+        if map_has(m, name) {
+            map_remove(m, name).ignore()
+            return
+        }
+        i = i - 1
+    }
+}
+
+func rebind_lambda_capture(tc: *TypeChecker, name: string, cf: string) -> void {
+    conditional: bool = (*tc).branch_depth > 0
+    stack: *Vector<*Map<string>> = (*tc).lambda_capture_binds
+    mut i: int64 = vec_len(stack) - 1
+    while i >= 0 {
+        m: *Map<string> = vec_get(stack, i)
+        if map_has(m, name) {
+            if conditional {
+                old: string = unwrap_or(map_get(m, name), "")
+                map_put(m, name, cap_union(old, cf))
+            } else {
+                map_put(m, name, cf)
+            }
+            return
+        }
+        i = i - 1
+    }
+    cap_last_put(tc, name, cf)
+}
+
+func drop_lambda_capture(tc: *TypeChecker, name: string) -> void {
+    stack: *Vector<*Map<string>> = (*tc).lambda_capture_binds
+    mut i: int64 = vec_len(stack) - 1
+    while i >= 0 {
+        m: *Map<string> = vec_get(stack, i)
+        if map_has(m, name) {
+            map_remove(m, name).ignore()
+            return
+        }
+        i = i - 1
+    }
+}
+
+// A local's recorded lambda sink set, searched innermost scope out so a shadow
+// masks an outer binding.
+export struct SinkLookup { found: bool, sinks: int64, collect: int64 }
+
+export func lambda_sink_bind_lookup(tc: *TypeChecker, name: string) -> SinkLookup {
+    stack: *Vector<*Map<LambdaSinkBind>> = (*tc).lambda_sink_binds
+    mut i: int64 = vec_len(stack) - 1
+    while i >= 0 {
+        m: *Map<LambdaSinkBind> = vec_get(stack, i)
+        if map_has(m, name) {
+            sb: LambdaSinkBind = unwrap_or(map_get(m, name), LambdaSinkBind { sinks: 0, collect: 0 })
+            return SinkLookup { found: true, sinks: sb.sinks, collect: sb.collect }
+        }
+        i = i - 1
+    }
+    return SinkLookup { found: false, sinks: 0, collect: 0 }
+}
+
+export struct CapLookup { found: bool, edges: string }
+
+export func lambda_capture_bind_lookup(tc: *TypeChecker, name: string) -> CapLookup {
+    stack: *Vector<*Map<string>> = (*tc).lambda_capture_binds
+    mut i: int64 = vec_len(stack) - 1
+    while i >= 0 {
+        m: *Map<string> = vec_get(stack, i)
+        if map_has(m, name) { return CapLookup { found: true, edges: unwrap_or(map_get(m, name), "") } }
+        i = i - 1
+    }
+    return CapLookup { found: false, edges: "" }
+}
+
+// The union of two serialized capture-edge sets (idx,name;), sorted and deduped, for
+// a conditional lambda rebind's may-join.
+func cap_union(x: string, y: string) -> string {
+    v: *Vector<CapFlow> = alloc(vec_new())
+    cap_parse_into(x, v)
+    cap_parse_into(y, v)
+    return cap_serialize_sorted(v)
+}
+
+func cap_parse_into(s: string, out: *Vector<CapFlow>) -> void {
+    mut p: int64 = 0
+    while s[p] != 0 {
+        mut idx: int64 = 0
+        while s[p] != 44 {
+            d: int64 = s[p]
+            idx = idx * 10 + (d - 48)
+            p = p + 1
+        }
+        p = p + 1
+        b: *StringBuilder = alloc(sb_new())
+        while s[p] != 59 {
+            sb_push_char(b, s[p])
+            p = p + 1
+        }
+        p = p + 1
+        nm: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        vec_push(out, CapFlow { idx: idx, name: nm })
+    }
+}
+
+func cap_serialize_sorted(v: *Vector<CapFlow>) -> string {
+    mut i: int64 = 1
+    while i < vec_len(v) {
+        key: CapFlow = vec_get(v, i)
+        mut j: int64 = i - 1
+        mut placed: bool = false
+        while j >= 0 && !placed {
+            cur: CapFlow = vec_get(v, j)
+            if cap_edge_less(key, cur) {
+                vec_set(v, j + 1, cur)
+                j = j - 1
+            } else {
+                placed = true
+            }
+        }
+        vec_set(v, j + 1, key)
+        i = i + 1
+    }
+    b: *StringBuilder = alloc(sb_new())
+    mut k: int64 = 0
+    while k < vec_len(v) {
+        cf: CapFlow = vec_get(v, k)
+        mut dup: bool = false
+        if k > 0 {
+            prev: CapFlow = vec_get(v, k - 1)
+            if prev.idx == cf.idx && str_eq(prev.name, cf.name) { dup = true }
+        }
+        if !dup {
+            sb_push_int(b, cf.idx)
+            sb_push_char(b, 44)
+            sb_push(b, cf.name)
+            sb_push_char(b, 59)
+        }
+        k = k + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func cap_edge_less(x: CapFlow, y: CapFlow) -> bool {
+    if x.idx < y.idx { return true }
+    if x.idx > y.idx { return false }
+    return str_less(x.name, y.name)
+}
+
+// The parameter a pointer name aliases: its own index if it is a parameter, or the
+// index recorded when a pointer local borrowed a parameter. -1 for a fresh local
+// allocation, whose polluted object stays frame-local unless the pointer is
+// returned.
+export func param_alias_of(tc: *TypeChecker, name: string) -> int64 {
+    cpi: *Map<int64> = (*tc).cur_param_index
+    if map_has(cpi, name) { return unwrap_or(map_get(cpi, name), -1) }
+    stack: *Vector<*Map<int64>> = (*tc).ptr_param_borrows
+    mut i: int64 = vec_len(stack) - 1
+    while i >= 0 {
+        m: *Map<int64> = vec_get(stack, i)
+        if map_has(m, name) { return unwrap_or(map_get(m, name), -1) }
+        i = i - 1
+    }
+    return -1
+}
+
+func ptr_param_borrows_put(tc: *TypeChecker, name: string, idx: int64) -> void {
+    stack: *Vector<*Map<int64>> = (*tc).ptr_param_borrows
+    n: int64 = vec_len(stack)
+    if n > 0 { map_put(vec_get(stack, n - 1), name, idx) }
+}
+
+// The argument indices a call's result may alias: the callee's returns_alias and
+// reads_through parameters, or every argument for an opaque callee.
+func summary_alias_mask(tc: *TypeChecker, callee_id: int64, arg_len: int64) -> int64 {
+    ce: CalleeEsc = tc_callee_esc(tc, callee_id)
+    if ce.opaque {
+        mut m: int64 = 0
+        mut i: int64 = 0
+        while i < arg_len && i < 64 {
+            m = m | (1 << i)
+            i = i + 1
+        }
+        return m
+    }
+    return ce.sum.returns_alias | ce.sum.reads_through
+}
+
+// Routes one call store edge (i, j) whose source argument holds a frame view into
+// the destination argument j's place. A parameter destination escapes at once; a
+// local that borrows a parameter names the borrowed parameter; any other local
+// raises its own flag and records the store provenance for its later egress check.
+export func route_flow_edge(tc: *TypeChecker, x: int64, y: int64, src_esc: EscPair, dst_id: int64, lo: int64, hi: int64) -> void {
+    root: string = store_root(tc, dst_id)
+    if str_len(root) == 0 { return }
+    cps: *Map<int64> = (*tc).cur_params
+    if map_has(cps, root) {
+        emit_flow_escape(tc, lo, hi, x, y)
+        return
+    }
+    pidx: int64 = param_alias_of(tc, root)
+    if pidx >= 0 {
+        tc_emit(tc, borrow_flow_msg(pidx), lo, hi)
+        return
+    }
+    raise_esc(tc, root, src_esc.slice, src_esc.closure)
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    map_put(fp, root, FlowProv { lo: lo, hi: hi, src: x, dst: y })
+}
+
+func borrow_flow_msg(pidx: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a frame view is stored through a pointer that borrows argument ")
+    sb_push_int(b, pidx + 1)
+    sb_push(b, " and may outlive this frame")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The store-edge provenance behind a returned pointer value: the record on a bare
+// name, or on the root binding of a projection that carries the flagged pointer
+// out, so the diagnostic names the store that polluted it.
+export func value_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    if e.kind == xk_ident() {
+        name: string = ast_name(a, e.a)
+        if map_has(fp, name) { return unwrap_or(map_get(fp, name), no_flow_prov()) }
+    } else if e.kind == xk_field() || e.kind == xk_index() {
+        root: string = store_root(tc, expr_id)
+        if str_len(root) > 0 {
+            if map_has(fp, root) { return unwrap_or(map_get(fp, root), no_flow_prov()) }
+        }
+    }
+    return no_flow_prov()
+}
+
+// The frame-escape diagnostic for a returned managed pointer whose object a store
+// edge polluted with a frame view: the store-edge message when a call recorded the
+// provenance, else the pointer-object message at the call origin or the value span.
+export func report_ptr_return_escape(tc: *TypeChecker, expr_id: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    vp: FlowProv = value_flow_prov(tc, expr_id)
+    if vp.lo >= 0 {
+        emit_flow_escape(tc, vp.lo, vp.hi, vp.src, vp.dst)
+        return
+    }
+    mut span_lo: int64 = e.lo
+    mut span_hi: int64 = e.hi
+    if e.kind == xk_call() {
+        fo: FrameOrigin = call_frame_origin(tc, e)
+        if fo.has {
+            span_lo = fo.lo
+            span_hi = fo.hi
+        }
+    }
+    tc_emit(tc, "this returns a pointer to an object that stores a view of the current frame", span_lo, span_hi)
+}
+
+// Records the parameter a managed-pointer binding borrows, and the argument alias a
+// call result carries: `d := c` and `d, n := (c, 1)` borrow c's parameter, and
+// `d := same(c)` both aliases c and, when c borrows a parameter, borrows it too.
+export func record_ptr_borrows(tc: *TypeChecker, name: string, value_id: int64, tyid: int64) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    val: ExprNode = vec_get((*a).exprs, value_id)
+    if val.kind == xk_ident() {
+        if is_managed_ty(tc, tyid) {
+            src: string = ast_name(a, val.a)
+            idx: int64 = param_alias_of(tc, src)
+            if idx >= 0 { ptr_param_borrows_put(tc, name, idx) }
+        }
+    } else if val.kind == xk_call() {
+        if is_managed_ty(tc, tyid) {
+            if str_len(variant_name(tc, val.a)) == 0 {
+                mask: int64 = summary_alias_mask(tc, val.a, val.c)
+                mut i: int64 = 0
+                mut done: bool = false
+                while i < val.c && i < 64 && !done {
+                    if ps_has(mask, i) {
+                        src_id: int64 = vec_get((*a).kids, val.b + i)
+                        se: ExprNode = vec_get((*a).exprs, src_id)
+                        if se.kind == xk_ident() {
+                            src: string = ast_name(a, se.a)
+                            if is_managed_ty(tc, lookup(tc, src)) { alias_link(tc, name, src) }
+                            idx: int64 = param_alias_of(tc, src)
+                            if idx >= 0 {
+                                ptr_param_borrows_put(tc, name, idx)
+                                done = true
+                            }
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+    } else if val.kind == xk_tuple() {
+        // A tuple literal that packs a parameter-borrowing pointer keeps the borrow
+        // on the whole-tuple binding (the first borrowing member), regardless of the
+        // binding type, so a later destructure hands it back out.
+        mut i: int64 = 0
+        mut done: bool = false
+        while i < val.b && !done {
+            m_id: int64 = vec_get((*a).kids, val.a + i)
+            me: ExprNode = vec_get((*a).exprs, m_id)
+            if me.kind == xk_ident() {
+                src: string = ast_name(a, me.a)
+                idx: int64 = param_alias_of(tc, src)
+                if idx >= 0 {
+                    ptr_param_borrows_put(tc, name, idx)
+                    done = true
+                }
+            }
+            i = i + 1
+        }
+    }
+}
+
+// A destructure binder takes its own tuple member: a pointer member that borrows a
+// parameter passes the borrow to the binder, so a frame view stored through the
+// binder still names the borrowed parameter.
+export func record_ptr_borrow_member(tc: *TypeChecker, name: string, member_id: int64) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    me: ExprNode = vec_get((*a).exprs, member_id)
+    if me.kind == xk_ident() {
+        src: string = ast_name(a, me.a)
+        idx: int64 = param_alias_of(tc, src)
+        if idx >= 0 { ptr_param_borrows_put(tc, name, idx) }
+    }
+}
+
+// The resolved method name and escape summary of a method call base.m(..), when the
+// base's type names a concrete type with a computed method summary.
+struct MethodSum { found: bool, mname: string, sum: SummaryHandle }
+
+func resolved_method_summary(tc: *TypeChecker, callee_id: int64) -> MethodSum {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() { return MethodSum { found: false, mname: "", sum: empty_summary() } }
+    tname: string = receiver_type_name(tc, callee.a)
+    if str_len(tname) == 0 { return MethodSum { found: false, mname: "", sum: empty_summary() } }
+    mname: string = ast_name(a, callee.b)
+    ms: *Map<SummaryHandle> = (*tc).method_summaries
+    key: string = method_key(tname, mname)
+    if !map_has(ms, key) { return MethodSum { found: false, mname: "", sum: empty_summary() } }
+    return MethodSum { found: true, mname: mname, sum: unwrap_or(map_get(ms, key), empty_summary()) }
+}
+
+// The interprocedural escape check for a method call. The receiver is the method's
+// implicit parameter 0, so the effective argument list carries the receiver at 0
+// and the call's arguments at 1, 2, ...; the method's sink and store-edge relations
+// then apply exactly as a named call's do.
+export func check_method_call_escape(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() { return }
+    rm: MethodSum = resolved_method_summary(tc, callee_id)
+    if !rm.found { return }
+    base: ExprNode = vec_get((*a).exprs, callee.a)
+    mut recv_id: int64 = callee.a
+    if base.kind == xk_unary() && base.a == uop_deref() { recv_id = base.b }
+    eff: *Vector<int64> = alloc(vec_new())
+    vec_push(eff, recv_id)
+    mut i: int64 = 0
+    while i < arg_len {
+        vec_push(eff, vec_get((*a).kids, arg_off + i))
+        i = i + 1
+    }
+    method_check_sinks(tc, rm.mname, rm.sum, eff, lo, hi)
+    method_apply_flows(tc, rm.sum, eff, lo, hi)
+}
+
+func method_check_sinks(tc: *TypeChecker, mname: string, sum: SummaryHandle, eff: *Vector<int64>, lo: int64, hi: int64) -> void {
+    fp: *Map<FlowProv> = (*tc).flow_prov
+    mut j: int64 = 0
+    while j < vec_len(eff) && j < 64 {
+        if ps_has(sum.sinks, j) {
+            arg_id: int64 = vec_get(eff, j)
+            root: string = send_value_root(tc, arg_id)
+            if str_len(root) > 0 {
+                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
+                    prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+                    emit_sink_reject(tc, mname, root, ps_has(sum.collect_sinks, j), prov, lo, hi)
+                }
+            }
+        }
+        j = j + 1
+    }
+}
+
+func method_apply_flows(tc: *TypeChecker, sum: SummaryHandle, eff: *Vector<int64>, lo: int64, hi: int64) -> void {
+    n: int64 = vec_len(eff)
+    src: *Vector<EscPair> = alloc(vec_new())
+    mut s: int64 = 0
+    while s < n {
+        vec_push(src, value_escape(tc, vec_get(eff, s)))
+        s = s + 1
+    }
+    mut x: int64 = 0
+    while x < n && x < 64 {
+        src_esc: EscPair = vec_get(src, x)
+        if src_esc.slice || src_esc.closure {
+            mut y: int64 = 0
+            while y < n && y < 64 {
+                if flow_has(sum.flows, x, y) {
+                    route_flow_edge(tc, x, y, src_esc, vec_get(eff, y), lo, hi)
+                }
+                y = y + 1
+            }
+        }
+        x = x + 1
+    }
+}

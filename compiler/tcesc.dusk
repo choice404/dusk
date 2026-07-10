@@ -206,7 +206,7 @@ func field_kind_escape(tc: *TypeChecker, expr_id: int64, fty: int64) -> EscPair 
     return esc_none()
 }
 
-func variant_name(tc: *TypeChecker, callee_id: int64) -> string {
+export func variant_name(tc: *TypeChecker, callee_id: int64) -> string {
     a: *Ast = (*tc).ast
     f: ExprNode = vec_get((*a).exprs, callee_id)
     if f.kind == xk_ident() {
@@ -238,15 +238,11 @@ func value_escape_call(tc: *TypeChecker, e: ExprNode) -> EscPair {
         }
         return out
     }
-    callee: ExprNode = vec_get((*a).exprs, e.a)
-    if callee.kind == xk_ident() && e.c > 0 {
-        name: string = ast_name(a, callee.a)
-        if (str_eq(name, "alloc") && !sig_has_fn((*tc).sigtab, name)) || str_eq(name, "move") || str_eq(name, "ptr_add") {
-            return value_escape(tc, vec_get((*a).kids, e.b))
-        }
-    }
-    // S4: call-result escape summaries, higher-order aliasing, and opaque TOP.
-    return esc_none()
+    // S4: the call-result escape follows the callee's summary (returns_alias and
+    // reads_through), the higher-order element models, or the opaque TOP. This
+    // subsumes the alloc, move, and ptr_add passthroughs, which carry those exact
+    // builtin summaries.
+    return call_result_escape(tc, e.a, e.b, e.c)
 }
 
 func pat_binds_name(tc: *TypeChecker, pat_id: int64, name: string) -> bool {
@@ -488,16 +484,6 @@ export func lambda_captures_local(tc: *TypeChecker, e: ExprNode) -> bool {
     return vec_len(lambda_captures(tc, e)) > 0
 }
 
-func report_slice_escape(tc: *TypeChecker, expr_id: int64) -> void {
-    e: ExprNode = vec_get((*(*tc).ast).exprs, expr_id)
-    tc_emit(tc, "a slice into a local array escapes its frame; put the backing on the heap", e.lo, e.hi)
-}
-
-func report_closure_escape(tc: *TypeChecker, expr_id: int64) -> void {
-    e: ExprNode = vec_get((*(*tc).ast).exprs, expr_id)
-    tc_emit(tc, "a closure that captures a local escapes its frame; it cannot be returned", e.lo, e.hi)
-}
-
 func slice_escapes(tc: *TypeChecker, expr_id: int64, inferred: int64) -> bool {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
@@ -541,9 +527,7 @@ func escape_walk(tc: *TypeChecker, expr_id: int64, declared: int64, inferred: in
         if expr_is_local_closure(tc, expr_id) { report_closure_escape(tc, expr_id) }
     } else if dn.kind == tyk_ptr() {
         esc: EscPair = value_escape(tc, expr_id)
-        if esc.slice || esc.closure {
-            tc_emit(tc, "this returns a pointer to an object that stores a view of the current frame", e.lo, e.hi)
-        }
+        if esc.slice || esc.closure { report_ptr_return_escape(tc, expr_id) }
     } else if dn.kind == tyk_tuple() {
         if e.kind == xk_tuple() {
             inf: TyNode = ty_get((*tc).ty, inferred)
@@ -798,3 +782,4 @@ func snap_stack(b: *StringBuilder, stack: *Vector<*Map<int64>>) -> void {
         i = i + 1
     }
 }
+

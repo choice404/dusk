@@ -202,7 +202,12 @@ impl<'a> FnState<'a> {
         let mut local_types = HashMap::new();
         let mut env = HashMap::new();
         for (i, p) in f.params.iter().enumerate() {
-            let idx = i as u8;
+            // Saturate before the u8 cast: a parameter at index 64 or beyond is
+            // past the bitmask bound, and ParamSet::single already saturates such an
+            // index to the top of the lattice. Casting the raw index to u8 first
+            // would wrap a 256th-or-later parameter back into range and set a wrong
+            // low bit, so clamp to 64 to keep the saturation sound.
+            let idx = i.min(64) as u8;
             param_index.insert(p.name.clone(), idx);
             local_types.insert(p.name.clone(), p.ty.clone());
             let view = s.is_view(&p.ty, &generics);

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse|load|desugar|check|mono>" >&2
+    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse|load|desugar|check|mono|esc>" >&2
 }
 
 if [[ $# -ne 3 ]]; then
@@ -25,10 +25,10 @@ if [[ ! -x "$binary_b" ]]; then
 fi
 
 case "$cmd" in
-    lex | scan | parse | load | desugar | check | mono) ;;
+    lex | scan | parse | load | desugar | check | mono | esc) ;;
     *)
         usage
-        echo "differential: command must be lex, scan, parse, load, desugar, check, or mono" >&2
+        echo "differential: command must be lex, scan, parse, load, desugar, check, mono, or esc" >&2
         exit 2
         ;;
 esac
@@ -91,9 +91,9 @@ diag_header_multiset() {
 count=0
 skipped=0
 while IFS= read -r -d '' file; do
-    # check and mono still exclude the known paradigm-gated fixture until dusk1
+    # check, mono, and esc still exclude the known paradigm-gated fixture until dusk1
     # carries the full sema verdicts those modes compare.
-    if [[ "$cmd" == "check" || "$cmd" == "mono" ]]; then
+    if [[ "$cmd" == "check" || "$cmd" == "mono" || "$cmd" == "esc" ]]; then
         case "$file" in
             examples/implgate_fail.dusk)
                 skipped=$((skipped + 1))

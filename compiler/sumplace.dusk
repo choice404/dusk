@@ -1,0 +1,192 @@
+// sumplace: store routing and place-root analysis for the escape summary walk. It
+// decides how a stored value reaches its destination binding, how a place roots to
+// a binding through fields, indexes, and dereferences, and the by-value type of a
+// projection chain. Split from sumwalk to keep each file focused; both are merged
+// through sumfix.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import tcstate
+@import summary
+@import sumwalk
+
+// Routes a stored value to its destination. The destination's caller reachability
+// is decided by the root binding's own abstract value, not its name: a parameter
+// reaches the caller through its seeded bits, and a local that aliases a
+// parameter's view or addresses a caller object reaches it the same way. Every
+// caller-reaching store carries the source's origins and reads as flow edges; a
+// direct store of a frame view additionally records a frame-store site. A store
+// rooted at a captured binding (a free name in a synthetic lambda walk) records a
+// capture-flow edge instead.
+export func record_store(c: *SumCtx, place_id: int64, src: SumVal, via_call: bool) -> void {
+    a: *Ast = (*(*c).t).ast
+    root: string = dest_root(c, place_id)
+    if str_len(root) == 0 { return }
+    mut targets: int64 = 0
+    pi: *Map<int64> = (*c).param_index
+    if map_has(pi, root) {
+        j: int64 = unwrap_or(map_get(pi, root), 0)
+        if ps_has((*c).dest_mask, j) { targets = targets | ps_single(j) }
+    }
+    env: *Map<SumVal> = (*c).env
+    if map_has(env, root) {
+        av: SumVal = unwrap_or(map_get(env, root), val_none())
+        targets = targets | av.origins | av.reads
+    }
+    srcps: int64 = src.origins | src.reads
+    if targets != 0 {
+        place: ExprNode = vec_get((*a).exprs, place_id)
+        mut j: int64 = 0
+        while j < 64 {
+            if ps_has(targets, j) {
+                mut k: int64 = 0
+                while k < 64 {
+                    if ps_has(srcps, k) { (*c).flows = flow_add((*c).flows, k, j) }
+                    k = k + 1
+                }
+                if src.frame && !via_call {
+                    vec_push((*c).frame_stores, FlowProv { lo: place.lo, hi: place.hi, src: 0, dst: j })
+                }
+            }
+            j = j + 1
+        }
+    }
+    locals: *Map<int64> = (*c).locals
+    if !map_has(pi, root) && !map_has(locals, root) {
+        caps: *Vector<CapFlow> = (*c).capture_flows
+        mut k2: int64 = 0
+        while k2 < 64 {
+            if ps_has(srcps, k2) { vec_push(caps, CapFlow { idx: k2, name: root }) }
+            k2 = k2 + 1
+        }
+    }
+    if !map_has(pi, root) { raise_env(c, root, src) }
+}
+
+export func flow_into_place(c: *SumCtx, place_id: int64, src: SumVal) -> void {
+    record_store(c, place_id, src, true)
+}
+
+export func raise_env(c: *SumCtx, name: string, v: SumVal) -> void {
+    cur: SumVal = unwrap_or(map_get((*c).env, name), val_none())
+    map_put((*c).env, name, val_join(cur, v))
+}
+
+// The root binding of a store place, rooting through field accesses, indexes, and
+// pointer dereferences alike, since a store through a parameter pointer reaches the
+// caller's heap object.
+export func dest_root(c: *SumCtx, id: int64) -> string {
+    if id < 0 { return "" }
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() { return ast_name(a, e.a) }
+    if e.kind == xk_field() || e.kind == xk_index() { return dest_root(c, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return dest_root(c, e.b) }
+    return ""
+}
+
+// The base binding of a by-value projection chain, rooting through field accesses
+// and indexes but stopping at a pointer dereference, whose target is the heap.
+func projection_root(c: *SumCtx, id: int64) -> string {
+    if id < 0 { return "" }
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() { return ast_name(a, e.a) }
+    if e.kind == xk_field() || e.kind == xk_index() { return projection_root(c, e.a) }
+    return ""
+}
+
+// The pointer binding a by-value projection reads back through, when the chain
+// crosses a dereference. None (empty) when the chain has no dereference.
+func reads_through_root(c: *SumCtx, id: int64) -> string {
+    if id < 0 { return "" }
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_field() || e.kind == xk_index() { return reads_through_root(c, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return dest_root(c, e.b) }
+    return ""
+}
+
+export func sum_elem_of(t: *SumTables, tyid: int64) -> int64 {
+    a: *Ast = (*t).ast
+    n: TypeNode = vec_get((*a).types, tyid)
+    if n.kind == tk_slice() || n.kind == tk_array() { return n.a }
+    return (*t).infer_ty
+}
+
+// A side-effect-free AST type walk for projection chains. A range index is a
+// re-slice, so it keeps the slice shape over the base's element; an unknown place
+// is the infer node, which is_view treats conservatively as a view.
+export func sum_chain_ty(c: *SumCtx, id: int64) -> int64 {
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
+    if id < 0 { return (*t).infer_ty }
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        return unwrap_or(map_get((*c).local_types, ast_name(a, e.a)), (*t).infer_ty)
+    }
+    if e.kind == xk_field() {
+        bt: int64 = sum_chain_ty(c, e.a)
+        bn: TypeNode = vec_get((*a).types, bt)
+        if bn.kind == tk_named() {
+            return struct_field_ty(t, ast_name(a, bn.a), ast_name(a, e.b))
+        }
+        return (*t).infer_ty
+    }
+    if e.kind == xk_index() {
+        bt2: int64 = sum_chain_ty(c, e.a)
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        if idx.kind == xk_range() {
+            return ast_type(a, tk_slice(), sum_elem_of(t, bt2), 0, 0)
+        }
+        return sum_elem_of(t, bt2)
+    }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        pt: int64 = sum_chain_ty(c, e.b)
+        pn: TypeNode = vec_get((*a).types, pt)
+        if pn.kind == tk_ptr() || pn.kind == tk_rawptr() || pn.kind == tk_collector() { return pn.a }
+        return (*t).infer_ty
+    }
+    return (*t).infer_ty
+}
+
+func struct_field_ty(t: *SumTables, sname: string, fname: string) -> int64 {
+    a: *Ast = (*t).ast
+    sidx: *Map<int64> = (*t).struct_idx
+    if !map_has(sidx, sname) { return (*t).infer_ty }
+    st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, sname), 0))
+    mut i: int64 = 0
+    while i < st.fields_len {
+        fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + i))
+        if str_eq(ast_name(a, fld.name), fname) { return fld.ty }
+        i = i + 1
+    }
+    return (*t).infer_ty
+}
+
+// The abstract value of a by-value projection: only a member that can carry a view
+// inherits its root binding's state. Frame-ness and origins root through fields and
+// indexes but stop at a dereference; the reads-through relation follows the
+// dereference, exposing whatever the caller stored behind the pointer.
+export func projection_val(c: *SumCtx, id: int64) -> SumVal {
+    t: *SumTables = (*c).t
+    ct: int64 = sum_chain_ty(c, id)
+    if !sum_is_view(t, ct, (*c).gens) { return val_none() }
+    env: *Map<SumVal> = (*c).env
+    mut v: SumVal = val_none()
+    proot: string = projection_root(c, id)
+    if str_len(proot) > 0 { v = unwrap_or(map_get(env, proot), val_none()) }
+    rroot: string = reads_through_root(c, id)
+    if str_len(rroot) > 0 {
+        if map_has(env, rroot) {
+            av: SumVal = unwrap_or(map_get(env, rroot), val_none())
+            v.reads = v.reads | av.reads
+        }
+    }
+    return v
+}

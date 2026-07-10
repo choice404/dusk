@@ -134,12 +134,13 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
             dst: string = ast_name(a, lhs.a)
             esc: EscPair = value_escape(tc, s.b)
             assign_esc(tc, dst, esc.slice, esc.closure)
+            record_lambda_assign(tc, dst, s.b)
             if links_as_alias(tc, lt) || links_as_alias(tc, chain_ty(tc, s.b)) {
                 link_binding_aliases(tc, dst, s.b, true)
             }
         } else {
             root: string = store_root(tc, s.a)
-            if str_len(root) > 0 {
+            if str_len(root) > 0 && param_alias_of(tc, root) < 0 {
                 esc2: EscPair = value_escape(tc, s.b)
                 if esc2.slice || esc2.closure { raise_esc(tc, root, esc2.slice, esc2.closure) }
             }

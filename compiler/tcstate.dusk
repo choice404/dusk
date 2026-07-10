@@ -8,9 +8,9 @@
 @import diag
 @import ty
 @import tysigs
+@import summary
 
-// S4: summary handles stay bottom in dusk1 until interprocedural enforcement lands.
-export struct SummaryHandle { empty: bool }
+export struct SummaryHandle { empty: bool, returns_alias: int64, reads_through: int64, sinks: int64, collect_sinks: int64, flows: string }
 export struct MutTupleEntry { ty: int64 }
 export struct LambdaSinkBind { sinks: int64, collect: int64 }
 export struct FlowProv { lo: int64, hi: int64, src: int64, dst: int64 }
@@ -63,8 +63,8 @@ export struct TypeChecker {
     lambda_sinks: *Map<int64>,
     lambda_collect_sinks: *Map<int64>,
     lambda_sink_binds: *Vector<*Map<LambdaSinkBind>>,
-    lambda_capture_flows: *Map<int64>,
-    lambda_capture_binds: *Vector<*Map<int64>>,
+    lambda_capture_flows: *Map<string>,
+    lambda_capture_binds: *Vector<*Map<string>>,
     resolvable_fn_binds: *Map<string>,
     cur_params: *Map<int64>,
     cur_param_index: *Map<int64>,
@@ -72,6 +72,7 @@ export struct TypeChecker {
     flow_prov: *Map<FlowProv>,
     mut_tuple_types: *Map<MutTupleEntry>,
     summary: SummaryHandle,
+    sum_tables: *SumTables,
     errors: *Vector<SpanDiagnostic>,
 }
 
@@ -95,8 +96,8 @@ export func tc_new(a: *Ast, types_only: bool, future_elems: *Map<int64>) -> *Typ
     lambda_sinks: *Map<int64> = alloc(map_new())
     lambda_collect_sinks: *Map<int64> = alloc(map_new())
     lambda_sink_binds: *Vector<*Map<LambdaSinkBind>> = alloc(vec_new())
-    lambda_capture_flows: *Map<int64> = alloc(map_new())
-    lambda_capture_binds: *Vector<*Map<int64>> = alloc(vec_new())
+    lambda_capture_flows: *Map<string> = alloc(map_new())
+    lambda_capture_binds: *Vector<*Map<string>> = alloc(vec_new())
     resolvable_fn_binds: *Map<string> = alloc(map_new())
     cur_params: *Map<int64> = alloc(map_new())
     cur_param_index: *Map<int64> = alloc(map_new())
@@ -155,7 +156,8 @@ export func tc_new(a: *Ast, types_only: bool, future_elems: *Map<int64>) -> *Typ
         ptr_param_borrows: ptr_param_borrows,
         flow_prov: flow_prov,
         mut_tuple_types: mut_tuple_types,
-        summary: SummaryHandle { empty: true },
+        summary: SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" },
+        sum_tables: sum_tables_new(a),
         errors: errors,
     })
 }

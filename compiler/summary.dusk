@@ -1,0 +1,425 @@
+// summary: native interprocedural escape summaries for dusk1, S4. This file holds
+// the immutable name and type tables the summary walk reads, the parameter-set
+// bitmask primitives, the view and managed-pointer classification of surface AST
+// types, the audited builtin summaries, and the canonical dump renderer. The
+// per-function abstract walk lives in sumwalk/sumplace/sumhof, and the fixpoint
+// driver plus collection pass in sumfix. Every message and dump line mirrors
+// stage0's src/sema/summary exactly, since the esc dump is a byte-for-byte gate.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import tcstate
+
+// The abstract value of a place during the walk: whether it may hold a
+// frame-local view (frame), which parameters' views it may alias (origins), and
+// which parameters it was read back through or that it is (reads). origins and
+// reads are int64 bitmasks over parameter indices.
+export struct SumVal { origins: int64, reads: int64, frame: bool }
+
+// One unique lambda literal span, kept in recording order (first-wins per span)
+// so the dump can order lambda lines by (lo, hi) numerically.
+export struct SpanKey { lo: int64, hi: int64 }
+
+// One captured-store edge of a lambda: the lambda parameter index whose view was
+// stored through a captured binding, and that binding's name.
+export struct CapFlow { idx: int64, name: string }
+
+// The immutable tables the summary walk reads: interface names, struct and enum
+// and variant node indices by name, and the module function name set. Field and
+// generic lists are read back out of the AST arenas through these indices.
+export struct SumTables {
+    ast: *Ast,
+    ifaces: *Map<int64>,
+    struct_idx: *Map<int64>,
+    enum_idx: *Map<int64>,
+    variant_idx: *Map<int64>,
+    module_fns: *Map<int64>,
+    infer_ty: int64,
+}
+
+// The escape info the enforcement step reads. summaries and method_summaries are
+// the per-function and per-method fixpoint results; the lambda tables are keyed by
+// the "lo:hi" span string; lambda_spans keeps the unique spans in first-seen order
+// for deterministic rendering; frame_stores lists direct frame-view stores through
+// a parameter for outright diagnostics.
+export struct EscapeInfo {
+    summaries: *Map<SummaryHandle>,
+    method_summaries: *Map<SummaryHandle>,
+    lambda_returns: *Map<int64>,
+    lambda_sinks: *Map<int64>,
+    lambda_collect_sinks: *Map<int64>,
+    lambda_capture_flows: *Map<string>,
+    lambda_spans: *Vector<SpanKey>,
+    frame_stores: *Vector<FlowProv>,
+    resolvable_fn_binds: *Map<string>,
+}
+
+// A small set of parameter indices backed by an int64 bitmask. A function with
+// more than 64 parameters is beyond any real program, so an index past the bound
+// saturates to the top of the lattice (all bits) rather than dropping, keeping the
+// over-approximation sound.
+export func ps_single(i: int64) -> int64 {
+    if i < 0 { return 0 }
+    if i >= 64 { return -1 }
+    return 1 << i
+}
+export func ps_has(mask: int64, i: int64) -> bool {
+    return i >= 0 && i < 64 && (mask & (1 << i)) != 0
+}
+export func ps_union(a: int64, b: int64) -> int64 { return a | b }
+
+export func val_none() -> SumVal { return SumVal { origins: 0, reads: 0, frame: false } }
+export func val_join(a: SumVal, b: SumVal) -> SumVal {
+    return SumVal { origins: a.origins | b.origins, reads: a.reads | b.reads, frame: a.frame || b.frame }
+}
+
+export func empty_summary() -> SummaryHandle {
+    return SummaryHandle { empty: false, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+}
+// A sentinel meaning "not a recognized builtin": the walk falls through to the
+// summary table, a constructor, a resolvable bind, or the opaque TOP.
+export func not_builtin() -> SummaryHandle {
+    return SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+}
+
+// The span key used for the lambda tables. The dump orders lambda lines by the
+// numeric (lo, hi) held in lambda_spans, not by this string.
+export func sum_span_key(lo: int64, hi: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_int(b, lo)
+    sb_push_char(b, 58)
+    sb_push_int(b, hi)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// A flow edge is stored as the delimited token ";i,j;" in a flows string; the
+// leading and trailing semicolons make each token self-delimiting so a scan never
+// confuses "1,2" with "11,2". flows_canon rebuilds a summary's flows in sorted,
+// deduplicated order for stable equality and rendering.
+func flow_token(i: int64, j: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 59)
+    sb_push_int(b, i)
+    sb_push_char(b, 44)
+    sb_push_int(b, j)
+    sb_push_char(b, 59)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+export func flow_has(flows: string, i: int64, j: int64) -> bool {
+    tok: string = flow_token(i, j)
+    mut p: int64 = 0
+    while flows[p] != 0 {
+        mut k: int64 = 0
+        while tok[k] != 0 && flows[p + k] == tok[k] { k = k + 1 }
+        if tok[k] == 0 { return true }
+        p = p + 1
+    }
+    return false
+}
+export func flow_add(flows: string, i: int64, j: int64) -> string {
+    if i >= 64 || j >= 64 { return flows }
+    if flow_has(flows, i, j) { return flows }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, flows)
+    sb_push(b, flow_token(i, j))
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+export func flows_canon(flows: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < 64 {
+        mut j: int64 = 0
+        while j < 64 {
+            if flow_has(flows, i, j) {
+                sb_push_char(b, 59)
+                sb_push_int(b, i)
+                sb_push_char(b, 44)
+                sb_push_int(b, j)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if sb_size(b) > 0 { sb_push_char(b, 59) }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Closes a function's sink set backward over its store edges: if argument i's view
+// flows into argument j's place and j is sunk, then i reaches the same boundary and
+// sinks too. Iterated to a fixed point.
+export func close_sinks(sinks: int64, flows: string) -> int64 {
+    mut cur: int64 = sinks
+    mut changed: bool = true
+    while changed {
+        changed = false
+        mut i: int64 = 0
+        while i < 64 {
+            mut j: int64 = 0
+            while j < 64 {
+                if ps_has(cur, j) && flow_has(flows, i, j) && !ps_has(cur, i) {
+                    cur = cur | ps_single(i)
+                    changed = true
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+    }
+    return cur
+}
+
+// The audited escape behavior of each builtin, so a call to one does not fall
+// through to the conservative TOP an unknown callee gets. move and alloc hand
+// their argument back through the result; the rest return fresh heap values,
+// scalars, pointers, unit, or errors and store nothing between arguments.
+// chan_send and chan_try_send are deliberately not here: the walk records their
+// send sink by name and then treats the call as opaque TOP, matching stage0.
+export func builtin_summary(name: string) -> SummaryHandle {
+    if str_eq(name, "move") {
+        return SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+    }
+    if str_eq(name, "alloc") {
+        return SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+    }
+    if is_neutral_builtin(name) { return empty_summary() }
+    return not_builtin()
+}
+
+// The builtins that return a fresh heap value, a scalar, a managed pointer, unit,
+// or an error and store nothing from one argument into another: a recognized but
+// escape-neutral summary rather than the opaque TOP an unknown callee gets.
+func is_neutral_builtin(name: string) -> bool {
+    if str_eq(name, "free") { return true }
+    if str_eq(name, "print") { return true }
+    if str_eq(name, "println") { return true }
+    if str_eq(name, "printerr") { return true }
+    if str_eq(name, "sizeof") { return true }
+    if str_eq(name, "alloc_bytes") { return true }
+    if str_eq(name, "ptr_add") { return true }
+    if str_eq(name, "map") { return true }
+    if str_eq(name, "filter") { return true }
+    if str_eq(name, "reduce") { return true }
+    if str_eq(name, "fold") { return true }
+    if str_eq(name, "foreach") { return true }
+    if str_eq(name, "debug_alloc") { return true }
+    if str_eq(name, "debug_free") { return true }
+    if str_eq(name, "debug_leaks") { return true }
+    if str_eq(name, "debug_double_frees") { return true }
+    if str_eq(name, "read_file") { return true }
+    if str_eq(name, "write_file") { return true }
+    if str_eq(name, "read_line") { return true }
+    if str_eq(name, "read_all") { return true }
+    if str_eq(name, "parse_float") { return true }
+    if str_eq(name, "cstr") { return true }
+    if str_eq(name, "spawn") { return true }
+    if str_eq(name, "join") { return true }
+    if str_eq(name, "submit") { return true }
+    if str_eq(name, "async_run") { return true }
+    return false
+}
+
+// Builds the immutable name and type tables from the merged, desugared module.
+export func sum_tables_new(a: *Ast) -> *SumTables {
+    ifaces: *Map<int64> = alloc(map_new())
+    struct_idx: *Map<int64> = alloc(map_new())
+    enum_idx: *Map<int64> = alloc(map_new())
+    variant_idx: *Map<int64> = alloc(map_new())
+    module_fns: *Map<int64> = alloc(map_new())
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            map_put(ifaces, ast_name(a, iface.name), 1)
+        } else if it.kind == ik_struct() {
+            st: StructNode = vec_get((*a).structs, it.id)
+            map_put(struct_idx, ast_name(a, st.name), it.id)
+        } else if it.kind == ik_enum() {
+            en: EnumNode = vec_get((*a).enums, it.id)
+            map_put(enum_idx, ast_name(a, en.name), it.id)
+            mut k: int64 = 0
+            while k < en.variants_len {
+                v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, en.variants_off + k))
+                if v.fields_len > 0 { map_put(variant_idx, ast_name(a, v.name), vec_get((*a).kids, en.variants_off + k)) }
+                k = k + 1
+            }
+        } else if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            map_put(module_fns, ast_name(a, f.name), 1)
+        }
+        i = i + 1
+    }
+    infer_ty: int64 = ast_type(a, tk_infer(), 0, 0, 0)
+    return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, enum_idx: enum_idx, variant_idx: variant_idx, module_fns: module_fns, infer_ty: infer_ty })
+}
+
+func gens_of(a: *Ast, off: int64, len: int64) -> *Map<int64> {
+    g: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < len {
+        map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
+        i = i + 1
+    }
+    return g
+}
+
+// Whether a type may carry a frame pointer when held or projected by value: a
+// slice, closure, interface, or an aggregate containing one, and a generic or
+// inference hole (conservative). A pointer, future, collector, and every scalar
+// or heap-backed primitive do not.
+export func sum_is_view(t: *SumTables, tyid: int64, gens: *Map<int64>) -> bool {
+    seen: *Map<int64> = alloc(map_new())
+    return is_view_rec(t, tyid, gens, seen)
+}
+func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<int64>, seen: *Map<int64>) -> bool {
+    a: *Ast = (*t).ast
+    kids: *Vector<int64> = (*a).kids
+    n: TypeNode = vec_get((*a).types, tyid)
+    if n.kind == tk_slice() || n.kind == tk_func() { return true }
+    if n.kind == tk_array() { return is_view_rec(t, n.a, gens, seen) }
+    if n.kind == tk_tuple() {
+        mut i: int64 = 0
+        while i < n.b {
+            elem: int64 = vec_get(kids, n.a + i)
+            if is_view_rec(t, elem, gens, seen) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_collector() { return false }
+    if n.kind == tk_unit() { return false }
+    if n.kind == tk_infer() { return true }
+    if n.kind == tk_named() {
+        ifaces: *Map<int64> = (*t).ifaces
+        sidx: *Map<int64> = (*t).struct_idx
+        eidx: *Map<int64> = (*t).enum_idx
+        name: string = ast_name(a, n.a)
+        if str_eq(name, "Future") { return false }
+        if map_has(gens, name) { return true }
+        if map_has(ifaces, name) { return true }
+        if map_has(sidx, name) {
+            if map_has(seen, name) { return false }
+            map_put(seen, name, 1)
+            st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, name), 0))
+            sgen: *Map<int64> = gens_of(a, st.generics_off, st.generics_len)
+            mut j: int64 = 0
+            while j < st.fields_len {
+                fid: int64 = vec_get(kids, st.fields_off + j)
+                fld: FieldNode = vec_get((*a).fields, fid)
+                if is_view_rec(t, fld.ty, sgen, seen) { return true }
+                j = j + 1
+            }
+            return false
+        }
+        if map_has(eidx, name) {
+            if map_has(seen, name) { return false }
+            map_put(seen, name, 1)
+            en: EnumNode = vec_get((*a).enums, unwrap_or(map_get(eidx, name), 0))
+            egen: *Map<int64> = gens_of(a, en.generics_off, en.generics_len)
+            mut k: int64 = 0
+            while k < en.variants_len {
+                vid: int64 = vec_get(kids, en.variants_off + k)
+                vr: VariantNode = vec_get((*a).variants, vid)
+                mut q: int64 = 0
+                while q < vr.fields_len {
+                    f2id: int64 = vec_get(kids, vr.fields_off + q)
+                    fld2: FieldNode = vec_get((*a).fields, f2id)
+                    if is_view_rec(t, fld2.ty, egen, seen) { return true }
+                    q = q + 1
+                }
+                k = k + 1
+            }
+            return false
+        }
+        return false
+    }
+    return false
+}
+
+// Whether a managed pointer is reachable through a value of this type, however
+// deeply a struct, enum, tuple, or array buries it. A bare *T (not *void) counts;
+// *raw T is the FFI boundary and does not; a generic type parameter does not,
+// since it already seeds origins as a view.
+export func sum_reaches_managed(t: *SumTables, tyid: int64) -> bool {
+    seen: *Map<int64> = alloc(map_new())
+    return reaches_rec(t, tyid, seen)
+}
+func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<int64>) -> bool {
+    a: *Ast = (*t).ast
+    kids: *Vector<int64> = (*a).kids
+    n: TypeNode = vec_get((*a).types, tyid)
+    if n.kind == tk_ptr() {
+        inner: TypeNode = vec_get((*a).types, n.a)
+        return inner.kind != tk_unit()
+    }
+    if n.kind == tk_rawptr() { return false }
+    if n.kind == tk_slice() || n.kind == tk_array() { return reaches_rec(t, n.a, seen) }
+    if n.kind == tk_tuple() {
+        mut i: int64 = 0
+        while i < n.b {
+            elem: int64 = vec_get(kids, n.a + i)
+            if reaches_rec(t, elem, seen) { return true }
+            i = i + 1
+        }
+        return false
+    }
+    if n.kind == tk_named() {
+        sidx: *Map<int64> = (*t).struct_idx
+        eidx: *Map<int64> = (*t).enum_idx
+        mut c: int64 = 0
+        while c < n.c {
+            arg: int64 = vec_get(kids, n.b + c)
+            if reaches_rec(t, arg, seen) { return true }
+            c = c + 1
+        }
+        name: string = ast_name(a, n.a)
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        if map_has(sidx, name) {
+            st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, name), 0))
+            mut j: int64 = 0
+            while j < st.fields_len {
+                fid: int64 = vec_get(kids, st.fields_off + j)
+                fld: FieldNode = vec_get((*a).fields, fid)
+                if reaches_rec(t, fld.ty, seen) { return true }
+                j = j + 1
+            }
+        }
+        if map_has(eidx, name) {
+            en: EnumNode = vec_get((*a).enums, unwrap_or(map_get(eidx, name), 0))
+            mut k: int64 = 0
+            while k < en.variants_len {
+                vid: int64 = vec_get(kids, en.variants_off + k)
+                vr: VariantNode = vec_get((*a).variants, vid)
+                mut q: int64 = 0
+                while q < vr.fields_len {
+                    f2id: int64 = vec_get(kids, vr.fields_off + q)
+                    fld2: FieldNode = vec_get((*a).fields, f2id)
+                    if reaches_rec(t, fld2.ty, seen) { return true }
+                    q = q + 1
+                }
+                k = k + 1
+            }
+        }
+        return false
+    }
+    return false
+}

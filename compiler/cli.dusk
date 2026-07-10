@@ -23,6 +23,7 @@
 @import desugar
 @import resolve
 @import tcrun
+@import sumfix
 
 func emit_errors(errs: *Vector<string>) -> void {
     mut i: int64 = 0
@@ -190,12 +191,13 @@ export func cmd_check(path: string, prog: string) -> int32 {
         return 1
     }
     desugar(p.module)
+    info: EscapeInfo = compute_escape_info(p.module)
     resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
     emit_span_errors(p.files, resolve_errs)
     if vec_len(resolve_errs) > 0 {
         return 1
     }
-    type_errs: *Vector<SpanDiagnostic> = typeck_check(p.module)
+    type_errs: *Vector<SpanDiagnostic> = typeck_check_with_info(p.module, info)
     emit_span_errors(p.files, type_errs)
     if vec_len(type_errs) > 0 {
         return 1
@@ -207,6 +209,20 @@ export func cmd_check(path: string, prog: string) -> int32 {
     println(out)
     sb_free(b)
     free(b)
+    free(out)
+    return 0
+}
+
+export func cmd_esc(path: string, prog: string) -> int32 {
+    p: Program = load(path, prog)
+    errs: *Vector<string> = p.errors
+    emit_errors(errs)
+    if vec_len(errs) > 0 { return 1 }
+    if !p.has_module { return 1 }
+    desugar(p.module)
+    info: EscapeInfo = compute_escape_info(p.module)
+    out: string = render_escape_info(info)
+    println(out)
     free(out)
     return 0
 }
