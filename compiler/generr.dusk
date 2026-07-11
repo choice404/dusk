@@ -1,0 +1,41 @@
+// generr: error values and builtin error operations for dusk1.
+
+@paradigm procedural
+
+@import std.string
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+
+export func gen_error_string(s: *GenFuncState, ev: Val) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    empty: string = emit_cstring((*s).module, "")
+    isnull: string = next_tmp((*s).fb)
+    op2((*s).fb, isnull, "icmp eq", "ptr", ev.op, "null")
+    out: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, out)
+    sb_push(b, " = select i1 ")
+    sb_push(b, isnull)
+    sb_push(b, ", ptr ")
+    sb_push(b, empty)
+    sb_push(b, ", ptr ")
+    sb_push(b, ev.op)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return Val { ty: cty_rawptr(c, cty_char(c)), op: out }
+}
+
+export func gen_error_field(s: *GenFuncState, base: int64, field: string) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if str_eq(field, "message") { return gen_error_string(s, gen_expr(s, base)) }
+    emit_error((*s).module, "unsupported error field")
+    return Val { ty: cty_rawptr(c, cty_char(c)), op: gs_copy("null") }
+}

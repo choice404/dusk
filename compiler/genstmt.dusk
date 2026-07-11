@@ -14,8 +14,107 @@
 @import genstate
 @import genexpr
 @import genlet
+@import genplace
+@import genagg
+@import genenum
 
-func gen_block(s: *GenFuncState, block_id: int64) -> void {
+func gen_for(s: *GenFuncState, st: StmtNode) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    ip: Place = gen_place(s, st.b)
+    mut data: string = gs_copy("")
+    mut len: string = gs_copy("0")
+    mut elem: int64 = cty_int(c, 64)
+    if ip.ok {
+        inn: CTyNode = vec_get(cty_nodes(c), ip.ty)
+        if inn.kind == ctyk_array() {
+            data = ip.ptr
+            elem = inn.a
+            nb: *StringBuilder = alloc(sb_new())
+            sb_push_int(nb, inn.b)
+            len = gs_built(nb)
+            sb_free(nb)
+            free(nb)
+        } else {
+            sv0: Val = gen_expr(s, st.b)
+            d0, l0, e0 := slice_parts(s, sv0)
+            data = d0
+            len = l0
+            elem = e0
+        }
+    } else {
+        sv: Val = gen_expr(s, st.b)
+        sn: CTyNode = vec_get(cty_nodes(c), sv.ty)
+        if sn.kind == ctyk_array() {
+            data = gen_alloca(s, sv.ty)
+            gen_store_slot(s, sv.ty, sv.op, data)
+            elem = sn.a
+            nb2: *StringBuilder = alloc(sb_new())
+            sb_push_int(nb2, sn.b)
+            len = gs_built(nb2)
+            sb_free(nb2)
+            free(nb2)
+        } else {
+            d1, l1, e1 := slice_parts(s, sv)
+            data = d1
+            len = l1
+            elem = e1
+        }
+    }
+    data_slot: string = gen_alloca(s, cty_rawptr(c, cty_void(c)))
+    gen_store_slot(s, cty_rawptr(c, cty_void(c)), data, data_slot)
+    len_slot: string = gen_alloca(s, cty_int(c, 64))
+    gen_store_slot(s, cty_int(c, 64), len, len_slot)
+    slot: string = gen_alloca(s, elem)
+    map_put((*s).locals, gs_copy(ast_name(a, st.a)), LocalVal { ty: elem, op: slot })
+    idx: string = gen_alloca(s, cty_int(c, 64))
+    gen_store_slot(s, cty_int(c, 64), "0", idx)
+    cond: int64 = fresh_label((*s).fb)
+    body: int64 = fresh_label((*s).fb)
+    done: int64 = fresh_label((*s).fb)
+    cl: string = branch_label(cond)
+    bl: string = branch_label(body)
+    dl: string = branch_label(done)
+    br((*s).fb, cl)
+    place_label((*s).fb, cond)
+    iv: string = gen_load_slot(s, cty_int(c, 64), idx)
+    lenv: string = gen_load_slot(s, cty_int(c, 64), len_slot)
+    cmp: string = next_tmp((*s).fb)
+    op2((*s).fb, cmp, "icmp slt", "i64", iv, lenv)
+    br_cond((*s).fb, cmp, bl, dl)
+    place_label((*s).fb, body)
+    ivb: string = gen_load_slot(s, cty_int(c, 64), idx)
+    datav: string = gen_load_slot(s, cty_rawptr(c, cty_void(c)), data_slot)
+    ep: string = next_tmp((*s).fb)
+    ell: string = cty_ll(c, elem)
+    gb: *StringBuilder = alloc(sb_new())
+    sb_push(gb, ep)
+    sb_push(gb, " = getelementptr ")
+    sb_push(gb, ell)
+    sb_push(gb, ", ptr ")
+    sb_push(gb, datav)
+    sb_push(gb, ", i64 ")
+    sb_push(gb, ivb)
+    gtx: string = gs_built(gb)
+    sb_free(gb)
+    free(gb)
+    line((*s).fb, gtx)
+    free(gtx)
+    ev: string = gen_load_slot(s, elem, ep)
+    gen_store_slot(s, elem, ev, slot)
+    gen_block(s, st.c)
+    if !(*s).terminated {
+        iv2: string = gen_load_slot(s, cty_int(c, 64), idx)
+        ni: string = next_tmp((*s).fb)
+        op2((*s).fb, ni, "add", "i64", iv2, "1")
+        gen_store_slot(s, cty_int(c, 64), ni, idx)
+        br((*s).fb, cl)
+    }
+    place_label((*s).fb, done)
+    (*s).terminated = false
+}
+
+export func gen_block(s: *GenFuncState, block_id: int64) -> void {
     a: *Ast = (*(*s).ctx).ast
     b: BlockNode = vec_get((*a).blocks, block_id)
     mut i: int64 = 0
@@ -62,19 +161,21 @@ func gen_default_ret(s: *GenFuncState) -> void {
 
 func gen_return(s: *GenFuncState, expr: int64) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
-    gen_emit_defers(s)
     if expr < 0 {
+        gen_emit_defers(s)
         gen_default_ret(s)
         return
     }
     v: Val = gen_expr(s, expr)
+    av: Val = adapt(s, v, (*s).ret)
+    gen_emit_defers(s)
     n: CTyNode = vec_get(cty_nodes(c), (*s).ret)
     if n.kind == ctyk_void() {
         line((*s).fb, "ret void")
         (*s).terminated = true
         return
     }
-    out: string = coerce(s, v.ty, v.op, (*s).ret)
+    out: string = av.op
     ll: string = cty_ll(c, (*s).ret)
     ret((*s).fb, ll, out)
     free(ll)
@@ -159,7 +260,7 @@ export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
         return }
     if st.kind == sk_expr() { gen_expr(s, st.a)
         return }
-    if st.kind == sk_for() { emit_error((*s).module, "unsupported for statement") }
-    else if st.kind == sk_match() { emit_error((*s).module, "unsupported match statement") }
+    if st.kind == sk_for() { gen_for(s, st) }
+    else if st.kind == sk_match() { gen_match(s, st.a, st.b, st.c, -1, "") }
     else { emit_error((*s).module, "unsupported statement") }
 }

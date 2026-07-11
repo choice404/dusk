@@ -133,7 +133,6 @@ func link_only(home: string, ll: string, bin: string) -> int64 {
     free(cmd)
     free(rt)
 
-    printerr("[dusk1] linking with clang")
     code: int64 = run(line)
     free(line)
     if code != 0 {
@@ -145,7 +144,6 @@ func link_only(home: string, ll: string, bin: string) -> int64 {
 }
 
 func run_linked(bin: string, argv: string[], start: int64) -> int64 {
-    printerr("[dusk1] running ->")
     cmd: *StringBuilder = alloc(sb_new())
     bq: string = quote(bin)
     sb_push(cmd, bq)
@@ -181,14 +179,6 @@ func check_ir_written(ll: string) -> bool {
         diag_emit(d)
         return false
     }
-    report: *StringBuilder = alloc(sb_new())
-    sb_push(report, "[dusk1] ir bytes   : ")
-    sb_push_int(report, source_len(src))
-    msg: string = substring(sb_cstr(report), 0, sb_size(report))
-    printerr(msg)
-    free(msg)
-    sb_free(report)
-    free(report)
     source_free(src)
     return true
 }
@@ -214,19 +204,20 @@ export func run_demo(prog: string) -> int32 {
         diag_emit(d)
         return 1
     }
-    printerr("[dusk1] emitted IR")
-
     if !check_ir_written(ll) {
         return 1
     }
 
+    header_code: int64 = run("printf '[dusk] emitted IR : target/dusk-out/demo.ll\\n[dusk] linked bin : target/dusk-out/demo\\n[dusk] running ->\\n\\n'")
+    if header_code != 0 { return 1 }
     code: int64 = link_and_run(home, ll, bin)
 
+    println("")
     tail: *StringBuilder = alloc(sb_new())
-    sb_push(tail, "[dusk1] exit code  : ")
+    sb_push(tail, "[dusk] exit code  : ")
     sb_push_int(tail, code)
     line: string = substring(sb_cstr(tail), 0, sb_size(tail))
-    printerr(line)
+    println(line)
     free(line)
     sb_free(tail)
     free(tail)

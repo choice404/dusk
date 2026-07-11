@@ -1,0 +1,388 @@
+// genenum: enum construction and match lowering for dusk1.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+@import genplace
+@import genstmt
+
+func ge_enum(a: *Ast, name: string) -> int64 {
+    enums: *Vector<EnumNode> = (*a).enums
+    mut i: int64 = 0
+    while i < vec_len(enums) {
+        e: EnumNode = vec_get(enums, i)
+        if str_eq(ast_name(a, e.name), name) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+func ge_variant(a: *Ast, enum_id: int64, name: string) -> (int64, int64) {
+    if enum_id < 0 { return (-1, -1) }
+    e: EnumNode = vec_get((*a).enums, enum_id)
+    mut i: int64 = 0
+    while i < e.variants_len {
+        vid: int64 = vec_get((*a).kids, e.variants_off + i)
+        v: VariantNode = vec_get((*a).variants, vid)
+        if str_eq(ast_name(a, v.name), name) { return (vid, i) }
+        i = i + 1
+    }
+    return (-1, -1)
+}
+
+func ge_field_offsets(c: *CTyArena, v: VariantNode) -> *Vector<int64> {
+    a: *Ast = (*c).ast
+    out: *Vector<int64> = alloc(vec_new())
+    mut off: int64 = 0
+    mut i: int64 = 0
+    while i < v.fields_len {
+        fid: int64 = vec_get((*a).kids, v.fields_off + i)
+        f: FieldNode = vec_get((*a).fields, fid)
+        sa: SizeAlign = cty_size_align(c, cty_lower_ast(c, a, f.ty))
+        mut rem: int64 = off % sa.align
+        if rem != 0 { off = off + sa.align - rem }
+        vec_push(out, off)
+        off = off + sa.size
+        i = i + 1
+    }
+    return out
+}
+
+func ge_field_ptr(s: *GenFuncState, base: string, off: int64) -> string {
+    if off == 0 { return gs_copy(base) }
+    d: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = getelementptr i8, ptr ")
+    sb_push(b, base)
+    sb_push(b, ", i64 ")
+    sb_push_int(b, off)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return d
+}
+
+export func gen_enum_ref(s: *GenFuncState, id: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind != xk_field() { return Val { ty: cty_void(c), op: gs_copy("") } }
+    base: ExprNode = vec_get((*a).exprs, e.a)
+    if base.kind != xk_ident() { return Val { ty: cty_void(c), op: gs_copy("") } }
+    return gen_enum_ctor(s, ast_name(a, base.a), ast_name(a, e.b), e.c, 0)
+}
+
+export func is_enum_ref(s: *GenFuncState, id: int64) -> bool {
+    a: *Ast = (*(*s).ctx).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind != xk_field() { return false }
+    base: ExprNode = vec_get((*a).exprs, e.a)
+    if base.kind != xk_ident() { return false }
+    eid: int64 = ge_enum(a, ast_name(a, base.a))
+    vid, tag := ge_variant(a, eid, ast_name(a, e.b))
+    return vid >= 0 && tag >= 0
+}
+
+export func gen_enum_ctor(s: *GenFuncState, name: string, variant: string, args_off: int64, args_len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    ety: int64 = cty_intern(c, ctyk_enum(), 0, 0, name)
+    eid: int64 = ge_enum(a, name)
+    vid, tag := ge_variant(a, eid, variant)
+    if vid < 0 {
+        emit_error((*s).module, "unsupported enum constructor")
+        return Val { ty: ety, op: gs_copy("undef") }
+    }
+    v: VariantNode = vec_get((*a).variants, vid)
+    offsets: *Vector<int64> = ge_field_offsets(c, v)
+    slot: string = gen_alloca(s, ety)
+    tp: string = next_tmp((*s).fb)
+    ll: string = cty_ll(c, ety)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, tp)
+    sb_push(b, " = getelementptr ")
+    sb_push(b, ll)
+    sb_push(b, ", ptr ")
+    sb_push(b, slot)
+    sb_push(b, ", i32 0, i32 0")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    tb: *StringBuilder = alloc(sb_new())
+    sb_push(tb, "store i")
+    sb_push_int(tb, cty_enum_tag_bits(c, name))
+    sb_push_char(tb, 32)
+    sb_push_int(tb, tag)
+    sb_push(tb, ", ptr ")
+    sb_push(tb, tp)
+    tt: string = gs_built(tb)
+    sb_free(tb)
+    free(tb)
+    line((*s).fb, tt)
+    free(tt)
+    if args_len > 0 {
+        pp: string = next_tmp((*s).fb)
+        pb: *StringBuilder = alloc(sb_new())
+        sb_push(pb, pp)
+        sb_push(pb, " = getelementptr ")
+        sb_push(pb, ll)
+        sb_push(pb, ", ptr ")
+        sb_push(pb, slot)
+        sb_push(pb, ", i32 0, i32 1")
+        pt: string = gs_built(pb)
+        sb_free(pb)
+        free(pb)
+        line((*s).fb, pt)
+        free(pt)
+        mut i: int64 = 0
+        while i < args_len {
+            aid: int64 = vec_get((*a).kids, args_off + i)
+            av: Val = gen_expr(s, aid)
+            if i < v.fields_len {
+                fid: int64 = vec_get((*a).kids, v.fields_off + i)
+                f: FieldNode = vec_get((*a).fields, fid)
+                fty: int64 = cty_lower_ast(c, a, f.ty)
+                fv: Val = adapt(s, av, fty)
+                fp: string = ge_field_ptr(s, pp, vec_get(offsets, i))
+                gen_store_slot(s, fty, fv.op, fp)
+            }
+            i = i + 1
+        }
+    }
+    out: string = gen_load_slot(s, ety, slot)
+    free(ll)
+    return Val { ty: ety, op: out }
+}
+
+func ge_bind_payload(s: *GenFuncState, ename: string, pat: PatternNode, addr: string, ety: int64) -> void {
+    if pat.kind != pk_variant() { return }
+    if pat.c == 0 { return }
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    eid: int64 = ge_enum(a, ename)
+    vid, tag := ge_variant(a, eid, ast_name(a, pat.a))
+    if vid < 0 || tag < 0 { return }
+    v: VariantNode = vec_get((*a).variants, vid)
+    offsets: *Vector<int64> = ge_field_offsets(c, v)
+    pp: string = next_tmp((*s).fb)
+    ll: string = cty_ll(c, ety)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, pp)
+    sb_push(b, " = getelementptr ")
+    sb_push(b, ll)
+    sb_push(b, ", ptr ")
+    sb_push(b, addr)
+    sb_push(b, ", i32 0, i32 1")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    mut i: int64 = 0
+    while i < pat.c {
+        if i < v.fields_len {
+            fid: int64 = vec_get((*a).kids, v.fields_off + i)
+            f: FieldNode = vec_get((*a).fields, fid)
+            fty: int64 = cty_lower_ast(c, a, f.ty)
+            fp: string = ge_field_ptr(s, pp, vec_get(offsets, i))
+            val: string = gen_load_slot(s, fty, fp)
+            slot: string = gen_alloca(s, fty)
+            gen_store_slot(s, fty, val, slot)
+            bid: int64 = vec_get((*a).kids, pat.b + i)
+            map_put((*s).locals, gs_copy(ast_name(a, bid)), LocalVal { ty: fty, op: slot })
+        }
+        i = i + 1
+    }
+    free(ll)
+}
+
+func ge_result_ty(s: *GenFuncState, off: int64, len: int64) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        block: BlockNode = vec_get((*a).blocks, arm.body)
+        if block.len > 0 {
+            sid: int64 = vec_get((*a).kids, block.off + block.len - 1)
+            st: StmtNode = vec_get((*a).stmts, sid)
+            if st.kind == sk_expr() {
+                ty: int64 = static_expr_ty(s, st.a)
+                if vec_get(cty_nodes(c), ty).kind != ctyk_void() { return ty }
+                ex: ExprNode = vec_get((*a).exprs, st.a)
+                if ex.kind == xk_int() { return cty_int(c, 64) }
+                if ex.kind == xk_bool() { return cty_bool(c) }
+                if ex.kind == xk_str() { return cty_rawptr(c, cty_char(c)) }
+                if ex.kind == xk_char() { return cty_char(c) }
+                if ex.kind == xk_rune() { return cty_int(c, 32) }
+                if ex.kind == xk_field() {
+                    bt: int64 = static_expr_ty(s, ex.a)
+                    if vec_get(cty_nodes(c), bt).kind == ctyk_error() {
+                        if str_eq(ast_name(a, ex.b), "message") { return cty_rawptr(c, cty_char(c)) }
+                    }
+                }
+                if ex.kind == xk_call() {
+                    ce: ExprNode = vec_get((*a).exprs, ex.a)
+                    if ce.kind == xk_field() {
+                        bt2: int64 = static_expr_ty(s, ce.a)
+                        if vec_get(cty_nodes(c), bt2).kind == ctyk_error() {
+                            if str_eq(ast_name(a, ce.b), "toString") { return cty_rawptr(c, cty_char(c)) }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return cty_int(c, 64)
+}
+
+func ge_arm_body(s: *GenFuncState, block_id: int64, result_ty: int64, result_slot: string) -> void {
+    if result_ty < 0 { gen_block(s, block_id)
+        return }
+    a: *Ast = (*(*s).ctx).ast
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    mut i: int64 = 0
+    while i < b.len {
+        if !(*s).terminated {
+            sid: int64 = vec_get((*a).kids, b.off + i)
+            st: StmtNode = vec_get((*a).stmts, sid)
+            if i + 1 == b.len && st.kind == sk_expr() {
+                v: Val = gen_expr(s, st.a)
+                av: Val = adapt(s, v, result_ty)
+                gen_store_slot(s, result_ty, av.op, result_slot)
+            } else { gen_stmt(s, sid) }
+        }
+        i = i + 1
+    }
+}
+
+export func gen_match(s: *GenFuncState, scrut: int64, arms_off: int64, arms_len: int64, result_ty: int64, result_slot: string) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    sv: Val = gen_expr(s, scrut)
+    slot: string = gen_alloca(s, sv.ty)
+    gen_store_slot(s, sv.ty, sv.op, slot)
+    n: CTyNode = vec_get(cty_nodes(c), sv.ty)
+    if n.kind != ctyk_enum() {
+        emit_error((*s).module, "unsupported non-enum match")
+        return
+    }
+    ll: string = cty_ll(c, sv.ty)
+    tp: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, tp)
+    sb_push(b, " = getelementptr ")
+    sb_push(b, ll)
+    sb_push(b, ", ptr ")
+    sb_push(b, slot)
+    sb_push(b, ", i32 0, i32 0")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    tag: string = next_tmp((*s).fb)
+    bits: int64 = cty_enum_tag_bits(c, n.text)
+    lb: *StringBuilder = alloc(sb_new())
+    sb_push(lb, tag)
+    sb_push(lb, " = load i")
+    sb_push_int(lb, bits)
+    sb_push(lb, ", ptr ")
+    sb_push(lb, tp)
+    lt: string = gs_built(lb)
+    sb_free(lb)
+    free(lb)
+    line((*s).fb, lt)
+    free(lt)
+    end: int64 = fresh_label((*s).fb)
+    labels: *Vector<int64> = alloc(vec_new())
+    mut default: int64 = end
+    mut i: int64 = 0
+    while i < arms_len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + i))
+        pat: PatternNode = vec_get((*a).patterns, arm.pat)
+        label: int64 = fresh_label((*s).fb)
+        vec_push(labels, label)
+        if pat.kind == pk_wildcard() { default = label }
+        else if pat.kind == pk_ident() {
+            vid, vt := ge_variant(a, ge_enum(a, n.text), ast_name(a, pat.a))
+            if vid < 0 || vt < 0 { default = label }
+        }
+        i = i + 1
+    }
+    sw: *StringBuilder = alloc(sb_new())
+    sb_push(sw, "switch i")
+    sb_push_int(sw, bits)
+    sb_push_char(sw, 32)
+    sb_push(sw, tag)
+    sb_push(sw, ", label ")
+    sb_push(sw, branch_label(default))
+    sb_push(sw, " [ ")
+    mut j: int64 = 0
+    mut wrote_case: bool = false
+    while j < arms_len {
+        arm2: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + j))
+        pat2: PatternNode = vec_get((*a).patterns, arm2.pat)
+        mut vname: string = ""
+        if pat2.kind == pk_variant() || pat2.kind == pk_ident() { vname = ast_name(a, pat2.a) }
+        vid2, tag2 := ge_variant(a, ge_enum(a, n.text), vname)
+        if vid2 >= 0 {
+            if wrote_case { sb_push_char(sw, 32) }
+            sb_push(sw, "i")
+            sb_push_int(sw, bits)
+            sb_push_char(sw, 32)
+            sb_push_int(sw, tag2)
+            sb_push(sw, ", label ")
+            sb_push(sw, branch_label(vec_get(labels, j)))
+            wrote_case = true
+        }
+        j = j + 1
+    }
+    sb_push(sw, " ]")
+    st: string = gs_built(sw)
+    sb_free(sw)
+    free(sw)
+    line((*s).fb, st)
+    free(st)
+    (*s).terminated = true
+    mut k: int64 = 0
+    while k < arms_len {
+        arm3: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + k))
+        pat3: PatternNode = vec_get((*a).patterns, arm3.pat)
+        place_label((*s).fb, vec_get(labels, k))
+        (*s).terminated = false
+        ge_bind_payload(s, n.text, pat3, slot, sv.ty)
+        if pat3.kind == pk_ident() {
+            vid3, tag3 := ge_variant(a, ge_enum(a, n.text), ast_name(a, pat3.a))
+            if vid3 < 0 || tag3 < 0 { map_put((*s).locals, gs_copy(ast_name(a, pat3.a)), LocalVal { ty: sv.ty, op: slot }) }
+        }
+        ge_arm_body(s, arm3.body, result_ty, result_slot)
+        if !(*s).terminated { br((*s).fb, branch_label(end)) }
+        k = k + 1
+    }
+    place_label((*s).fb, end)
+    (*s).terminated = false
+    free(ll)
+}
+
+export func gen_match_expr(s: *GenFuncState, e: ExprNode) -> Val {
+    ty: int64 = ge_result_ty(s, e.b, e.c)
+    slot: string = gen_alloca(s, ty)
+    gen_match(s, e.a, e.b, e.c, ty, slot)
+    return Val { ty: ty, op: gen_load_slot(s, ty, slot) }
+}

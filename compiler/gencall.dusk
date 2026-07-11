@@ -14,6 +14,10 @@
 @import genctx
 @import genstate
 @import genprint
+@import genptr
+@import genagg
+@import genmeth
+@import genio
 
 // Lowers a call expression when the callee is a plain top-level name or builtin.
 export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_len: int64) -> Val {
@@ -21,10 +25,32 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     c: *CTyArena = genctx_ctys((*s).ctx)
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind != xk_ident() {
+        if callee.kind == xk_field() {
+            return gen_method_call(s, callee.a, ast_name(a, callee.b), args_off, args_len)
+        }
         emit_error((*s).module, "unsupported call target")
         return Val { ty: cty_void(c), op: gs_copy("") }
     }
     name: string = ast_name(a, callee.a)
+    if str_eq(name, "alloc") { return gen_alloc(s, args_off, args_len) }
+    if str_eq(name, "free") { return gen_free(s, args_off, args_len) }
+    if str_eq(name, "sizeof") { return gen_sizeof(s, args_off, args_len) }
+    if str_eq(name, "alloc_bytes") { return gen_alloc_bytes(s, args_off, args_len) }
+    if str_eq(name, "ptr_add") { return gen_ptr_add(s, args_off, args_len) }
+    if str_eq(name, "read_file") { return gen_read_file(s, args_off, args_len) }
+    if str_eq(name, "write_file") { return gen_write_file(s, args_off, args_len) }
+    if str_eq(name, "read_line") { return gen_stdin_read(s, "cool_read_line", "end of input") }
+    if str_eq(name, "read_all") { return gen_stdin_read(s, "cool_read_all", "cannot read stdin") }
+    if str_eq(name, "parse_float") { return gen_parse_float(s, args_off, args_len) }
+    if str_eq(name, "cstr") {
+        if args_len > 0 {
+            v0: Val = gen_expr(s, vec_get((*a).kids, args_off))
+            return Val { ty: cty_rawptr(c, cty_char(c)), op: v0.op }
+        }
+    }
+    if str_eq(name, "move") {
+        if args_len > 0 { return gen_expr(s, vec_get((*a).kids, args_off)) }
+    }
     if genctx_has_fn((*s).ctx, name) {
         sig: GenFnSig = genctx_fn((*s).ctx, name)
         mut call_ret: string = cty_ll(c, sig.ret)
@@ -33,8 +59,16 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
         while i < args_len {
             if i > 0 { sb_push(args, ", ") }
             aty: int64 = vec_get(sig.params, i)
-            v: Val = gen_expr(s, vec_get((*a).kids, args_off + i))
-            out: string = coerce(s, v.ty, v.op, aty)
+            aeid: int64 = vec_get((*a).kids, args_off + i)
+            ae: ExprNode = vec_get((*a).exprs, aeid)
+            an: CTyNode = vec_get(cty_nodes(c), aty)
+            mut v: Val = Val { ty: cty_void(c), op: gs_copy("") }
+            if ae.kind == xk_array() {
+                if an.kind == ctyk_array() { v = gen_array_lit(s, ae, an.a) }
+                else if an.kind == ctyk_slice() { v = slice_from_array(s, gen_array_lit(s, ae, an.a), ae.b) }
+                else { v = gen_expr(s, aeid) }
+            } else { v = gen_expr(s, aeid) }
+            out: string = adapt(s, v, aty).op
             ll: string = cty_ll(c, aty)
             sb_push(args, ll)
             sb_push_char(args, 32)

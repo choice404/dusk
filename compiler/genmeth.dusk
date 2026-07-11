@@ -1,0 +1,283 @@
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+@import genplace
+@import genptr
+
+func gm_key(a: string, b: string) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push(out, a)
+ sb_push_char(out, 46)
+ sb_push(out, b)
+    text: string = gs_built(out)
+ sb_free(out)
+ free(out)
+    return text
+}
+
+func gm_unresolved(s: *GenFuncState, ty: string, method: string) -> Val {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "no method '")
+ sb_push(b, method)
+ sb_push(b, "' on type '")
+ sb_push(b, ty)
+ sb_push_char(b, 39)
+    msg: string = gs_built(b)
+ sb_free(b)
+ free(b)
+    emit_error((*s).module, msg)
+ free(msg)
+    return Val { ty: cty_int(genctx_ctys((*s).ctx), 64), op: gs_copy("0") }
+}
+
+func gm_error_string(s: *GenFuncState, ev: Val) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    empty: string = emit_cstring((*s).module, "")
+    isnull: string = next_tmp((*s).fb)
+    op2((*s).fb, isnull, "icmp eq", "ptr", ev.op, "null")
+    out: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, out)
+ sb_push(b, " = select i1 ")
+ sb_push(b, isnull)
+ sb_push(b, ", ptr ")
+ sb_push(b, empty)
+ sb_push(b, ", ptr ")
+ sb_push(b, ev.op)
+    text: string = gs_built(b)
+ sb_free(b)
+ free(b)
+ line((*s).fb, text)
+ free(text)
+    return Val { ty: cty_rawptr(c, cty_char(c)), op: out }
+}
+
+func gm_error(s: *GenFuncState, ev: Val, method: string, args_off: int64, args_len: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if str_eq(method, "exists") {
+        d: string = next_tmp((*s).fb)
+ op2((*s).fb, d, "icmp ne", "ptr", ev.op, "null")
+        return Val { ty: cty_bool(c), op: d }
+    }
+    if str_eq(method, "toString") { return gm_error_string(s, ev) }
+    if str_eq(method, "ignore") { return Val { ty: cty_void(c), op: gs_copy("") } }
+    if str_eq(method, "check") {
+        emit_error((*s).module, "unsupported error check closure")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    return gm_unresolved(s, "error", method)
+}
+
+func gm_struct(s: *GenFuncState, ty: int64, ptr: string, method: string, args_off: int64, args_len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    tn: CTyNode = vec_get(cty_nodes(c), ty)
+    key: string = gm_key(tn.text, method)
+    if genctx_has_method((*s).ctx, key) {
+        sig: GenFnSig = genctx_method((*s).ctx, key)
+        args: *StringBuilder = alloc(sb_new())
+        sb_push(args, "ptr ")
+ sb_push(args, ptr)
+        mut i: int64 = 0
+        while i < args_len {
+            aeid: int64 = vec_get((*a).kids, args_off + i)
+            v: Val = gen_expr(s, aeid)
+            target: int64 = vec_get(sig.params, i + 1)
+            av: Val = adapt(s, v, target)
+            ll: string = cty_ll(c, target)
+            sb_push(args, ", ")
+ sb_push(args, ll)
+ sb_push_char(args, 32)
+ sb_push(args, av.op)
+            free(ll)
+ i = i + 1
+        }
+        argtext: string = gs_built(args)
+ sb_free(args)
+ free(args)
+        retll: string = cty_ll(c, sig.ret)
+        b: *StringBuilder = alloc(sb_new())
+        mut dest: string = gs_copy("")
+        if !str_eq(retll, "void") { dest = next_tmp((*s).fb)
+ sb_push(b, dest)
+ sb_push(b, " = ") }
+        sb_push(b, "call ")
+ sb_push(b, retll)
+ sb_push(b, " @")
+ sb_push(b, key)
+ sb_push_char(b, 40)
+ sb_push(b, argtext)
+ sb_push_char(b, 41)
+        text: string = gs_built(b)
+ sb_free(b)
+ free(b)
+ line((*s).fb, text)
+ free(text)
+        return Val { ty: sig.ret, op: dest }
+    }
+    if str_eq(method, "ignore") { return Val { ty: cty_void(c), op: gs_copy("") } }
+    return gm_unresolved(s, tn.text, method)
+}
+
+func gm_iface(s: *GenFuncState, ty: int64, op: string, method: string, args_off: int64, args_len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    tn: CTyNode = vec_get(cty_nodes(c), ty)
+    mut iface_id: int64 = -1
+    interfaces: *Vector<InterfaceNode> = (*a).interfaces
+    mut ii: int64 = 0
+    while ii < vec_len(interfaces) {
+        cand: InterfaceNode = vec_get(interfaces, ii)
+        if str_eq(ast_name(a, cand.name), tn.text) { iface_id = ii }
+        ii = ii + 1
+    }
+    if iface_id < 0 { return gm_unresolved(s, tn.text, method) }
+    iface: InterfaceNode = vec_get(interfaces, iface_id)
+    mut slot_index: int64 = -1
+    mut sig_id: int64 = -1
+    mut mi: int64 = 0
+    while mi < iface.methods_len {
+        mid: int64 = vec_get((*a).kids, iface.methods_off + mi)
+        ms0: MethodSigNode = vec_get((*a).method_sigs, mid)
+        if str_eq(ast_name(a, ms0.name), method) {
+            slot_index = mi
+            sig_id = mid
+        }
+        mi = mi + 1
+    }
+    if sig_id < 0 { return gm_unresolved(s, tn.text, method) }
+    ms: MethodSigNode = vec_get((*a).method_sigs, sig_id)
+    data: string = next_tmp((*s).fb)
+    eb0: *StringBuilder = alloc(sb_new())
+    sb_push(eb0, data)
+    sb_push(eb0, " = extractvalue { ptr, ptr } ")
+    sb_push(eb0, op)
+    sb_push(eb0, ", 0")
+    et0: string = gs_built(eb0)
+    sb_free(eb0)
+    free(eb0)
+    line((*s).fb, et0)
+    free(et0)
+    vt: string = next_tmp((*s).fb)
+    eb1: *StringBuilder = alloc(sb_new())
+    sb_push(eb1, vt)
+    sb_push(eb1, " = extractvalue { ptr, ptr } ")
+    sb_push(eb1, op)
+    sb_push(eb1, ", 1")
+    et1: string = gs_built(eb1)
+    sb_free(eb1)
+    free(eb1)
+    line((*s).fb, et1)
+    free(et1)
+    slot: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, slot)
+    sb_push(b0, " = getelementptr [")
+    sb_push_int(b0, iface.methods_len)
+    sb_push(b0, " x ptr], ptr ")
+    sb_push(b0, vt)
+    sb_push(b0, ", i64 0, i64 ")
+    sb_push_int(b0, slot_index)
+    t0: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, t0)
+    free(t0)
+    fp: string = next_tmp((*s).fb)
+    fb_load((*s).fb, fp, "ptr", slot)
+    args: *StringBuilder = alloc(sb_new())
+    sb_push(args, "ptr ")
+    sb_push(args, data)
+    mut ai: int64 = 0
+    while ai < args_len {
+        v: Val = gen_expr(s, vec_get((*a).kids, args_off + ai))
+        pid: int64 = vec_get((*a).kids, ms.params_off + ai)
+        p: ParamNode = vec_get((*a).params, pid)
+        target: int64 = cty_lower_ast(c, a, p.ty)
+        av: Val = adapt(s, v, target)
+        ll: string = cty_ll(c, target)
+        sb_push(args, ", ")
+        sb_push(args, ll)
+        sb_push_char(args, 32)
+        sb_push(args, av.op)
+        free(ll)
+        ai = ai + 1
+    }
+    ret_ty: int64 = cty_lower_ast(c, a, ms.ret)
+    retll: string = cty_ll(c, ret_ty)
+    callb: *StringBuilder = alloc(sb_new())
+    mut dest: string = gs_copy("")
+    if !str_eq(retll, "void") {
+        dest = next_tmp((*s).fb)
+        sb_push(callb, dest)
+        sb_push(callb, " = ")
+    }
+    sb_push(callb, "call ")
+    sb_push(callb, retll)
+    sb_push_char(callb, 32)
+    sb_push(callb, fp)
+    sb_push_char(callb, 40)
+    argtext: string = gs_built(args)
+    sb_push(callb, argtext)
+    sb_push_char(callb, 41)
+    calltext: string = gs_built(callb)
+    sb_free(callb)
+    free(callb)
+    sb_free(args)
+    free(args)
+    free(argtext)
+    line((*s).fb, calltext)
+    free(calltext)
+    free(retll)
+    return Val { ty: ret_ty, op: dest }
+}
+
+func gm_place(s: *GenFuncState, p: Place, method: string, args_off: int64, args_len: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), p.ty)
+    if n.kind == ctyk_struct() { return gm_struct(s, p.ty, p.ptr, method, args_off, args_len) }
+    if n.kind == ctyk_ptr() {
+        inner: CTyNode = vec_get(cty_nodes(c), n.a)
+        if inner.kind == ctyk_struct() {
+            fatv: string = gen_load_slot(s, p.ty, p.ptr)
+            return gm_struct(s, n.a, fat_checked(s, fatv), method, args_off, args_len)
+        }
+    }
+    v: Val = Val { ty: p.ty, op: gen_load_slot(s, p.ty, p.ptr) }
+    if n.kind == ctyk_error() { return gm_error(s, v, method, args_off, args_len) }
+    if n.kind == ctyk_iface() { return gm_iface(s, p.ty, v.op, method, args_off, args_len) }
+    if str_eq(method, "ignore") { return Val { ty: cty_void(c), op: gs_copy("") } }
+    return gm_unresolved(s, cty_ll(c, p.ty), method)
+}
+
+func gm_value(s: *GenFuncState, v: Val, method: string, args_off: int64, args_len: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if n.kind == ctyk_error() { return gm_error(s, v, method, args_off, args_len) }
+    if n.kind == ctyk_iface() { return gm_iface(s, v.ty, v.op, method, args_off, args_len) }
+    if n.kind == ctyk_struct() {
+        slot: string = gen_alloca(s, v.ty)
+ gen_store_slot(s, v.ty, v.op, slot)
+        return gm_struct(s, v.ty, slot, method, args_off, args_len)
+    }
+    if n.kind == ctyk_ptr() {
+        inner: CTyNode = vec_get(cty_nodes(c), n.a)
+        if inner.kind == ctyk_struct() { return gm_struct(s, n.a, fat_checked(s, v.op), method, args_off, args_len) }
+    }
+    if str_eq(method, "ignore") { return Val { ty: cty_void(c), op: gs_copy("") } }
+    return gm_unresolved(s, cty_ll(c, v.ty), method)
+}
+
+export func gen_method_call(s: *GenFuncState, base_id: int64, method: string, args_off: int64, args_len: int64) -> Val {
+    p: Place = gen_place(s, base_id)
+    if p.ok { return gm_place(s, p, method, args_off, args_len) }
+    return gm_value(s, gen_expr(s, base_id), method, args_off, args_len)
+}

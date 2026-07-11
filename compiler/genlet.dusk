@@ -15,6 +15,9 @@
 @import genctx
 @import genstate
 @import genexpr
+@import genagg
+@import genptr
+@import genplace
 
 // Lowers a scalar binding and records its stack slot for later loads and stores.
 export func gen_let(s: *GenFuncState, sid: int64) -> void {
@@ -22,19 +25,73 @@ export func gen_let(s: *GenFuncState, sid: int64) -> void {
     st: StmtNode = vec_get((*a).stmts, sid)
     c: *CTyArena = genctx_ctys((*s).ctx)
     if st.b != 1 {
-        emit_error((*s).module, "unsupported destructuring let")
+        v0: Val = gen_expr(s, st.c)
+        mut di: int64 = 0
+        while di < st.b {
+            ety: int64 = cty_tuple_elem(c, v0.ty, di)
+            d: string = next_tmp((*s).fb)
+            vll: string = cty_ll(c, v0.ty)
+            eb: *StringBuilder = alloc(sb_new())
+            sb_push(eb, d)
+            sb_push(eb, " = extractvalue ")
+            sb_push(eb, vll)
+            sb_push_char(eb, 32)
+            sb_push(eb, v0.op)
+            sb_push(eb, ", ")
+            sb_push_int(eb, di)
+            etx: string = gs_built(eb)
+            sb_free(eb)
+            free(eb)
+            line((*s).fb, etx)
+            free(etx)
+            dbid: int64 = vec_get((*a).kids, st.a + di)
+            db: BindNode = vec_get((*a).binds, dbid)
+            mut dty: int64 = ety
+            if db.ty >= 0 { dty = cty_lower_ast(c, a, db.ty) }
+            av0: Val = adapt(s, Val { ty: ety, op: d }, dty)
+            dp: string = gen_alloca(s, dty)
+            gen_store_slot(s, dty, av0.op, dp)
+            map_put((*s).locals, gs_copy(ast_name(a, db.name)), LocalVal { ty: dty, op: dp })
+            di = di + 1
+        }
         return
     }
     bid: int64 = vec_get((*a).kids, st.a)
     bind: BindNode = vec_get((*a).binds, bid)
-    v: Val = gen_expr(s, st.c)
-    mut ty: int64 = v.ty
-    if bind.ty >= 0 { ty = cty_lower_ast(c, a, bind.ty) }
+    init: ExprNode = vec_get((*a).exprs, st.c)
+    mut ty: int64 = cty_void(c)
+    mut v: Val = Val { ty: cty_void(c), op: gs_copy("") }
+    if bind.ty >= 0 {
+        ty = cty_lower_ast(c, a, bind.ty)
+        tn: CTyNode = vec_get(cty_nodes(c), ty)
+        mut special_alloc: bool = false
+        if init.kind == xk_call() {
+            callee: ExprNode = vec_get((*a).exprs, init.a)
+            if callee.kind == xk_ident() {
+                if str_eq(ast_name(a, callee.a), "alloc") {
+                    if tn.kind == ctyk_ptr() {
+                        if init.c == 0 { v = alloc_of(s, tn.a, false, Val { ty: tn.a, op: gs_copy("0") }) }
+                        else { v = alloc_of(s, tn.a, true, gen_expr(s, vec_get((*a).kids, init.b))) }
+                        special_alloc = true
+                    }
+                }
+            }
+        }
+        if special_alloc {
+        } else if init.kind == xk_array() {
+            if tn.kind == ctyk_array() { v = gen_array_lit(s, init, tn.a) }
+            else if tn.kind == ctyk_slice() { v = slice_from_array(s, gen_array_lit(s, init, tn.a), init.b) }
+            else { v = gen_expr(s, st.c) }
+        } else { v = gen_expr(s, st.c) }
+    } else {
+        v = gen_expr(s, st.c)
+        ty = v.ty
+    }
     if cty_is_stub(c, ty) {
         emit_error((*s).module, "unsupported codegen type in let")
         return
     }
-    out: string = coerce(s, v.ty, v.op, ty)
+    out: string = adapt(s, v, ty).op
     ptr: string = gen_alloca(s, ty)
     gen_store_slot(s, ty, out, ptr)
     map_put((*s).locals, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: ptr })
@@ -42,43 +99,25 @@ export func gen_let(s: *GenFuncState, sid: int64) -> void {
 
 // Lowers `name = expr` for scalar locals; other places remain aggregate-owned.
 export func gen_assign(s: *GenFuncState, lhs: int64, rhs: int64) -> void {
-    a: *Ast = (*(*s).ctx).ast
-    e: ExprNode = vec_get((*a).exprs, lhs)
-    c: *CTyArena = genctx_ctys((*s).ctx)
-    if e.kind != xk_ident() {
+    p: Place = gen_place(s, lhs)
+    if !p.ok {
         emit_error((*s).module, "unsupported assignment target")
         return
     }
-    name: string = ast_name(a, e.a)
-    locals: *Map<LocalVal> = (*s).locals
-    if !map_has(locals, name) {
-        emit_error((*s).module, "unsupported assignment target")
-        return
-    }
-    lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
     v: Val = gen_expr(s, rhs)
-    out: string = coerce(s, v.ty, v.op, lv.ty)
-    gen_store_slot(s, lv.ty, out, lv.op)
+    out: string = adapt(s, v, p.ty).op
+    gen_store_slot(s, p.ty, out, p.ptr)
 }
 
 // Lowers scalar compound assignment by loading once, combining, and storing back.
 export func gen_assign_op(s: *GenFuncState, op: int64, lhs: int64, rhs: int64) -> void {
-    a: *Ast = (*(*s).ctx).ast
-    e: ExprNode = vec_get((*a).exprs, lhs)
-    c: *CTyArena = genctx_ctys((*s).ctx)
-    if e.kind != xk_ident() {
+    p: Place = gen_place(s, lhs)
+    if !p.ok {
         emit_error((*s).module, "unsupported compound assignment target")
         return
     }
-    name: string = ast_name(a, e.a)
-    locals: *Map<LocalVal> = (*s).locals
-    if !map_has(locals, name) {
-        emit_error((*s).module, "unsupported compound assignment target")
-        return
-    }
-    lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
-    cur: string = gen_load_slot(s, lv.ty, lv.op)
-    v: Val = gen_binop_vals(s, op, Val { ty: lv.ty, op: cur }, rhs)
-    out: string = coerce(s, v.ty, v.op, lv.ty)
-    gen_store_slot(s, lv.ty, out, lv.op)
+    cur: string = gen_load_slot(s, p.ty, p.ptr)
+    v: Val = gen_binop_vals(s, op, Val { ty: p.ty, op: cur }, rhs)
+    out: string = coerce(s, v.ty, v.op, p.ty)
+    gen_store_slot(s, p.ty, out, p.ptr)
 }

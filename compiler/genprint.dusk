@@ -127,7 +127,9 @@ func gp_emit_fmt_lit(s: *GenFuncState, fmt: string, lo: int64, hi: int64, errout
     }
     if sb_size(lit) > 0 {
         piece: string = gs_built(lit)
-        label: string = emit_cstring((*s).module, piece)
+        decoded: string = gx_string_bytes(piece)
+        label: string = emit_cstring((*s).module, decoded)
+        free(decoded)
         if errout { gp_call_cstr(s, "cool_eprint_cstr", label) } else { gp_call_cstr(s, "cool_print_cstr", label) }
     }
     sb_free(lit)
@@ -145,7 +147,9 @@ func gp_format_print(s: *GenFuncState, args_off: int64, args_len: int64, newline
     while i < str_len(fmt) {
         if fmt[i] == 123 {
             if i + 1 < str_len(fmt) {
-                if fmt[i + 1] == 125 {
+                if fmt[i + 1] == 123 {
+                    i = i + 2
+                } else if fmt[i + 1] == 125 {
                     gp_emit_fmt_lit(s, fmt, seg_start, i, errout)
                     if ai < args_len {
                         v: Val = gen_expr(s, vec_get((*a).kids, args_off + ai))
@@ -161,7 +165,12 @@ func gp_format_print(s: *GenFuncState, args_off: int64, args_len: int64, newline
                 i = i + 1
             }
         } else {
-            i = i + 1
+            if fmt[i] == 125 {
+                if i + 1 < str_len(fmt) {
+                    if fmt[i + 1] == 125 { i = i + 2 }
+                    else { i = i + 1 }
+                } else { i = i + 1 }
+            } else { i = i + 1 }
         }
     }
     gp_emit_fmt_lit(s, fmt, seg_start, str_len(fmt), errout)

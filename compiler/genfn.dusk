@@ -150,8 +150,18 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     }
     locals: *Map<LocalVal> = alloc(map_new())
     defers: *Vector<int64> = alloc(vec_new())
-    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, terminated: false })
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false })
     bind_params(st, f)
+    mut ui: int64 = 0
+    while ui < f.params_len {
+        upid: int64 = vec_get((*a).kids, f.params_off + ui)
+        up: ParamNode = vec_get((*a).params, upid)
+        if up.is_using {
+            (*st).allocator_name = gf_copy(ast_name(a, up.name))
+            (*st).allocator_ty = cty_lower_ast(c, a, up.ty)
+        }
+        ui = ui + 1
+    }
     block: BlockNode = vec_get((*a).blocks, f.body)
     mut i: int64 = 0
     while i < block.len {
@@ -165,6 +175,64 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     free(ret_ll)
     free(sig)
     return out
+}
+
+export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: string) -> string {
+    a: *Ast = (*ctx).ast
+    c: *CTyArena = genctx_ctys(ctx)
+    ret_ty: int64 = cty_lower_ast(c, a, f.ret)
+    rb: *StringBuilder = alloc(sb_new())
+    sb_push(rb, owner)
+ sb_push_char(rb, 46)
+ sb_push(rb, ast_name(a, f.name))
+    name: string = gf_built(rb)
+ sb_free(rb)
+ free(rb)
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, "ptr %a0")
+    mut i: int64 = 0
+    while i < f.params_len {
+        pid: int64 = vec_get((*a).kids, f.params_off + i)
+        p: ParamNode = vec_get((*a).params, pid)
+        ll: string = cty_ll(c, cty_lower_ast(c, a, p.ty))
+        sb_push(sb, ", ")
+ sb_push(sb, ll)
+ sb_push(sb, " %a")
+ sb_push_int(sb, i + 1)
+        free(ll)
+ i = i + 1
+    }
+    sig: string = gf_built(sb)
+ sb_free(sb)
+ free(sb)
+    ret_ll: string = cty_ll(c, ret_ty)
+    fb: *FuncBuilder = func_new(ret_ll, name, sig)
+    locals: *Map<LocalVal> = alloc(map_new())
+    map_put(locals, gf_copy("self"), LocalVal { ty: cty_intern(c, ctyk_struct(), 0, 0, owner), op: gf_copy("%a0") })
+    defers: *Vector<int64> = alloc(vec_new())
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false })
+    mut j: int64 = 0
+    while j < f.params_len {
+        pid2: int64 = vec_get((*a).kids, f.params_off + j)
+        p2: ParamNode = vec_get((*a).params, pid2)
+        ty: int64 = cty_lower_ast(c, a, p2.ty)
+        opb: *StringBuilder = alloc(sb_new())
+ sb_push(opb, "%a")
+ sb_push_int(opb, j + 1)
+        op: string = gf_built(opb)
+ sb_free(opb)
+ free(opb)
+        ptr: string = gen_alloca(st, ty)
+ gen_store_slot(st, ty, op, ptr)
+        map_put(locals, gf_copy(ast_name(a, p2.name)), LocalVal { ty: ty, op: ptr })
+        j = j + 1
+    }
+    block: BlockNode = vec_get((*a).blocks, f.body)
+    mut k: int64 = 0
+    while k < block.len { if !(*st).terminated { gen_stmt(st, vec_get((*a).kids, block.off + k)) }
+ k = k + 1 }
+    if !(*st).terminated { default_ret(st) }
+    return finish(fb)
 }
 
 // Detects the argc/argv entry form that must be split into dusk__main plus a C ABI

@@ -6,6 +6,7 @@
 @import std.string
 @import std.vector
 @import ast
+@import cty
 @import emit
 @import genctx
 @import genfn
@@ -87,12 +88,185 @@ func joined_faults(errs: *Vector<string>) -> string {
     return out
 }
 
+func emit_ground_types(m: *EmitModule, ctx: *GenCtx) -> void {
+    a: *Ast = (*ctx).ast
+    c: *CTyArena = genctx_ctys(ctx)
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_struct() {
+            s: StructNode = vec_get((*a).structs, it.id)
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, "{ ")
+            mut j: int64 = 0
+            while j < s.fields_len {
+                if j > 0 { sb_push(b, ", ") }
+                fid: int64 = vec_get((*a).kids, s.fields_off + j)
+                f: FieldNode = vec_get((*a).fields, fid)
+                ll: string = cty_ll(c, cty_lower_ast(c, a, f.ty))
+                sb_push(b, ll)
+                free(ll)
+                j = j + 1
+            }
+            sb_push(b, " }")
+            body: string = gen_built(b)
+            sb_free(b)
+            free(b)
+            emit_define_type(m, ast_name(a, s.name), body)
+            free(body)
+        }
+        i = i + 1
+    }
+    mut k: int64 = 0
+    while k < vec_len(items) {
+        it2: ItemNode = vec_get(items, k)
+        if it2.kind == ik_enum() {
+            e: EnumNode = vec_get((*a).enums, it2.id)
+            ename: string = ast_name(a, e.name)
+            b2: *StringBuilder = alloc(sb_new())
+            sb_push(b2, "{ i")
+            sb_push_int(b2, cty_enum_tag_bits(c, ename))
+            sb_push(b2, ", [")
+            sb_push_int(b2, cty_enum_blob_lanes(c, ename))
+            sb_push(b2, " x i64] }")
+            body2: string = gen_built(b2)
+            sb_free(b2)
+            free(b2)
+            emit_define_type(m, ename, body2)
+            free(body2)
+        }
+        k = k + 1
+    }
+}
+
+func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
+    a: *Ast = (*ctx).ast
+    c: *CTyArena = genctx_ctys(ctx)
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            if im.iface >= 0 {
+                iname: string = ast_name(a, im.iface)
+                tname: string = ast_name(a, im.ty)
+                interfaces: *Vector<InterfaceNode> = (*a).interfaces
+                mut iid: int64 = -1
+                mut ii: int64 = 0
+                while ii < vec_len(interfaces) {
+                    cand: InterfaceNode = vec_get(interfaces, ii)
+                    if str_eq(ast_name(a, cand.name), iname) { iid = ii }
+                    ii = ii + 1
+                }
+                if iid >= 0 {
+                    iface: InterfaceNode = vec_get(interfaces, iid)
+                    slots: *StringBuilder = alloc(sb_new())
+                    mut mi: int64 = 0
+                    while mi < iface.methods_len {
+                        ms: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + mi))
+                        mname: string = ast_name(a, ms.name)
+                        tb: *StringBuilder = alloc(sb_new())
+                        sb_push(tb, "@thunk.")
+                        sb_push(tb, iname)
+                        sb_push_char(tb, 46)
+                        sb_push(tb, tname)
+                        sb_push_char(tb, 46)
+                        sb_push(tb, mname)
+                        thunk: string = gen_built(tb)
+                        sb_free(tb)
+                        free(tb)
+                        if mi > 0 { sb_push(slots, ", ") }
+                        sb_push(slots, "ptr ")
+                        sb_push(slots, thunk)
+                        ret_ty: int64 = cty_lower_ast(c, a, ms.ret)
+                        retll: string = cty_ll(c, ret_ty)
+                        fb: *StringBuilder = alloc(sb_new())
+                        sb_push(fb, "define ")
+                        sb_push(fb, retll)
+                        sb_push_char(fb, 32)
+                        sb_push(fb, thunk)
+                        sb_push(fb, "(ptr %d")
+                        mut pi: int64 = 0
+                        while pi < ms.params_len {
+                            pid: int64 = vec_get((*a).kids, ms.params_off + pi)
+                            p: ParamNode = vec_get((*a).params, pid)
+                            pll: string = cty_ll(c, cty_lower_ast(c, a, p.ty))
+                            sb_push(fb, ", ")
+                            sb_push(fb, pll)
+                            sb_push(fb, " %a")
+                            sb_push_int(fb, pi)
+                            free(pll)
+                            pi = pi + 1
+                        }
+                        sb_push(fb, ") {\nentry:\n")
+                        if !str_eq(retll, "void") { sb_push(fb, "  %r = ") } else { sb_push(fb, "  ") }
+                        sb_push(fb, "call ")
+                        sb_push(fb, retll)
+                        sb_push(fb, " @")
+                        sb_push(fb, tname)
+                        sb_push_char(fb, 46)
+                        sb_push(fb, mname)
+                        sb_push(fb, "(ptr %d")
+                        mut ai: int64 = 0
+                        while ai < ms.params_len {
+                            pid2: int64 = vec_get((*a).kids, ms.params_off + ai)
+                            p2: ParamNode = vec_get((*a).params, pid2)
+                            all: string = cty_ll(c, cty_lower_ast(c, a, p2.ty))
+                            sb_push(fb, ", ")
+                            sb_push(fb, all)
+                            sb_push(fb, " %a")
+                            sb_push_int(fb, ai)
+                            free(all)
+                            ai = ai + 1
+                        }
+                        sb_push(fb, ")\n  ret ")
+                        sb_push(fb, retll)
+                        if !str_eq(retll, "void") { sb_push(fb, " %r") }
+                        sb_push(fb, "\n}")
+                        ftext: string = gen_built(fb)
+                        sb_free(fb)
+                        free(fb)
+                        emit_push_function(m, ftext)
+                        free(ftext)
+                        free(retll)
+                        free(thunk)
+                        mi = mi + 1
+                    }
+                    slottext: string = gen_built(slots)
+                    sb_free(slots)
+                    free(slots)
+                    gb: *StringBuilder = alloc(sb_new())
+                    sb_push(gb, "@vtable.")
+                    sb_push(gb, iname)
+                    sb_push_char(gb, 46)
+                    sb_push(gb, tname)
+                    sb_push(gb, " = constant [")
+                    sb_push_int(gb, iface.methods_len)
+                    sb_push(gb, " x ptr] [")
+                    sb_push(gb, slottext)
+                    sb_push_char(gb, 93)
+                    gt: string = gen_built(gb)
+                    sb_free(gb)
+                    free(gb)
+                    emit_global(m, gt)
+                    free(gt)
+                    free(slottext)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
 // Lowers a ground, monomorphized AST to textual LLVM IR. Unsupported Phase A
 // constructs record faults so callers never observe a malformed partial module.
 export func gen_compile(a: *Ast) -> GenResult {
     ctx: *GenCtx = genctx_new(a)
     m: *EmitModule = emit_module_new("dusk", "x86_64-pc-linux-gnu")
     declare_prelude(m)
+    emit_ground_types(m, ctx)
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {
@@ -121,18 +295,52 @@ export func gen_compile(a: *Ast) -> GenResult {
                 free(body3)
             }
         } else if it.kind == ik_impl() {
-            emit_error(m, "unsupported impl lowering in Phase A")
+            im: ImplNode = vec_get((*a).impls, it.id)
+            mut mi: int64 = 0
+            while mi < im.methods_len {
+                mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + mi))
+                mb: string = gen_method_func(m, ctx, mf, ast_name(a, im.ty))
+                emit_push_function(m, mb)
+                free(mb)
+                mi = mi + 1
+            }
         } else if it.kind == ik_foreign() {
-            emit_error(m, "unsupported foreign block lowering in Phase A")
+            fb: ForeignNode = vec_get((*a).foreigns, it.id)
+            mut fi: int64 = 0
+            while fi < fb.funcs_len {
+                ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + fi))
+                sig: GenFnSig = genctx_fn(ctx, ast_name(a, ff.name))
+                b4: *StringBuilder = alloc(sb_new())
+                rll: string = cty_ll(genctx_ctys(ctx), sig.ret)
+                sb_push(b4, rll)
+                sb_push(b4, " @")
+                sb_push(b4, ast_name(a, ff.name))
+                sb_push_char(b4, 40)
+                ps: *Vector<int64> = sig.params
+                mut pi: int64 = 0
+                while pi < vec_len(ps) {
+                    if pi > 0 { sb_push(b4, ", ") }
+                    pll: string = cty_ll(genctx_ctys(ctx), vec_get(ps, pi))
+                    sb_push(b4, pll)
+                    free(pll)
+                    pi = pi + 1
+                }
+                sb_push_char(b4, 41)
+                ds: string = gen_built(b4)
+                sb_free(b4)
+                free(b4)
+                emit_declare(m, ds)
+                free(ds)
+                free(rll)
+                fi = fi + 1
+            }
         } else if it.kind == ik_struct() {
-            emit_error(m, "unsupported struct lowering in Phase A")
         } else if it.kind == ik_enum() {
-            emit_error(m, "unsupported enum lowering in Phase A")
         } else if it.kind == ik_interface() {
-            emit_error(m, "unsupported interface lowering in Phase A")
         }
         i = i + 1
     }
+    emit_iface_vtables(m, ctx)
     errs: *Vector<string> = emit_errors(m)
     if vec_len(errs) > 0 {
         return GenResult { ok: false, text: joined_faults(errs) }

@@ -1,0 +1,264 @@
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+@import genptr
+@import genplace
+
+func ga_insert(s: *GenFuncState, aggty: int64, agg: string, memberty: int64, member: string, index: int64) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    d: string = next_tmp((*s).fb)
+    all: string = cty_ll(c, aggty)
+    mll: string = cty_ll(c, memberty)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = insertvalue ")
+    sb_push(b, all)
+    sb_push_char(b, 32)
+    sb_push(b, agg)
+    sb_push(b, ", ")
+    sb_push(b, mll)
+    sb_push_char(b, 32)
+    sb_push(b, member)
+    sb_push(b, ", ")
+    sb_push_int(b, index)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    free(all)
+    free(mll)
+    return d
+}
+
+export func gen_struct_lit(s: *GenFuncState, e: ExprNode) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    name: string = ast_name(a, e.a)
+    if str_eq(name, "error") {
+        mut msg: string = gs_copy("null")
+        mut z: int64 = 0
+        while z < e.c {
+            ni: int64 = vec_get((*a).kids, e.b + z)
+            if str_eq(ast_name(a, ni), "message") { msg = gen_expr(s, vec_get((*a).kids, e.b + z + 1)).op }
+            z = z + 2
+        }
+        return Val { ty: cty_error(c), op: msg }
+    }
+    ty: int64 = cty_intern(c, ctyk_struct(), 0, 0, name)
+    mut agg: string = gs_copy("undef")
+    mut i: int64 = 0
+    while i < e.c {
+        fname: string = ast_name(a, vec_get((*a).kids, e.b + i))
+        index: int64 = cty_struct_field(c, ty, fname)
+        if index >= 0 {
+            fty: int64 = cty_struct_field_ty(c, ty, index)
+            fv: Val = gen_expr(s, vec_get((*a).kids, e.b + i + 1))
+            av: Val = adapt(s, fv, fty)
+            agg = ga_insert(s, ty, agg, fty, av.op, index)
+        }
+        i = i + 2
+    }
+    return Val { ty: ty, op: agg }
+}
+
+export func gen_array_lit(s: *GenFuncState, e: ExprNode, hint: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    vals: *Vector<Val> = alloc(vec_new())
+    mut elem: int64 = hint
+    mut i: int64 = 0
+    while i < e.b {
+        eid: int64 = vec_get((*a).kids, e.a + i)
+        enode: ExprNode = vec_get((*a).exprs, eid)
+        mut v: Val = Val { ty: cty_int(c, 64), op: gs_copy("0") }
+        mut hinted: bool = false
+        if elem >= 0 {
+            et: CTyNode = vec_get(cty_nodes(c), elem)
+            if enode.kind == xk_array() {
+                if et.kind == ctyk_array() || et.kind == ctyk_slice() {
+                    v = gen_array_lit(s, enode, et.a)
+                    hinted = true
+                }
+            }
+        }
+        if !hinted { v = gen_expr(s, eid) }
+        if elem < 0 { elem = v.ty }
+        vec_push(vals, v)
+        i = i + 1
+    }
+    if elem < 0 { elem = cty_int(c, 64) }
+    aty: int64 = cty_intern(c, ctyk_array(), elem, e.b, "")
+    mut agg: string = gs_copy("undef")
+    mut j: int64 = 0
+    while j < vec_len(vals) {
+        av: Val = adapt(s, vec_get(vals, j), elem)
+        agg = ga_insert(s, aty, agg, elem, av.op, j)
+        j = j + 1
+    }
+    return Val { ty: aty, op: agg }
+}
+
+export func gen_tuple(s: *GenFuncState, e: ExprNode) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    vals: *Vector<Val> = alloc(vec_new())
+    tys: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < e.b {
+        v: Val = gen_expr(s, vec_get((*a).kids, e.a + i))
+        vec_push(vals, v)
+        vec_push(tys, v.ty)
+        i = i + 1
+    }
+    tty: int64 = cty_tuple_make(c, tys)
+    mut agg: string = gs_copy("undef")
+    mut j: int64 = 0
+    while j < vec_len(vals) {
+        v2: Val = vec_get(vals, j)
+        agg = ga_insert(s, tty, agg, v2.ty, v2.op, j)
+        j = j + 1
+    }
+    return Val { ty: tty, op: agg }
+}
+
+export func slice_from_array(s: *GenFuncState, arr: Val, n: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    an: CTyNode = vec_get(cty_nodes(c), arr.ty)
+    slot: string = gen_alloca(s, arr.ty)
+    gen_store_slot(s, arr.ty, arr.op, slot)
+    nb: *StringBuilder = alloc(sb_new())
+    sb_push_int(nb, n)
+    ns: string = gs_built(nb)
+    sb_free(nb)
+    free(nb)
+    return Val { ty: cty_intern(c, ctyk_slice(), an.a, 0, ""), op: fat(s, slot, ns) }
+}
+
+export func slice_parts(s: *GenFuncState, sv: Val) -> (string, string, int64) {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), sv.ty)
+    data: string = fat_data(s, sv.op)
+    len: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, len)
+    sb_push(b, " = extractvalue { ptr, i64 } ")
+    sb_push(b, sv.op)
+    sb_push(b, ", 1")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return (data, len, n.a)
+}
+
+export func gen_slice(s: *GenFuncState, base_id: int64, range: ExprNode) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    lo: Val = gen_expr(s, range.a)
+    hi: Val = gen_expr(s, range.b)
+    loi: string = coerce(s, lo.ty, lo.op, cty_int(c, 64))
+    mut hii: string = coerce(s, hi.ty, hi.op, cty_int(c, 64))
+    if range.c != 0 {
+        hd: string = next_tmp((*s).fb)
+        op2((*s).fb, hd, "add", "i64", hii, "1")
+        hii = hd
+    }
+    bp: Place = gen_place(s, base_id)
+    mut data0: string = gs_copy("")
+    mut blen: string = gs_copy("")
+    mut has_len: bool = false
+    mut elem: int64 = cty_int(c, 64)
+    if bp.ok {
+        bn: CTyNode = vec_get(cty_nodes(c), bp.ty)
+        elem = bn.a
+        if bn.kind == ctyk_array() {
+            data0 = next_tmp((*s).fb)
+            all: string = cty_ll(c, bp.ty)
+            bb: *StringBuilder = alloc(sb_new())
+            sb_push(bb, data0)
+            sb_push(bb, " = getelementptr ")
+            sb_push(bb, all)
+            sb_push(bb, ", ptr ")
+            sb_push(bb, bp.ptr)
+            sb_push(bb, ", i64 0, i64 0")
+            tx: string = gs_built(bb)
+            sb_free(bb)
+            free(bb)
+            line((*s).fb, tx)
+            free(tx)
+            nb: *StringBuilder = alloc(sb_new())
+            sb_push_int(nb, bn.b)
+            blen = gs_built(nb)
+            sb_free(nb)
+            free(nb)
+            has_len = true
+        } else if bn.kind == ctyk_slice() {
+            sv: string = gen_load_slot(s, bp.ty, bp.ptr)
+            data0 = fat_data(s, sv)
+            blen = next_tmp((*s).fb)
+            lb: *StringBuilder = alloc(sb_new())
+            sb_push(lb, blen)
+            sb_push(lb, " = extractvalue { ptr, i64 } ")
+            sb_push(lb, sv)
+            sb_push(lb, ", 1")
+            ltx: string = gs_built(lb)
+            sb_free(lb)
+            free(lb)
+            line((*s).fb, ltx)
+            free(ltx)
+            has_len = true
+        } else if bn.kind == ctyk_rawptr() { data0 = gen_load_slot(s, bp.ty, bp.ptr) }
+        else if bn.kind == ctyk_ptr() { data0 = fat_checked(s, gen_load_slot(s, bp.ty, bp.ptr)) }
+    }
+    bad: string = next_tmp((*s).fb)
+    op2((*s).fb, bad, "icmp ugt", "i64", loi, hii)
+    fault: int64 = fresh_label((*s).fb)
+    ok: int64 = fresh_label((*s).fb)
+    fl: string = branch_label(fault)
+    ol: string = branch_label(ok)
+    br_cond((*s).fb, bad, fl, ol)
+    place_label((*s).fb, fault)
+    line((*s).fb, "call void @cool_bounds_fault()")
+    br((*s).fb, ol)
+    place_label((*s).fb, ok)
+    if has_len {
+        over: string = next_tmp((*s).fb)
+        op2((*s).fb, over, "icmp ugt", "i64", hii, blen)
+        fault2: int64 = fresh_label((*s).fb)
+        ok2: int64 = fresh_label((*s).fb)
+        f2: string = branch_label(fault2)
+        o2: string = branch_label(ok2)
+        br_cond((*s).fb, over, f2, o2)
+        place_label((*s).fb, fault2)
+        line((*s).fb, "call void @cool_bounds_fault()")
+        br((*s).fb, o2)
+        place_label((*s).fb, ok2)
+    }
+    len: string = next_tmp((*s).fb)
+    op2((*s).fb, len, "sub", "i64", hii, loi)
+    data: string = next_tmp((*s).fb)
+    ell: string = cty_ll(c, elem)
+    gb: *StringBuilder = alloc(sb_new())
+    sb_push(gb, data)
+    sb_push(gb, " = getelementptr ")
+    sb_push(gb, ell)
+    sb_push(gb, ", ptr ")
+    sb_push(gb, data0)
+    sb_push(gb, ", i64 ")
+    sb_push(gb, loi)
+    gtx: string = gs_built(gb)
+    sb_free(gb)
+    free(gb)
+    line((*s).fb, gtx)
+    free(gtx)
+    return Val { ty: cty_intern(c, ctyk_slice(), elem, 0, ""), op: fat(s, data, len) }
+}

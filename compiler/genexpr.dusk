@@ -17,6 +17,62 @@
 @import genctx
 @import genstate
 @import gencall
+@import genagg
+@import bytes
+@import genptr
+@import genplace
+@import genenum
+@import generr
+
+func gx_hex(b: int64) -> int64 {
+    if b >= 48 {
+        if b <= 57 { return b - 48 }
+    }
+    if b >= 97 {
+        if b <= 102 { return b - 87 }
+    }
+    return b - 55
+}
+
+export func gx_string_bytes(text: string) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < str_len(text) {
+        mut consumed: bool = false
+        if text[i] == 92 {
+            if i + 3 < str_len(text) {
+                if text[i + 1] == 117 {
+                    if text[i + 2] == 123 {
+                        mut p: int64 = i + 3
+                        mut cp: int64 = 0
+                        mut scanning: bool = true
+                        while scanning {
+                            if p >= str_len(text) { scanning = false }
+                            else if text[p] == 125 { scanning = false }
+                            else {
+                                cp = cp * 16 + gx_hex(text[p])
+                                p = p + 1
+                            }
+                        }
+                        if p < str_len(text) {
+                            bytes.push_utf8(out, cp)
+                            i = p + 1
+                            consumed = true
+                        }
+                    }
+                }
+            }
+        }
+        if !consumed {
+            sb_push_char(out, text[i])
+            i = i + 1
+        }
+    }
+    result: string = gs_built(out)
+    sb_free(out)
+    free(out)
+    return result
+}
 
 func gx_hex_digit(n: int64) -> int64 {
     if n >= 10 { return 55 + n }
@@ -37,12 +93,12 @@ func gx_int_ty(s: *GenFuncState, suffix: int64) -> int64 {
     if suffix < 0 { return cty_int(c, 64) }
     a: *Ast = (*(*s).ctx).ast
     name: string = ast_name(a, suffix)
-    if str_eq(name, "int8") { return cty_int(c, 8) }
-    if str_eq(name, "uint8") { return cty_int(c, 8) }
-    if str_eq(name, "int16") { return cty_int(c, 16) }
-    if str_eq(name, "uint16") { return cty_int(c, 16) }
-    if str_eq(name, "int32") { return cty_int(c, 32) }
-    if str_eq(name, "uint32") { return cty_int(c, 32) }
+    if str_eq(name, "int8") || str_eq(name, "i8") { return cty_int(c, 8) }
+    if str_eq(name, "uint8") || str_eq(name, "u8") { return cty_int(c, 8) }
+    if str_eq(name, "int16") || str_eq(name, "i16") { return cty_int(c, 16) }
+    if str_eq(name, "uint16") || str_eq(name, "u16") { return cty_int(c, 16) }
+    if str_eq(name, "int32") || str_eq(name, "i32") { return cty_int(c, 32) }
+    if str_eq(name, "uint32") || str_eq(name, "u32") { return cty_int(c, 32) }
     return cty_int(c, 64)
 }
 
@@ -252,6 +308,7 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     e: ExprNode = vec_get((*a).exprs, id)
+    if is_enum_ref(s, id) { return gen_enum_ref(s, id) }
     if e.kind == xk_int() {
         text: string = gx_int_text(e.a)
         return Val { ty: gx_int_ty(s, e.b), op: text }
@@ -270,7 +327,9 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
         return Val { ty: cty_int(c, 32), op: text2 }
     }
     if e.kind == xk_str() {
-        label: string = emit_cstring((*s).module, ast_name(a, e.a))
+        decoded: string = gx_string_bytes(ast_name(a, e.a))
+        label: string = emit_cstring((*s).module, decoded)
+        free(decoded)
         return Val { ty: cty_rawptr(c, cty_char(c)), op: label }
     }
     if e.kind == xk_ident() {
@@ -286,8 +345,32 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
     }
     if e.kind == xk_unary() {
         v: Val = gen_expr(s, e.b)
+        if e.a == uop_deref() {
+            n0: CTyNode = vec_get(cty_nodes(c), v.ty)
+            mut p0: string = v.op
+            if n0.kind == ctyk_ptr() { p0 = fat_checked(s, v.op) }
+            if n0.kind == ctyk_ptr() || n0.kind == ctyk_rawptr() {
+                return Val { ty: n0.a, op: gen_load_slot(s, n0.a, p0) }
+            }
+        }
         if e.a == uop_neg() {
-            if cty_is_float(c, v.ty) { return Val { ty: v.ty, op: gx_op_line(s, "fsub", v.ty, "0.0", v.op) } }
+            if cty_is_float(c, v.ty) {
+                dneg: string = next_tmp((*s).fb)
+                llneg: string = cty_ll(c, v.ty)
+                nb: *StringBuilder = alloc(sb_new())
+                sb_push(nb, dneg)
+                sb_push(nb, " = fneg ")
+                sb_push(nb, llneg)
+                sb_push_char(nb, 32)
+                sb_push(nb, v.op)
+                nt: string = gs_built(nb)
+                sb_free(nb)
+                free(nb)
+                line((*s).fb, nt)
+                free(nt)
+                free(llneg)
+                return Val { ty: v.ty, op: dneg }
+            }
             return Val { ty: v.ty, op: gx_op_line(s, "sub", v.ty, "0", v.op) }
         }
         if e.a == uop_not() {
@@ -305,15 +388,92 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
         av: Val = gen_expr(s, e.b)
         return gx_binary_vals(s, e.a, av, e.c)
     }
-    if e.kind == xk_call() { return gen_call(s, e.a, e.b, e.c) }
-    if e.kind == xk_field() { emit_error((*s).module, "unsupported field expression") }
-    else if e.kind == xk_index() { emit_error((*s).module, "unsupported index expression") }
+    if e.kind == xk_call() {
+        if is_enum_ref(s, e.a) {
+            callee: ExprNode = vec_get((*a).exprs, e.a)
+            base: ExprNode = vec_get((*a).exprs, callee.a)
+            return gen_enum_ctor(s, ast_name(a, base.a), ast_name(a, callee.b), e.b, e.c)
+        }
+        return gen_call(s, e.a, e.b, e.c)
+    }
+    if e.kind == xk_sizeof_type() { return gen_sizeof_ty(s, cty_lower_ast(c, a, e.a)) }
+    if e.kind == xk_field() {
+        ety: int64 = static_expr_ty(s, e.a)
+        if vec_get(cty_nodes(c), ety).kind == ctyk_error() {
+            return gen_error_field(s, e.a, ast_name(a, e.b))
+        }
+        if str_eq(ast_name(a, e.b), "len") {
+            bsty: int64 = static_expr_ty(s, e.a)
+            bn0: CTyNode = vec_get(cty_nodes(c), bsty)
+            if bn0.kind == ctyk_array() || bn0.kind == ctyk_slice() {
+                basep: Place = gen_place(s, e.a)
+                bn: CTyNode = vec_get(cty_nodes(c), basep.ty)
+                if bn.kind == ctyk_array() {
+                    gen_load_slot(s, basep.ty, basep.ptr)
+                    lb: *StringBuilder = alloc(sb_new())
+                    sb_push_int(lb, bn.b)
+                    ls: string = gs_built(lb)
+                    sb_free(lb)
+                    free(lb)
+                    return Val { ty: cty_int(c, 64), op: ls }
+                }
+                if bn.kind == ctyk_slice() {
+                    sv: string = gen_load_slot(s, basep.ty, basep.ptr)
+                    ld: string = next_tmp((*s).fb)
+                    lbb: *StringBuilder = alloc(sb_new())
+                    sb_push(lbb, ld)
+                    sb_push(lbb, " = extractvalue { ptr, i64 } ")
+                    sb_push(lbb, sv)
+                    sb_push(lbb, ", 1")
+                    ltx: string = gs_built(lbb)
+                    sb_free(lbb)
+                    free(lbb)
+                    line((*s).fb, ltx)
+                    free(ltx)
+                    return Val { ty: cty_int(c, 64), op: ld }
+                }
+            }
+        }
+        fp: Place = gen_place(s, id)
+        if fp.ok { return Val { ty: fp.ty, op: gen_load_slot(s, fp.ty, fp.ptr) } }
+        bv: Val = gen_expr(s, e.a)
+        bi: int64 = cty_struct_field(c, bv.ty, ast_name(a, e.b))
+        if bi >= 0 {
+            ft: int64 = cty_struct_field_ty(c, bv.ty, bi)
+            d: string = next_tmp((*s).fb)
+            bll: string = cty_ll(c, bv.ty)
+            xb: *StringBuilder = alloc(sb_new())
+            sb_push(xb, d)
+            sb_push(xb, " = extractvalue ")
+            sb_push(xb, bll)
+            sb_push_char(xb, 32)
+            sb_push(xb, bv.op)
+            sb_push(xb, ", ")
+            sb_push_int(xb, bi)
+            xt: string = gs_built(xb)
+            sb_free(xb)
+            free(xb)
+            line((*s).fb, xt)
+            free(xt)
+            return Val { ty: ft, op: d }
+        }
+        emit_error((*s).module, "unsupported field expression")
+    }
+    else if e.kind == xk_index() {
+        ie: ExprNode = vec_get((*a).exprs, e.b)
+        if ie.kind == xk_range() { return gen_slice(s, e.a, ie) }
+        iv2: Val = gen_expr(s, e.b)
+        io2: string = coerce(s, iv2.ty, iv2.op, cty_int(c, 64))
+        ep: Place = elem_addr(s, e.a, io2)
+        if ep.ok { return Val { ty: ep.ty, op: gen_load_slot(s, ep.ty, ep.ptr) } }
+        emit_error((*s).module, "unsupported index expression")
+    }
     else if e.kind == xk_range() { emit_error((*s).module, "unsupported range expression") }
-    else if e.kind == xk_tuple() { emit_error((*s).module, "unsupported tuple expression") }
-    else if e.kind == xk_array() { emit_error((*s).module, "unsupported array expression") }
-    else if e.kind == xk_struct_lit() { emit_error((*s).module, "unsupported struct literal") }
+    else if e.kind == xk_tuple() { return gen_tuple(s, e) }
+    else if e.kind == xk_array() { return gen_array_lit(s, e, -1) }
+    else if e.kind == xk_struct_lit() { return gen_struct_lit(s, e) }
     else if e.kind == xk_lambda() { emit_error((*s).module, "unsupported closure expression") }
-    else if e.kind == xk_match() { emit_error((*s).module, "unsupported match expression") }
+    else if e.kind == xk_match() { return gen_match_expr(s, e) }
     else if e.kind == xk_await() { emit_error((*s).module, "unsupported await expression") }
     else if e.kind == xk_collect() { emit_error((*s).module, "unsupported collector expression") }
     else { emit_error((*s).module, "unsupported expression") }

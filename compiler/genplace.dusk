@@ -1,0 +1,220 @@
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+@import genptr
+
+export struct Place { ok: bool, ty: int64, ptr: string }
+
+export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        locals: *Map<LocalVal> = (*s).locals
+        name: string = ast_name(a, e.a)
+        if map_has(locals, name) { return unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") }).ty }
+    }
+    if e.kind == xk_field() {
+        bt: int64 = static_expr_ty(s, e.a)
+        idx: int64 = cty_struct_field(c, bt, ast_name(a, e.b))
+        if idx >= 0 { return cty_struct_field_ty(c, bt, idx) }
+    }
+    if e.kind == xk_index() {
+        bt2: int64 = static_expr_ty(s, e.a)
+        bn: CTyNode = vec_get(cty_nodes(c), bt2)
+        if bn.kind == ctyk_array() || bn.kind == ctyk_slice() || bn.kind == ctyk_ptr() || bn.kind == ctyk_rawptr() { return bn.a }
+    }
+    if e.kind == xk_unary() {
+        if e.a == uop_deref() {
+            bt3: int64 = static_expr_ty(s, e.b)
+            bn2: CTyNode = vec_get(cty_nodes(c), bt3)
+            if bn2.kind == ctyk_ptr() { return bn2.a }
+            if bn2.kind == ctyk_rawptr() { return bn2.a }
+        }
+    }
+    return cty_void(c)
+}
+
+export func bounds_check(s: *GenFuncState, index: string, len: string) -> void {
+    bad: string = next_tmp((*s).fb)
+    op2((*s).fb, bad, "icmp uge", "i64", index, len)
+    fault: int64 = fresh_label((*s).fb)
+    ok: int64 = fresh_label((*s).fb)
+    fl: string = branch_label(fault)
+    ol: string = branch_label(ok)
+    br_cond((*s).fb, bad, fl, ol)
+    place_label((*s).fb, fault)
+    line((*s).fb, "call void @cool_bounds_fault()")
+    br((*s).fb, ol)
+    place_label((*s).fb, ok)
+}
+
+export func field_ptr(s: *GenFuncState, sty: int64, base: string, index: int64) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    d: string = next_tmp((*s).fb)
+    ll: string = cty_ll(c, sty)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = getelementptr ")
+    sb_push(b, ll)
+    sb_push(b, ", ptr ")
+    sb_push(b, base)
+    sb_push(b, ", i32 0, i32 ")
+    sb_push_int(b, index)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    free(ll)
+    return d
+}
+
+export func elem_addr(s: *GenFuncState, base_id: int64, index: string) -> Place {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    bp: Place = gen_place(s, base_id)
+    if bp.ok {
+        n: CTyNode = vec_get(cty_nodes(c), bp.ty)
+        mut data: string = bp.ptr
+        mut elem: int64 = n.a
+        if n.kind == ctyk_array() {
+            nb: *StringBuilder = alloc(sb_new())
+            sb_push_int(nb, n.b)
+            ns: string = gs_built(nb)
+            sb_free(nb)
+            free(nb)
+            bounds_check(s, index, ns)
+        } else if n.kind == ctyk_slice() {
+            lenp: string = next_tmp((*s).fb)
+            b0: *StringBuilder = alloc(sb_new())
+            sb_push(b0, lenp)
+            sb_push(b0, " = getelementptr { ptr, i64 }, ptr ")
+            sb_push(b0, bp.ptr)
+            sb_push(b0, ", i32 0, i32 1")
+            tx0: string = gs_built(b0)
+            sb_free(b0)
+            free(b0)
+            line((*s).fb, tx0)
+            free(tx0)
+            len: string = gen_load_slot(s, cty_int(c, 64), lenp)
+            bounds_check(s, index, len)
+            data = gen_load_slot(s, cty_rawptr(c, n.a), bp.ptr)
+        } else if n.kind == ctyk_ptr() {
+            fatv2: string = gen_load_slot(s, bp.ty, bp.ptr)
+            data = fat_checked(s, fatv2)
+        } else if n.kind == ctyk_rawptr() {
+            data = gen_load_slot(s, bp.ty, bp.ptr)
+        } else {
+            return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") }
+        }
+        d: string = next_tmp((*s).fb)
+        ell: string = cty_ll(c, elem)
+        mut base_ll: string = ell
+        mut prefix: string = ""
+        if n.kind == ctyk_array() {
+            base_ll = cty_ll(c, bp.ty)
+            prefix = ", i64 0"
+        }
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, d)
+        sb_push(b, " = getelementptr ")
+        sb_push(b, base_ll)
+        sb_push(b, ", ptr ")
+        sb_push(b, data)
+        sb_push(b, prefix)
+        sb_push(b, ", i64 ")
+        sb_push(b, index)
+        text: string = gs_built(b)
+        sb_free(b)
+        free(b)
+        line((*s).fb, text)
+        free(text)
+        free(ell)
+        return Place { ok: true, ty: elem, ptr: d }
+    }
+    bv: Val = gen_expr(s, base_id)
+    bn: CTyNode = vec_get(cty_nodes(c), bv.ty)
+    if bn.kind == ctyk_slice() {
+        data2: string = fat_data(s, bv.op)
+        len2: string = next_tmp((*s).fb)
+        b2: *StringBuilder = alloc(sb_new())
+        sb_push(b2, len2)
+        sb_push(b2, " = extractvalue { ptr, i64 } ")
+        sb_push(b2, bv.op)
+        sb_push(b2, ", 1")
+        tx2: string = gs_built(b2)
+        sb_free(b2)
+        free(b2)
+        line((*s).fb, tx2)
+        free(tx2)
+        bounds_check(s, index, len2)
+        d2: string = next_tmp((*s).fb)
+        ell2: string = cty_ll(c, bn.a)
+        b3: *StringBuilder = alloc(sb_new())
+        sb_push(b3, d2)
+        sb_push(b3, " = getelementptr ")
+        sb_push(b3, ell2)
+        sb_push(b3, ", ptr ")
+        sb_push(b3, data2)
+        sb_push(b3, ", i64 ")
+        sb_push(b3, index)
+        tx3: string = gs_built(b3)
+        sb_free(b3)
+        free(b3)
+        line((*s).fb, tx3)
+        free(tx3)
+        return Place { ok: true, ty: bn.a, ptr: d2 }
+    }
+    return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") }
+}
+
+export func gen_place(s: *GenFuncState, id: int64) -> Place {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        name: string = ast_name(a, e.a)
+        locals: *Map<LocalVal> = (*s).locals
+        if map_has(locals, name) {
+            lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+            return Place { ok: true, ty: lv.ty, ptr: lv.op }
+        }
+    }
+    if e.kind == xk_unary() {
+        if e.a == uop_deref() {
+            v: Val = gen_expr(s, e.b)
+            n: CTyNode = vec_get(cty_nodes(c), v.ty)
+            if n.kind == ctyk_ptr() { return Place { ok: true, ty: n.a, ptr: fat_checked(s, v.op) } }
+            if n.kind == ctyk_rawptr() { return Place { ok: true, ty: n.a, ptr: v.op } }
+        }
+    }
+    if e.kind == xk_field() {
+        base: Place = gen_place(s, e.a)
+        if base.ok {
+            index: int64 = cty_struct_field(c, base.ty, ast_name(a, e.b))
+            if index >= 0 { return Place { ok: true, ty: cty_struct_field_ty(c, base.ty, index), ptr: field_ptr(s, base.ty, base.ptr, index) } }
+        }
+    }
+    if e.kind == xk_index() {
+        iv: Val = gen_expr(s, e.b)
+        io: string = coerce(s, iv.ty, iv.op, cty_int(c, 64))
+        return elem_addr(s, e.a, io)
+    }
+    return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") }
+}
+
+export func gen_load(s: *GenFuncState, id: int64) -> Val {
+    p: Place = gen_place(s, id)
+    if p.ok { return Val { ty: p.ty, op: gen_load_slot(s, p.ty, p.ptr) } }
+    return gen_expr(s, id)
+}

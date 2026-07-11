@@ -1,0 +1,339 @@
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import std.map
+@import std.functional.maybe
+@import genplace
+@import genexpr
+
+func gp_line2(s: *GenFuncState, a: string, b: string) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push(out, a)
+    sb_push(out, b)
+    text: string = gs_built(out)
+    sb_free(out)
+    free(out)
+    line((*s).fb, text)
+    free(text)
+    return a
+}
+
+export func fat(s: *GenFuncState, data: string, gen: string) -> string {
+    a: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, a)
+    sb_push(b, " = insertvalue { ptr, i64 } undef, ptr ")
+    sb_push(b, data)
+    sb_push(b, ", 0")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    d: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, d)
+    sb_push(b2, " = insertvalue { ptr, i64 } ")
+    sb_push(b2, a)
+    sb_push(b2, ", i64 ")
+    sb_push(b2, gen)
+    sb_push(b2, ", 1")
+    text2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, text2)
+    free(text2)
+    return d
+}
+
+export func fat_data(s: *GenFuncState, value: string) -> string {
+    d: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = extractvalue { ptr, i64 } ")
+    sb_push(b, value)
+    sb_push(b, ", 0")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return d
+}
+
+export func fat_checked(s: *GenFuncState, value: string) -> string {
+    data: string = fat_data(s, value)
+    gen: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, gen)
+    sb_push(b, " = extractvalue { ptr, i64 } ")
+    sb_push(b, value)
+    sb_push(b, ", 1")
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    chk: int64 = fresh_label((*s).fb)
+    skip: int64 = fresh_label((*s).fb)
+    z: string = next_tmp((*s).fb)
+    op2((*s).fb, z, "icmp eq", "i64", gen, "0")
+    nullchk: int64 = fresh_label((*s).fb)
+    cl: string = branch_label(nullchk)
+    kl: string = branch_label(chk)
+    br_cond((*s).fb, z, cl, kl)
+    place_label((*s).fb, nullchk)
+    isnull: string = next_tmp((*s).fb)
+    op2((*s).fb, isnull, "icmp eq", "ptr", data, "null")
+    nfault: int64 = fresh_label((*s).fb)
+    nl: string = branch_label(nfault)
+    sl: string = branch_label(skip)
+    br_cond((*s).fb, isnull, nl, sl)
+    place_label((*s).fb, nfault)
+    line((*s).fb, "call void @cool_null_fault()")
+    br((*s).fb, sl)
+    place_label((*s).fb, chk)
+    hp: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, hp)
+    sb_push(b2, " = getelementptr i8, ptr ")
+    sb_push(b2, data)
+    sb_push(b2, ", i64 -8")
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    cur: string = next_tmp((*s).fb)
+    b3: *StringBuilder = alloc(sb_new())
+    sb_push(b3, cur)
+    sb_push(b3, " = load atomic i64, ptr ")
+    sb_push(b3, hp)
+    sb_push(b3, " seq_cst, align 8")
+    t3: string = gs_built(b3)
+    sb_free(b3)
+    free(b3)
+    line((*s).fb, t3)
+    free(t3)
+    bad: string = next_tmp((*s).fb)
+    op2((*s).fb, bad, "icmp ne", "i64", cur, gen)
+    fault: int64 = fresh_label((*s).fb)
+    fl: string = branch_label(fault)
+    br_cond((*s).fb, bad, fl, sl)
+    place_label((*s).fb, fault)
+    line((*s).fb, "call void @cool_gen_fault()")
+    br((*s).fb, sl)
+    place_label((*s).fb, skip)
+    return data
+}
+
+export func gen_sizeof_ty(s: *GenFuncState, ty: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    ll: string = cty_ll(c, ty)
+    p: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, p)
+    sb_push(b, " = getelementptr ")
+    sb_push(b, ll)
+    sb_push(b, ", ptr null, i64 1")
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    d: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, d)
+    sb_push(b2, " = ptrtoint ptr ")
+    sb_push(b2, p)
+    sb_push(b2, " to i64")
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    free(ll)
+    return Val { ty: cty_int(c, 64), op: d }
+}
+
+
+export func alloc_of(s: *GenFuncState, pointee: int64, has_value: bool, value: Val) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    sz: Val = gen_sizeof_ty(s, pointee)
+    p: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, p)
+    if (*s).allocator_ty != cty_void(c) {
+        an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
+        lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        sa: SizeAlign = cty_size_align(c, pointee)
+        sb_push(b, " = call ptr @")
+        sb_push(b, an.text)
+        sb_push(b, ".alloc(ptr ")
+        sb_push(b, lv.op)
+        sb_push(b, ", i64 ")
+        sb_push(b, sz.op)
+        sb_push(b, ", i64 ")
+        sb_push_int(b, sa.align)
+        sb_push_char(b, 41)
+    } else {
+        sb_push(b, " = call ptr @cool_gen_alloc(i64 ")
+        sb_push(b, sz.op)
+        sb_push_char(b, 41)
+    }
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    if (*s).allocator_ty != cty_void(c) {
+        if has_value {
+            av0: Val = adapt(s, value, pointee)
+            gen_store_slot(s, pointee, av0.op, p)
+        }
+        return Val { ty: cty_intern(c, ctyk_ptr(), pointee, 0, ""), op: fat(s, p, "0") }
+    }
+    hp: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, hp)
+    sb_push(b2, " = getelementptr i8, ptr ")
+    sb_push(b2, p)
+    sb_push(b2, ", i64 -8")
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    gen: string = next_tmp((*s).fb)
+    b3: *StringBuilder = alloc(sb_new())
+    sb_push(b3, gen)
+    sb_push(b3, " = load atomic i64, ptr ")
+    sb_push(b3, hp)
+    sb_push(b3, " seq_cst, align 8")
+    t3: string = gs_built(b3)
+    sb_free(b3)
+    free(b3)
+    line((*s).fb, t3)
+    free(t3)
+    if has_value {
+        av: Val = adapt(s, value, pointee)
+        gen_store_slot(s, pointee, av.op, p)
+    }
+    return Val { ty: cty_intern(c, ctyk_ptr(), pointee, 0, ""), op: fat(s, p, gen) }
+}
+
+export func gen_alloc(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if len > 0 {
+        v: Val = gen_expr(s, vec_get((*a).kids, off))
+        return alloc_of(s, v.ty, true, v)
+    }
+    return alloc_of(s, cty_int(c, 64), false, Val { ty: cty_int(c, 64), op: gs_copy("0") })
+}
+
+export func gen_free(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if len > 0 {
+        v: Val = gen_expr(s, vec_get((*a).kids, off))
+        n: CTyNode = vec_get(cty_nodes(c), v.ty)
+        mut p: string = v.op
+        if n.kind == ctyk_ptr() { p = fat_checked(s, v.op) }
+        b: *StringBuilder = alloc(sb_new())
+        if (*s).allocator_ty != cty_void(c) {
+            an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
+            lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+            sb_push(b, "call void @")
+            sb_push(b, an.text)
+            sb_push(b, ".free(ptr ")
+            sb_push(b, lv.op)
+            sb_push(b, ", ptr ")
+        } else { sb_push(b, "call void @cool_gen_free(ptr ") }
+        sb_push(b, p)
+        sb_push_char(b, 41)
+        t: string = gs_built(b)
+        sb_free(b)
+        free(b)
+        line((*s).fb, t)
+        free(t)
+    }
+    return Val { ty: cty_void(c), op: gs_copy("") }
+}
+
+export func gen_alloc_bytes(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut ni: string = gs_copy("0")
+    if len > 0 {
+        n: Val = gen_expr(s, vec_get((*a).kids, off))
+        ni = coerce(s, n.ty, n.op, cty_int(c, 64))
+    }
+    p: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, p)
+    sb_push(b, " = call ptr @cool_gen_alloc(i64 ")
+    sb_push(b, ni)
+    sb_push_char(b, 41)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    return Val { ty: cty_rawptr(c, cty_int(c, 8)), op: p }
+}
+
+export func gen_ptr_add(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    p: Val = gen_expr(s, vec_get((*a).kids, off))
+    n: Val = gen_expr(s, vec_get((*a).kids, off + 1))
+    ni: string = coerce(s, n.ty, n.op, cty_int(c, 64))
+    pn: CTyNode = vec_get(cty_nodes(c), p.ty)
+    mut po: string = p.op
+    mut ty: int64 = p.ty
+    if pn.kind == ctyk_ptr() {
+        po = fat_data(s, p.op)
+        ty = cty_rawptr(c, pn.a)
+    }
+    d: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = getelementptr i8, ptr ")
+    sb_push(b, po)
+    sb_push(b, ", i64 ")
+    sb_push(b, ni)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    return Val { ty: ty, op: d }
+}
+
+export func gen_sizeof(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut ty: int64 = cty_int(c, 64)
+    if len > 0 {
+        eid: int64 = vec_get((*a).kids, off)
+        e: ExprNode = vec_get((*a).exprs, eid)
+        if e.kind == xk_ident() {
+            name: string = ast_name(a, e.a)
+            locals: *Map<LocalVal> = (*s).locals
+            if map_has(locals, name) { ty = unwrap_or(map_get(locals, name), LocalVal { ty: ty, op: gs_copy("") }).ty }
+            else { ty = cty_lower_ast(c, a, ast_type(a, tk_named(), e.a, 0, 0)) }
+        } else {
+            ty = static_expr_ty(s, eid)
+            if ty == cty_void(c) { ty = gen_expr(s, eid).ty }
+        }
+    }
+    return gen_sizeof_ty(s, ty)
+}

@@ -4258,14 +4258,20 @@ fn a_foreign_signature_rejects_a_string_parameter() {
 
 #[test]
 fn bootstrap_scaffold_demo() {
-    // The dusk1 scaffold under compiler/ is stage0's first self hosted target: a
-    // dusk program that assembles the phase 0 IR spine, writes it, links it with
-    // clang, and runs it. Its stdout is the built program's own output, byte for
-    // byte the stage0 demo, since the scaffold sends every progress and error
-    // message of its own to stderr. Both commands run through one `dusk run` of
-    // the same source file, which stage0 compiles and executes.
+    // The dusk1 demo under compiler/ mirrors stage0's demo command through the
+    // shared driver: assemble the spine module, write the IR, link it with clang,
+    // and run it. Its stdout is byte for byte the stage0 demo's stdout, progress
+    // lines included. The two runs are sequential because both write the same
+    // target/dusk-out/demo artifacts.
     let bin = dusk_bin();
     let main = format!("{}/compiler/main.dusk", env!("CARGO_MANIFEST_DIR"));
+
+    let stage0_demo = Command::new(&bin).arg("demo").output().expect("spawn dusk");
+    assert!(
+        stage0_demo.status.success(),
+        "stage0 demo did not run cleanly: {}",
+        String::from_utf8_lossy(&stage0_demo.stderr)
+    );
 
     let demo = Command::new(&bin)
         .args(["run", &main, "demo"])
@@ -4278,8 +4284,8 @@ fn bootstrap_scaffold_demo() {
     );
     assert_eq!(
         String::from_utf8_lossy(&demo.stdout),
-        "hello from the dusk spine\n42",
-        "the linked spine must print its line and integer"
+        String::from_utf8_lossy(&stage0_demo.stdout),
+        "the dusk1 demo prints the stage0 demo's stdout byte for byte"
     );
 
     let version = Command::new(&bin)

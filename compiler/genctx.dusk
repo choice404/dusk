@@ -16,6 +16,7 @@ export struct GenCtx {
     ast: *Ast,
     ctys: *CTyArena,
     fns: *Map<GenFnSig>,
+    methods: *Map<GenFnSig>,
     structs: *Map<int64>,
     enums: *Map<int64>,
 }
@@ -40,11 +41,12 @@ func genctx_param_ctys(ctx: *GenCtx, f: FuncNode) -> *Vector<int64> {
 // Builds the scalar-relevant lookup tables before any function body lowers, so a
 // call site sees the same signature regardless of item order.
 export func genctx_new(a: *Ast) -> *GenCtx {
-    ctys: *CTyArena = cty_new()
+    ctys: *CTyArena = cty_new(a)
     fns: *Map<GenFnSig> = alloc(map_new())
+    methods: *Map<GenFnSig> = alloc(map_new())
     structs: *Map<int64> = alloc(map_new())
     enums: *Map<int64> = alloc(map_new())
-    ctx: *GenCtx = alloc(GenCtx { ast: a, ctys: ctys, fns: fns, structs: structs, enums: enums })
+    ctx: *GenCtx = alloc(GenCtx { ast: a, ctys: ctys, fns: fns, methods: methods, structs: structs, enums: enums })
 
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
@@ -68,6 +70,27 @@ export func genctx_new(a: *Ast) -> *GenCtx {
             ret: int64 = cty_lower_ast(ctys, a, f.ret)
             params: *Vector<int64> = genctx_param_ctys(ctx, f)
             map_put(fns, genctx_copy(ast_name(a, f.name)), GenFnSig { ret: ret, params: params })
+        } else if it2.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it2.id)
+            mut mi: int64 = 0
+            while mi < im.methods_len {
+                mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + mi))
+                ps: *Vector<int64> = alloc(vec_new())
+                vec_push(ps, cty_intern(ctys, ctyk_struct(), 0, 0, ast_name(a, im.ty)))
+                extra: *Vector<int64> = genctx_param_ctys(ctx, mf)
+                mut pi: int64 = 0
+                while pi < vec_len(extra) { vec_push(ps, vec_get(extra, pi))
+ pi = pi + 1 }
+                kb: *StringBuilder = alloc(sb_new())
+                sb_push(kb, ast_name(a, im.ty))
+ sb_push_char(kb, 46)
+ sb_push(kb, ast_name(a, mf.name))
+                key: string = genctx_copy(sb_cstr(kb))
+                sb_free(kb)
+ free(kb)
+                map_put(methods, key, GenFnSig { ret: cty_lower_ast(ctys, a, mf.ret), params: ps })
+                mi = mi + 1
+            }
         } else if it2.kind == ik_foreign() {
             fb: ForeignNode = vec_get((*a).foreigns, it2.id)
             mut k: int64 = 0
@@ -93,6 +116,7 @@ export func genctx_new(a: *Ast) -> *GenCtx {
 
 export func genctx_ctys(ctx: *GenCtx) -> *CTyArena { return (*ctx).ctys }
 export func genctx_fns(ctx: *GenCtx) -> *Map<GenFnSig> { return (*ctx).fns }
+export func genctx_methods(ctx: *GenCtx) -> *Map<GenFnSig> { return (*ctx).methods }
 func genctx_structs(ctx: *GenCtx) -> *Map<int64> { return (*ctx).structs }
 func genctx_enums(ctx: *GenCtx) -> *Map<int64> { return (*ctx).enums }
 
@@ -104,6 +128,12 @@ export func genctx_fn(ctx: *GenCtx, name: string) -> GenFnSig {
 
 export func genctx_has_fn(ctx: *GenCtx, name: string) -> bool {
     return map_has(genctx_fns(ctx), name)
+}
+
+export func genctx_has_method(ctx: *GenCtx, name: string) -> bool { return map_has(genctx_methods(ctx), name) }
+export func genctx_method(ctx: *GenCtx, name: string) -> GenFnSig {
+    empty: *Vector<int64> = alloc(vec_new())
+    return unwrap_or(map_get(genctx_methods(ctx), name), GenFnSig { ret: cty_void((*ctx).ctys), params: empty })
 }
 
 // Classifies a nominal name for later aggregate lowering while Phase A keeps those
