@@ -1,0 +1,247 @@
+// emit: textual LLVM IR module builder for dusk1 code generation.
+//
+// The builder is intentionally small: it owns ordered text sections, interns C
+// strings as globals, and renders the same module frame as the stage0 compiler.
+// Later lowering passes add semantics; this file only assembles bytes.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+
+export struct EncodedCString {
+    text: string,
+    len: int64,
+}
+
+export struct EmitModule {
+    name: string,
+    triple: string,
+    types: *Vector<string>,
+    externs: *Vector<string>,
+    globals: *Vector<string>,
+    funcs: *Vector<string>,
+    str_count: int64,
+    strings: *Map<string>,
+    lambda_count: int64,
+    funcval_thunks: *Map<int64>,
+    faults: *Vector<string>,
+}
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+func built_string(b: *StringBuilder) -> string {
+    return substring(sb_cstr(b), 0, sb_size(b))
+}
+
+export func emit_module_new(name: string, triple: string) -> *EmitModule {
+    types: *Vector<string> = alloc(vec_new())
+    externs: *Vector<string> = alloc(vec_new())
+    globals: *Vector<string> = alloc(vec_new())
+    funcs: *Vector<string> = alloc(vec_new())
+    strings: *Map<string> = alloc(map_new())
+    thunks: *Map<int64> = alloc(map_new())
+    faults: *Vector<string> = alloc(vec_new())
+    return alloc(EmitModule {
+        name: copy_string(name),
+        triple: copy_string(triple),
+        types: types,
+        externs: externs,
+        globals: globals,
+        funcs: funcs,
+        str_count: 0,
+        strings: strings,
+        lambda_count: 0,
+        funcval_thunks: thunks,
+        faults: faults,
+    })
+}
+
+export func emit_error(m: *EmitModule, msg: string) -> void {
+    vec_push((*m).faults, copy_string(msg))
+}
+
+export func emit_errors(m: *EmitModule) -> *Vector<string> {
+    return (*m).faults
+}
+
+export func emit_fresh_lambda(m: *EmitModule) -> int64 {
+    n: int64 = (*m).lambda_count
+    (*m).lambda_count = (*m).lambda_count + 1
+    return n
+}
+
+export func emit_need_funcval_thunk(m: *EmitModule, name: string) -> bool {
+    thunks: *Map<int64> = (*m).funcval_thunks
+    if map_has(thunks, name) {
+        return false
+    }
+    map_put(thunks, copy_string(name), 1)
+    return true
+}
+
+export func emit_define_type(m: *EmitModule, name: string, body: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 37)
+    sb_push(b, name)
+    sb_push(b, " = type ")
+    sb_push(b, body)
+    line: string = built_string(b)
+    sb_free(b)
+    free(b)
+    vec_push((*m).types, line)
+}
+
+export func emit_declare(m: *EmitModule, sig: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "declare ")
+    sb_push(b, sig)
+    line: string = built_string(b)
+    sb_free(b)
+    free(b)
+
+    externs: *Vector<string> = (*m).externs
+    mut i: int64 = 0
+    while i < vec_len(externs) {
+        if str_eq(vec_get(externs, i), line) {
+            free(line)
+            return
+        }
+        i = i + 1
+    }
+    vec_push(externs, line)
+}
+
+func hex_digit(nib: int64) -> int64 {
+    if nib >= 10 {
+        return 55 + nib
+    }
+    return 48 + nib
+}
+
+func push_hex_byte(b: *StringBuilder, byte: int64) -> void {
+    sb_push_char(b, 92)
+    sb_push_char(b, hex_digit((byte >> 4) & 15))
+    sb_push_char(b, hex_digit(byte & 15))
+}
+
+// Encodes n raw bytes from text as an LLVM c"..." body and appends the string's
+// own NUL terminator. This form is useful for tests that construct embedded NULs.
+export func encode_cstring_n(text: string, n: int64) -> EncodedCString {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < n {
+        mut byte: int64 = text[i]
+        if byte < 0 {
+            byte = byte + 256
+        }
+        if byte == 92 {
+            sb_push(b, "\\5C")
+        } else if byte == 34 {
+            sb_push(b, "\\22")
+        } else if byte >= 32 {
+            if byte <= 126 {
+                sb_push_char(b, byte)
+            } else {
+                push_hex_byte(b, byte)
+            }
+        } else {
+            push_hex_byte(b, byte)
+        }
+        i = i + 1
+    }
+    sb_push(b, "\\00")
+    out: string = built_string(b)
+    sb_free(b)
+    free(b)
+    return EncodedCString { text: out, len: n + 1 }
+}
+
+export func encode_cstring(text: string) -> EncodedCString {
+    return encode_cstring_n(text, str_len(text))
+}
+
+export func emit_cstring(m: *EmitModule, text: string) -> string {
+    strings: *Map<string> = (*m).strings
+    if map_has(strings, text) {
+        return unwrap_or(map_get(strings, text), "")
+    }
+
+    lb: *StringBuilder = alloc(sb_new())
+    sb_push(lb, "@.str.")
+    sb_push_int(lb, (*m).str_count)
+    label: string = built_string(lb)
+    sb_free(lb)
+    free(lb)
+    (*m).str_count = (*m).str_count + 1
+
+    enc: EncodedCString = encode_cstring(text)
+    gb: *StringBuilder = alloc(sb_new())
+    sb_push(gb, label)
+    sb_push(gb, " = private unnamed_addr constant [")
+    sb_push_int(gb, enc.len)
+    sb_push(gb, " x i8] c\"")
+    sb_push(gb, enc.text)
+    sb_push_char(gb, 34)
+    global_line: string = built_string(gb)
+    sb_free(gb)
+    free(gb)
+    free(enc.text)
+
+    vec_push((*m).globals, global_line)
+    map_put(strings, copy_string(text), label)
+    return label
+}
+
+export func emit_push_function(m: *EmitModule, f: string) -> void {
+    vec_push((*m).funcs, copy_string(f))
+}
+
+export func emit_global(m: *EmitModule, g: string) -> void {
+    vec_push((*m).globals, copy_string(g))
+}
+
+func emit_section(out: *StringBuilder, lines: *Vector<string>) -> void {
+    if vec_len(lines) == 0 {
+        return
+    }
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        sb_push(out, vec_get(lines, i))
+        sb_push_char(out, 10)
+        i = i + 1
+    }
+    sb_push_char(out, 10)
+}
+
+export func emit_render(m: *EmitModule) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push(out, "; ModuleID = '")
+    sb_push(out, (*m).name)
+    sb_push(out, "'\n")
+    sb_push(out, "target triple = \"")
+    sb_push(out, (*m).triple)
+    sb_push(out, "\"\n")
+    sb_push_char(out, 10)
+
+    emit_section(out, (*m).types)
+    emit_section(out, (*m).globals)
+    emit_section(out, (*m).externs)
+
+    funcs: *Vector<string> = (*m).funcs
+    mut i: int64 = 0
+    while i < vec_len(funcs) {
+        sb_push(out, vec_get(funcs, i))
+        sb_push(out, "\n\n")
+        i = i + 1
+    }
+
+    rendered: string = built_string(out)
+    sb_free(out)
+    free(out)
+    return rendered
+}

@@ -17,11 +17,49 @@
 @import home
 @import source
 @import diag
+@import emit
+@import emitfb
+@import cli
 
 // The directory the scaffold writes its artifacts to, parallel to the stage0
 // compiler's target/dusk-out. Returned as a literal, never freed.
 func out_dir() -> string {
-    return "target/dusk1-out"
+    return "target/dusk-out"
+}
+
+func make_out_dir(out: string) -> bool {
+    mk: *StringBuilder = alloc(sb_new())
+    sb_push(mk, "mkdir -p ")
+    mq: string = quote(out)
+    sb_push(mk, mq)
+    mkline: string = substring(sb_cstr(mk), 0, sb_size(mk))
+    mkcode: int64 = run(mkline)
+    free(mkline)
+    free(mq)
+    sb_free(mk)
+    free(mk)
+    if mkcode != 0 {
+        d: Diagnostic = diag_new(out, 0, 0, "could not create the output directory")
+        diag_emit(d)
+        return false
+    }
+    return true
+}
+
+func stem_of(path: string) -> string {
+    mut start: int64 = 0
+    mut i: int64 = 0
+    while i < str_len(path) {
+        if path[i] == 47 { start = i + 1 }
+        i = i + 1
+    }
+    mut end: int64 = str_len(path)
+    mut j: int64 = start
+    while j < str_len(path) {
+        if path[j] == 46 { end = j }
+        j = j + 1
+    }
+    return substring(path, start, end)
 }
 
 // Builds the phase 0 spine as textual LLVM IR: a module that prints one line and
@@ -29,25 +67,28 @@ func out_dir() -> string {
 // stage0 demo module byte for byte, including the interned string constant and its
 // length. The result is a fresh heap string the caller owns and frees.
 func emit_demo_ir() -> string {
-    m: *StringBuilder = alloc(sb_new())
-    sb_push(m, "; ModuleID = 'dusk_demo'\n")
-    sb_push(m, "target triple = \"x86_64-pc-linux-gnu\"\n")
-    sb_push(m, "\n")
-    sb_push(m, "@.str.0 = private unnamed_addr constant [26 x i8] c\"hello from the dusk spine\\00\"\n")
-    sb_push(m, "\n")
-    sb_push(m, "declare void @cool_println_cstr(ptr)\n")
-    sb_push(m, "declare void @cool_print_i64(i64)\n")
-    sb_push(m, "\n")
-    sb_push(m, "define i32 @main() {\n")
-    sb_push(m, "entry:\n")
-    sb_push(m, "  call void @cool_println_cstr(ptr @.str.0)\n")
-    sb_push(m, "  call void @cool_print_i64(i64 42)\n")
-    sb_push(m, "  ret i32 0\n")
-    sb_push(m, "}\n")
-    out: string = substring(sb_cstr(m), 0, sb_size(m))
-    sb_free(m)
-    free(m)
-    return out
+    m: *EmitModule = emit_module_new("dusk_demo", "x86_64-pc-linux-gnu")
+    emit_declare(m, "void @cool_println_cstr(ptr)")
+    emit_declare(m, "void @cool_print_i64(i64)")
+    msg: string = emit_cstring(m, "hello from the dusk spine")
+
+    main: *FuncBuilder = func_new("i32", "main", "")
+    call: *StringBuilder = alloc(sb_new())
+    sb_push(call, "@cool_println_cstr(ptr ")
+    sb_push(call, msg)
+    sb_push_char(call, 41)
+    callee: string = substring(sb_cstr(call), 0, sb_size(call))
+    sb_free(call)
+    free(call)
+    call_void(main, callee)
+    free(callee)
+    call_void(main, "@cool_print_i64(i64 42)")
+    ret(main, "i32", "0")
+
+    body: string = finish(main)
+    emit_push_function(m, body)
+    free(body)
+    return emit_render(m)
 }
 
 // Appends one shell argument to a command line: a leading space, then the argument
@@ -73,7 +114,7 @@ func push_source(cmd: *StringBuilder, rt: string, name: string) -> void {
 // linker: every runtime source, -pthread for toolchains where pthreads is not yet
 // in libc, and -lm for the math intrinsics. No optimization flag rides along, the
 // same as stage0. A clang failure reports a diagnostic and returns its code.
-func link_and_run(home: string, ll: string, bin: string) -> int64 {
+func link_only(home: string, ll: string, bin: string) -> int64 {
     rt: string = path_join(home, "runtime")
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "clang")
@@ -100,12 +141,33 @@ func link_and_run(home: string, ll: string, bin: string) -> int64 {
         diag_emit(d)
         return code
     }
+    return 0
+}
 
+func run_linked(bin: string, argv: string[], start: int64) -> int64 {
     printerr("[dusk1] running ->")
-    rq: string = quote(bin)
-    ec: int64 = run(rq)
-    free(rq)
+    cmd: *StringBuilder = alloc(sb_new())
+    bq: string = quote(bin)
+    sb_push(cmd, bq)
+    free(bq)
+    mut i: int64 = start
+    while i < argv.len {
+        push_arg(cmd, argv[i])
+        i = i + 1
+    }
+    line2: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    sb_free(cmd)
+    free(cmd)
+    ec: int64 = run(line2)
+    free(line2)
     return ec
+}
+
+func link_and_run(home: string, ll: string, bin: string) -> int64 {
+    code: int64 = link_only(home, ll, bin)
+    if code != 0 { return code }
+    empty: string[] = []
+    return run_linked(bin, empty, 0)
 }
 
 // Reads the just written IR back through the source loader as a sanity check, so a
@@ -139,23 +201,7 @@ export func run_demo(prog: string) -> int32 {
     home: string = dusk_home(prog)
     out: string = out_dir()
 
-    // write_file opens a file but does not create its parent directory, so make
-    // the output directory first.
-    mk: *StringBuilder = alloc(sb_new())
-    sb_push(mk, "mkdir -p ")
-    mq: string = quote(out)
-    sb_push(mk, mq)
-    mkline: string = substring(sb_cstr(mk), 0, sb_size(mk))
-    mkcode: int64 = run(mkline)
-    free(mkline)
-    free(mq)
-    sb_free(mk)
-    free(mk)
-    if mkcode != 0 {
-        d: Diagnostic = diag_new(out, 0, 0, "could not create the output directory")
-        diag_emit(d)
-        return 1
-    }
+    if !make_out_dir(out) { return 1 }
 
     ll: string = path_join(out, "demo.ll")
     bin: string = path_join(out, "demo")
@@ -184,5 +230,44 @@ export func run_demo(prog: string) -> int32 {
     free(line)
     sb_free(tail)
     free(tail)
+    return 0
+}
+
+// Builds a source file through the shared IR spine, writes target/dusk-out, and
+// links the runtime. The run flag controls whether the linked binary is executed.
+export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64) -> int32 {
+    ir: CliIrResult = compile_ir_text(path, prog)
+    if !ir.ok {
+        if str_len(ir.text) > 0 { printerr(ir.text) }
+        return 1
+    }
+    out: string = out_dir()
+    if !make_out_dir(out) { return 1 }
+    stem: string = stem_of(path)
+    ll_name: *StringBuilder = alloc(sb_new())
+    sb_push(ll_name, stem)
+    sb_push(ll_name, ".ll")
+    ll_base: string = substring(sb_cstr(ll_name), 0, sb_size(ll_name))
+    sb_free(ll_name)
+    free(ll_name)
+    ll: string = path_join(out, ll_base)
+    bin: string = path_join(out, stem)
+    werr := write_file(ll, ir.text)
+    if werr.exists() {
+        d: Diagnostic = diag_new(ll, 0, 0, "could not write the IR module")
+        diag_emit(d)
+        return 1
+    }
+    if !check_ir_written(ll) { return 1 }
+    home: string = dusk_home(prog)
+    code: int64 = link_only(home, ll, bin)
+    if code != 0 { return 1 }
+    if run_it {
+        rc: int64 = run_linked(bin, argv, arg_start)
+        if rc == 0 { return 0 }
+        if rc == -1 { return -1 }
+        if rc == 255 { return -1 }
+        return -1
+    }
     return 0
 }

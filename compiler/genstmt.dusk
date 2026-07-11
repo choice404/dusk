@@ -1,0 +1,165 @@
+// genstmt: scalar statement lowering for dusk1.
+//
+// This dispatcher owns control-flow shape and defer replay. Binding and assignment
+// storage lives in genlet; expression-only work lives in genexpr.
+
+@paradigm procedural
+
+@import std.vector
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+@import genlet
+
+func gen_block(s: *GenFuncState, block_id: int64) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    mut i: int64 = 0
+    while i < b.len {
+        if !(*s).terminated { gen_stmt(s, vec_get((*a).kids, b.off + i)) }
+        i = i + 1
+    }
+}
+
+func gen_emit_defers(s: *GenFuncState) -> void {
+    ds: *Vector<int64> = (*s).defers
+    mut i: int64 = vec_len(ds) - 1
+    while i >= 0 {
+        gen_expr(s, vec_get(ds, i))
+        i = i - 1
+    }
+}
+
+func gen_default_ret(s: *GenFuncState) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), (*s).ret)
+    if n.kind == ctyk_void() {
+        line((*s).fb, "ret void")
+        (*s).terminated = true
+        return
+    }
+    ll: string = cty_ll(c, (*s).ret)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "ret ")
+    sb_push(b, ll)
+    sb_push_char(b, 32)
+    if n.kind == ctyk_f64() { sb_push(b, "0.0") }
+    else if n.kind == ctyk_f32() { sb_push(b, "0.0") }
+    else if n.kind == ctyk_rawptr() { sb_push(b, "null") }
+    else { sb_push_char(b, 48) }
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    free(ll)
+    (*s).terminated = true
+}
+
+func gen_return(s: *GenFuncState, expr: int64) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    gen_emit_defers(s)
+    if expr < 0 {
+        gen_default_ret(s)
+        return
+    }
+    v: Val = gen_expr(s, expr)
+    n: CTyNode = vec_get(cty_nodes(c), (*s).ret)
+    if n.kind == ctyk_void() {
+        line((*s).fb, "ret void")
+        (*s).terminated = true
+        return
+    }
+    out: string = coerce(s, v.ty, v.op, (*s).ret)
+    ll: string = cty_ll(c, (*s).ret)
+    ret((*s).fb, ll, out)
+    free(ll)
+    (*s).terminated = true
+}
+
+func gen_if(s: *GenFuncState, st: StmtNode) -> void {
+    c: Val = gen_expr(s, st.a)
+    cond: string = coerce(s, c.ty, c.op, cty_bool(genctx_ctys((*s).ctx)))
+    then_l: int64 = fresh_label((*s).fb)
+    end_l: int64 = fresh_label((*s).fb)
+    mut else_l: int64 = end_l
+    if st.c >= 0 { else_l = fresh_label((*s).fb) }
+    tl: string = branch_label(then_l)
+    el: string = branch_label(else_l)
+    endl: string = branch_label(end_l)
+    br_cond((*s).fb, cond, tl, el)
+    place_label((*s).fb, then_l)
+    gen_block(s, st.b)
+    if !(*s).terminated { br((*s).fb, endl) }
+    if st.c >= 0 {
+        place_label((*s).fb, else_l)
+        (*s).terminated = false
+        gen_block(s, st.c)
+        if !(*s).terminated { br((*s).fb, endl) }
+    }
+    place_label((*s).fb, end_l)
+    (*s).terminated = false
+}
+
+func gen_while(s: *GenFuncState, st: StmtNode) -> void {
+    cond_l: int64 = fresh_label((*s).fb)
+    body_l: int64 = fresh_label((*s).fb)
+    end_l: int64 = fresh_label((*s).fb)
+    cl: string = branch_label(cond_l)
+    bl: string = branch_label(body_l)
+    el: string = branch_label(end_l)
+    if st.c != 0 {
+        br((*s).fb, bl)
+        place_label((*s).fb, body_l)
+        gen_block(s, st.b)
+        if !(*s).terminated { br((*s).fb, cl) }
+        place_label((*s).fb, cond_l)
+        (*s).terminated = false
+        cv: Val = gen_expr(s, st.a)
+        cond: string = coerce(s, cv.ty, cv.op, cty_bool(genctx_ctys((*s).ctx)))
+        br_cond((*s).fb, cond, bl, el)
+    } else {
+        br((*s).fb, cl)
+        place_label((*s).fb, cond_l)
+        cv2: Val = gen_expr(s, st.a)
+        cond2: string = coerce(s, cv2.ty, cv2.op, cty_bool(genctx_ctys((*s).ctx)))
+        br_cond((*s).fb, cond2, bl, el)
+        place_label((*s).fb, body_l)
+        gen_block(s, st.b)
+        if !(*s).terminated { br((*s).fb, cl) }
+    }
+    place_label((*s).fb, end_l)
+    (*s).terminated = false
+}
+
+// Dispatches one scalar statement and records clean faults for shapes owned by
+// later aggregate or async lowering.
+export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    st: StmtNode = vec_get((*a).stmts, sid)
+    if st.kind == sk_let() { gen_let(s, sid)
+        return }
+    if st.kind == sk_assign() { gen_assign(s, st.a, st.b)
+        return }
+    if st.kind == sk_assign_op() { gen_assign_op(s, st.a, st.b, st.c)
+        return }
+    if st.kind == sk_return() { gen_return(s, st.a)
+        return }
+    if st.kind == sk_defer() {
+        ds2: *Vector<int64> = (*s).defers
+        vec_push(ds2, st.a)
+        return }
+    if st.kind == sk_if() { gen_if(s, st)
+        return }
+    if st.kind == sk_while() { gen_while(s, st)
+        return }
+    if st.kind == sk_expr() { gen_expr(s, st.a)
+        return }
+    if st.kind == sk_for() { emit_error((*s).module, "unsupported for statement") }
+    else if st.kind == sk_match() { emit_error((*s).module, "unsupported match statement") }
+    else { emit_error((*s).module, "unsupported statement") }
+}

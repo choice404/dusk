@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse|load|desugar|check|mono|esc>" >&2
+    echo "usage: tools/differential.sh <binary-a> <binary-b> <lex|scan|parse|load|desugar|check|mono|esc|ir>" >&2
 }
 
 if [[ $# -ne 3 ]]; then
@@ -25,10 +25,10 @@ if [[ ! -x "$binary_b" ]]; then
 fi
 
 case "$cmd" in
-    lex | scan | parse | load | desugar | check | mono | esc) ;;
+    lex | scan | parse | load | desugar | check | mono | esc | ir) ;;
     *)
         usage
-        echo "differential: command must be lex, scan, parse, load, desugar, check, mono, or esc" >&2
+        echo "differential: command must be lex, scan, parse, load, desugar, check, mono, esc, or ir" >&2
         exit 2
         ;;
 esac
@@ -140,6 +140,14 @@ while IFS= read -r -d '' file; do
             diag_header_multiset "$err_b" "$headers_b"
             if ! cmp -s "$headers_a" "$headers_b"; then
                 echo "advisory: header multiset differs: $file" >&2
+            fi
+        fi
+    elif [[ "$cmd" == "ir" ]]; then
+        if [[ "$status_a" -eq 0 ]]; then
+            if ! cmp -s "$out_a" "$out_b"; then
+                echo "divergence: $file" >&2
+                echo "first diff: $(first_diff_line "$out_a" "$out_b")" >&2
+                exit 1
             fi
         fi
     else

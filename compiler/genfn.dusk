@@ -1,0 +1,213 @@
+// genfn: Phase A function lowering for dusk1. It emits scalar signatures, the GC
+// entry anchor, default returns, and the narrow literal-return gate path.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genstmt
+
+func gf_copy(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+func gf_built(b: *StringBuilder) -> string {
+    return substring(sb_cstr(b), 0, sb_size(b))
+}
+
+func param_sig(ctx: *GenCtx, a: *Ast, f: FuncNode) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    c: *CTyArena = genctx_ctys(ctx)
+    mut i: int64 = 0
+    while i < f.params_len {
+        if i > 0 { sb_push(b, ", ") }
+        pid: int64 = vec_get((*a).kids, f.params_off + i)
+        p: ParamNode = vec_get((*a).params, pid)
+        ty: int64 = cty_lower_ast(c, a, p.ty)
+        ll: string = cty_ll(c, ty)
+        sb_push(b, ll)
+        free(ll)
+        sb_push(b, " %a")
+        sb_push_int(b, i)
+        i = i + 1
+    }
+    out: string = gf_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func unsupported_type(m: *EmitModule, c: *CTyArena, ty: int64, where_: string) -> void {
+    if cty_is_stub(c, ty) {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "unsupported codegen type in ")
+        sb_push(b, where_)
+        msg: string = gf_built(b)
+        sb_free(b)
+        free(b)
+        emit_error(m, msg)
+        free(msg)
+    }
+}
+
+func default_ret(s: *GenFuncState) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), (*s).ret)
+    if n.kind == ctyk_void() {
+        line((*s).fb, "ret void")
+        (*s).terminated = true
+        return
+    }
+    ll: string = cty_ll(c, (*s).ret)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "ret ")
+    sb_push(b, ll)
+    sb_push_char(b, 32)
+    if n.kind == ctyk_f64() {
+        sb_push(b, "0.0")
+    } else if n.kind == ctyk_f32() {
+        sb_push(b, "0.0")
+    } else if n.kind == ctyk_rawptr() {
+        sb_push(b, "null")
+    } else {
+        sb_push_char(b, 48)
+    }
+    text: string = gf_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    free(ll)
+    (*s).terminated = true
+}
+
+func bind_params(s: *GenFuncState, f: FuncNode) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut i: int64 = 0
+    while i < f.params_len {
+        pid: int64 = vec_get((*a).kids, f.params_off + i)
+        p: ParamNode = vec_get((*a).params, pid)
+        ty: int64 = cty_lower_ast(c, a, p.ty)
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "%a")
+        sb_push_int(b, i)
+        op: string = gf_built(b)
+        sb_free(b)
+        free(b)
+        ptr: string = gen_alloca(s, ty)
+        gen_store_slot(s, ty, op, ptr)
+        map_put((*s).locals, gf_copy(ast_name(a, p.name)), LocalVal { ty: ty, op: ptr })
+        i = i + 1
+    }
+}
+
+// Emits one non-method function body. Scalar signatures enter the shared lowering
+// path while aggregate values still fault before any partial body is trusted.
+export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) -> string {
+    a: *Ast = (*ctx).ast
+    c: *CTyArena = genctx_ctys(ctx)
+    ret_ty: int64 = cty_lower_ast(c, a, f.ret)
+    unsupported_type(m, c, ret_ty, "function return")
+    mut pcheck: int64 = 0
+    while pcheck < f.params_len {
+        pidc: int64 = vec_get((*a).kids, f.params_off + pcheck)
+        pc: ParamNode = vec_get((*a).params, pidc)
+        pty: int64 = cty_lower_ast(c, a, pc.ty)
+        if cty_is_stub(c, pty) { emit_error(m, "unsupported codegen type in function parameter") }
+        pcheck = pcheck + 1
+    }
+    ret_ll: string = cty_ll(c, ret_ty)
+    sig: string = param_sig(ctx, a, f)
+    fb: *FuncBuilder = func_new(ret_ll, name, sig)
+    if str_eq(name, "main") || str_eq(name, "dusk__main") {
+        slot: string = next_tmp(fb)
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, slot)
+        sb_push(b, " = alloca i8")
+        alloca_line: string = gf_built(b)
+        sb_free(b)
+        free(b)
+        push_entry_alloca(fb, alloca_line)
+        free(alloca_line)
+        callb: *StringBuilder = alloc(sb_new())
+        sb_push(callb, "@cool_gc_anchor(ptr ")
+        sb_push(callb, slot)
+        sb_push_char(callb, 41)
+        call: string = gf_built(callb)
+        sb_free(callb)
+        free(callb)
+        call_void(fb, call)
+        free(call)
+        free(slot)
+    }
+    locals: *Map<LocalVal> = alloc(map_new())
+    defers: *Vector<int64> = alloc(vec_new())
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, terminated: false })
+    bind_params(st, f)
+    block: BlockNode = vec_get((*a).blocks, f.body)
+    mut i: int64 = 0
+    while i < block.len {
+        if !(*st).terminated {
+            gen_stmt(st, vec_get((*a).kids, block.off + i))
+        }
+        i = i + 1
+    }
+    if !(*st).terminated { default_ret(st) }
+    out: string = finish(fb)
+    free(ret_ll)
+    free(sig)
+    return out
+}
+
+// Detects the argc/argv entry form that must be split into dusk__main plus a C ABI
+// wrapper. Phase A recognizes slices only for this predicate, then faults if used.
+export func main_is_argc_argv(ctx: *GenCtx, f: FuncNode) -> bool {
+    if f.params_len != 2 { return false }
+    a: *Ast = (*ctx).ast
+    c: *CTyArena = genctx_ctys(ctx)
+    p0id: int64 = vec_get((*a).kids, f.params_off)
+    p0: ParamNode = vec_get((*a).params, p0id)
+    t0: int64 = cty_lower_ast(c, a, p0.ty)
+    n0: CTyNode = vec_get(cty_nodes(c), t0)
+    if n0.kind != ctyk_int() { return false }
+    if n0.a != 32 { return false }
+    p1id: int64 = vec_get((*a).kids, f.params_off + 1)
+    p1: ParamNode = vec_get((*a).params, p1id)
+    t1: int64 = cty_lower_ast(c, a, p1.ty)
+    n1: CTyNode = vec_get(cty_nodes(c), t1)
+    if n1.kind == ctyk_slice() { return true }
+    return false
+}
+
+// Emits the C ABI wrapper for an argc/argv main after the user body was renamed.
+export func emit_main_wrapper(ctx: *GenCtx, f: FuncNode) -> string {
+    a: *Ast = (*ctx).ast
+    rty: string = cty_ll(genctx_ctys(ctx), cty_lower_ast(genctx_ctys(ctx), a, f.ret))
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "define ")
+    sb_push(b, rty)
+    sb_push(b, " @main(i32 %argc, ptr %argv) {\n")
+    sb_push(b, "entry:\n")
+    sb_push(b, "  %len = sext i32 %argc to i64\n")
+    sb_push(b, "  %s0 = insertvalue { ptr, i64 } undef, ptr %argv, 0\n")
+    sb_push(b, "  %s1 = insertvalue { ptr, i64 } %s0, i64 %len, 1\n")
+    sb_push(b, "  %r = call ")
+    sb_push(b, rty)
+    sb_push(b, " @dusk__main(i32 %argc, { ptr, i64 } %s1)\n")
+    sb_push(b, "  ret ")
+    sb_push(b, rty)
+    sb_push(b, " %r\n}")
+    out: string = gf_built(b)
+    sb_free(b)
+    free(b)
+    free(rty)
+    return out
+}

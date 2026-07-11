@@ -29,6 +29,9 @@
 @import tcstate
 @import monoemit
 @import mono
+@import gen
+
+export struct CliIrResult { ok: bool, text: string }
 
 func emit_errors(errs: *Vector<string>) -> void {
     mut i: int64 = 0
@@ -345,5 +348,60 @@ export func cmd_mono(path: string, prog: string) -> int32 {
     out: string = mono_dump(m)
     println(out)
     free(out)
+    return 0
+}
+
+// Checks a source file through the same gated spine as mono, then lowers the
+// ground module to LLVM IR. The build commands share this path so every front-end
+// gate observes the same diagnostics before codegen runs.
+export func compile_ir_text(path: string, prog: string) -> CliIrResult {
+    p: Program = load(path, prog)
+    errs: *Vector<string> = p.errors
+    emit_errors(errs)
+    if vec_len(errs) > 0 {
+        return CliIrResult { ok: false, text: "" }
+    }
+    if !p.has_module {
+        return CliIrResult { ok: false, text: "" }
+    }
+    desugar(p.module)
+    info: EscapeInfo = compute_escape_info(p.module)
+    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
+    emit_span_errors(p.files, resolve_errs)
+    tc: *TypeChecker = typeck_run_with_info(p.module, info)
+    type_errs: *Vector<SpanDiagnostic> = (*tc).errors
+    emit_span_errors(p.files, type_errs)
+    if vec_len(resolve_errs) > 0 {
+        return CliIrResult { ok: false, text: "" }
+    }
+    if vec_len(type_errs) > 0 {
+        return CliIrResult { ok: false, text: "" }
+    }
+    m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
+    mono_errs: *Vector<SpanDiagnostic> = (*m).diags
+    emit_span_errors(p.files, mono_errs)
+    ground_new: int64 = emit_ground_pass(p.files, m, mono_errs)
+    if vec_len(mono_errs) > 0 {
+        return CliIrResult { ok: false, text: "" }
+    }
+    if ground_new > 0 {
+        return CliIrResult { ok: false, text: "" }
+    }
+    ground: *Ast = mono_ground(m)
+    res: GenResult = gen_compile(ground)
+    if !res.ok {
+        return CliIrResult { ok: false, text: res.text }
+    }
+    return CliIrResult { ok: true, text: res.text }
+}
+
+// Emits the shared IR text to stdout, preserving the oracle-facing ir command.
+export func cmd_ir(path: string, prog: string) -> int32 {
+    res: CliIrResult = compile_ir_text(path, prog)
+    if !res.ok {
+        if str_len(res.text) > 0 { printerr(res.text) }
+        return 1
+    }
+    print(res.text)
     return 0
 }

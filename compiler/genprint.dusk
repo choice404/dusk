@@ -1,0 +1,194 @@
+// genprint: runtime print lowering for dusk1 scalar values.
+//
+// Printing is a sequence of runtime calls selected from the lowered scalar type.
+// Format strings expand at compile time into literal pieces and value holes.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+
+func gp_call_cstr(s: *GenFuncState, fn: string, ptr: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @")
+    sb_push(b, fn)
+    sb_push(b, "(ptr ")
+    sb_push(b, ptr)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+func gp_call_num(s: *GenFuncState, fn: string, ty: string, op: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @")
+    sb_push(b, fn)
+    sb_push_char(b, 40)
+    sb_push(b, ty)
+    sb_push_char(b, 32)
+    sb_push(b, op)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+func gp_newline(s: *GenFuncState, errout: bool) -> void {
+    nl: string = emit_cstring((*s).module, "\n")
+    if errout {
+        gp_call_cstr(s, "cool_eprint_cstr", nl)
+        return
+    }
+    gp_call_cstr(s, "cool_print_cstr", nl)
+}
+
+func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if errout {
+        if n.kind == ctyk_rawptr() || n.kind == ctyk_error() { gp_call_cstr(s, "cool_eprint_cstr", v.op) }
+        else if cty_is_float(c, v.ty) {
+            d: string = coerce(s, v.ty, v.op, cty_f64(c))
+            gp_call_num(s, "cool_eprint_f64", "double", d)
+        } else {
+            d2: string = coerce(s, v.ty, v.op, cty_int(c, 64))
+            gp_call_num(s, "cool_eprint_i64", "i64", d2)
+        }
+        if newline { gp_newline(s, true) }
+        return
+    }
+    mut suffix: string = ""
+    if newline { suffix = "ln" }
+    if n.kind == ctyk_rawptr() || n.kind == ctyk_error() {
+        if newline { gp_call_cstr(s, "cool_println_cstr", v.op) } else { gp_call_cstr(s, "cool_print_cstr", v.op) }
+    } else if cty_is_float(c, v.ty) {
+        d3: string = coerce(s, v.ty, v.op, cty_f64(c))
+        if newline { gp_call_num(s, "cool_println_f64", "double", d3) } else { gp_call_num(s, "cool_print_f64", "double", d3) }
+    } else {
+        d4: string = coerce(s, v.ty, v.op, cty_int(c, 64))
+        if str_eq(suffix, "ln") { gp_call_num(s, "cool_println_i64", "i64", d4) } else { gp_call_num(s, "cool_print_i64", "i64", d4) }
+    }
+}
+
+func gp_emit_lit(s: *GenFuncState, text: string, lo: int64, hi: int64, errout: bool) -> void {
+    piece: string = substring(text, lo, hi)
+    label: string = emit_cstring((*s).module, piece)
+    if errout { gp_call_cstr(s, "cool_eprint_cstr", label) } else { gp_call_cstr(s, "cool_print_cstr", label) }
+}
+
+func gp_emit_fmt_lit(s: *GenFuncState, fmt: string, lo: int64, hi: int64, errout: bool) -> void {
+    if hi <= lo { return }
+    lit: *StringBuilder = alloc(sb_new())
+    mut i: int64 = lo
+    while i < hi {
+        ch: int64 = fmt[i]
+        if ch == 123 {
+            if i + 1 < hi {
+                if fmt[i + 1] == 123 {
+                    sb_push_char(lit, 123)
+                    i = i + 2
+                } else {
+                    sb_push_char(lit, ch)
+                    i = i + 1
+                }
+            } else {
+                sb_push_char(lit, ch)
+                i = i + 1
+            }
+        } else if ch == 125 {
+            if i + 1 < hi {
+                if fmt[i + 1] == 125 {
+                    sb_push_char(lit, 125)
+                    i = i + 2
+                } else {
+                    sb_push_char(lit, ch)
+                    i = i + 1
+                }
+            } else {
+                sb_push_char(lit, ch)
+                i = i + 1
+            }
+        } else {
+            sb_push_char(lit, ch)
+            i = i + 1
+        }
+    }
+    if sb_size(lit) > 0 {
+        piece: string = gs_built(lit)
+        label: string = emit_cstring((*s).module, piece)
+        if errout { gp_call_cstr(s, "cool_eprint_cstr", label) } else { gp_call_cstr(s, "cool_print_cstr", label) }
+    }
+    sb_free(lit)
+    free(lit)
+}
+
+func gp_format_print(s: *GenFuncState, args_off: int64, args_len: int64, newline: bool, errout: bool) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    first_id: int64 = vec_get((*a).kids, args_off)
+    first: ExprNode = vec_get((*a).exprs, first_id)
+    fmt: string = ast_name(a, first.a)
+    mut ai: int64 = 1
+    mut seg_start: int64 = 0
+    mut i: int64 = 0
+    while i < str_len(fmt) {
+        if fmt[i] == 123 {
+            if i + 1 < str_len(fmt) {
+                if fmt[i + 1] == 125 {
+                    gp_emit_fmt_lit(s, fmt, seg_start, i, errout)
+                    if ai < args_len {
+                        v: Val = gen_expr(s, vec_get((*a).kids, args_off + ai))
+                        gp_print_value(s, v, false, errout)
+                    }
+                    ai = ai + 1
+                    i = i + 2
+                    seg_start = i
+                } else {
+                    i = i + 1
+                }
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    gp_emit_fmt_lit(s, fmt, seg_start, str_len(fmt), errout)
+    if newline { gp_newline(s, errout) }
+    return Val { ty: cty_void(genctx_ctys((*s).ctx)), op: gs_copy("") }
+}
+
+// Lowers the print family; the first string literal selects format expansion.
+export func gen_print(s: *GenFuncState, args_off: int64, args_len: int64, newline: bool, errout: bool) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    if args_len > 0 {
+        first_id: int64 = vec_get((*a).kids, args_off)
+        first: ExprNode = vec_get((*a).exprs, first_id)
+        if first.kind == xk_str() { return gp_format_print(s, args_off, args_len, newline, errout) }
+        mut i: int64 = 0
+        while i < args_len {
+            v: Val = gen_expr(s, vec_get((*a).kids, args_off + i))
+            gp_print_value(s, v, newline && i == args_len - 1, errout)
+            i = i + 1
+        }
+    } else if newline {
+        empty: string = emit_cstring((*s).module, "")
+        if errout {
+            gp_call_cstr(s, "cool_eprint_cstr", empty)
+            gp_newline(s, true)
+        }
+        else { gp_call_cstr(s, "cool_println_cstr", empty) }
+    }
+    return Val { ty: cty_void(genctx_ctys((*s).ctx)), op: gs_copy("") }
+}

@@ -1,0 +1,325 @@
+// genexpr: scalar expression lowering for dusk1.
+//
+// This file owns values that fit in LLVM scalars: literals, local loads,
+// ordinary calls, unary operators, and binary operators. Aggregate forms stay
+// behind the fault backstop until their layout is real.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import gencall
+
+func gx_hex_digit(n: int64) -> int64 {
+    if n >= 10 { return 55 + n }
+    return 48 + n
+}
+
+func gx_push_hex64(b: *StringBuilder, v: int64) -> void {
+    sb_push(b, "0x")
+    mut shift: int64 = 60
+    while shift >= 0 {
+        sb_push_char(b, gx_hex_digit((v >> shift) & 15))
+        shift = shift - 4
+    }
+}
+
+func gx_int_ty(s: *GenFuncState, suffix: int64) -> int64 {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if suffix < 0 { return cty_int(c, 64) }
+    a: *Ast = (*(*s).ctx).ast
+    name: string = ast_name(a, suffix)
+    if str_eq(name, "int8") { return cty_int(c, 8) }
+    if str_eq(name, "uint8") { return cty_int(c, 8) }
+    if str_eq(name, "int16") { return cty_int(c, 16) }
+    if str_eq(name, "uint16") { return cty_int(c, 16) }
+    if str_eq(name, "int32") { return cty_int(c, 32) }
+    if str_eq(name, "uint32") { return cty_int(c, 32) }
+    return cty_int(c, 64)
+}
+
+func gx_int_text(v: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_int(b, v)
+    out: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func gx_float_text(bits: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    gx_push_hex64(b, bits)
+    out: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func gx_op_line(s: *GenFuncState, op: string, ty: int64, lhs: string, rhs: string) -> string {
+    ll: string = cty_ll(genctx_ctys((*s).ctx), ty)
+    dest: string = next_tmp((*s).fb)
+    op2((*s).fb, dest, op, ll, lhs, rhs)
+    free(ll)
+    return dest
+}
+
+func gx_cmp_line(s: *GenFuncState, instr: string, pred: string, ty: int64, lhs: string, rhs: string) -> Val {
+    ll: string = cty_ll(genctx_ctys((*s).ctx), ty)
+    dest: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dest)
+    sb_push(b, " = ")
+    sb_push(b, instr)
+    sb_push_char(b, 32)
+    sb_push(b, pred)
+    sb_push_char(b, 32)
+    sb_push(b, ll)
+    sb_push_char(b, 32)
+    sb_push(b, lhs)
+    sb_push(b, ", ")
+    sb_push(b, rhs)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    free(ll)
+    return Val { ty: cty_bool(genctx_ctys((*s).ctx)), op: dest }
+}
+
+func gx_arith_opcode(op: int64, is_float: bool) -> string {
+    if op == bop_add() { if is_float { return "fadd" } return "add" }
+    if op == bop_sub() { if is_float { return "fsub" } return "sub" }
+    if op == bop_mul() { if is_float { return "fmul" } return "mul" }
+    if op == bop_div() { if is_float { return "fdiv" } return "sdiv" }
+    if is_float { return "frem" }
+    return "srem"
+}
+
+func gx_cmp_pred(op: int64, is_float: bool) -> string {
+    if op == bop_eq() { if is_float { return "oeq" } return "eq" }
+    if op == bop_ne() { if is_float { return "one" } return "ne" }
+    if op == bop_lt() { if is_float { return "olt" } return "slt" }
+    if op == bop_le() { if is_float { return "ole" } return "sle" }
+    if op == bop_gt() { if is_float { return "ogt" } return "sgt" }
+    if is_float { return "oge" }
+    return "sge"
+}
+
+func gx_shift_safe(a: *Ast, e: ExprNode, ty: int64, c: *CTyArena) -> bool {
+    if e.kind != xk_int() { return false }
+    mut bits: int64 = cty_int_bits(c, ty)
+    if bits <= 0 { bits = 64 }
+    if e.a < 0 { return false }
+    if e.a >= bits { return false }
+    return true
+}
+
+func gx_shift_check(s: *GenFuncState, amount: string, ty: int64) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut w: int64 = cty_int_bits(c, ty)
+    if w <= 0 { w = 64 }
+    ll: string = cty_ll(c, ty)
+    bad: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, bad)
+    sb_push(b, " = icmp uge ")
+    sb_push(b, ll)
+    sb_push_char(b, 32)
+    sb_push(b, amount)
+    sb_push(b, ", ")
+    sb_push_int(b, w)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    fault: int64 = fresh_label((*s).fb)
+    ok: int64 = fresh_label((*s).fb)
+    fl: string = branch_label(fault)
+    ol: string = branch_label(ok)
+    br_cond((*s).fb, bad, fl, ol)
+    place_label((*s).fb, fault)
+    line((*s).fb, "call void @cool_shift_fault()")
+    br((*s).fb, ol)
+    place_label((*s).fb, ok)
+    free(ll)
+    free(bad)
+    free(fl)
+    free(ol)
+}
+
+func gx_binary_vals(s: *GenFuncState, op: int64, av: Val, rhs: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    bv: Val = gen_expr(s, rhs)
+    ty: int64 = av.ty
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if op == bop_pow() {
+        if !cty_is_float(c, ty) {
+            a64: string = coerce(s, av.ty, av.op, cty_int(c, 64))
+            e64: string = coerce(s, bv.ty, bv.op, cty_int(c, 64))
+            d: string = next_tmp((*s).fb)
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, d)
+            sb_push(b, " = call i64 @cool_pow_i64(i64 ")
+            sb_push(b, a64)
+            sb_push(b, ", i64 ")
+            sb_push(b, e64)
+            sb_push_char(b, 41)
+            text: string = gs_built(b)
+            sb_free(b)
+            free(b)
+            line((*s).fb, text)
+            free(text)
+            back: string = coerce(s, cty_int(c, 64), d, ty)
+            return Val { ty: ty, op: back }
+        }
+    }
+    bo: string = coerce(s, bv.ty, bv.op, av.ty)
+    is_float: bool = cty_is_float(c, ty)
+    if op <= bop_mod() {
+        r: string = gx_op_line(s, gx_arith_opcode(op, is_float), ty, av.op, bo)
+        return Val { ty: ty, op: r }
+    }
+    if op >= bop_eq() {
+        if op <= bop_ge() {
+            mut instr: string = "icmp"
+            if is_float { instr = "fcmp" }
+            return gx_cmp_line(s, instr, gx_cmp_pred(op, is_float), ty, av.op, bo)
+        }
+    }
+    if op == bop_and() {
+        r2: string = gx_op_line(s, "and", cty_bool(c), av.op, bo)
+        return Val { ty: cty_bool(c), op: r2 }
+    }
+    if op == bop_or() {
+        r3: string = gx_op_line(s, "or", cty_bool(c), av.op, bo)
+        return Val { ty: cty_bool(c), op: r3 }
+    }
+    if op == bop_bitand() { return Val { ty: ty, op: gx_op_line(s, "and", ty, av.op, bo) } }
+    if op == bop_bitor() { return Val { ty: ty, op: gx_op_line(s, "or", ty, av.op, bo) } }
+    if op == bop_bitxor() { return Val { ty: ty, op: gx_op_line(s, "xor", ty, av.op, bo) } }
+    if op == bop_shl() || op == bop_shr() {
+        re: ExprNode = vec_get((*a).exprs, rhs)
+        if !gx_shift_safe(a, re, ty, c) { gx_shift_check(s, bo, ty) }
+        mut sop: string = "shl"
+        if op == bop_shr() { sop = "ashr" }
+        return Val { ty: ty, op: gx_op_line(s, sop, ty, av.op, bo) }
+    }
+    if op == bop_pow() {
+        ll: string = cty_ll(c, ty)
+        mut intr: string = "llvm.pow.f64"
+        n: CTyNode = vec_get(cty_nodes(c), ty)
+        if n.kind == ctyk_f32() { intr = "llvm.pow.f32" }
+        d2: string = next_tmp((*s).fb)
+        b2: *StringBuilder = alloc(sb_new())
+        sb_push(b2, d2)
+        sb_push(b2, " = call ")
+        sb_push(b2, ll)
+        sb_push(b2, " @")
+        sb_push(b2, intr)
+        sb_push_char(b2, 40)
+        sb_push(b2, ll)
+        sb_push_char(b2, 32)
+        sb_push(b2, av.op)
+        sb_push(b2, ", ")
+        sb_push(b2, ll)
+        sb_push_char(b2, 32)
+        sb_push(b2, bo)
+        sb_push_char(b2, 41)
+        text2: string = gs_built(b2)
+        sb_free(b2)
+        free(b2)
+        line((*s).fb, text2)
+        free(text2)
+        free(ll)
+        return Val { ty: ty, op: d2 }
+    }
+    emit_error((*s).module, "unsupported binary expression")
+    return av
+}
+
+export func gen_expr(s: *GenFuncState, id: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_int() {
+        text: string = gx_int_text(e.a)
+        return Val { ty: gx_int_ty(s, e.b), op: text }
+    }
+    if e.kind == xk_float() {
+        ft: string = gx_float_text(e.a)
+        return Val { ty: cty_f64(c), op: ft }
+    }
+    if e.kind == xk_bool() {
+        if e.a != 0 { return Val { ty: cty_bool(c), op: gs_copy("1") } }
+        return Val { ty: cty_bool(c), op: gs_copy("0") }
+    }
+    if e.kind == xk_char() || e.kind == xk_rune() {
+        text2: string = gx_int_text(e.a)
+        if e.kind == xk_char() { return Val { ty: cty_char(c), op: text2 } }
+        return Val { ty: cty_int(c, 32), op: text2 }
+    }
+    if e.kind == xk_str() {
+        label: string = emit_cstring((*s).module, ast_name(a, e.a))
+        return Val { ty: cty_rawptr(c, cty_char(c)), op: label }
+    }
+    if e.kind == xk_ident() {
+        name: string = ast_name(a, e.a)
+        locals: *Map<LocalVal> = (*s).locals
+        if map_has(locals, name) {
+            lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+            loaded: string = gen_load_slot(s, lv.ty, lv.op)
+            return Val { ty: lv.ty, op: loaded }
+        }
+        emit_error((*s).module, "unsupported identifier expression")
+        return Val { ty: cty_int(c, 64), op: gs_copy("0") }
+    }
+    if e.kind == xk_unary() {
+        v: Val = gen_expr(s, e.b)
+        if e.a == uop_neg() {
+            if cty_is_float(c, v.ty) { return Val { ty: v.ty, op: gx_op_line(s, "fsub", v.ty, "0.0", v.op) } }
+            return Val { ty: v.ty, op: gx_op_line(s, "sub", v.ty, "0", v.op) }
+        }
+        if e.a == uop_not() {
+            one: string = coerce(s, v.ty, v.op, cty_bool(c))
+            r: string = gx_op_line(s, "xor", cty_bool(c), one, "1")
+            return Val { ty: cty_bool(c), op: r }
+        }
+        if e.a == uop_bitnot() {
+            return Val { ty: v.ty, op: gx_op_line(s, "xor", v.ty, v.op, "-1") }
+        }
+        emit_error((*s).module, "unsupported dereference expression")
+        return v
+    }
+    if e.kind == xk_binary() {
+        av: Val = gen_expr(s, e.b)
+        return gx_binary_vals(s, e.a, av, e.c)
+    }
+    if e.kind == xk_call() { return gen_call(s, e.a, e.b, e.c) }
+    if e.kind == xk_field() { emit_error((*s).module, "unsupported field expression") }
+    else if e.kind == xk_index() { emit_error((*s).module, "unsupported index expression") }
+    else if e.kind == xk_range() { emit_error((*s).module, "unsupported range expression") }
+    else if e.kind == xk_tuple() { emit_error((*s).module, "unsupported tuple expression") }
+    else if e.kind == xk_array() { emit_error((*s).module, "unsupported array expression") }
+    else if e.kind == xk_struct_lit() { emit_error((*s).module, "unsupported struct literal") }
+    else if e.kind == xk_lambda() { emit_error((*s).module, "unsupported closure expression") }
+    else if e.kind == xk_match() { emit_error((*s).module, "unsupported match expression") }
+    else if e.kind == xk_await() { emit_error((*s).module, "unsupported await expression") }
+    else if e.kind == xk_collect() { emit_error((*s).module, "unsupported collector expression") }
+    else { emit_error((*s).module, "unsupported expression") }
+    return Val { ty: cty_int(c, 64), op: gs_copy("0") }
+}
+
+export func gen_binop_vals(s: *GenFuncState, op: int64, av: Val, rhs: int64) -> Val {
+    return gx_binary_vals(s, op, av, rhs)
+}

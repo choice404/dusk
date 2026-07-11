@@ -1,0 +1,77 @@
+// gencall: top-level scalar call lowering for dusk1.
+//
+// User functions are looked up through GenCtx so forward references and builtins
+// resolve with the same precedence as the stage0 lowerer.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genprint
+
+// Lowers a call expression when the callee is a plain top-level name or builtin.
+export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() {
+        emit_error((*s).module, "unsupported call target")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    name: string = ast_name(a, callee.a)
+    if genctx_has_fn((*s).ctx, name) {
+        sig: GenFnSig = genctx_fn((*s).ctx, name)
+        mut call_ret: string = cty_ll(c, sig.ret)
+        args: *StringBuilder = alloc(sb_new())
+        mut i: int64 = 0
+        while i < args_len {
+            if i > 0 { sb_push(args, ", ") }
+            aty: int64 = vec_get(sig.params, i)
+            v: Val = gen_expr(s, vec_get((*a).kids, args_off + i))
+            out: string = coerce(s, v.ty, v.op, aty)
+            ll: string = cty_ll(c, aty)
+            sb_push(args, ll)
+            sb_push_char(args, 32)
+            sb_push(args, out)
+            free(ll)
+            i = i + 1
+        }
+        arg_text: string = gs_built(args)
+        sb_free(args)
+        free(args)
+        b: *StringBuilder = alloc(sb_new())
+        mut dest: string = ""
+        if !str_eq(call_ret, "void") {
+            dest = next_tmp((*s).fb)
+            sb_push(b, dest)
+            sb_push(b, " = ")
+        }
+        sb_push(b, "call ")
+        sb_push(b, call_ret)
+        sb_push(b, " @")
+        sb_push(b, name)
+        sb_push_char(b, 40)
+        sb_push(b, arg_text)
+        sb_push_char(b, 41)
+        text: string = gs_built(b)
+        sb_free(b)
+        free(b)
+        line((*s).fb, text)
+        free(text)
+        if str_eq(call_ret, "void") { return Val { ty: sig.ret, op: gs_copy("") } }
+        return Val { ty: sig.ret, op: dest }
+    }
+    if str_eq(name, "print") { return gen_print(s, args_off, args_len, false, false) }
+    if str_eq(name, "println") { return gen_print(s, args_off, args_len, true, false) }
+    if str_eq(name, "eprint") { return gen_print(s, args_off, args_len, false, true) }
+    if str_eq(name, "eprintln") { return gen_print(s, args_off, args_len, true, true) }
+    if str_eq(name, "printerr") { return gen_print(s, args_off, args_len, true, true) }
+    emit_error((*s).module, "unsupported builtin call")
+    return Val { ty: cty_void(c), op: gs_copy("") }
+}

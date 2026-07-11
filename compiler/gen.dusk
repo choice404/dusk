@@ -1,0 +1,141 @@
+// gen: top-level LLVM IR orchestration for dusk1. It builds the module prelude,
+// walks ground items in order, and turns lowering faults into one build error.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import emit
+@import genctx
+@import genfn
+
+export struct GenResult { ok: bool, text: string }
+
+func gen_copy(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+func gen_built(b: *StringBuilder) -> string {
+    return substring(sb_cstr(b), 0, sb_size(b))
+}
+
+func declare_prelude(m: *EmitModule) -> void {
+    emit_declare(m, "void @cool_print_i64(i64)")
+    emit_declare(m, "void @cool_println_i64(i64)")
+    emit_declare(m, "void @cool_print_f64(double)")
+    emit_declare(m, "void @cool_println_f64(double)")
+    emit_declare(m, "void @cool_print_cstr(ptr)")
+    emit_declare(m, "void @cool_println_cstr(ptr)")
+    emit_declare(m, "void @cool_eprint_i64(i64)")
+    emit_declare(m, "void @cool_eprint_f64(double)")
+    emit_declare(m, "void @cool_eprint_cstr(ptr)")
+    emit_declare(m, "ptr @cool_alloc(i64)")
+    emit_declare(m, "void @cool_free(ptr)")
+    emit_declare(m, "ptr @cool_gen_alloc(i64)")
+    emit_declare(m, "void @cool_gen_free(ptr)")
+    emit_declare(m, "void @cool_gen_fault()")
+    emit_declare(m, "void @cool_null_fault()")
+    emit_declare(m, "void @cool_bounds_fault()")
+    emit_declare(m, "void @cool_shift_fault()")
+    emit_declare(m, "i64 @cool_pow_i64(i64, i64)")
+    emit_declare(m, "double @llvm.pow.f64(double, double)")
+    emit_declare(m, "float @llvm.pow.f32(float, float)")
+    emit_declare(m, "ptr @cool_debug_alloc(i64)")
+    emit_declare(m, "void @cool_debug_free(ptr)")
+    emit_declare(m, "i64 @cool_debug_leaks()")
+    emit_declare(m, "i64 @cool_debug_double_frees()")
+    emit_declare(m, "ptr @cool_thread_spawn(ptr, ptr)")
+    emit_declare(m, "i64 @cool_thread_join(ptr, i64)")
+    emit_declare(m, "i64 @cool_pool_submit(ptr, ptr)")
+    emit_declare(m, "ptr @cool_alloc_env(i64)")
+    emit_declare(m, "ptr @cool_task_new(ptr, i64, i64)")
+    emit_declare(m, "ptr @cool_task_frame(ptr)")
+    emit_declare(m, "void @cool_task_start(ptr)")
+    emit_declare(m, "void @cool_task_await(ptr, ptr, i64)")
+    emit_declare(m, "void @cool_task_return(ptr, ptr, i64)")
+    emit_declare(m, "ptr @cool_task_env_alloc(ptr, i64)")
+    emit_declare(m, "void @cool_future_take(ptr, i64, ptr, ptr)")
+    emit_declare(m, "void @cool_loop_run(ptr, i64, ptr, i64)")
+    emit_declare(m, "void @cool_task_state_fault()")
+    emit_declare(m, "void @cool_gc_anchor(ptr)")
+    emit_declare(m, "ptr @cool_collect_alloc(i64)")
+    emit_declare(m, "void @cool_gc_collect()")
+    emit_declare(m, "i64 @cool_gc_live_blocks()")
+    emit_declare(m, "i64 @cool_gc_live_bytes()")
+    emit_declare(m, "i64 @cool_gc_collections()")
+    emit_declare(m, "void @cool_gc_add_region(ptr, i64)")
+    emit_declare(m, "void @cool_gc_del_region(ptr)")
+    emit_declare(m, "ptr @cool_read_file(ptr)")
+    emit_declare(m, "i64 @cool_write_file(ptr, ptr)")
+    emit_declare(m, "ptr @cool_read_line()")
+    emit_declare(m, "ptr @cool_read_all()")
+    emit_declare(m, "double @cool_parse_float(ptr, ptr)")
+}
+
+func joined_faults(errs: *Vector<string>) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < vec_len(errs) {
+        if i > 0 { sb_push_char(b, 10) }
+        sb_push(b, vec_get(errs, i))
+        i = i + 1
+    }
+    out: string = gen_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Lowers a ground, monomorphized AST to textual LLVM IR. Unsupported Phase A
+// constructs record faults so callers never observe a malformed partial module.
+export func gen_compile(a: *Ast) -> GenResult {
+    ctx: *GenCtx = genctx_new(a)
+    m: *EmitModule = emit_module_new("dusk", "x86_64-pc-linux-gnu")
+    declare_prelude(m)
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            name: string = ast_name(a, f.name)
+            if f.is_async {
+                emit_error(m, "unsupported async function in Phase A")
+            } else if str_eq(name, "main") {
+                if main_is_argc_argv(ctx, f) {
+                    body: string = gen_func(m, ctx, f, "dusk__main")
+                    emit_push_function(m, body)
+                    free(body)
+                    wrapper: string = emit_main_wrapper(ctx, f)
+                    emit_push_function(m, wrapper)
+                    free(wrapper)
+                } else {
+                    body2: string = gen_func(m, ctx, f, name)
+                    emit_push_function(m, body2)
+                    free(body2)
+                }
+            } else {
+                body3: string = gen_func(m, ctx, f, name)
+                emit_push_function(m, body3)
+                free(body3)
+            }
+        } else if it.kind == ik_impl() {
+            emit_error(m, "unsupported impl lowering in Phase A")
+        } else if it.kind == ik_foreign() {
+            emit_error(m, "unsupported foreign block lowering in Phase A")
+        } else if it.kind == ik_struct() {
+            emit_error(m, "unsupported struct lowering in Phase A")
+        } else if it.kind == ik_enum() {
+            emit_error(m, "unsupported enum lowering in Phase A")
+        } else if it.kind == ik_interface() {
+            emit_error(m, "unsupported interface lowering in Phase A")
+        }
+        i = i + 1
+    }
+    errs: *Vector<string> = emit_errors(m)
+    if vec_len(errs) > 0 {
+        return GenResult { ok: false, text: joined_faults(errs) }
+    }
+    return GenResult { ok: true, text: emit_render(m) }
+}

@@ -158,6 +158,28 @@ leave exactly the same ones alone, or its `load` and `desugar` dumps disagree
 with this compiler's even on a program whose parsed AST shape actually
 matches, file by file.
 
+## The `ir` Dump
+
+`dusk ir <file>` runs the full front end, through resolve, typecheck, and
+monomorphization, then runs code generation and prints the resulting LLVM IR
+text to stdout. Diagnostics go to stderr. The command never invokes clang, so
+it never links or runs anything; it only exposes the generated IR for
+inspection or comparison without touching the native toolchain.
+
+The canonical form of the `ir` dump is the emission itself. There is no
+separate renderer the way `lex`, `parse`, `load`, and `desugar` route through
+`render_kind` or `render_module` for a second compiler reproducible textual
+form. The LLVM IR text code generation produces for clang to consume is
+already the exact byte sequence dumped to stdout, unmodified. No trailing
+newline is appended or stripped beyond what the emitter itself writes. This is
+the same string a real build writes to its `.ll` artifact before invoking the
+toolchain.
+
+The command exits zero and prints IR only when the front end and code
+generation both succeed. It exits non zero and prints no IR when either part
+fails. Partial IR must not leak to stdout on a rejected program; unlike the
+`load` and `desugar` dumps, there is no partial dump contract for `ir`.
+
 ## Stability
 
 For the same binary version and the same input bytes, each dump is byte
@@ -203,6 +225,11 @@ merge itself, and the span rebasing described above, before any one file's own
 parsed shape is the suspect, and `desugar` localizes the monadic `do` rewrite
 on top of an already agreed merge, before semantic analysis or code generation
 can hide the source.
+
+Run the same byte comparison with `ir` once both sides are compilers that
+implement code generation. The `ir` dump exercises monomorphization and LLVM
+IR generation, rather than only the front end passes where the other dumps
+stop.
 
 ## The Mono and Escape Dumps
 

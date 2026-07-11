@@ -1,0 +1,214 @@
+// cty: lowered codegen types for dusk1. The arena is hash-consed so every pass
+// can compare compact ids while preserving the LLVM spelling used by stage0.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+
+export struct CTyNode { kind: int64, a: int64, b: int64, text: string }
+export struct SizeAlign { size: int64, align: int64 }
+
+export struct CTyArena {
+    nodes: *Vector<CTyNode>,
+    dedup: *Map<int64>,
+}
+
+export func ctyk_int() -> int64 { return 0 }
+export func ctyk_char() -> int64 { return 1 }
+export func ctyk_f64() -> int64 { return 2 }
+export func ctyk_f32() -> int64 { return 3 }
+export func ctyk_bool() -> int64 { return 4 }
+export func ctyk_void() -> int64 { return 5 }
+export func ctyk_ptr() -> int64 { return 6 }
+export func ctyk_rawptr() -> int64 { return 7 }
+export func ctyk_slice() -> int64 { return 8 }
+export func ctyk_array() -> int64 { return 9 }
+export func ctyk_struct() -> int64 { return 10 }
+export func ctyk_enum() -> int64 { return 11 }
+export func ctyk_iface() -> int64 { return 12 }
+export func ctyk_closure() -> int64 { return 13 }
+export func ctyk_error() -> int64 { return 14 }
+export func ctyk_thread() -> int64 { return 15 }
+export func ctyk_tuple() -> int64 { return 16 }
+export func ctyk_unknown() -> int64 { return 17 }
+
+func cty_copy(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+func cty_built(b: *StringBuilder) -> string {
+    return substring(sb_cstr(b), 0, sb_size(b))
+}
+
+// Creates the compact lowered-type arena used by codegen passes. Type nodes are
+// never freed because the compiler is a short-lived batch process.
+export func cty_new() -> *CTyArena {
+    nodes: *Vector<CTyNode> = alloc(vec_new())
+    dedup: *Map<int64> = alloc(map_new())
+    return alloc(CTyArena { nodes: nodes, dedup: dedup })
+}
+
+export func cty_nodes(c: *CTyArena) -> *Vector<CTyNode> { return (*c).nodes }
+func cty_dedup(c: *CTyArena) -> *Map<int64> { return (*c).dedup }
+
+func cty_key(kind: int64, a: int64, b: int64, text: string) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push_int(out, kind)
+    sb_push_char(out, 124)
+    sb_push_int(out, a)
+    sb_push_char(out, 124)
+    sb_push_int(out, b)
+    sb_push_char(out, 124)
+    sb_push(out, text)
+    s: string = cty_built(out)
+    sb_free(out)
+    free(out)
+    return s
+}
+
+// Interns one lowered node, giving all later passes stable ids for equal types.
+export func cty_intern(c: *CTyArena, kind: int64, a: int64, b: int64, text: string) -> int64 {
+    key: string = cty_key(kind, a, b, text)
+    dedup: *Map<int64> = cty_dedup(c)
+    if map_has(dedup, key) {
+        return unwrap_or(map_get(dedup, key), -1)
+    }
+    nodes: *Vector<CTyNode> = cty_nodes(c)
+    id: int64 = vec_len(nodes)
+    vec_push(nodes, CTyNode { kind: kind, a: a, b: b, text: cty_copy(text) })
+    map_put(dedup, key, id)
+    return id
+}
+
+export func cty_int(c: *CTyArena, bits: int64) -> int64 { return cty_intern(c, ctyk_int(), bits, 0, "") }
+export func cty_char(c: *CTyArena) -> int64 { return cty_intern(c, ctyk_char(), 0, 0, "") }
+export func cty_f64(c: *CTyArena) -> int64 { return cty_intern(c, ctyk_f64(), 0, 0, "") }
+export func cty_f32(c: *CTyArena) -> int64 { return cty_intern(c, ctyk_f32(), 0, 0, "") }
+export func cty_bool(c: *CTyArena) -> int64 { return cty_intern(c, ctyk_bool(), 0, 0, "") }
+export func cty_void(c: *CTyArena) -> int64 { return cty_intern(c, ctyk_void(), 0, 0, "") }
+export func cty_error(c: *CTyArena) -> int64 { return cty_intern(c, ctyk_error(), 0, 0, "") }
+export func cty_rawptr(c: *CTyArena, inner: int64) -> int64 { return cty_intern(c, ctyk_rawptr(), inner, 0, "") }
+
+// Renders the LLVM type spelling for scalar CTys. Reserved aggregate kinds keep a
+// placeholder spelling so Phase A can diagnose them before producing partial IR.
+export func cty_ll(c: *CTyArena, id: int64) -> string {
+    n: CTyNode = vec_get(cty_nodes(c), id)
+    if n.kind == ctyk_int() {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push_char(b, 105)
+        sb_push_int(b, n.a)
+        out: string = cty_built(b)
+        sb_free(b)
+        free(b)
+        return out
+    }
+    if n.kind == ctyk_char() { return cty_copy("i8") }
+    if n.kind == ctyk_f64() { return cty_copy("double") }
+    if n.kind == ctyk_f32() { return cty_copy("float") }
+    if n.kind == ctyk_bool() { return cty_copy("i1") }
+    if n.kind == ctyk_void() { return cty_copy("void") }
+    if n.kind == ctyk_rawptr() { return cty_copy("ptr") }
+    if n.kind == ctyk_error() { return cty_copy("ptr") }
+    return cty_copy("i64")
+}
+
+// Computes byte size and alignment for scalar CTys. Aggregate stubs return the
+// conservative fallback used only by unsupported-path diagnostics in this phase.
+export func cty_size_align(c: *CTyArena, id: int64) -> SizeAlign {
+    n: CTyNode = vec_get(cty_nodes(c), id)
+    if n.kind == ctyk_bool() { return SizeAlign { size: 1, align: 1 } }
+    if n.kind == ctyk_char() { return SizeAlign { size: 1, align: 1 } }
+    if n.kind == ctyk_int() {
+        mut bytes: int64 = n.a / 8
+        if bytes < 1 { bytes = 1 }
+        return SizeAlign { size: bytes, align: bytes }
+    }
+    if n.kind == ctyk_f32() { return SizeAlign { size: 4, align: 4 } }
+    if n.kind == ctyk_f64() { return SizeAlign { size: 8, align: 8 } }
+    if n.kind == ctyk_rawptr() { return SizeAlign { size: 8, align: 8 } }
+    if n.kind == ctyk_error() { return SizeAlign { size: 8, align: 8 } }
+    if n.kind == ctyk_void() { return SizeAlign { size: 0, align: 1 } }
+    return SizeAlign { size: 8, align: 8 }
+}
+
+// Returns the integer width used by casts and shift guards. Non-integer CTys have
+// no width, matching the stage0 coercion predicate.
+export func cty_int_bits(c: *CTyArena, id: int64) -> int64 {
+    n: CTyNode = vec_get(cty_nodes(c), id)
+    if n.kind == ctyk_int() { return n.a }
+    if n.kind == ctyk_char() { return 8 }
+    if n.kind == ctyk_bool() { return 1 }
+    return 0
+}
+
+export func cty_is_float(c: *CTyArena, id: int64) -> bool {
+    n: CTyNode = vec_get(cty_nodes(c), id)
+    if n.kind == ctyk_f64() { return true }
+    if n.kind == ctyk_f32() { return true }
+    return false
+}
+
+// Tells Phase A whether a type needs lowering that is intentionally deferred.
+export func cty_is_stub(c: *CTyArena, id: int64) -> bool {
+    n: CTyNode = vec_get(cty_nodes(c), id)
+    if n.kind == ctyk_int() { return false }
+    if n.kind == ctyk_char() { return false }
+    if n.kind == ctyk_f64() { return false }
+    if n.kind == ctyk_f32() { return false }
+    if n.kind == ctyk_bool() { return false }
+    if n.kind == ctyk_void() { return false }
+    if n.kind == ctyk_rawptr() { return false }
+    if n.kind == ctyk_error() { return false }
+    return true
+}
+
+func cty_nominal_stub(c: *CTyArena, a: *Ast, name: string) -> int64 {
+    return cty_intern(c, ctyk_unknown(), 0, 0, name)
+}
+
+// Lowers a monomorphized AST TypeNode id to a CTy id. Scalar names are complete;
+// every aggregate shape reserves its final kind code but remains a faultable stub.
+export func cty_lower_ast(c: *CTyArena, a: *Ast, id: int64) -> int64 {
+    t: TypeNode = vec_get((*a).types, id)
+    if t.kind == tk_named() {
+        name: string = ast_name(a, t.a)
+        if str_eq(name, "int8") { return cty_int(c, 8) }
+        if str_eq(name, "uint8") { return cty_int(c, 8) }
+        if str_eq(name, "int16") { return cty_int(c, 16) }
+        if str_eq(name, "uint16") { return cty_int(c, 16) }
+        if str_eq(name, "int32") { return cty_int(c, 32) }
+        if str_eq(name, "uint32") { return cty_int(c, 32) }
+        if str_eq(name, "int64") { return cty_int(c, 64) }
+        if str_eq(name, "uint64") { return cty_int(c, 64) }
+        if str_eq(name, "bool") { return cty_bool(c) }
+        if str_eq(name, "char") { return cty_char(c) }
+        if str_eq(name, "rune") { return cty_int(c, 32) }
+        if str_eq(name, "float64") { return cty_f64(c) }
+        if str_eq(name, "float32") { return cty_f32(c) }
+        if str_eq(name, "string") { return cty_rawptr(c, cty_char(c)) }
+        if str_eq(name, "error") { return cty_error(c) }
+        if str_eq(name, "thread") { return cty_intern(c, ctyk_thread(), 0, 0, "") }
+        return cty_nominal_stub(c, a, name)
+    }
+    if t.kind == tk_unit() { return cty_void(c) }
+    if t.kind == tk_rawptr() { return cty_rawptr(c, cty_lower_ast(c, a, t.a)) }
+    if t.kind == tk_ptr() {
+        inner: int64 = cty_lower_ast(c, a, t.a)
+        in_node: CTyNode = vec_get(cty_nodes(c), inner)
+        if in_node.kind == ctyk_void() { return cty_rawptr(c, inner) }
+        return cty_intern(c, ctyk_ptr(), inner, 0, "")
+    }
+    if t.kind == tk_slice() { return cty_intern(c, ctyk_slice(), cty_lower_ast(c, a, t.a), 0, "") }
+    if t.kind == tk_array() { return cty_intern(c, ctyk_array(), cty_lower_ast(c, a, t.a), t.b, "") }
+    if t.kind == tk_tuple() { return cty_intern(c, ctyk_tuple(), t.a, t.b, "") }
+    if t.kind == tk_func() { return cty_intern(c, ctyk_closure(), t.a, t.b, "") }
+    if t.kind == tk_collector() {
+        inner2: int64 = cty_lower_ast(c, a, t.a)
+        return cty_intern(c, ctyk_ptr(), inner2, 0, "")
+    }
+    return cty_intern(c, ctyk_unknown(), 0, 0, "")
+}

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use dusk::sema::summary;
 use dusk::{analyze, Analysis};
-use dusk::{desugar, driver, lexer, loader, parser, prescan};
+use dusk::{codegen, desugar, driver, lexer, loader, parser, prescan};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -23,6 +23,7 @@ fn main() -> ExitCode {
         "mono" => cmd_mono(args.get(1)),
         "esc" => cmd_esc(args.get(1)),
         "build" => cmd_build(args.get(1)),
+        "ir" => cmd_ir(args.get(1)),
         "run" => cmd_run(args.get(1), args.get(2..).unwrap_or(&[])),
         "version" | "--version" | "-V" => {
             println!("dusk {VERSION}");
@@ -287,6 +288,27 @@ fn cmd_build(path: Option<&String>) -> ExitCode {
     }
 }
 
+/// Compiles a source file to LLVM IR text and prints it to stdout, without
+/// invoking clang.
+fn cmd_ir(path: Option<&String>) -> ExitCode {
+    let Some((path, _)) = read_src(path, "ir") else {
+        return ExitCode::FAILURE;
+    };
+    let Some(analysis) = front_end(&path) else {
+        return ExitCode::FAILURE;
+    };
+    match codegen::compile(&analysis.module, &analysis.mut_tuple_types) {
+        Ok(ir) => {
+            print!("{ir}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("[dusk] {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Compiles and runs a source file, forwarding any trailing arguments to the
 /// program, so an argc/argv main sees them.
 fn cmd_run(path: Option<&String>, prog_args: &[String]) -> ExitCode {
@@ -355,6 +377,7 @@ fn print_help() {
     println!("  dusk mono <file>     check + dump the monomorphized AST");
     println!("  dusk esc <file>      dump the escape summary oracle");
     println!("  dusk build <file>    compile to a native binary");
+    println!("  dusk ir <file>       compile to LLVM IR, print to stdout");
     println!("  dusk run <file>      compile and run");
     println!("  dusk version         print version");
 }

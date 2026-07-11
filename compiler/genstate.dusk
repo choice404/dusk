@@ -1,0 +1,148 @@
+// genstate: shared function-lowering state for dusk1 scalar codegen.
+//
+// The statement, expression, call, and print lowerers all need the same locals,
+// return type, defer stack, and scalar cast rules. Keeping those facts here avoids
+// cyclic imports while preserving the byte shape established by function lowering.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+
+export struct LocalVal { ty: int64, op: string }
+export struct Val { ty: int64, op: string }
+
+export struct GenFuncState {
+    module: *EmitModule,
+    ctx: *GenCtx,
+    fb: *FuncBuilder,
+    ret: int64,
+    locals: *Map<LocalVal>,
+    defers: *Vector<int64>,
+    terminated: bool,
+}
+
+export func gs_copy(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+export func gs_built(b: *StringBuilder) -> string {
+    return substring(sb_cstr(b), 0, sb_size(b))
+}
+
+export func gen_val(ty: int64, op: string) -> Val {
+    return Val { ty: ty, op: gs_copy(op) }
+}
+
+// Allocates storage through the entry funnel so loop-body bindings do not emit a
+// dynamic alloca at the binding site.
+export func gen_alloca(s: *GenFuncState, ty: int64) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    dest: string = next_tmp((*s).fb)
+    ll: string = cty_ll(c, ty)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dest)
+    sb_push(b, " = alloca ")
+    sb_push(b, ll)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    push_entry_alloca((*s).fb, text)
+    free(text)
+    free(ll)
+    return dest
+}
+
+// Loads a scalar slot through the same textual helper used by Phase A.
+export func gen_load_slot(s: *GenFuncState, ty: int64, ptr: string) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    dest: string = next_tmp((*s).fb)
+    ll: string = cty_ll(c, ty)
+    fb_load((*s).fb, dest, ll, ptr)
+    free(ll)
+    return dest
+}
+
+export func gen_store_slot(s: *GenFuncState, ty: int64, val: string, ptr: string) -> void {
+    ll: string = cty_ll(genctx_ctys((*s).ctx), ty)
+    store((*s).fb, ll, val, ptr)
+    free(ll)
+}
+
+// Coerces scalar integer values with the signedness convention already pinned by
+// Phase A: bool and char widen with zext, all other integer widening uses sext.
+export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> string {
+    if from == to { return gs_copy(op) }
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    fb: int64 = cty_int_bits(c, from)
+    tb: int64 = cty_int_bits(c, to)
+    if fb > 0 {
+        if tb > 0 {
+            if fb == tb { return gs_copy(op) }
+            mut cast: string = "sext"
+            if tb < fb {
+                cast = "trunc"
+            } else {
+                n: CTyNode = vec_get(cty_nodes(c), from)
+                if n.kind == ctyk_bool() { cast = "zext" }
+                if n.kind == ctyk_char() { cast = "zext" }
+            }
+            dest: string = next_tmp((*s).fb)
+            fromll: string = cty_ll(c, from)
+            toll: string = cty_ll(c, to)
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, dest)
+            sb_push(b, " = ")
+            sb_push(b, cast)
+            sb_push_char(b, 32)
+            sb_push(b, fromll)
+            sb_push_char(b, 32)
+            sb_push(b, op)
+            sb_push(b, " to ")
+            sb_push(b, toll)
+            text: string = gs_built(b)
+            sb_free(b)
+            free(b)
+            line((*s).fb, text)
+            free(text)
+            free(fromll)
+            free(toll)
+            return dest
+        }
+    }
+    if cty_is_float(c, from) {
+        if cty_is_float(c, to) {
+            fromll2: string = cty_ll(c, from)
+            toll2: string = cty_ll(c, to)
+            mut cast2: string = "fpext"
+            if str_eq(fromll2, "double") { cast2 = "fptrunc" }
+            dest2: string = next_tmp((*s).fb)
+            b2: *StringBuilder = alloc(sb_new())
+            sb_push(b2, dest2)
+            sb_push(b2, " = ")
+            sb_push(b2, cast2)
+            sb_push_char(b2, 32)
+            sb_push(b2, fromll2)
+            sb_push_char(b2, 32)
+            sb_push(b2, op)
+            sb_push(b2, " to ")
+            sb_push(b2, toll2)
+            text2: string = gs_built(b2)
+            sb_free(b2)
+            free(b2)
+            line((*s).fb, text2)
+            free(text2)
+            free(fromll2)
+            free(toll2)
+            return dest2
+        }
+    }
+    emit_error((*s).module, "unsupported scalar coercion")
+    return gs_copy(op)
+}

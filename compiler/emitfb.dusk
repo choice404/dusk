@@ -1,0 +1,218 @@
+// emitfb: textual LLVM IR function builder for dusk1 code generation.
+//
+// The builder owns one function body and simple counters for SSA temporaries and
+// labels. It performs no type checking; helpers are only formatting funnels for
+// textual LLVM instructions.
+
+@paradigm procedural
+
+@import std.string
+
+export struct FuncBuilder {
+    header: string,
+    body: *StringBuilder,
+    entry_allocas: *StringBuilder,
+    tmp: int64,
+    label: int64,
+}
+
+func fb_built_string(b: *StringBuilder) -> string {
+    return substring(sb_cstr(b), 0, sb_size(b))
+}
+
+func fb_copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+export func func_new(ret: string, name: string, params: string) -> *FuncBuilder {
+    h: *StringBuilder = alloc(sb_new())
+    sb_push(h, "define ")
+    sb_push(h, ret)
+    sb_push(h, " @")
+    sb_push(h, name)
+    sb_push_char(h, 40)
+    sb_push(h, params)
+    sb_push(h, ") {")
+    header: string = fb_built_string(h)
+    sb_free(h)
+    free(h)
+
+    body: *StringBuilder = alloc(sb_new())
+    sb_push(body, "entry:\n")
+    allocas: *StringBuilder = alloc(sb_new())
+    return alloc(FuncBuilder {
+        header: header,
+        body: body,
+        entry_allocas: allocas,
+        tmp: 0,
+        label: 0,
+    })
+}
+
+export func next_tmp(f: *FuncBuilder) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "%t")
+    sb_push_int(b, (*f).tmp)
+    out: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    (*f).tmp = (*f).tmp + 1
+    return out
+}
+
+export func line(f: *FuncBuilder, text: string) -> void {
+    sb_push((*f).body, "  ")
+    sb_push((*f).body, text)
+    sb_push_char((*f).body, 10)
+}
+
+export func call_void(f: *FuncBuilder, callee_and_args: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void ")
+    sb_push(b, callee_and_args)
+    text: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    line(f, text)
+    free(text)
+}
+
+export func ret(f: *FuncBuilder, ty: string, val: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "ret ")
+    sb_push(b, ty)
+    sb_push_char(b, 32)
+    sb_push(b, val)
+    text: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    line(f, text)
+    free(text)
+}
+
+export func fresh_label(f: *FuncBuilder) -> int64 {
+    n: int64 = (*f).label
+    (*f).label = (*f).label + 1
+    return n
+}
+
+export func place_label(f: *FuncBuilder, n: int64) -> void {
+    sb_push_char((*f).body, 76)
+    sb_push_int((*f).body, n)
+    sb_push((*f).body, ":\n")
+}
+
+export func branch_label(n: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "%L")
+    sb_push_int(b, n)
+    out: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func push_entry_alloca(f: *FuncBuilder, text: string) -> void {
+    sb_push((*f).entry_allocas, "  ")
+    sb_push((*f).entry_allocas, text)
+    sb_push_char((*f).entry_allocas, 10)
+}
+
+export func body_out(f: *FuncBuilder) -> string {
+    return fb_built_string((*f).body)
+}
+
+export func op2(f: *FuncBuilder, dest: string, op: string, ty: string, lhs: string, rhs: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dest)
+    sb_push(b, " = ")
+    sb_push(b, op)
+    sb_push_char(b, 32)
+    sb_push(b, ty)
+    sb_push_char(b, 32)
+    sb_push(b, lhs)
+    sb_push(b, ", ")
+    sb_push(b, rhs)
+    text: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    line(f, text)
+    free(text)
+}
+
+export func fb_load(f: *FuncBuilder, dest: string, ty: string, ptr: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dest)
+    sb_push(b, " = load ")
+    sb_push(b, ty)
+    sb_push(b, ", ptr ")
+    sb_push(b, ptr)
+    text: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    line(f, text)
+    free(text)
+}
+
+export func store(f: *FuncBuilder, ty: string, val: string, ptr: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "store ")
+    sb_push(b, ty)
+    sb_push_char(b, 32)
+    sb_push(b, val)
+    sb_push(b, ", ptr ")
+    sb_push(b, ptr)
+    text: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    line(f, text)
+    free(text)
+}
+
+export func br(f: *FuncBuilder, label_operand: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "br label ")
+    sb_push(b, label_operand)
+    text: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    line(f, text)
+    free(text)
+}
+
+export func br_cond(f: *FuncBuilder, cond: string, then_label: string, else_label: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "br i1 ")
+    sb_push(b, cond)
+    sb_push(b, ", label ")
+    sb_push(b, then_label)
+    sb_push(b, ", label ")
+    sb_push(b, else_label)
+    text: string = fb_built_string(b)
+    sb_free(b)
+    free(b)
+    line(f, text)
+    free(text)
+}
+
+func push_body_without_entry(out: *StringBuilder, body: string) -> void {
+    mut i: int64 = 7
+    while body[i] != 0 {
+        sb_push_char(out, body[i])
+        i = i + 1
+    }
+}
+
+export func finish(f: *FuncBuilder) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    sb_push(out, (*f).header)
+    sb_push_char(out, 10)
+    sb_push(out, "entry:\n")
+    sb_push(out, sb_cstr((*f).entry_allocas))
+    push_body_without_entry(out, sb_cstr((*f).body))
+    sb_push_char(out, 125)
+    rendered: string = fb_built_string(out)
+    sb_free(out)
+    free(out)
+    return rendered
+}

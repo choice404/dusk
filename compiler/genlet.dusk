@@ -1,0 +1,84 @@
+// genlet: scalar local storage and assignment lowering for dusk1.
+//
+// Locals are represented as stack slots in the entry block. This matches the
+// stage0 lifetime shape and gives assignment a stable place to update.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import cty
+@import emit
+@import genctx
+@import genstate
+@import genexpr
+
+// Lowers a scalar binding and records its stack slot for later loads and stores.
+export func gen_let(s: *GenFuncState, sid: int64) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    st: StmtNode = vec_get((*a).stmts, sid)
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if st.b != 1 {
+        emit_error((*s).module, "unsupported destructuring let")
+        return
+    }
+    bid: int64 = vec_get((*a).kids, st.a)
+    bind: BindNode = vec_get((*a).binds, bid)
+    v: Val = gen_expr(s, st.c)
+    mut ty: int64 = v.ty
+    if bind.ty >= 0 { ty = cty_lower_ast(c, a, bind.ty) }
+    if cty_is_stub(c, ty) {
+        emit_error((*s).module, "unsupported codegen type in let")
+        return
+    }
+    out: string = coerce(s, v.ty, v.op, ty)
+    ptr: string = gen_alloca(s, ty)
+    gen_store_slot(s, ty, out, ptr)
+    map_put((*s).locals, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: ptr })
+}
+
+// Lowers `name = expr` for scalar locals; other places remain aggregate-owned.
+export func gen_assign(s: *GenFuncState, lhs: int64, rhs: int64) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    e: ExprNode = vec_get((*a).exprs, lhs)
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if e.kind != xk_ident() {
+        emit_error((*s).module, "unsupported assignment target")
+        return
+    }
+    name: string = ast_name(a, e.a)
+    locals: *Map<LocalVal> = (*s).locals
+    if !map_has(locals, name) {
+        emit_error((*s).module, "unsupported assignment target")
+        return
+    }
+    lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+    v: Val = gen_expr(s, rhs)
+    out: string = coerce(s, v.ty, v.op, lv.ty)
+    gen_store_slot(s, lv.ty, out, lv.op)
+}
+
+// Lowers scalar compound assignment by loading once, combining, and storing back.
+export func gen_assign_op(s: *GenFuncState, op: int64, lhs: int64, rhs: int64) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    e: ExprNode = vec_get((*a).exprs, lhs)
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if e.kind != xk_ident() {
+        emit_error((*s).module, "unsupported compound assignment target")
+        return
+    }
+    name: string = ast_name(a, e.a)
+    locals: *Map<LocalVal> = (*s).locals
+    if !map_has(locals, name) {
+        emit_error((*s).module, "unsupported compound assignment target")
+        return
+    }
+    lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+    cur: string = gen_load_slot(s, lv.ty, lv.op)
+    v: Val = gen_binop_vals(s, op, Val { ty: lv.ty, op: cur }, rhs)
+    out: string = coerce(s, v.ty, v.op, lv.ty)
+    gen_store_slot(s, lv.ty, out, lv.op)
+}
