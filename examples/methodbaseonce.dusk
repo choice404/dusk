@@ -1,0 +1,19 @@
+// A method call lowers its receiver exactly once. The discard idiom
+// `make().ignore()` evaluates `make()` a single time: `made` prints once, not
+// twice. A struct receiver with no impl method for `ignore` used to lower the
+// base, fail to resolve, and let the generic call path re-lower the whole field
+// expression, running the receiver's side effects a second time.
+@paradigm procedural
+
+struct V { n: int64 }
+
+func make() -> V {
+    println("made")
+    return V { n: 7 }
+}
+
+func main() -> int32 {
+    make().ignore()
+    println("done")
+    return 0
+}

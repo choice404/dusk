@@ -103,7 +103,22 @@ func dir_of(path: string) -> string {
     if last < 0 {
         return "."
     }
-    return substring(path, 0, last)
+    // Collapse the run of separators before the final component, so a path with a
+    // doubled slash yields the same clean parent Rust's Path::parent returns; the
+    // resolved import path then matches stage0 byte for byte. dusk's && is eager,
+    // so the index guard and the character read step through a flag rather than
+    // one condition, keeping the read off path[-1] at end == 0.
+    mut end: int64 = last
+    mut stripping: bool = end > 0
+    while stripping {
+        if path[end - 1] == 47 {
+            end = end - 1
+            stripping = end > 0
+        } else {
+            stripping = false
+        }
+    }
+    return substring(path, 0, end)
 }
 
 func last_slash(s: string) -> int64 {

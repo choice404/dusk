@@ -1,0 +1,24 @@
+// Dual-pass proof: a generic `do`'s continuation body carries Ty::Unknown holes
+// the surface pass wildcards, so mixing int32 and int64 inside the do slips past
+// resolve and the surface type pass. Once mono makes the monad ground, the second
+// types-only pass width-checks the continuation like any other arithmetic and
+// rejects it. A reject that exists only because the ground pass runs.
+@paradigm functional
+
+@import std.functional.maybe
+
+func small() -> Maybe<int32> { return Maybe.Some(0i32) }
+func big() -> Maybe<int64> { return Maybe.Some(4294967297) }
+
+func main() -> int32 {
+    r := do Maybe {
+        a <- small()
+        b <- big()
+        a + b
+    }
+    match r {
+        Some(v) => println("{}", v),
+        None => println("none"),
+    }
+    return 0
+}

@@ -399,8 +399,13 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
     if e.kind == xk_struct_lit() {
         name2: string = ast_name(a, e.a)
         check_struct_lit(tc, name2, e.b, e.c, e.lo, e.hi)
+        // A surface `Future { ... }` literal carries no element in its words, so it
+        // infers as a future of an unknown element, compatible with any Future<T>.
+        // On the ground AST mono has mangled the literal to `Future$T`, so unmangle
+        // restores the future shape the async call and annotation both carry; a
+        // plain struct name passes through untouched.
         if str_eq(name2, "Future") { return ty_future((*tc).ty, ty_unknown((*tc).ty)) }
-        return named_ty((*tc).ty, name2)
+        return unmangle((*tc).ty, named_ty((*tc).ty, name2), (*tc).future_elems)
     }
     if e.kind == xk_lambda() { return infer_lambda_sig(tc, e) }
     if e.kind == xk_match() {

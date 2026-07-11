@@ -86,6 +86,10 @@ export func p_error_at(p: *Parser, lo: int64, msg: string) -> void {
     vec_push((*p).errors, located(lo, p_hi(p), msg))
 }
 
+export func p_error_span(p: *Parser, lo: int64, hi: int64, msg: string) -> void {
+    vec_push((*p).errors, located(lo, hi, msg))
+}
+
 export func p_bump(p: *Parser) -> void {
     if !p_at_eof(p) {
         (*p).pos = (*p).pos + 1
@@ -177,7 +181,17 @@ export func p_ident(p: *Parser) -> int64 {
 
 export func p_guard_progress(p: *Parser, before: int64, ctx: string) -> bool {
     if (*p).pos == before {
-        p_error(p, ctx)
+        // "<ctx>: <token>", the stuck token rendered in stage0's Debug form.
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, ctx)
+        sb_push(b, ": ")
+        found: string = token_found((*p).src, (*p).n, p_tok(p))
+        sb_push(b, found)
+        free(found)
+        msg: string = substring(sb_cstr(b), 0, sb_size(b))
+        p_error(p, msg)
+        sb_free(b)
+        free(b)
         p_bump(p)
         return true
     }

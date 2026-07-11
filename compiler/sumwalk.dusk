@@ -127,17 +127,17 @@ export func sum_stmt(c: *SumCtx, sid: int64) -> void {
         if lhs.kind == xk_ident() {
             raise_env(c, ast_name(a, lhs.a), rv)
         } else {
-            sum_eval(c, s.a).ignore()
+            sum_eval(c, s.a)
             record_store(c, s.a, rv, false)
         }
     } else if s.kind == sk_assign_op() {
-        sum_eval(c, s.c).ignore()
-        sum_eval(c, s.b).ignore()
+        sum_eval(c, s.c)
+        sum_eval(c, s.b)
     } else if s.kind == sk_return() {
         if s.a < 0 { return }
         e: ExprNode = vec_get((*a).exprs, s.a)
         if e.kind == xk_await() {
-            sum_eval(c, e.a).ignore()
+            sum_eval(c, e.a)
             return
         }
         v: SumVal = sum_eval(c, s.a)
@@ -148,13 +148,13 @@ export func sum_stmt(c: *SumCtx, sid: int64) -> void {
             (*c).reads_through = (*c).reads_through | v.reads
         }
     } else if s.kind == sk_defer() || s.kind == sk_expr() {
-        sum_eval(c, s.a).ignore()
+        sum_eval(c, s.a)
     } else if s.kind == sk_if() {
-        sum_eval(c, s.a).ignore()
+        sum_eval(c, s.a)
         sum_block(c, s.b)
         if s.c >= 0 { sum_block(c, s.c) }
     } else if s.kind == sk_while() {
-        sum_eval(c, s.a).ignore()
+        sum_eval(c, s.a)
         loop_fixpoint(c, s.b)
     } else if s.kind == sk_for() {
         it: SumVal = sum_eval(c, s.b)
@@ -171,7 +171,7 @@ func sum_let(c: *SumCtx, s: StmtNode) -> void {
     a: *Ast = (*(*c).t).ast
     val: ExprNode = vec_get((*a).exprs, s.c)
     if val.kind == xk_await() {
-        sum_eval(c, val.a).ignore()
+        sum_eval(c, val.a)
         mut i: int64 = 0
         while i < s.b {
             note_local(c, vec_get((*a).binds, kid(a, s.a, i)))
@@ -258,17 +258,17 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         return unwrap_or(r, val_none())
     }
     if e.kind == xk_unary() {
-        sum_eval(c, e.b).ignore()
+        sum_eval(c, e.b)
         return val_none()
     }
     if e.kind == xk_binary() {
-        sum_eval(c, e.b).ignore()
-        sum_eval(c, e.c).ignore()
+        sum_eval(c, e.b)
+        sum_eval(c, e.c)
         return val_none()
     }
     if e.kind == xk_range() {
-        sum_eval(c, e.a).ignore()
-        sum_eval(c, e.b).ignore()
+        sum_eval(c, e.a)
+        sum_eval(c, e.b)
         return val_none()
     }
     if e.kind == xk_array() {
@@ -292,15 +292,15 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
     if e.kind == xk_index() {
         idx: ExprNode = vec_get((*a).exprs, e.b)
         if idx.kind == xk_range() {
-            sum_eval(c, e.b).ignore()
+            sum_eval(c, e.b)
             return sum_eval(c, e.a)
         }
-        sum_eval(c, e.b).ignore()
-        sum_eval(c, e.a).ignore()
+        sum_eval(c, e.b)
+        sum_eval(c, e.a)
         return projection_val(c, id)
     }
     if e.kind == xk_field() {
-        sum_eval(c, e.a).ignore()
+        sum_eval(c, e.a)
         return projection_val(c, id)
     }
     if e.kind == xk_lambda() {
@@ -316,7 +316,7 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         return sum_eval_match(c, e)
     }
     if e.kind == xk_await() {
-        sum_eval(c, e.a).ignore()
+        sum_eval(c, e.a)
         return val_none()
     }
     if e.kind == xk_collect() {
@@ -331,7 +331,7 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         mut k: int64 = 0
         while k < e.c {
             db: DoBindNode = vec_get((*a).do_binds, kid(a, e.b, k))
-            sum_eval(c, db.expr).ignore()
+            sum_eval(c, db.expr)
             k = k + 1
         }
         return val_none()
@@ -456,10 +456,10 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
             if map_has(vidx, vname) { return ctor_val(c, vname, argvals) }
             return join_all(argvals)
         }
-        sum_eval(c, callee.a).ignore()
+        sum_eval(c, callee.a)
         return apply_top(c, arg_off, arg_len, argvals)
     }
-    sum_eval(c, callee_id).ignore()
+    sum_eval(c, callee_id)
     return apply_top(c, arg_off, arg_len, argvals)
 }
 

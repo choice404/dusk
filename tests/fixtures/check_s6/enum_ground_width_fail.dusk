@@ -1,0 +1,20 @@
+// Dual-pass proof, the enum constructor form: a generic enum carried through a
+// generic `do` binds an int64 payload where the pinned result element is int32.
+// The surface pass sees the constructor argument against a type parameter and
+// wildcards it; the ground pass instantiates the enum and width-checks the
+// argument against the concrete payload, catching the mismatch.
+@paradigm functional
+
+@import std.functional.maybe
+
+func main() -> int32 {
+    r: Maybe<int32> = do Maybe {
+        a <- Maybe.Some(0i32)
+        Maybe.Some(4294967297)
+    }
+    match r {
+        Some(v) => println("{}", v),
+        None => println("none"),
+    }
+    return 0
+}

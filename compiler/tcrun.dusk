@@ -187,7 +187,12 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
 export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
     (*tc).resolvable_fn_binds = sum_resolvable_fn_binds((*tc).sum_tables, f.body)
     set_cur_generics(tc, f.generics_off, f.generics_len)
-    (*tc).cur_ret = tc_raw_type(tc, f.ret)
+    // cur_ret drives the return-type compat and, being unfixed, the by-value
+    // interface-return reject. Unmangle it so a ground `Future$T` return matches
+    // an expression whose type the body pass unmangled; the surface pass carries
+    // an empty table, so this is a no-op there. cur_raw_ret stays the plain lower,
+    // which the interface/conformance branch reads.
+    (*tc).cur_ret = unmangle((*tc).ty, tc_raw_type(tc, f.ret), (*tc).future_elems)
     (*tc).cur_raw_ret = tc_raw_type(tc, f.ret)
     (*tc).branch_depth = 0
     (*tc).in_async = f.is_async
@@ -341,7 +346,9 @@ export func tc_run(tc: *TypeChecker) -> void {
     }
 }
 
-export func typeck_check_with_info(a: *Ast, info: EscapeInfo) -> *Vector<SpanDiagnostic> {
+// Runs the surface type pass and returns the checker, so the mono command can read
+// its reconciled mutable-tuple table and type arena alongside the diagnostics.
+export func typeck_run_with_info(a: *Ast, info: EscapeInfo) -> *TypeChecker {
     empty_future: *Map<int64> = alloc(map_new())
     tc: *TypeChecker = tc_new(a, false, empty_future)
     (*tc).summaries = info.summaries
@@ -359,6 +366,11 @@ export func typeck_check_with_info(a: *Ast, info: EscapeInfo) -> *Vector<SpanDia
         i = i + 1
     }
     tc_run(tc)
+    return tc
+}
+
+export func typeck_check_with_info(a: *Ast, info: EscapeInfo) -> *Vector<SpanDiagnostic> {
+    tc: *TypeChecker = typeck_run_with_info(a, info)
     return (*tc).errors
 }
 
@@ -366,8 +378,14 @@ export func typeck_check(a: *Ast) -> *Vector<SpanDiagnostic> {
     return typeck_check_with_info(a, compute_escape_info(a))
 }
 
-export func typeck_check_ground(a: *Ast, future_elems: *Map<int64>) -> *Vector<SpanDiagnostic> {
-    tc: *TypeChecker = tc_new(a, true, future_elems)
+// The ground double pass: types, widths, arguments, and exhaustiveness only, over
+// the mono-expanded module. `future_table` is mono's mangled Future$T map; tc_new
+// lowers it and unmangles every signature and body reference through it, so a
+// future passed, returned, or stored ground-checks the same shape the surface pass
+// accepted. Ownership, escape, and must-handle stay suppressed here (types_only,
+// empty summaries), since the surface pass already ran them at full fidelity.
+export func typeck_check_ground(a: *Ast, future_table: *Map<int64>) -> *Vector<SpanDiagnostic> {
+    tc: *TypeChecker = tc_new(a, true, future_table)
     tc_run(tc)
     return (*tc).errors
 }

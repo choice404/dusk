@@ -1,0 +1,382 @@
+// monoemit: the shared state and type machinery for dusk1 monomorphization. Holds
+// the Mono record every mono pass threads, the AST-type builders that append ground
+// TypeNodes to the arena, the mangle/flat name encoders that must match stage0 byte
+// for byte, the Ty-to-AST emitter that stamps a reconciled mutable-tuple type onto a
+// binding, and the diagnostic push. Mono works on AST TypeNode ids throughout, the
+// same representation the parser dump renders, so the order nodes land in the arena
+// never affects the dump; only the structure of the ground items does.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import intern
+@import ast
+@import ty
+@import diag
+@import tcstate
+
+// Each queued instantiation: the generic name, the ground type arguments, and the
+// span of the site that first requested it, so a backstop points at real source.
+export struct WorkItem { name: string, args: *Vector<int64>, lo: int64, hi: int64 }
+
+// The result of one call-site inference: the type arguments, the parameters no site
+// pinned (reported unless a monad phantom), and whether the return is still open.
+export struct SolveResult { targs: *Vector<int64>, missing: *Vector<string>, ret_open: bool }
+
+// The result of a struct-literal or enum-ctor inference: type arguments plus the
+// unpinned parameter names.
+export struct ArgResult { targs: *Vector<int64>, missing: *Vector<string> }
+
+export struct Mono {
+    ast: *Ast,
+    ty: *TyArena,
+    gfuncs: *Map<int64>,
+    gstructs: *Map<int64>,
+    genums: *Map<int64>,
+    ifaces: *Map<int64>,
+    nfuncs: *Map<int64>,
+    requested: *Map<int64>,
+    worklist: *Vector<WorkItem>,
+    out: *Vector<ItemNode>,
+    diags: *Vector<SpanDiagnostic>,
+    future_table: *Map<int64>,
+    mut_tuple: *Map<MutTupleEntry>,
+}
+
+// The instantiation budget the worklist drain may spend before it is declared non
+// terminating. Matches stage0's ceiling exactly.
+export func mono_limit() -> int64 { return 10000 }
+
+export func mono_new(a: *Ast, tyarena: *TyArena, muts: *Map<MutTupleEntry>) -> *Mono {
+    gfuncs: *Map<int64> = alloc(map_new())
+    gstructs: *Map<int64> = alloc(map_new())
+    genums: *Map<int64> = alloc(map_new())
+    ifaces: *Map<int64> = alloc(map_new())
+    nfuncs: *Map<int64> = alloc(map_new())
+    requested: *Map<int64> = alloc(map_new())
+    worklist: *Vector<WorkItem> = alloc(vec_new())
+    out: *Vector<ItemNode> = alloc(vec_new())
+    diags: *Vector<SpanDiagnostic> = alloc(vec_new())
+    future_table: *Map<int64> = alloc(map_new())
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if f.generics_len > 0 {
+                map_put(gfuncs, ast_name(a, f.name), it.id)
+            } else {
+                map_put(nfuncs, ast_name(a, f.name), it.id)
+            }
+        } else if it.kind == ik_struct() {
+            s: StructNode = vec_get((*a).structs, it.id)
+            if s.generics_len > 0 {
+                map_put(gstructs, ast_name(a, s.name), it.id)
+            }
+        } else if it.kind == ik_enum() {
+            e: EnumNode = vec_get((*a).enums, it.id)
+            if e.generics_len > 0 {
+                map_put(genums, ast_name(a, e.name), it.id)
+            }
+        } else if it.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            map_put(ifaces, ast_name(a, iface.name), 1)
+        }
+        i = i + 1
+    }
+    return alloc(Mono {
+        ast: a,
+        ty: tyarena,
+        gfuncs: gfuncs,
+        gstructs: gstructs,
+        genums: genums,
+        ifaces: ifaces,
+        nfuncs: nfuncs,
+        requested: requested,
+        worklist: worklist,
+        out: out,
+        diags: diags,
+        future_table: future_table,
+        mut_tuple: muts,
+    })
+}
+
+export func mono_diag(m: *Mono, msg: string, lo: int64, hi: int64) -> void {
+    vec_push((*m).diags, span_diag(lo, hi, msg))
+}
+
+// Typed accessors for the Mono maps. A generic call such as map_has cannot infer
+// its element type through a bare field access on a non-generic struct, so every
+// generic map or vector call routes its argument through one of these, whose
+// declared return pins the element type.
+export func m_gstructs(m: *Mono) -> *Map<int64> { return (*m).gstructs }
+export func m_genums(m: *Mono) -> *Map<int64> { return (*m).genums }
+export func m_gfuncs(m: *Mono) -> *Map<int64> { return (*m).gfuncs }
+export func m_nfuncs(m: *Mono) -> *Map<int64> { return (*m).nfuncs }
+export func m_ifaces(m: *Mono) -> *Map<int64> { return (*m).ifaces }
+export func m_requested(m: *Mono) -> *Map<int64> { return (*m).requested }
+export func m_future_table(m: *Mono) -> *Map<int64> { return (*m).future_table }
+export func m_mut_tuple(m: *Mono) -> *Map<MutTupleEntry> { return (*m).mut_tuple }
+export func m_worklist(m: *Mono) -> *Vector<WorkItem> { return (*m).worklist }
+
+export func mono_is_generic(m: *Mono, name: string) -> bool {
+    return map_has(m_gstructs(m), name) || map_has(m_genums(m), name)
+}
+
+// ---- AST type builders: append ground TypeNodes to the shared arena. ----
+
+export func mt_named0(a: *Ast, name: string) -> int64 {
+    nid: int64 = intern_id((*a).interner, name)
+    empty: *Vector<int64> = alloc(vec_new())
+    off, len := ast_kids(a, empty)
+    return ast_type(a, tk_named(), nid, off, len)
+}
+
+export func mt_named(a: *Ast, name: string, args: *Vector<int64>) -> int64 {
+    nid: int64 = intern_id((*a).interner, name)
+    off, len := ast_kids(a, args)
+    return ast_type(a, tk_named(), nid, off, len)
+}
+
+export func mt_named_id(a: *Ast, nid: int64, args: *Vector<int64>) -> int64 {
+    off, len := ast_kids(a, args)
+    return ast_type(a, tk_named(), nid, off, len)
+}
+
+export func mt_ptr(a: *Ast, inner: int64) -> int64 { return ast_type(a, tk_ptr(), inner, 0, 0) }
+export func mt_rawptr(a: *Ast, inner: int64) -> int64 { return ast_type(a, tk_rawptr(), inner, 0, 0) }
+export func mt_slice(a: *Ast, inner: int64) -> int64 { return ast_type(a, tk_slice(), inner, 0, 0) }
+export func mt_collector(a: *Ast, inner: int64) -> int64 { return ast_type(a, tk_collector(), inner, 0, 0) }
+export func mt_array(a: *Ast, inner: int64, n: int64) -> int64 { return ast_type(a, tk_array(), inner, n, 0) }
+export func mt_unit(a: *Ast) -> int64 { return ast_type(a, tk_unit(), 0, 0, 0) }
+export func mt_infer(a: *Ast) -> int64 { return ast_type(a, tk_infer(), 0, 0, 0) }
+
+export func mt_tuple(a: *Ast, xs: *Vector<int64>) -> int64 {
+    off, len := ast_kids(a, xs)
+    return ast_type(a, tk_tuple(), off, len, 0)
+}
+
+export func mt_func(a: *Ast, ps: *Vector<int64>, ret: int64) -> int64 {
+    off, len := ast_kids(a, ps)
+    return ast_type(a, tk_func(), off, len, ret)
+}
+
+// ---- Type readers: structural queries over an AST TypeNode id. ----
+
+// The type-argument ids of a Named type, gathered into a fresh vector.
+export func named_targs(a: *Ast, id: int64) -> *Vector<int64> {
+    n: TypeNode = vec_get((*a).types, id)
+    out: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < n.c {
+        vec_push(out, vec_get((*a).kids, n.b + i))
+        i = i + 1
+    }
+    return out
+}
+
+// The element ids of a Tuple type.
+export func tuple_kids(a: *Ast, id: int64) -> *Vector<int64> {
+    n: TypeNode = vec_get((*a).types, id)
+    out: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < n.b {
+        vec_push(out, vec_get((*a).kids, n.a + i))
+        i = i + 1
+    }
+    return out
+}
+
+// The parameter ids of a Func type.
+export func func_params(a: *Ast, id: int64) -> *Vector<int64> {
+    n: TypeNode = vec_get((*a).types, id)
+    out: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < n.b {
+        vec_push(out, vec_get((*a).kids, n.a + i))
+        i = i + 1
+    }
+    return out
+}
+
+// ---- Mangling: name$arg$arg, byte identical to stage0's mangle/flat. ----
+
+export func mono_mangle(a: *Ast, name: string, args: *Vector<int64>) -> string {
+    if vec_len(args) == 0 {
+        return name
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    mut i: int64 = 0
+    while i < vec_len(args) {
+        sb_push_char(b, 36)
+        s: string = mono_flat(a, vec_get(args, i))
+        sb_push(b, s)
+        free(s)
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func mono_flat(a: *Ast, id: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    flat_into(b, a, id)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func flat_into(b: *StringBuilder, a: *Ast, id: int64) -> void {
+    n: TypeNode = vec_get((*a).types, id)
+    if n.kind == tk_named() {
+        if n.c == 0 {
+            sb_push(b, ast_name(a, n.a))
+            return
+        }
+        sb_push(b, ast_name(a, n.a))
+        sb_push_char(b, 36)
+        sb_push_int(b, n.c)
+        mut i: int64 = 0
+        while i < n.c {
+            sb_push_char(b, 36)
+            flat_into(b, a, vec_get((*a).kids, n.b + i))
+            i = i + 1
+        }
+        return
+    }
+    if n.kind == tk_ptr() {
+        sb_push(b, "$p$")
+        flat_into(b, a, n.a)
+        return
+    }
+    if n.kind == tk_rawptr() {
+        sb_push(b, "$rp$")
+        flat_into(b, a, n.a)
+        return
+    }
+    if n.kind == tk_slice() {
+        sb_push(b, "$s$")
+        flat_into(b, a, n.a)
+        return
+    }
+    if n.kind == tk_array() {
+        sb_push(b, "$a")
+        sb_push_int(b, n.b)
+        sb_push_char(b, 36)
+        flat_into(b, a, n.a)
+        return
+    }
+    if n.kind == tk_tuple() {
+        // "$t{len}${parts joined by $}": the separator after the count prints even
+        // when the list is empty, matching stage0's format string byte for byte.
+        sb_push(b, "$t")
+        sb_push_int(b, n.b)
+        sb_push_char(b, 36)
+        mut i: int64 = 0
+        while i < n.b {
+            if i > 0 { sb_push_char(b, 36) }
+            flat_into(b, a, vec_get((*a).kids, n.a + i))
+            i = i + 1
+        }
+        return
+    }
+    if n.kind == tk_func() {
+        // "$f{len}${params joined by $}${ret}": a zero param function still carries
+        // both separators, so "() -> R" flattens to "$f0$$R" as stage0 does.
+        sb_push(b, "$f")
+        sb_push_int(b, n.b)
+        sb_push_char(b, 36)
+        mut j: int64 = 0
+        while j < n.b {
+            if j > 0 { sb_push_char(b, 36) }
+            flat_into(b, a, vec_get((*a).kids, n.a + j))
+            j = j + 1
+        }
+        sb_push_char(b, 36)
+        flat_into(b, a, n.c)
+        return
+    }
+    if n.kind == tk_collector() {
+        sb_push(b, "$c$")
+        flat_into(b, a, n.a)
+        return
+    }
+    if n.kind == tk_unit() {
+        sb_push(b, "$void")
+        return
+    }
+    sb_push(b, "$infer")
+}
+
+// ---- Ty-to-AST emitter: the inverse of `lower`, for stamping a reconciled
+// mutable-tuple storage type onto a Bind. Only the scalar, pointer, slice, array,
+// and tuple shapes the mut-tuple class can hold are handled; anything else yields
+// -1, the "no stamp" signal, matching stage0's `ty_to_ast` returning None. ----
+
+export func ty_to_ast(m: *Mono, tyid: int64) -> int64 {
+    a: *Ast = (*m).ast
+    n: TyNode = ty_get((*m).ty, tyid)
+    if n.kind == tyk_int() {
+        return mt_named0(a, int_width_name(n.w))
+    }
+    if n.kind == tyk_float() {
+        return mt_named0(a, float_width_name(n.w))
+    }
+    if n.kind == tyk_bool() { return mt_named0(a, "bool") }
+    if n.kind == tyk_char() { return mt_named0(a, "char") }
+    if n.kind == tyk_rune() { return mt_named0(a, "rune") }
+    if n.kind == tyk_str() { return mt_named0(a, "string") }
+    if n.kind == tyk_unit() { return mt_unit(a) }
+    if n.kind == tyk_ptr() {
+        inner: int64 = ty_to_ast(m, n.a)
+        if inner < 0 { return -1 }
+        return mt_ptr(a, inner)
+    }
+    if n.kind == tyk_rawptr() {
+        inner2: int64 = ty_to_ast(m, n.a)
+        if inner2 < 0 { return -1 }
+        return mt_rawptr(a, inner2)
+    }
+    if n.kind == tyk_slice() {
+        inner3: int64 = ty_to_ast(m, n.a)
+        if inner3 < 0 { return -1 }
+        return mt_slice(a, inner3)
+    }
+    if n.kind == tyk_array() {
+        inner4: int64 = ty_to_ast(m, n.a)
+        if inner4 < 0 { return -1 }
+        return mt_array(a, inner4, n.w)
+    }
+    if n.kind == tyk_tuple() {
+        xs: *Vector<int64> = alloc(vec_new())
+        mut i: int64 = 0
+        while i < n.len {
+            e: int64 = ty_to_ast(m, vec_get((*(*m).ty).kids, n.off + i))
+            if e < 0 { return -1 }
+            vec_push(xs, e)
+            i = i + 1
+        }
+        return mt_tuple(a, xs)
+    }
+    return -1
+}
+
+func int_width_name(w: int64) -> string {
+    if w == 32 { return "int32" }
+    if w == 16 { return "int16" }
+    if w == 8 { return "int8" }
+    return "int64"
+}
+
+func float_width_name(w: int64) -> string {
+    if w == 32 { return "float32" }
+    return "float64"
+}

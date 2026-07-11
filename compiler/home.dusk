@@ -13,11 +13,28 @@
 @import std.string
 
 // Joins a directory and a name with a single separator, returning a fresh heap
-// string the caller owns. No normalization is done: the inputs are assumed to be
-// clean path fragments, which is all the driver ever passes.
+// string the caller owns. Trailing separators on the directory are collapsed
+// first, so a directory that already ends in a separator, or in a run of them,
+// yields exactly one before the name, matching Rust's Path::join, which the
+// stage0 loader uses. This keeps a diagnostic's file path byte-identical to
+// stage0 when an import resolves under a directory that carried a stray slash.
 export func path_join(dir: string, name: string) -> string {
+    mut dl: int64 = str_len(dir)
+    // dusk's && is eager, so the index guard and the character read cannot share
+    // one condition: at dl == 0 the read would be dir[-1]. Step with a flag.
+    mut stripping: bool = dl > 0
+    while stripping {
+        if dir[dl - 1] == 47 {
+            dl = dl - 1
+            stripping = dl > 0
+        } else {
+            stripping = false
+        }
+    }
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, dir)
+    clean: string = substring(dir, 0, dl)
+    sb_push(b, clean)
+    free(clean)
     sb_push_char(b, 47)
     sb_push(b, name)
     out: string = substring(sb_cstr(b), 0, sb_size(b))

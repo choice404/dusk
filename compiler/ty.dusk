@@ -335,6 +335,23 @@ export func compat(t: *TyArena, a: int64, b: int64) -> bool {
     return false
 }
 
+// The base name a diagnostic shows for a possibly mangled type: everything before
+// the first '$', so a ground instantiation names its source type, not the mangled
+// internal name mono minted. A surface name carries no '$', so this returns a plain
+// copy of it. Mirrors stage0's `name.split('$').next()`. Always a fresh heap string
+// the caller frees.
+export func base_type_name(name: string) -> string {
+    n: int64 = str_len(name)
+    mut i: int64 = 0
+    while i < n {
+        if name[i] == 36 {
+            return substring(name, 0, i)
+        }
+        i = i + 1
+    }
+    return substring(name, 0, n)
+}
+
 func push_quoted(b: *StringBuilder, s: string) -> void {
     sb_push_char(b, 39)
     sb_push(b, s)
@@ -413,9 +430,46 @@ export func elem_of(t: *TyArena, id: int64) -> int64 {
     return ty_unknown(t)
 }
 
-// Future unmangling is a pass-through in S3a because mono has not populated the
-// future table yet. S5 wires this to the ground pass table.
+// Restores the surface future shape wherever mono left a mangled Future$T named
+// type, walking every carrier so a future buried in a slice, array, tuple,
+// pointer, collector, or function type is restored too. `future_elems` maps each
+// mangled name to its element's checked-type id in this arena. An empty table
+// (the surface pass) short-circuits to a pass-through, so unmangle costs nothing
+// there and only rewrites on the ground re-check.
 export func unmangle(t: *TyArena, id: int64, future_elems: *Map<int64>) -> int64 {
-    future_elems.ignore()
+    if map_len(future_elems) == 0 { return id }
+    n: TyNode = ty_get(t, id)
+    if n.kind == tyk_named() {
+        name: string = intern_get((*t).interner, n.a)
+        if map_has(future_elems, name) {
+            elem: int64 = unwrap_or(map_get(future_elems, name), -1)
+            return ty_future(t, unmangle(t, elem, future_elems))
+        }
+        return id
+    }
+    if n.kind == tyk_ptr() { return ty_ptr(t, unmangle(t, n.a, future_elems)) }
+    if n.kind == tyk_rawptr() { return ty_rawptr(t, unmangle(t, n.a, future_elems)) }
+    if n.kind == tyk_slice() { return ty_slice(t, unmangle(t, n.a, future_elems)) }
+    if n.kind == tyk_collector() { return ty_collector(t, unmangle(t, n.a, future_elems)) }
+    if n.kind == tyk_future() { return ty_future(t, unmangle(t, n.a, future_elems)) }
+    if n.kind == tyk_array() { return ty_array(t, unmangle(t, n.a, future_elems), n.w) }
+    if n.kind == tyk_tuple() {
+        xs: *Vector<int64> = alloc(vec_new())
+        mut i: int64 = 0
+        while i < n.len {
+            vec_push(xs, unmangle(t, vec_get((*t).kids, n.off + i), future_elems))
+            i = i + 1
+        }
+        return ty_tuple(t, xs)
+    }
+    if n.kind == tyk_func() {
+        ps: *Vector<int64> = alloc(vec_new())
+        mut j: int64 = 0
+        while j < n.len {
+            vec_push(ps, unmangle(t, vec_get((*t).kids, n.off + j), future_elems))
+            j = j + 1
+        }
+        return ty_func(t, ps, unmangle(t, n.a, future_elems))
+    }
     return id
 }

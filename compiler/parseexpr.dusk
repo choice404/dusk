@@ -401,12 +401,14 @@ func parse_primary(p: *Parser) -> int64 {
     if t.kind == k_ident() {
         name: int64 = intern_range((*p_ast(p)).interner, (*p).src, (*p).n, t.lo, t.hi)
         if (*p).in_async_fn && p_ident_text_is(p, "await") {
+            // The span is the operand token, the same one stage0's parser points
+            // at after it steps past `await`, so the caret covers the awaited name
+            // rather than collapsing to a single column on a multi-character name.
             next: Token = p_tok2(p)
-            at: int64 = next.lo
             if (*p).lambda_depth == 0 {
-                p_error_at(p, at, "'await' cannot appear mid-expression; give the awaited value a name, as in v, e := await f")
+                p_error_span(p, next.lo, next.hi, "'await' cannot appear mid-expression; give the awaited value a name, as in v, e := await f")
             } else {
-                p_error_at(p, at, "a lambda cannot await; only the enclosing async func can suspend")
+                p_error_span(p, next.lo, next.hi, "a lambda cannot await; only the enclosing async func can suspend")
             }
         }
         p_bump(p)

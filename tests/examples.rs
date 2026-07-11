@@ -117,6 +117,21 @@ fn check_fails(example: &str) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// Runs `dusk build` on an example that type-checks but must be refused by
+/// codegen, returning stderr. This is the backstop class: the surface pass is
+/// permissive, so `dusk check` passes, but the backend records a named build
+/// error rather than emitting unsound IR.
+fn build_fails(example: &str) -> String {
+    let bin = dusk_bin();
+    let path = format!("{}/examples/{}", env!("CARGO_MANIFEST_DIR"), example);
+    let out = Command::new(bin)
+        .args(["build", &path])
+        .output()
+        .expect("spawn dusk");
+    assert!(!out.status.success(), "{example} must fail to build");
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 #[test]
 fn bare_call_to_imported_private_name_is_rejected() {
     let err = check_fails("privacy_bare.dusk");
@@ -1776,6 +1791,25 @@ fn a_slice_of_concrete_structs_as_a_slice_of_interface_is_rejected() {
         err.contains("cannot pass a slice of 'Box' as a slice of interface 'Sized'"),
         "{err}"
     );
+}
+
+#[test]
+fn a_method_call_lowers_its_receiver_exactly_once() {
+    // The discard idiom `make().ignore()` evaluates `make()` a single time. Before
+    // the fix the base was lowered, the method failed to resolve, and the generic
+    // call path re-lowered the whole field expression, running the side effect
+    // twice; `made` would print twice.
+    assert_eq!(run("methodbaseonce.dusk"), "made\ndone\n");
+}
+
+#[test]
+fn an_unresolvable_method_is_a_named_build_error_not_a_silent_zero() {
+    // `toString` on a plain struct with no Display impl has no lowering. The
+    // surface pass is permissive (the result is Unknown), so `dusk check` passes,
+    // but codegen must refuse the module with a named error rather than emit a
+    // garbage zero and evaluate the receiver twice.
+    let err = build_fails("methodunresolved_fail.dusk");
+    assert!(err.contains("no method 'toString' on type 'V'"), "{err}");
 }
 
 #[test]

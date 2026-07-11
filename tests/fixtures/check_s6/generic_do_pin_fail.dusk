@@ -1,0 +1,19 @@
+// Dual-pass proof, the annotation form: the binding pins Maybe<int32> but the
+// element bound inside the generic `do` is int64. The surface pass wildcards the
+// do's element, so the clash is invisible until mono grounds the monad and the
+// second types-only pass compares the pinned annotation against the ground element.
+@paradigm functional
+
+@import std.functional.maybe
+
+func main() -> int32 {
+    r: Maybe<int32> = do Maybe {
+        a <- Maybe.Some(4294967297)
+        a
+    }
+    match r {
+        Some(v) => println("{}", v),
+        None => println("none"),
+    }
+    return 0
+}

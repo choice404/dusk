@@ -4,6 +4,7 @@
 
 @import std.vector
 @import std.map
+@import std.functional.maybe
 @import ast
 @import diag
 @import ty
@@ -76,9 +77,25 @@ export struct TypeChecker {
     errors: *Vector<SpanDiagnostic>,
 }
 
-export func tc_new(a: *Ast, types_only: bool, future_elems: *Map<int64>) -> *TypeChecker {
+// The third argument is mono's raw future table (mangled Future$T name -> the
+// element's ground AST type id). It is lowered into this pass's arena before
+// signatures are collected, so the sig-collection unmangle sees a populated
+// table exactly as stage0 sets future_elems before collect_sigs. The surface
+// pass passes an empty table, so future_elems stays empty and every unmangle is
+// a no-op there.
+export func tc_new(a: *Ast, types_only: bool, future_table: *Map<int64>) -> *TypeChecker {
     ta: *TyArena = ty_arena_new()
-    sigs: *TypeSigs = tysigs_new(a, ta)
+    future_elems: *Map<int64> = alloc(map_new())
+    no_gens: *Map<int64> = alloc(map_new())
+    fkeys: *Vector<string> = map_keys(future_table)
+    mut fi: int64 = 0
+    while fi < vec_len(fkeys) {
+        fk: string = vec_get(fkeys, fi)
+        fastty: int64 = unwrap_or(map_get(future_table, fk), -1)
+        map_put(future_elems, fk, lower(ta, a, fastty, no_gens))
+        fi = fi + 1
+    }
+    sigs: *TypeSigs = tysigs_new(a, ta, future_elems)
     collect_sigs(sigs)
     scopes: *Vector<*Map<int64>> = alloc(vec_new())
     owns: *Vector<*Map<int64>> = alloc(vec_new())

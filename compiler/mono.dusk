@@ -1,0 +1,427 @@
+// mono: the monomorphization driver. rewrite_item copies every non-generic item
+// in source order, emit_ty and instantiate feed the worklist, force_future_instances
+// mints one Future per async func, then the worklist drains LIFO under the 10000
+// instantiation budget. requested gates each distinct mangled name once, so the
+// interface backstop and the budget diagnostic fire at most once per site. The
+// ground items land in a fresh item table dumped through the parser's ast_dump; the
+// arena nodes they reference are appended in place, orphan leakage by design.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import intern
+@import ast
+@import ty
+@import diag
+@import tcstate
+@import astdump
+@import monoemit
+@import monosolve
+@import monoguard
+@import monorw
+
+// ---- worklist as a LIFO stack over the Vector length field ----
+
+func wl_pop(wl: *Vector<WorkItem>) -> WorkItem {
+    n: int64 = vec_len(wl)
+    item: WorkItem = vec_get(wl, n - 1)
+    (*wl).len = n - 1
+    return item
+}
+
+export func report_missing(m: *Mono, missing: *Vector<string>, what: string, lo: int64, hi: int64) -> void {
+    mut i: int64 = 0
+    while i < vec_len(missing) {
+        g: string = vec_get(missing, i)
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "cannot infer the type parameter '")
+        sb_push(b, g)
+        sb_push(b, "' for '")
+        sb_push(b, what)
+        sb_push(b, "'; add an annotation that pins it")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        mono_diag(m, out, lo, hi)
+        i = i + 1
+    }
+}
+
+export func enqueue(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi: int64) -> void {
+    a: *Ast = (*m).ast
+    mg: string = mono_mangle(a, name, args)
+    if str_len(mg) > 1024 { return }
+    if str_eq(name, "Future") && vec_len(args) == 1 {
+        map_put(m_future_table(m), mg, vec_get(args, 0))
+    }
+    if map_has(m_requested(m), mg) { return }
+    map_put(m_requested(m), mg, 1)
+    // Interface backstop, once per distinct instantiation.
+    mut i: int64 = 0
+    while i < vec_len(args) {
+        an: TypeNode = vec_get((*a).types, vec_get(args, i))
+        if an.kind == tk_named() {
+            aname: string = ast_name(a, an.a)
+            if map_has(m_ifaces(m), aname) {
+                mono_diag(m, "an interface cannot be a generic type argument; generics are monomorphized over concrete types", lo, hi)
+            }
+        }
+        i = i + 1
+    }
+    argcopy: *Vector<int64> = alloc(vec_new())
+    mut j: int64 = 0
+    while j < vec_len(args) {
+        vec_push(argcopy, vec_get(args, j))
+        j = j + 1
+    }
+    vec_push(m_worklist(m), WorkItem { name: name, args: argcopy, lo: lo, hi: hi })
+}
+
+export func instantiate(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi: int64) -> string {
+    a: *Ast = (*m).ast
+    cargs: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(args) {
+        vec_push(cargs, emit_ty(m, vec_get(args, i), lo, hi))
+        i = i + 1
+    }
+    enqueue(m, name, cargs, lo, hi)
+    return mono_mangle(a, name, cargs)
+}
+
+export func emit_ty(m: *Mono, id: int64, lo: int64, hi: int64) -> int64 {
+    a: *Ast = (*m).ast
+    n: TypeNode = vec_get((*a).types, id)
+    if n.kind == tk_named() {
+        name: string = ast_name(a, n.a)
+        if n.c > 0 {
+            cargs: *Vector<int64> = alloc(vec_new())
+            mut i: int64 = 0
+            while i < n.c {
+                vec_push(cargs, emit_ty(m, vec_get((*a).kids, n.b + i), lo, hi))
+                i = i + 1
+            }
+            if mono_is_generic(m, name) {
+                enqueue(m, name, cargs, lo, hi)
+                return mt_named0(a, mono_mangle(a, name, cargs))
+            }
+            return mt_named(a, name, cargs)
+        }
+        return mt_named0(a, name)
+    }
+    if n.kind == tk_ptr() { return mt_ptr(a, emit_ty(m, n.a, lo, hi)) }
+    if n.kind == tk_rawptr() { return mt_rawptr(a, emit_ty(m, n.a, lo, hi)) }
+    if n.kind == tk_slice() { return mt_slice(a, emit_ty(m, n.a, lo, hi)) }
+    if n.kind == tk_array() { return mt_array(a, emit_ty(m, n.a, lo, hi), n.b) }
+    if n.kind == tk_tuple() {
+        xs: *Vector<int64> = alloc(vec_new())
+        mut j: int64 = 0
+        while j < n.b {
+            vec_push(xs, emit_ty(m, vec_get((*a).kids, n.a + j), lo, hi))
+            j = j + 1
+        }
+        return mt_tuple(a, xs)
+    }
+    if n.kind == tk_func() {
+        ps: *Vector<int64> = alloc(vec_new())
+        mut k: int64 = 0
+        while k < n.b {
+            vec_push(ps, emit_ty(m, vec_get((*a).kids, n.a + k), lo, hi))
+            k = k + 1
+        }
+        return mt_func(a, ps, emit_ty(m, n.c, lo, hi))
+    }
+    if n.kind == tk_collector() { return mt_collector(a, emit_ty(m, n.a, lo, hi)) }
+    if n.kind == tk_unit() { return mt_unit(a) }
+    // Infer poison: reported and defaulted so mangling stays total.
+    mono_diag(m, "could not infer this type argument; add an annotation that pins it", lo, hi)
+    return mt_named0(a, "int64")
+}
+
+export func emit_field_ty(m: *Mono, id: int64, subst: *Map<int64>, lo: int64, hi: int64) -> int64 {
+    applied: int64 = subst_apply(m, id, subst)
+    check_future_spell(m, applied, lo, hi)
+    return emit_ty(m, applied, lo, hi)
+}
+
+func expand_instance(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi: int64) -> void {
+    a: *Ast = (*m).ast
+    mangled: string = mono_mangle(a, name, args)
+    if map_has(m_gfuncs(m), name) {
+        gfid: int64 = unwrap_or(map_get(m_gfuncs(m), name), -1)
+        gf: FuncNode = vec_get((*a).funcs, gfid)
+        subst: *Map<int64> = build_subst(m, gf.generics_off, gf.generics_len, args)
+        nameid: int64 = intern_owned((*a).interner, mangled)
+        fid: int64 = rw_func(m, gfid, subst, nameid)
+        vec_push((*m).out, ItemNode { kind: ik_func(), id: fid })
+        return
+    }
+    if map_has(m_gstructs(m), name) {
+        gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
+        gs: StructNode = vec_get((*a).structs, gsid)
+        subst2: *Map<int64> = build_subst(m, gs.generics_off, gs.generics_len, args)
+        nameid2: int64 = intern_owned((*a).interner, mangled)
+        gens: *Vector<int64> = alloc(vec_new())
+        fields: *Vector<int64> = alloc(vec_new())
+        mut i: int64 = 0
+        while i < gs.fields_len {
+            fl: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + i))
+            vec_push(fields, ast_field(a, fl.name, emit_field_ty(m, fl.ty, subst2, lo, hi)))
+            i = i + 1
+        }
+        sid: int64 = ast_struct(a, gs.exported, nameid2, gens, fields)
+        vec_push((*m).out, ItemNode { kind: ik_struct(), id: sid })
+        return
+    }
+    if map_has(m_genums(m), name) {
+        geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
+        ge: EnumNode = vec_get((*a).enums, geid)
+        subst3: *Map<int64> = build_subst(m, ge.generics_off, ge.generics_len, args)
+        nameid3: int64 = intern_owned((*a).interner, mangled)
+        gens2: *Vector<int64> = alloc(vec_new())
+        variants: *Vector<int64> = alloc(vec_new())
+        mut vi: int64 = 0
+        while vi < ge.variants_len {
+            va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
+            vfields: *Vector<int64> = alloc(vec_new())
+            mut fi: int64 = 0
+            while fi < va.fields_len {
+                fl2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + fi))
+                vec_push(vfields, ast_field(a, fl2.name, emit_field_ty(m, fl2.ty, subst3, lo, hi)))
+                fi = fi + 1
+            }
+            vec_push(variants, ast_variant(a, va.name, vfields))
+            vi = vi + 1
+        }
+        eid: int64 = ast_enum(a, ge.exported, nameid3, gens2, variants)
+        vec_push((*m).out, ItemNode { kind: ik_enum(), id: eid })
+        return
+    }
+}
+
+func rewrite_item(m: *Mono, it: ItemNode) -> void {
+    a: *Ast = (*m).ast
+    empty_subst: *Map<int64> = alloc(map_new())
+    if it.kind == ik_func() {
+        f: FuncNode = vec_get((*a).funcs, it.id)
+        if f.generics_len == 0 {
+            fid: int64 = rw_func(m, it.id, empty_subst, -1)
+            vec_push((*m).out, ItemNode { kind: ik_func(), id: fid })
+        }
+        return
+    }
+    if it.kind == ik_struct() {
+        s: StructNode = vec_get((*a).structs, it.id)
+        if s.generics_len == 0 {
+            gens: *Vector<int64> = alloc(vec_new())
+            fields: *Vector<int64> = alloc(vec_new())
+            mut i: int64 = 0
+            while i < s.fields_len {
+                fl: FieldNode = vec_get((*a).fields, vec_get((*a).kids, s.fields_off + i))
+                vec_push(fields, ast_field(a, fl.name, emit_field_ty(m, fl.ty, empty_subst, 0, 0)))
+                i = i + 1
+            }
+            sid: int64 = ast_struct(a, s.exported, s.name, gens, fields)
+            vec_push((*m).out, ItemNode { kind: ik_struct(), id: sid })
+        }
+        return
+    }
+    if it.kind == ik_enum() {
+        e: EnumNode = vec_get((*a).enums, it.id)
+        if e.generics_len == 0 {
+            gens2: *Vector<int64> = alloc(vec_new())
+            variants: *Vector<int64> = alloc(vec_new())
+            mut vi: int64 = 0
+            while vi < e.variants_len {
+                va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + vi))
+                vfields: *Vector<int64> = alloc(vec_new())
+                mut fi: int64 = 0
+                while fi < va.fields_len {
+                    fl2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + fi))
+                    vec_push(vfields, ast_field(a, fl2.name, emit_field_ty(m, fl2.ty, empty_subst, 0, 0)))
+                    fi = fi + 1
+                }
+                vec_push(variants, ast_variant(a, va.name, vfields))
+                vi = vi + 1
+            }
+            eid: int64 = ast_enum(a, e.exported, e.name, gens2, variants)
+            vec_push((*m).out, ItemNode { kind: ik_enum(), id: eid })
+        }
+        return
+    }
+    if it.kind == ik_impl() {
+        im: ImplNode = vec_get((*a).impls, it.id)
+        if !mono_is_generic(m, ast_name(a, im.ty)) {
+            methods: *Vector<int64> = alloc(vec_new())
+            mut i: int64 = 0
+            while i < im.methods_len {
+                vec_push(methods, rw_func(m, vec_get((*a).kids, im.methods_off + i), empty_subst, -1))
+                i = i + 1
+            }
+            iid: int64 = ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)
+            vec_push((*m).out, ItemNode { kind: ik_impl(), id: iid })
+        } else {
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, "methods on the generic type '")
+            sb_push(b, ast_name(a, im.ty))
+            sb_push(b, "' are not supported yet; write free functions over it, the way std.vector does")
+            out: string = substring(sb_cstr(b), 0, sb_size(b))
+            sb_free(b)
+            free(b)
+            mono_diag(m, out, im.lo, im.hi)
+        }
+        return
+    }
+    if it.kind == ik_interface() {
+        vec_push((*m).out, it)
+        return
+    }
+    if it.kind == ik_foreign() {
+        vec_push((*m).out, it)
+        return
+    }
+}
+
+func force_future_instances(m: *Mono) -> void {
+    a: *Ast = (*m).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut first_lo: int64 = -1
+    mut first_hi: int64 = -1
+    mut any: bool = false
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if f.is_async {
+                if !any {
+                    first_lo = f.lo
+                    first_hi = f.hi
+                    any = true
+                }
+            }
+        }
+        i = i + 1
+    }
+    if !any { return }
+    if !map_has(m_gstructs(m), "Future") {
+        mono_diag(m, "calling an async func needs Future from std.async.future; add @import std.async.future", first_lo, first_hi)
+        return
+    }
+    mut j: int64 = 0
+    while j < vec_len(items) {
+        it2: ItemNode = vec_get(items, j)
+        if it2.kind == ik_func() {
+            f2: FuncNode = vec_get((*a).funcs, it2.id)
+            if f2.is_async {
+                mut p: int64 = 0
+                while p < f2.params_len {
+                    pm: ParamNode = vec_get((*a).params, vec_get((*a).kids, f2.params_off + p))
+                    e1: *Map<int64> = alloc(map_new())
+                    if !crossable(m, pm.ty, true, true, e1) {
+                        b: *StringBuilder = alloc(sb_new())
+                        sb_push(b, "an async func cannot take '")
+                        sb_push(b, ast_name(a, pm.name))
+                        sb_push(b, "': it holds a slice, closure, interface value, or future that would view the caller's frame, which the task outlives")
+                        out: string = substring(sb_cstr(b), 0, sb_size(b))
+                        sb_free(b)
+                        free(b)
+                        mono_diag(m, out, f2.lo, f2.hi)
+                    }
+                    p = p + 1
+                }
+                e2: *Map<int64> = alloc(map_new())
+                if !crossable(m, f2.ret, true, true, e2) {
+                    mono_diag(m, "an async func cannot return a slice, closure, interface value, or future that would outlive the task frame it views", f2.lo, f2.hi)
+                }
+                one: *Vector<int64> = alloc(vec_new())
+                vec_push(one, emit_ty(m, f2.ret, f2.lo, f2.hi))
+                enqueue(m, "Future", one, f2.lo, f2.hi)
+            }
+        }
+        j = j + 1
+    }
+}
+
+func mono_run(m: *Mono) -> void {
+    a: *Ast = (*m).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        rewrite_item(m, vec_get(items, i))
+        i = i + 1
+    }
+    force_future_instances(m)
+    mut spent: int64 = 0
+    while vec_len(m_worklist(m)) > 0 {
+        w: WorkItem = wl_pop(m_worklist(m))
+        spent = spent + 1
+        if spent > mono_limit() {
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, "monomorphization did not terminate within ")
+            sb_push_int(b, mono_limit())
+            sb_push(b, " instantiations; a generic is expanding without bound, likely a recursive generic instantiated with an ever growing type argument")
+            out: string = substring(sb_cstr(b), 0, sb_size(b))
+            sb_free(b)
+            free(b)
+            mono_diag(m, out, w.lo, w.hi)
+            return
+        }
+        expand_instance(m, w.name, w.args, w.lo, w.hi)
+    }
+}
+
+// Runs monomorphization over the checked module and returns the Mono record, whose
+// `out` holds the ground items, `diags` the inference and ban diagnostics, and
+// `future_table` the mangled Future to element map.
+export func mono_expand(a: *Ast, tyarena: *TyArena, muts: *Map<MutTupleEntry>) -> *Mono {
+    m: *Mono = mono_new(a, tyarena, muts)
+    mono_run(m)
+    return m
+}
+
+// A shallow Ast sharing every arena with the source but presenting the ground item
+// table, so the canonical parser dump renders the monomorphized module.
+func ast_with_items(a: *Ast, items: *Vector<ItemNode>) -> *Ast {
+    return alloc(Ast {
+        interner: (*a).interner,
+        exprs: (*a).exprs,
+        stmts: (*a).stmts,
+        types: (*a).types,
+        patterns: (*a).patterns,
+        funcs: (*a).funcs,
+        params: (*a).params,
+        fields: (*a).fields,
+        binds: (*a).binds,
+        arms: (*a).arms,
+        variants: (*a).variants,
+        method_sigs: (*a).method_sigs,
+        foreign_funcs: (*a).foreign_funcs,
+        structs: (*a).structs,
+        enums: (*a).enums,
+        interfaces: (*a).interfaces,
+        impls: (*a).impls,
+        foreigns: (*a).foreigns,
+        do_binds: (*a).do_binds,
+        blocks: (*a).blocks,
+        kids: (*a).kids,
+        paradigms: (*a).paradigms,
+        imports: (*a).imports,
+        monads: (*a).monads,
+        items: items,
+    })
+}
+
+// The monomorphized ground module: a shallow Ast presenting the ground item table
+// over the shared arenas. The ground double pass type-checks it and the mono dump
+// renders it.
+export func mono_ground(m: *Mono) -> *Ast {
+    return ast_with_items((*m).ast, (*m).out)
+}
+
+export func mono_dump(m: *Mono) -> string {
+    return ast_dump(mono_ground(m))
+}

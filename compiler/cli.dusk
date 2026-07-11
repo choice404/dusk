@@ -8,6 +8,7 @@
 
 @import std.string
 @import std.vector
+@import std.map
 @import source
 @import lex
 @import lexcore
@@ -24,6 +25,10 @@
 @import resolve
 @import tcrun
 @import sumfix
+@import ty
+@import tcstate
+@import monoemit
+@import mono
 
 func emit_errors(errs: *Vector<string>) -> void {
     mut i: int64 = 0
@@ -41,6 +46,55 @@ func emit_span_errors(files: *Vector<FileSrc>, errs: *Vector<SpanDiagnostic>) ->
         free(rendered)
         i = i + 1
     }
+}
+
+// The dedup key a ground diagnostic is matched against: its span and its message,
+// so an identical (lo, hi, msg) triple raised by both the mono pass and the ground
+// pass prints once, in emit order.
+func diag_dedup_key(lo: int64, hi: int64, msg: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_int(b, lo)
+    sb_push_char(b, 58)
+    sb_push_int(b, hi)
+    sb_push_char(b, 58)
+    sb_push(b, msg)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Runs the ground double pass over the monomorphized module and prints each ground
+// diagnostic the mono pass has not already emitted, deduping by (lo, hi, msg) with
+// insertion order preserved. Returns the count of newly emitted diagnostics, which
+// the caller folds into its exit gate. The surface diagnostics are empty by
+// construction here, since the spine reaches mono only when resolve and typeck are
+// clean, so the seen set is exactly the mono set, matching sema::check's precedence.
+func emit_ground_pass(files: *Vector<FileSrc>, m: *Mono, mono_errs: *Vector<SpanDiagnostic>) -> int64 {
+    ground: *Ast = mono_ground(m)
+    gdiags: *Vector<SpanDiagnostic> = typeck_check_ground(ground, m_future_table(m))
+    seen: *Map<int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < vec_len(mono_errs) {
+        e: SpanDiagnostic = vec_get(mono_errs, i)
+        map_put(seen, diag_dedup_key(e.lo, e.hi, e.msg), 1)
+        i = i + 1
+    }
+    mut n: int64 = 0
+    mut j: int64 = 0
+    while j < vec_len(gdiags) {
+        g: SpanDiagnostic = vec_get(gdiags, j)
+        k: string = diag_dedup_key(g.lo, g.hi, g.msg)
+        if !map_has(seen, k) {
+            map_put(seen, k, 1)
+            rendered: string = render_diag(files, g)
+            printerr(rendered)
+            free(rendered)
+            n = n + 1
+        }
+        j = j + 1
+    }
+    return n
 }
 
 // Runs the lexer on the file at path, printing one line per token to stdout and any
@@ -192,14 +246,35 @@ export func cmd_check(path: string, prog: string) -> int32 {
     }
     desugar(p.module)
     info: EscapeInfo = compute_escape_info(p.module)
+    // The surface passes run unconditionally and their diagnostics concatenate,
+    // resolve first, then the type pass; only monomorphization is gated on the
+    // combined set being empty, mirroring sema's own ordering.
     resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
     emit_span_errors(p.files, resolve_errs)
+    tc: *TypeChecker = typeck_run_with_info(p.module, info)
+    type_errs: *Vector<SpanDiagnostic> = (*tc).errors
+    emit_span_errors(p.files, type_errs)
     if vec_len(resolve_errs) > 0 {
         return 1
     }
-    type_errs: *Vector<SpanDiagnostic> = typeck_check_with_info(p.module, info)
-    emit_span_errors(p.files, type_errs)
     if vec_len(type_errs) > 0 {
+        return 1
+    }
+    // Monomorphization contributes its inference and frame-view ban diagnostics,
+    // so a type parameter no site pins down, or a channel element that would view
+    // the sending frame, fails check the way stage0 surfaces it. It runs only on
+    // an otherwise clean module. The ground double pass then re-runs the type,
+    // width, argument, and exhaustiveness class over the mono-expanded module,
+    // recovering exactly the class a generic do wildcarded on the surface. Mono
+    // and ground both run even when mono has diagnostics, matching sema::check.
+    m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
+    mono_errs: *Vector<SpanDiagnostic> = (*m).diags
+    emit_span_errors(p.files, mono_errs)
+    ground_new: int64 = emit_ground_pass(p.files, m, mono_errs)
+    if vec_len(mono_errs) > 0 {
+        return 1
+    }
+    if ground_new > 0 {
         return 1
     }
     b: *StringBuilder = alloc(sb_new())
@@ -227,8 +302,12 @@ export func cmd_esc(path: string, prog: string) -> int32 {
     return 0
 }
 
-// Mono is still a command spine only. It shares check's load+desugar+resolve+type
-// error behavior and stays silent on success until the mono pipeline lands.
+// Checks a source file through the surface passes, then monomorphizes and dumps the
+// ground module in the canonical parser dump format. Resolve, then typeck, then the
+// mono inference and ban diagnostics, then the ground double pass gate the dump; any
+// one that rejects fails the command with a non zero exit and an empty stdout,
+// matching stage0's mono contract. A program stage0 rejects only at the ground pass
+// (a generic do width mismatch, say) is now rejected here too, so no dump is printed.
 export func cmd_mono(path: string, prog: string) -> int32 {
     p: Program = load(path, prog)
     errs: *Vector<string> = p.errors
@@ -240,15 +319,31 @@ export func cmd_mono(path: string, prog: string) -> int32 {
         return 1
     }
     desugar(p.module)
+    info: EscapeInfo = compute_escape_info(p.module)
+    // Same spine as check: both surface passes run and print before any exit.
     resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
     emit_span_errors(p.files, resolve_errs)
+    tc: *TypeChecker = typeck_run_with_info(p.module, info)
+    type_errs: *Vector<SpanDiagnostic> = (*tc).errors
+    emit_span_errors(p.files, type_errs)
     if vec_len(resolve_errs) > 0 {
         return 1
     }
-    type_errs: *Vector<SpanDiagnostic> = typeck_check(p.module)
-    emit_span_errors(p.files, type_errs)
     if vec_len(type_errs) > 0 {
         return 1
     }
+    m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
+    mono_errs: *Vector<SpanDiagnostic> = (*m).diags
+    emit_span_errors(p.files, mono_errs)
+    ground_new: int64 = emit_ground_pass(p.files, m, mono_errs)
+    if vec_len(mono_errs) > 0 {
+        return 1
+    }
+    if ground_new > 0 {
+        return 1
+    }
+    out: string = mono_dump(m)
+    println(out)
+    free(out)
     return 0
 }

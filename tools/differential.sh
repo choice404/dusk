@@ -91,16 +91,10 @@ diag_header_multiset() {
 count=0
 skipped=0
 while IFS= read -r -d '' file; do
-    # check, mono, and esc still exclude the known paradigm-gated fixture until dusk1
-    # carries the full sema verdicts those modes compare.
-    if [[ "$cmd" == "check" || "$cmd" == "mono" || "$cmd" == "esc" ]]; then
-        case "$file" in
-            examples/implgate_fail.dusk)
-                skipped=$((skipped + 1))
-                continue
-                ;;
-        esac
-    fi
+    # dusk1 now carries the full sema verdicts for check, mono, and esc: the
+    # paradigm gate (the impl-requires-oop fixture), the surface type pass, mono,
+    # and the ground double pass that rejects the generic-do width class. Every
+    # corpus file is compared on all three modes with no exclusions.
 
     out_a="$tmp/a.out"
     out_b="$tmp/b.out"

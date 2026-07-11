@@ -21,6 +21,7 @@ export struct MethodList { off: int64, len: int64 }
 export struct TypeSigs {
     ast: *Ast,
     ty: *TyArena,
+    future_elems: *Map<int64>,
     tys: *Vector<int64>,
     fields: *Vector<FieldSig>,
     names: *Vector<string>,
@@ -42,7 +43,7 @@ export struct TypeSigs {
     iface_method_params: *Map<TyList>,
 }
 
-export func tysigs_new(a: *Ast, t: *TyArena) -> *TypeSigs {
+export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<int64>) -> *TypeSigs {
     tys: *Vector<int64> = alloc(vec_new())
     fields: *Vector<FieldSig> = alloc(vec_new())
     names: *Vector<string> = alloc(vec_new())
@@ -65,6 +66,7 @@ export func tysigs_new(a: *Ast, t: *TyArena) -> *TypeSigs {
     return alloc(TypeSigs {
         ast: a,
         ty: t,
+        future_elems: future_elems,
         tys: tys,
         fields: fields,
         names: names,
@@ -144,7 +146,12 @@ func push_tys(dst: *Vector<int64>, src: *Vector<int64>) -> TyList {
     return TyList { off: off, len: vec_len(src) }
 }
 
-func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>, fixed: bool) -> TyList {
+// Lowers a run of parameter types into the shared type vector. When fixed, an
+// interface named slot collapses to Unknown; when unmangle_fixed too, a mangled
+// Future$T left by mono is restored to its future shape, exactly as the ground
+// pass restores it for func signatures (and only func signatures, matching
+// stage0: foreign, interface, and impl method params keep the mangled name).
+func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>, fixed: bool, unmangle_fixed: bool) -> TyList {
     vals: *Vector<int64> = alloc(vec_new())
     a: *Ast = (*s).ast
     mut i: int64 = 0
@@ -152,6 +159,7 @@ func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>, fixed:
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, off + i))
         mut id: int64 = lower((*s).ty, a, p.ty, gens)
         if fixed { id = fix(s, id) }
+        if fixed && unmangle_fixed { id = unmangle((*s).ty, id, (*s).future_elems) }
         vec_push(vals, id)
         i = i + 1
     }
@@ -167,7 +175,7 @@ func push_fields(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>) -> (in
     while i < len {
         fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, off + i))
         raw: int64 = lower((*s).ty, a, fld.ty, gens)
-        fixed: int64 = fix(s, raw)
+        fixed: int64 = unmangle((*s).ty, fix(s, raw), (*s).future_elems)
         vec_push(fields_vec, FieldSig { name: ast_name(a, fld.name), ty: fixed, raw: raw })
         vec_push(raws, raw)
         i = i + 1
@@ -225,7 +233,7 @@ func collect_iface(s: *TypeSigs, id: int64) -> void {
         m: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + i))
         mname: string = ast_name(a, m.name)
         vec_push(methods_vec, MethodReq { name: mname, arity: m.params_len })
-        params: TyList = push_params(s, m.params_off, m.params_len, gens, false)
+        params: TyList = push_params(s, m.params_off, m.params_len, gens, false, false)
         map_put((*s).iface_method_params, key2(iname, mname), params)
         i = i + 1
     }
@@ -276,7 +284,7 @@ func collect_impl(s: *TypeSigs, id: int64) -> void {
     while i < im.methods_len {
         f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
         gens: *Map<int64> = generics_set(s, f.generics_off, f.generics_len)
-        params: TyList = push_params(s, f.params_off, f.params_len, gens, false)
+        params: TyList = push_params(s, f.params_off, f.params_len, gens, false, false)
         map_put((*s).method_params, key2(recv, ast_name(a, f.name)), params)
         i = i + 1
     }
@@ -286,10 +294,10 @@ func collect_func_sig(s: *TypeSigs, f: FuncNode) -> void {
     a: *Ast = (*s).ast
     name: string = ast_name(a, f.name)
     gens: *Map<int64> = generics_set(s, f.generics_off, f.generics_len)
-    raw_params: TyList = push_params(s, f.params_off, f.params_len, gens, false)
-    params: TyList = push_params(s, f.params_off, f.params_len, gens, true)
+    raw_params: TyList = push_params(s, f.params_off, f.params_len, gens, false, false)
+    params: TyList = push_params(s, f.params_off, f.params_len, gens, true, true)
     raw_ret: int64 = lower((*s).ty, a, f.ret, gens)
-    mut ret: int64 = fix(s, raw_ret)
+    mut ret: int64 = unmangle((*s).ty, fix(s, raw_ret), (*s).future_elems)
     if f.is_async {
         map_put((*s).async_fns, name, ret)
         ret = ty_future((*s).ty, ret)
@@ -316,8 +324,8 @@ func collect_foreign(s: *TypeSigs, id: int64) -> void {
     while i < fb.funcs_len {
         ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + i))
         name: string = ast_name(a, ff.name)
-        raw_params: TyList = push_params(s, ff.params_off, ff.params_len, gens, false)
-        params: TyList = push_params(s, ff.params_off, ff.params_len, gens, true)
+        raw_params: TyList = push_params(s, ff.params_off, ff.params_len, gens, false, false)
+        params: TyList = push_params(s, ff.params_off, ff.params_len, gens, true, false)
         raw_ret: int64 = lower((*s).ty, a, ff.ret, gens)
         ret: int64 = fix(s, raw_ret)
         map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: false })

@@ -5,6 +5,7 @@
 @import std.string
 @import std.vector
 @import std.map
+@import std.functional.maybe
 @import ast
 @import ty
 @import tcstate
@@ -22,6 +23,17 @@ func infer_await_operand(tc: *TypeChecker, await_expr: ExprNode) -> int64 {
     fn: TyNode = ty_get((*tc).ty, ft)
     if fn.kind == tyk_future() { return fn.a }
     if fn.kind == tyk_unknown() { return ft }
+    // On the ground AST mono may leave a future as its mangled Future$T named type
+    // where the operand's type was read from a table the unmangle walk does not
+    // reach, a struct field among them. The future table names its element, so an
+    // await still yields the right type instead of the permissive backstop.
+    if fn.kind == tyk_named() {
+        nm: string = ty_name((*tc).ty, ft)
+        fe: *Map<int64> = (*tc).future_elems
+        if map_has(fe, nm) {
+            return unwrap_or(map_get(fe, nm), ty_unknown((*tc).ty))
+        }
+    }
     if !(*tc).types_only {
         tc_emit(tc, "the operand of await is not a future", await_expr.lo, await_expr.hi)
     }
@@ -47,6 +59,25 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
             handled = true
         } else if tuple_iface_mismatch(tc, (*tc).cur_raw_ret, t, e.lo, e.hi) {
             handled = true
+        }
+        // A `return self` against a `*T` return earns the precise receiver-value
+        // message, not the generic mismatch: `self` is the receiver value, and
+        // codegen would hand the struct where the fat pointer belongs. Mirrors
+        // stage0's self_value_in_ptr_position at the return position, which the
+        // call-arg positions already run. dusk's `&&` does not short-circuit, so
+        // the ident kind is guarded with nested ifs before the name is read; a
+        // flat chain would call ast_name on a non-ident return expr and fault.
+        if !handled && (*tc).in_method {
+            if e.kind == xk_ident() {
+                if str_eq(ast_name(a, e.a), "self") {
+                    rt: TyNode = ty_get((*tc).ty, (*tc).cur_ret)
+                    selfn: TyNode = ty_get((*tc).ty, lookup(tc, "self"))
+                    if rt.kind == tyk_ptr() && selfn.kind == tyk_named() {
+                        tc_emit(tc, "cannot use 'self' where a pointer is required; 'self' is the receiver value, not a pointer to it", e.lo, e.hi)
+                        handled = true
+                    }
+                }
+            }
         }
         if !handled {
             tc_emit(tc, "return type does not match the function's return type", e.lo, e.hi)

@@ -1,0 +1,19 @@
+// Build-fail: a method the backend cannot resolve is a named build error, not a
+// silent zero. `toString` is a built-in on error values; on a plain struct with
+// no Display impl it has no lowering. The surface type pass is permissive here
+// (the result is Unknown), so `dusk check` passes, but `dusk build` refuses the
+// module rather than emitting a garbage value and evaluating `f()` twice.
+@paradigm procedural
+
+struct V { n: int64 }
+
+func f() -> V {
+    println("f runs")
+    return V { n: 1 }
+}
+
+func main() -> int32 {
+    s := f().toString()
+    println(s)
+    return 0
+}

@@ -2842,9 +2842,7 @@ impl<'a> Fb<'a> {
             return self.gen_enum_ctor(&en, &vn, args);
         }
         if let ExprKind::Field(base, mname) = &f.kind {
-            if let Some(v) = self.gen_method_call(base, mname, args) {
-                return v;
-            }
+            return self.gen_method_call(base, mname, args);
         }
         if let ExprKind::Ident(name) = &f.kind {
             let local_closure = matches!(
@@ -2962,78 +2960,159 @@ impl<'a> Fb<'a> {
         Val::i0()
     }
 
-    fn gen_method_call(&mut self, base: &Expr, mname: &str, args: &[Expr]) -> Option<Val> {
-        // Resolve the receiver to a self pointer so the method can mutate it. An
-        // lvalue passes its address; an rvalue struct is materialized to a slot; a
-        // `*Struct` passes the stored pointer. Error and interface receivers keep
-        // their own dispatch.
-        let (tyname, selfptr) = match self.gen_place(base) {
-            Some((CTy::Struct(t), pptr)) => (t, pptr),
-            Some((CTy::Ptr(inner), pptr)) if matches!(*inner, CTy::Struct(_)) => {
+    /// Lowers a `base.mname(args)` method-call callee. The receiver is lowered
+    /// exactly once (as a place when it is one, so a method can mutate it, else as
+    /// a value), and every dispatch decision is taken from that single lowering.
+    /// This is the sole landing point for a `Field` callee, so it never returns to
+    /// the generic call path that would re-lower the base a second time, which was
+    /// a silent double-evaluation of any side-effecting receiver.
+    fn gen_method_call(&mut self, base: &Expr, mname: &str, args: &[Expr]) -> Val {
+        if let Some((ty, ptr)) = self.gen_place(base) {
+            return self.method_on_place(ty, ptr, mname, args);
+        }
+        let bv = self.gen_expr(base);
+        self.method_on_value(bv, mname, args)
+    }
+
+    /// Dispatches a method on a receiver already lowered to its address `ptr`. A
+    /// `*Struct` receiver loads its fat pointer and checks the generation before
+    /// dispatch, so a call on a freed receiver faults exactly like a dereference.
+    fn method_on_place(&mut self, ty: CTy, ptr: String, mname: &str, args: &[Expr]) -> Val {
+        match ty {
+            CTy::Struct(t) => self.method_on_struct(&t, &ptr, mname, args),
+            CTy::Ptr(inner) if matches!(*inner, CTy::Struct(_)) => {
                 let CTy::Struct(t) = *inner else {
                     unreachable!()
                 };
-                // Load the full fat pointer and check its generation before
-                // dispatch, so a method call on a freed receiver faults the same
-                // way an explicit dereference does.
-                let fat = self.load(&CTy::Ptr(Box::new(CTy::Struct(t.clone()))), &pptr);
-                let p = self.fat_checked(&fat);
-                (t, p)
+                let fat = self.load(&CTy::Ptr(Box::new(CTy::Struct(t.clone()))), &ptr);
+                let data = self.fat_checked(&fat);
+                self.method_on_struct(&t, &data, mname, args)
             }
-            Some((CTy::Error, pptr)) => {
-                let v = self.load(&CTy::Error, &pptr);
-                return self.gen_error_method(&Val::new(CTy::Error, v), mname, args);
+            CTy::Error => {
+                let v = self.load(&CTy::Error, &ptr);
+                self.method_on_error(Val::new(CTy::Error, v), mname, args)
             }
-            Some((CTy::Iface(i), pptr)) => {
-                let v = self.load(&CTy::Iface(i.clone()), &pptr);
-                return self.gen_dyn_dispatch(&Val::new(CTy::Iface(i.clone()), v), &i, mname, args);
+            CTy::Iface(i) => {
+                let v = self.load(&CTy::Iface(i.clone()), &ptr);
+                self.method_on_iface(Val::new(CTy::Iface(i.clone()), v), &i, mname, args)
             }
-            _ => {
-                let bv = self.gen_expr(base);
-                match &bv.ty {
-                    CTy::Error => return self.gen_error_method(&bv, mname, args),
-                    CTy::Iface(i) => {
-                        let i = i.clone();
-                        return self.gen_dyn_dispatch(&bv, &i, mname, args);
-                    }
-                    CTy::Struct(t) => {
-                        let slot = self.alloca(&bv.ty);
-                        self.line(&format!("store %{t} {}, ptr {slot}", bv.op));
-                        (t.clone(), slot)
-                    }
-                    CTy::Ptr(inner) if matches!(**inner, CTy::Struct(_)) => {
-                        let CTy::Struct(t) = (**inner).clone() else {
-                            unreachable!()
-                        };
-                        let data = self.fat_checked(&bv.op);
-                        (t, data)
-                    }
-                    _ => return None,
-                }
+            other => {
+                // A scalar, slice, or closure place. Read it once, then take the
+                // residual path: the universal `ignore` discard, or a build error.
+                let v = self.load(&other, &ptr);
+                self.method_residual(Val::new(other, v), mname)
             }
-        };
+        }
+    }
+
+    /// Dispatches a method on a receiver already lowered to a value `bv`. A struct
+    /// rvalue is spilled to a slot so the by-pointer method convention holds.
+    fn method_on_value(&mut self, bv: Val, mname: &str, args: &[Expr]) -> Val {
+        match &bv.ty {
+            CTy::Error => self.method_on_error(bv, mname, args),
+            CTy::Iface(i) => {
+                let i = i.clone();
+                self.method_on_iface(bv, &i, mname, args)
+            }
+            CTy::Struct(t) => {
+                let t = t.clone();
+                let slot = self.alloca(&bv.ty);
+                self.line(&format!("store %{t} {}, ptr {slot}", bv.op));
+                self.method_on_struct(&t, &slot, mname, args)
+            }
+            CTy::Ptr(inner) if matches!(**inner, CTy::Struct(_)) => {
+                let CTy::Struct(t) = (**inner).clone() else {
+                    unreachable!()
+                };
+                let data = self.fat_checked(&bv.op);
+                self.method_on_struct(&t, &data, mname, args)
+            }
+            _ => self.method_residual(bv, mname),
+        }
+    }
+
+    /// Dispatches a method on a concrete struct receiver at address `selfptr`. An
+    /// impl method wins; otherwise a function-valued struct field named `mname` is
+    /// loaded from the receiver and called as a closure, so `(obj.field)(args)`
+    /// works without lowering the receiver twice; otherwise the residual path.
+    fn method_on_struct(&mut self, tyname: &str, selfptr: &str, mname: &str, args: &[Expr]) -> Val {
         let key = format!("{tyname}.{mname}");
-        let (ret, params) = self.ctx.methods.get(&key).cloned()?;
-        let mut parts = vec![format!("ptr {selfptr}")];
-        for (i, a) in args.iter().enumerate() {
-            let v = self.gen_expr(a);
-            let target = params.get(i + 1).cloned().unwrap_or(v.ty.clone());
-            // adapt, not coerce, mirroring gen_user_call: a method argument of
-            // interface type boxes a struct, a slice parameter views an array.
-            let op = self.adapt(v, &target).op;
-            parts.push(format!("{} {op}", target.ll()));
+        if let Some((ret, params)) = self.ctx.methods.get(&key).cloned() {
+            let mut parts = vec![format!("ptr {selfptr}")];
+            for (i, a) in args.iter().enumerate() {
+                let v = self.gen_expr(a);
+                let target = params.get(i + 1).cloned().unwrap_or(v.ty.clone());
+                // adapt, not coerce, mirroring gen_user_call: a method argument of
+                // interface type boxes a struct, a slice parameter views an array.
+                let op = self.adapt(v, &target).op;
+                parts.push(format!("{} {op}", target.ll()));
+            }
+            let argstr = parts.join(", ");
+            if matches!(ret, CTy::Void) {
+                self.line(&format!("call void @{tyname}.{mname}({argstr})"));
+                return Val::new(CTy::Void, "");
+            }
+            let d = self.fresh();
+            self.line(&format!("{d} = call {} @{tyname}.{mname}({argstr})", ret.ll()));
+            return Val::new(ret, d);
         }
-        let argstr = parts.join(", ");
-        if matches!(ret, CTy::Void) {
-            self.line(&format!("call void @{tyname}.{mname}({argstr})"));
-            return Some(Val::new(CTy::Void, ""));
+        // Not an impl method. A struct field holding a function value is called
+        // through `(obj.field)(args)`; load it from the already-lowered receiver
+        // and dispatch as a closure.
+        if let Some((idx, fty)) = self.ctx.field(tyname, mname) {
+            if matches!(fty, CTy::Closure(..)) {
+                let fp = self.fresh();
+                self.line(&format!(
+                    "{fp} = getelementptr %{tyname}, ptr {selfptr}, i32 0, i32 {idx}"
+                ));
+                let cv = self.load(&fty, &fp);
+                return self.gen_closure_call(&Val::new(fty, cv), args);
+            }
         }
-        let d = self.fresh();
-        self.line(&format!(
-            "{d} = call {} @{tyname}.{mname}({argstr})",
-            ret.ll()
-        ));
-        Some(Val::new(ret, d))
+        if mname == "ignore" {
+            return Val::new(CTy::Void, "");
+        }
+        self.unresolved_method(tyname, mname)
+    }
+
+    /// Error-receiver dispatch. An unrecognized method name falls to the residual
+    /// path (`ignore` discards, everything else is a named build error) rather
+    /// than the old silent zero.
+    fn method_on_error(&mut self, ev: Val, mname: &str, args: &[Expr]) -> Val {
+        if let Some(v) = self.gen_error_method(&ev, mname, args) {
+            return v;
+        }
+        self.method_residual(ev, mname)
+    }
+
+    /// Interface-receiver dispatch. An unrecognized method name (no such vtable
+    /// slot) falls to the residual path rather than a silent zero.
+    fn method_on_iface(&mut self, iv: Val, iface: &str, mname: &str, args: &[Expr]) -> Val {
+        if let Some(v) = self.gen_dyn_dispatch(&iv, iface, mname, args) {
+            return v;
+        }
+        self.method_residual(iv, mname)
+    }
+
+    /// The residual for a method call the backend cannot resolve, on a receiver
+    /// already lowered once. `ignore` is the universal discard: the receiver ran
+    /// for its side effects and its value is dropped. Any other name has no
+    /// lowering and becomes a named build error, so an unresolvable method can
+    /// never silently miscompile to a zero.
+    fn method_residual(&mut self, bv: Val, mname: &str) -> Val {
+        if mname == "ignore" {
+            return Val::new(CTy::Void, "");
+        }
+        self.unresolved_method(&ty_name(&bv.ty), mname)
+    }
+
+    /// Records a build error for a method with no lowering and poisons the value.
+    /// The module will not link; the poison keeps IR generation going only far
+    /// enough to surface the diagnostic.
+    fn unresolved_method(&mut self, tyname: &str, mname: &str) -> Val {
+        let disp = tyname.split('$').next().unwrap_or(tyname);
+        self.m.error(format!("no method '{mname}' on type '{disp}'"));
+        Val::i0()
     }
 
     /// Reads an error's message as a string. The empty error's message pointer
