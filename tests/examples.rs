@@ -4272,6 +4272,49 @@ fn a_foreign_signature_rejects_a_string_parameter() {
 }
 
 #[test]
+fn an_installed_layout_resolves_assets_through_the_share_directory() {
+    // A packaged install puts the binary under prefix/bin and the stdlib and
+    // runtime under prefix/share/dusk-lang. The compiler walks up from its own
+    // executable to find them, with no DUSK_HOME set and the working directory
+    // pointing nowhere useful. The compiler under test is itself copied into
+    // the fake prefix, so the walk under test is the installed binary's own.
+    let bin = dusk_bin();
+    let root = env!("CARGO_MANIFEST_DIR");
+    let prefix = std::env::temp_dir().join(format!("dusk_install_{}", std::process::id()));
+    let bin_dir = prefix.join("bin");
+    let share = prefix.join("share").join("dusk-lang");
+    std::fs::create_dir_all(&bin_dir).expect("mkdir bin");
+    std::fs::create_dir_all(&share).expect("mkdir share");
+    let installed = bin_dir.join("dusk");
+    std::fs::copy(&bin, &installed).expect("install binary");
+    let copy_tree = |name: &str| {
+        let status = Command::new("cp")
+            .args(["-r"])
+            .arg(format!("{root}/{name}"))
+            .arg(share.join(name))
+            .status()
+            .expect("copy asset tree");
+        assert!(status.success(), "copying {name} into the fake install");
+    };
+    copy_tree("lib");
+    copy_tree("runtime");
+
+    let out = Command::new(&installed)
+        .args(["run", &format!("{root}/examples/hello.dusk")])
+        .current_dir(&prefix)
+        .env_remove("DUSK_HOME")
+        .output()
+        .expect("run installed compiler");
+    let _ = std::fs::remove_dir_all(&prefix);
+    assert!(
+        out.status.success(),
+        "installed compiler did not run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello, world\n");
+}
+
+#[test]
 fn bootstrap_scaffold_demo() {
     // The dusk1 demo under compiler/ mirrors stage0's demo command through the
     // shared driver: assemble the spine module, write the IR, link it with clang,
@@ -4314,7 +4357,7 @@ fn bootstrap_scaffold_demo() {
     );
     assert_eq!(
         String::from_utf8_lossy(&version.stdout),
-        "dusk 1.0.0\n",
+        "dusk 1.0.1\n",
         "version prints the canonical compiler version"
     );
 }

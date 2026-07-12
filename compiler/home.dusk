@@ -1,16 +1,22 @@
 // home: locates the directory the toolchain ships beside the compiler, the one
 // that holds runtime/ (the C runtime sources) and lib/ (the standard library).
 // This mirrors the stage0 resolver in src/home.rs: the DUSK_HOME environment
-// variable wins when it points at a real toolchain, then the directory the
-// running binary sits in, and finally the current working directory, where a
-// source checkout keeps runtime/ and lib/ at its root. The first candidate that
-// actually holds the assets wins, so a stale environment variable falls through
-// to a location that works instead of naming one that does not.
+// variable wins when it points at a real toolchain, then the directory of the
+// running executable, then the share directory of a packaged install one level
+// above the executable's bin/, then the directory argv[0] names, and finally
+// the current working directory, where a source checkout keeps runtime/ and
+// lib/ at its root. The first candidate that actually holds the asset wins, so
+// a stale environment variable falls through to a location that works instead
+// of naming one that does not.
 
 @paradigm procedural
 
 @import std.os
 @import std.string
+
+foreign "C" {
+    func cool_exe_path(buf: *void, cap: int64) -> int64
+}
 
 // Joins a directory and a name with a single separator, returning a fresh heap
 // string the caller owns. Trailing separators on the directory are collapsed
@@ -85,10 +91,29 @@ func has_asset(base: string, name: string) -> bool {
     return code == 0
 }
 
+// The absolute path of the running executable, or the empty string when the
+// platform cannot answer. The runtime shim reads /proc/self/exe on Linux and
+// asks the loader on Apple, the same fact src/home.rs gets from current_exe.
+func exe_path() -> string {
+    buf: *raw char = alloc_bytes(4097)
+    n: int64 = cool_exe_path(buf, 4096)
+    if n < 0 {
+        free(buf)
+        e: *raw char = alloc_bytes(1)
+        e[0] = 0
+        return cstr(e)
+    }
+    return cstr(buf)
+}
+
 // Resolves the toolchain home for a given argv[0] and the asset it needs.
 // Each candidate is validated against the asset it will actually serve, the
 // way src/home.rs checks each requested directory independently: DUSK_HOME
 // may hold runtime/ but not lib/, and the two lookups must not conflate.
+// After DUSK_HOME the walk follows the executable: the directory it sits in
+// covers a source checkout running target/dusk-out/main, and the share
+// directory one level above its bin/ covers a packaged install. The argv[0]
+// directory and the working directory close the chain for direct invocations.
 // The returned string lives for the whole run and is not freed, since the
 // driver joins asset paths onto it right through to the final clang line.
 export func dusk_home_for(prog: string, asset: string) -> string {
@@ -97,6 +122,21 @@ export func dusk_home_for(prog: string, asset: string) -> string {
         if has_asset(h, asset) {
             return h
         }
+    }
+    exe: string = exe_path()
+    if str_len(exe) > 0 {
+        bin: string = dir_of(exe)
+        if has_asset(bin, asset) {
+            return bin
+        }
+        prefix: string = dir_of(bin)
+        shared: string = path_join(prefix, "share/dusk-lang")
+        if has_asset(shared, asset) {
+            free(prefix)
+            return shared
+        }
+        free(shared)
+        free(prefix)
     }
     d: string = dir_of(prog)
     if has_asset(d, asset) {

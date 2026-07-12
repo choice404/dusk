@@ -2,6 +2,25 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.0.1
+
+The installed compiler. 1.0.0 named `compiler/main.dusk` the canonical dusk compiler, but a packaged install of it still needed `DUSK_HOME` set by hand: the seed's own `src/home.rs` has probed a share directory beside the running binary since before the bootstrap began, and the canonical compiler's resolver never picked up the same search, falling back to an unchecked working directory instead. 1.0.1 closes that gap so an installed canonical compiler finds its own assets the way the seed already does. No language surface changes; this is the installed layout catching up to the seed's own resolver.
+
+The share directory, resolved from dusk.
+
+- `runtime/runtime.c` gains `cool_exe_path`, a small foreign shim that resolves the running executable's own absolute path: Linux reads the `/proc/self/exe` symlink, Apple asks the loader through `_NSGetExecutablePath`, and every other platform returns `-1`, the same one function per platform shape the reactor's poller seam already splits behind.
+- `compiler/home.dusk` declares `cool_exe_path` through a private `foreign "C"` block and widens `dusk_home_for`'s probe chain from three candidates to five: `DUSK_HOME`, checked against the specific asset it is being asked to serve; the directory the running executable sits in; a `share/dusk-lang` directory one level above that; the directory `argv[0]` names; and finally the working directory, the source checkout fallback the chain has always carried. A compiler installed at `prefix/bin` beside `prefix/share/dusk-lang` now finds its own `lib/` and `runtime/` with no `DUSK_HOME` set at all, and a bare `PATH` invocation resolves the same way. Both `cool_exe_path` and the widened probe chain are private to the compiler's own driver; nothing about the language surface moves.
+
+The golden.
+
+- `an_installed_layout_resolves_assets_through_the_share_directory` is new: it copies the compiler under test into a fake `prefix/bin`, copies `lib/` and `runtime/` into `prefix/share/dusk-lang` beside it, and runs `hello.dusk` through the installed binary with `DUSK_HOME` unset and the working directory pointed at the fake prefix, nowhere the checkout's own assets live. Both the seed and the canonical compiler pass it standing in as the compiler under test.
+
+Numbers.
+
+- Suite 458 unit, 561 golden, 13 parser termination, clippy clean.
+- `tools/differential.sh`'s `check` and `ir` modes still agree with stage0 across the full 587 file corpus, zero exclusions, zero advisories, zero crashes.
+- `tools/pyramid.sh` reproduces the fixpoint on the 1.0.1 tree: stage1, stage2, and stage3 land on the identical binary, sha256 `7ddf309fa239eadadd7c35f9388ac8092d3380a0e9b7b7ca18dd39802217472d`, built from the identical compiler IR, sha256 `90a48273b169861074eca10c1cdc4f61cc2aaa44af40de8444c8f3353b0d94ad`, and the golden suite passes in full with stage1 and stage2 each standing in as the compiler under test.
+
 ## 1.0.0
 
 The declaration. 0.9.4 closed the bootstrap arc that opened at 0.6.0, `tools/pyramid.sh`'s stage ladder reaching a fixpoint, three stages agreeing byte for byte on the compiler's own binary and its own compiler IR; 1.0.0 is the release that makes the handoff official. No language surface changes and no compiler behavior changes, this is a declaration on top of a proof already made, not a new one. Suite depth is unchanged from 0.9.4: 458 unit, 560 golden, 13 parser termination, clippy clean.

@@ -21,7 +21,7 @@ paru -S dusk-lang-git
 
 Both install the `dusk` and `dawn` binaries. The compiler finds its standard library and C runtime beside itself, in the share directory for a packaged install or inside the cargo registry checkout for `cargo install`, and the `DUSK_HOME` environment variable overrides the search when you want a binary to use a different toolchain tree, such as a source checkout.
 
-The canonical dusk compiler is `compiler/main.dusk`, written in dusk itself and built by the seed compiler above. Run directly, it resolves `lib/` and `runtime/` through a narrower search than the seed: `DUSK_HOME`, then the directory the running binary sits in, then the current directory as an unchecked fallback, with no share directory probing. Point `DUSK_HOME` at a checkout root when running it standalone rather than relying on the fallback the packaged seed binary carries.
+The canonical dusk compiler is `compiler/main.dusk`, written in dusk itself and built by the seed compiler above. Run directly, it resolves `lib/` and `runtime/` through the same shape of search the seed does: `DUSK_HOME`, checked against the specific asset being asked for, then the directory the running executable sits in, then a `share/dusk-lang` directory one level above that, then the directory `argv[0]` names, and finally the working directory as a source checkout fallback. A compiler installed at `prefix/bin` beside `prefix/share/dusk-lang` finds its own assets with no `DUSK_HOME` set at all, the same as a packaged install of the seed. `DUSK_HOME` still overrides the search, point it at a checkout root when running the canonical compiler standalone rather than relying on the working directory fallback.
 
 ## Try it without building a binary
 

@@ -621,3 +621,35 @@ double cool_parse_float(const char *s, int64_t *ok) {
     *ok = 1;
     return v;
 }
+
+/* Resolves the absolute path of the running executable into buf, returning the
+   byte length written (no NUL counted) or -1 when the platform offers no way
+   to ask. Linux reads the /proc/self/exe symlink; Apple asks the loader. The
+   compiler uses this to find its stdlib and runtime beside a packaged install,
+   the same walk the seed compiler does through current_exe. */
+#if defined(__linux__)
+#include <unistd.h>
+int64_t cool_exe_path(char *buf, int64_t cap) {
+    ssize_t n = readlink("/proc/self/exe", buf, (size_t)(cap - 1));
+    if (n < 0) {
+        return -1;
+    }
+    buf[n] = '\0';
+    return (int64_t)n;
+}
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+int64_t cool_exe_path(char *buf, int64_t cap) {
+    uint32_t size = (uint32_t)cap;
+    if (_NSGetExecutablePath(buf, &size) != 0) {
+        return -1;
+    }
+    return (int64_t)strlen(buf);
+}
+#else
+int64_t cool_exe_path(char *buf, int64_t cap) {
+    (void)buf;
+    (void)cap;
+    return -1;
+}
+#endif
