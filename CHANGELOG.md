@@ -2,6 +2,25 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.0.0
+
+The declaration. 0.9.4 closed the bootstrap arc that opened at 0.6.0, `tools/pyramid.sh`'s stage ladder reaching a fixpoint, three stages agreeing byte for byte on the compiler's own binary and its own compiler IR; 1.0.0 is the release that makes the handoff official. No language surface changes and no compiler behavior changes, this is a declaration on top of a proof already made, not a new one. Suite depth is unchanged from 0.9.4: 458 unit, 560 golden, 13 parser termination, clippy clean.
+
+The canonical handoff.
+
+- `compiler/`, the compiler written in dusk, is the canonical dusk compiler from this release forward. `src/`, the compiler written in Rust, stays in the repository as the seed, and the seed's one remaining job is rebuilding stage1 from dusk source, the first rung of the pyramid, not a compiler reached for day to day use. `dawn`, the package tool, stays written in Rust; nothing about the bootstrap touches it.
+- `dusk version` prints `dusk 1.0.0` from both sides now, `src/main.rs`'s version command and `compiler/main.dusk`'s, the one user visible signal that the seed and the canonical compiler agree on what release they carry. `dusk`'s usage output and header comments are brought forward to match.
+
+The seed pin.
+
+- dusk 1.0.0 is built by the seed compiler at tag `v1.0.0`, and that fixpoint reproduces under `tools/pyramid.sh`: stage1, stage2, and stage3 land on the identical binary, sha256 `216c0a666f28c18c8a5506d50847dd0f28935f75b5db33bde7876437d8b3faec`, built from the identical compiler IR, sha256 `55d3a4485a3cf910e730df4f4cd9d56e9d326f5a8b57ed7d22928f577acdfc8b`. Stage1 equals stage2 equals stage3, the same three way agreement 0.9.4 first reached, reproduced clean at the tag this release cuts.
+- The golden suite passes in full, stage1 and stage2 each standing in as the compiler under test, no exclusion on either side. Across the 304 file corpus stage1 accepts, a second run of `dusk1 ir` over every one of them agrees byte for byte with the first, the determinism the ladder checks directly rather than assuming.
+
+The documentation.
+
+- `README.md` drops the pre 1.0 install warning, documents that the canonical `compiler/main.dusk` resolves `lib/` and `runtime/` through `DUSK_HOME` with no share directory probing, unlike the seed's fallback to a share directory beside the binary, refreshes the command table to the full thirteen commands the compiler now carries, and closes the Status section on the 1.0.0 declaration.
+- `spec.md`'s status line now reads the 0.5.4 frozen surface as the 1.0.0 surface, and the bootstrap freeze section records where the freeze opened, where it closed, and that new language surface is open to propose again starting now. The async fault table gains the one named fault it had described in prose but never listed, `fatal: the event loop is not running`.
+
 ## 0.9.4
 
 The pyramid. 0.9.3 closed the codegen line, every construct the language surface carries lowering under dusk1; 0.9.4 closes the bootstrap itself, climbing `tools/pyramid.sh`'s stage ladder past the point it stopped at and all the way to the top. stage0 builds `compiler/main.dusk` into stage1, stage1 builds the identical source into stage2, and stage2 builds it once more into stage3, and this release is the first time all three stages run to completion and agree: stage1, stage2, and stage3 land on the identical binary, sha256 `80f1de1f0ca7924f42ef97b7018c800011e7dd78a968606f004228b2d7b8c541`, built from the identical compiler IR, sha256 `d2641455b96b9a47330998de026f19c386a79a4bd2664029559660c9a499db52`. The collapse, stage2's own compiler IR byte equaling stage1's, and the fixpoint, stage3's byte equaling stage2's, both hold at once, the proof a self hosting compiler eventually has to pass. No language surface changes; this is the bootstrap line doing what the freeze promised, the last stage of it closed. Suite 458 unit, 560 golden, 13 parser termination, clippy clean.

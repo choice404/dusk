@@ -1,10 +1,8 @@
-// main: the command line entry for dusk1, the self hosted stage1 compiler. This
-// is the scaffold: the spine that carries source text through IR and clang to a
-// running program, with the front end still to come. Two commands work today.
-// version prints the build string. demo emits the phase 0 IR spine, links it, and
-// runs it, proving the whole toolchain path in dusk. Anything else is a usage
-// error, printed to stderr with a non zero exit so a script can tell it apart from
-// a clean run.
+// main: the command line entry for the dusk compiler, written in dusk. The
+// full pipeline lives here: lex through codegen, clang linking, and the dump
+// commands that expose each pass. Every message that is not a built program's
+// own output goes to stderr with a non zero exit, so a script can tell a
+// toolchain error apart from a clean run.
 
 @paradigm procedural
 
@@ -13,10 +11,10 @@
 @import driver
 @import cli
 
-// The version string the version command prints. This tracks the stage1 scaffold,
-// not the stage0 compiler that builds it.
+// The version string the version command prints, the same line the seed
+// compiler prints for its own version command.
 func version_string() -> string {
-    return "dusk1 0.6.0 (bootstrap scaffold)"
+    return "dusk 1.0.0"
 }
 
 // Prints the command list to stderr, where every message that is not a built
@@ -31,8 +29,8 @@ func usage() -> void {
     printerr("  parse <file>  lex + parse, dump the AST")
     printerr("  load <file>   load imports, dump the merged AST")
     printerr("  desugar <file> load + desugar, dump the merged AST")
-    printerr("  check <file>  load + desugar + resolve")
-    printerr("  mono <file>   load + desugar + resolve mono spine")
+    printerr("  check <file>  type check a source file and report diagnostics")
+    printerr("  mono <file>   check, then dump the mono-expanded ground module")
     printerr("  ir <file>     lower the mono-expanded module to LLVM IR")
     printerr("  build <file>  lower, link, and write target/dusk-out")
     printerr("  run <file>    build and run, forwarding trailing args")

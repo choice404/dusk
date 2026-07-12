@@ -1,14 +1,16 @@
 # dusk Language Specification
 
-## Status, 0.5.4 surface
+## Status, the 0.5.4 frozen surface is the 1.0.0 surface
 
 This is the language reference for dusk. It describes the language as of 0.5.4: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, and Unicode strings with the `rune` primitive. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
 
 ### The bootstrap freeze
 
-The surface described in this spec is frozen as of 0.5.4 for the bootstrap. The releases from 0.6.x through 0.9.x change the compiler, not the language, as dusk is rewritten in itself, so a program that compiles against this spec keeps compiling across that line without a source change. Three kinds of work stay live during the freeze: diagnostics can improve, the standard library can grow, and a soundness fix can land, since none of those change the surface a correct program relies on. New surface resumes only after 1.0.0.
+The surface described in this spec was frozen as of 0.5.4 for the bootstrap. The releases from 0.6.x through 0.9.4 changed the compiler, not the language, as dusk was rewritten in itself, so a program that compiled against this spec at 0.5.4 kept compiling across that whole line without a source change. Three kinds of work stayed live during the freeze: diagnostics could improve, the standard library could grow, and a soundness fix could land, since none of those change the surface a correct program relies on.
 
-The one exception is a soundness hole. A hole found during the bootstrap may force a surface change to close it, and when that happens the change is named in the changelog of the release that makes it.
+The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface this chapter describes is the 1.0.0 surface, unchanged start to finish across the line that carried it. New language surface is open to propose again starting with the releases after 1.0.0.
+
+The one exception the freeze carried was a soundness hole. A hole found during the bootstrap could force a surface change to close it, and when that happened the change was named in the changelog of the release that made it.
 
 A shape the compiler already accepts can also be written into this spec for the first time without breaking the freeze, since a program's meaning does not change when the reference catches up to what the parser has always done. The `else if` chain is the first such note, recorded in 0.6.1: `if a { } else if b { } else { }` has always parsed as an `else` branch whose whole body is a single nested `if`, so a chain of any length is ordinary nested `if`s carrying no new node, no new keyword, and no new rule. Each `else if` condition is a bool and is checked like any `if` condition, and a chain longer than the parser's nesting ceiling is refused with the same too deep diagnostic every deep nesting meets rather than overflowing the stack.
 
@@ -1213,6 +1215,7 @@ Every abort under the async keyword layer and the substrate beneath it is named 
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `fatal: use of a dead future`                             | a future or task result is awaited, polled, or freed a second time                                           |
 | `fatal: two tasks await one future`                       | a second task parks on a future that already carries a waiter                                                |
+| `fatal: the event loop is not running`                    | a loop touch, an await, a completion, or a task start, runs before `loop_init` or after the owning loop is freed |
 | `fatal: async_run re-entered the event loop`              | `async_run` is called while the loop is already cranking                                                     |
 | `fatal: the event loop is idle but work is still pending` | an await parks with no timer, no live thread, no in flight pool task, and no armed watch left to complete it |
 | `fatal: a task resumed in an invalid state`               | a poll's entry switch sees a state its own emission never produced                                           |

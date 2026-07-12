@@ -4314,8 +4314,8 @@ fn bootstrap_scaffold_demo() {
     );
     assert_eq!(
         String::from_utf8_lossy(&version.stdout),
-        "dusk1 0.6.0 (bootstrap scaffold)\n",
-        "version prints the scaffold build string"
+        "dusk 1.0.0\n",
+        "version prints the canonical compiler version"
     );
 }
 
