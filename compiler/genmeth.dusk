@@ -11,6 +11,7 @@
 @import genexpr
 @import genplace
 @import genptr
+@import genclos
 
 func gm_key(a: string, b: string) -> string {
     out: *StringBuilder = alloc(sb_new())
@@ -70,7 +71,23 @@ func gm_error(s: *GenFuncState, ev: Val, method: string, args_off: int64, args_l
     if str_eq(method, "toString") { return gm_error_string(s, ev) }
     if str_eq(method, "ignore") { return Val { ty: cty_void(c), op: gs_copy("") } }
     if str_eq(method, "check") {
-        emit_error((*s).module, "unsupported error check closure")
+        if args_len > 0 {
+            a: *Ast = (*(*s).ctx).ast
+            cv: Val = gen_expr(s, vec_get((*a).kids, args_off))
+            cond: string = next_tmp((*s).fb)
+            op2((*s).fb, cond, "icmp ne", "ptr", ev.op, "null")
+            call_id: int64 = fresh_label((*s).fb)
+            end_id: int64 = fresh_label((*s).fb)
+            call_label: string = branch_label(call_id)
+            end_label: string = branch_label(end_id)
+            br_cond((*s).fb, cond, call_label, end_label)
+            place_label((*s).fb, call_id)
+            vals: *Vector<Val> = alloc(vec_new())
+            vec_push(vals, Val { ty: cty_error(c), op: gs_copy(ev.op) })
+            invoke_closure(s, cv, vals)
+            if !(*s).terminated { br((*s).fb, end_label) }
+            place_label((*s).fb, end_id)
+        }
         return Val { ty: cty_void(c), op: gs_copy("") }
     }
     return gm_unresolved(s, "error", method)

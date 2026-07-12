@@ -133,6 +133,10 @@ export func gen_tuple(s: *GenFuncState, e: ExprNode) -> Val {
 export func slice_from_array(s: *GenFuncState, arr: Val, n: int64) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
     an: CTyNode = vec_get(cty_nodes(c), arr.ty)
+    if an.kind != ctyk_array() {
+        emit_error((*s).module, "unsupported collection value")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
     slot: string = gen_alloca(s, arr.ty)
     gen_store_slot(s, arr.ty, arr.op, slot)
     nb: *StringBuilder = alloc(sb_new())
@@ -146,6 +150,10 @@ export func slice_from_array(s: *GenFuncState, arr: Val, n: int64) -> Val {
 export func slice_parts(s: *GenFuncState, sv: Val) -> (string, string, int64) {
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), sv.ty)
+    if n.kind != ctyk_slice() {
+        emit_error((*s).module, "unsupported collection value")
+        return (gs_copy("null"), gs_copy("0"), cty_void(c))
+    }
     data: string = fat_data(s, sv.op)
     len: string = next_tmp((*s).fb)
     b: *StringBuilder = alloc(sb_new())

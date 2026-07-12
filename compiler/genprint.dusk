@@ -54,6 +54,34 @@ func gp_newline(s: *GenFuncState, errout: bool) -> void {
     gp_call_cstr(s, "cool_print_cstr", nl)
 }
 
+func gp_display_string(s: *GenFuncState, v: Val) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    keyb: *StringBuilder = alloc(sb_new())
+    sb_push(keyb, n.text)
+    sb_push(keyb, ".toString")
+    key: string = gs_built(keyb)
+    sb_free(keyb)
+    free(keyb)
+    if !genctx_has_method((*s).ctx, key) { return gs_copy("") }
+    slot: string = gen_alloca(s, v.ty)
+    gen_store_slot(s, v.ty, v.op, slot)
+    out: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, out)
+    sb_push(b, " = call ptr @")
+    sb_push(b, key)
+    sb_push(b, "(ptr ")
+    sb_push(b, slot)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return out
+}
+
 func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), v.ty)
@@ -62,6 +90,9 @@ func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> vo
         else if cty_is_float(c, v.ty) {
             d: string = coerce(s, v.ty, v.op, cty_f64(c))
             gp_call_num(s, "cool_eprint_f64", "double", d)
+        } else if n.kind == ctyk_struct() {
+            text0: string = gp_display_string(s, v)
+            if str_len(text0) > 0 { gp_call_cstr(s, "cool_eprint_cstr", text0) }
         } else {
             d2: string = coerce(s, v.ty, v.op, cty_int(c, 64))
             gp_call_num(s, "cool_eprint_i64", "i64", d2)
@@ -76,6 +107,12 @@ func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> vo
     } else if cty_is_float(c, v.ty) {
         d3: string = coerce(s, v.ty, v.op, cty_f64(c))
         if newline { gp_call_num(s, "cool_println_f64", "double", d3) } else { gp_call_num(s, "cool_print_f64", "double", d3) }
+    } else if n.kind == ctyk_struct() {
+        text1: string = gp_display_string(s, v)
+        if str_len(text1) > 0 {
+            if newline { gp_call_cstr(s, "cool_println_cstr", text1) }
+            else { gp_call_cstr(s, "cool_print_cstr", text1) }
+        }
     } else {
         d4: string = coerce(s, v.ty, v.op, cty_int(c, 64))
         if str_eq(suffix, "ln") { gp_call_num(s, "cool_println_i64", "i64", d4) } else { gp_call_num(s, "cool_print_i64", "i64", d4) }
@@ -188,7 +225,11 @@ export func gen_print(s: *GenFuncState, args_off: int64, args_len: int64, newlin
         mut i: int64 = 0
         while i < args_len {
             v: Val = gen_expr(s, vec_get((*a).kids, args_off + i))
-            gp_print_value(s, v, newline && i == args_len - 1, errout)
+            mut value_newline: bool = false
+            if newline {
+                if i == args_len - 1 { value_newline = true }
+            }
+            gp_print_value(s, v, value_newline, errout)
             i = i + 1
         }
     } else if newline {

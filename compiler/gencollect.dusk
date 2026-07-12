@@ -1,0 +1,342 @@
+// gencollect: collector casts and collector/debug runtime builtins.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genagg
+@import genclos
+@import genptr
+
+func gc_call1(s: *GenFuncState, dest: string, ret: string, name: string, aty: string, arg: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    if !str_eq(dest, "") {
+        sb_push(b, dest)
+        sb_push(b, " = ")
+    }
+    sb_push(b, "call ")
+    sb_push(b, ret)
+    sb_push(b, " @")
+    sb_push(b, name)
+    sb_push_char(b, 40)
+    sb_push(b, aty)
+    sb_push_char(b, 32)
+    sb_push(b, arg)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+func gc_call0(s: *GenFuncState, ret: string, name: string, ty: int64) -> Val {
+    mut dest: string = gs_copy("")
+    if !str_eq(ret, "void") { dest = next_tmp((*s).fb) }
+    b: *StringBuilder = alloc(sb_new())
+    if !str_eq(dest, "") {
+        sb_push(b, dest)
+        sb_push(b, " = ")
+    }
+    sb_push(b, "call ")
+    sb_push(b, ret)
+    sb_push(b, " @")
+    sb_push(b, name)
+    sb_push(b, "()")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return Val { ty: ty, op: dest }
+}
+
+func gc_plain(s: *GenFuncState, ty: int64, arg: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    value: Val = gen_expr(s, arg)
+    tn: CTyNode = vec_get(cty_nodes(c), ty)
+    if tn.kind == ctyk_void() || tn.kind == ctyk_unknown() {
+        emit_error((*s).module, "unsupported collector expression")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    sz: Val = gen_sizeof_ty(s, ty)
+    p: string = next_tmp((*s).fb)
+    gc_call1(s, p, "ptr", "cool_collect_alloc", "i64", sz.op)
+    hp: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, hp)
+    sb_push(b0, " = getelementptr i8, ptr ")
+    sb_push(b0, p)
+    sb_push(b0, ", i64 -8")
+    t0: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, t0)
+    free(t0)
+    gen: string = next_tmp((*s).fb)
+    b1: *StringBuilder = alloc(sb_new())
+    sb_push(b1, gen)
+    sb_push(b1, " = load atomic i64, ptr ")
+    sb_push(b1, hp)
+    sb_push(b1, " seq_cst, align 8")
+    t1: string = gs_built(b1)
+    sb_free(b1)
+    free(b1)
+    line((*s).fb, t1)
+    free(t1)
+    av: Val = adapt(s, value, ty)
+    gen_store_slot(s, ty, av.op, p)
+    return Val { ty: cty_intern(c, ctyk_ptr(), ty, 0, ""), op: fat(s, p, gen) }
+}
+
+func gc_closure(s: *GenFuncState, arg: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, arg)
+    if e.kind != xk_lambda() {
+        emit_error((*s).module, "unsupported collector closure expression")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    caps: *Vector<LocalVal> = clos_captures(s, e)
+    loaded: *Vector<Val> = alloc(vec_new())
+    mut li: int64 = 0
+    while li < vec_len(caps) {
+        cap0: LocalVal = vec_get(caps, li)
+        lv0: LocalVal = unwrap_or(map_get((*s).locals, cap0.op), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        vec_push(loaded, Val { ty: cap0.ty, op: gen_load_slot(s, lv0.ty, lv0.op) })
+        li = li + 1
+    }
+    name: string = clos_lambda_name((*s).module)
+    env_ty: string = clos_env_ty(s, caps)
+    mut env: string = gs_copy("null")
+    if vec_len(caps) > 0 {
+        szp: string = next_tmp((*s).fb)
+        b0: *StringBuilder = alloc(sb_new())
+        sb_push(b0, szp)
+        sb_push(b0, " = getelementptr ")
+        sb_push(b0, env_ty)
+        sb_push(b0, ", ptr null, i64 1")
+        t0: string = gs_built(b0)
+        sb_free(b0)
+        free(b0)
+        line((*s).fb, t0)
+        free(t0)
+        sz: string = next_tmp((*s).fb)
+        b1: *StringBuilder = alloc(sb_new())
+        sb_push(b1, sz)
+        sb_push(b1, " = ptrtoint ptr ")
+        sb_push(b1, szp)
+        sb_push(b1, " to i64")
+        t1: string = gs_built(b1)
+        sb_free(b1)
+        free(b1)
+        line((*s).fb, t1)
+        free(t1)
+        env = next_tmp((*s).fb)
+        gc_call1(s, env, "ptr", "cool_collect_alloc", "i64", sz)
+        mut i: int64 = 0
+        while i < vec_len(caps) {
+            cap: LocalVal = vec_get(caps, i)
+            slot: string = next_tmp((*s).fb)
+            gb: *StringBuilder = alloc(sb_new())
+            sb_push(gb, slot)
+            sb_push(gb, " = getelementptr ")
+            sb_push(gb, env_ty)
+            sb_push(gb, ", ptr ")
+            sb_push(gb, env)
+            sb_push(gb, ", i32 0, i32 ")
+            sb_push_int(gb, i)
+            gt: string = gs_built(gb)
+            sb_free(gb)
+            free(gb)
+            line((*s).fb, gt)
+            free(gt)
+            gen_store_slot(s, cap.ty, vec_get(loaded, i).op, slot)
+            i = i + 1
+        }
+    }
+    clos_emit_lambda(s, e, name, env_ty, caps)
+    first: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, first)
+    sb_push(b2, " = insertvalue { ptr, ptr } undef, ptr ")
+    sb_push(b2, env)
+    sb_push(b2, ", 0")
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    out: string = next_tmp((*s).fb)
+    b3: *StringBuilder = alloc(sb_new())
+    sb_push(b3, out)
+    sb_push(b3, " = insertvalue { ptr, ptr } ")
+    sb_push(b3, first)
+    sb_push(b3, ", ptr @")
+    sb_push(b3, name)
+    sb_push(b3, ", 1")
+    t3: string = gs_built(b3)
+    sb_free(b3)
+    free(b3)
+    line((*s).fb, t3)
+    free(t3)
+    return Val { ty: cty_intern_full(c, ctyk_closure(), e.a, e.b, e.c, "lambda"), op: out }
+}
+
+func gc_collection(s: *GenFuncState, arg: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    v: Val = gen_expr(s, arg)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if n.kind == ctyk_slice() { return v }
+    if n.kind == ctyk_array() { return slice_from_array(s, v, n.b) }
+    emit_error((*s).module, "unsupported collector slice expression")
+    return Val { ty: cty_void(c), op: gs_copy("") }
+}
+
+func gc_slice(s: *GenFuncState, ty: int64, arg: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    if n.kind != ctyk_slice() {
+        emit_error((*s).module, "unsupported collector slice expression")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    elem: int64 = n.a
+    src0: Val = gc_collection(s, arg)
+    src: Val = adapt(s, src0, ty)
+    data, len, actual := slice_parts(s, src)
+    if actual != elem {
+        emit_error((*s).module, "unsupported collector slice element")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    esz: Val = gen_sizeof_ty(s, elem)
+    total: string = next_tmp((*s).fb)
+    op2((*s).fb, total, "mul", "i64", len, esz.op)
+    out: string = next_tmp((*s).fb)
+    gc_call1(s, out, "ptr", "cool_collect_alloc", "i64", total)
+    idx: string = gen_alloca(s, cty_int(c, 64))
+    gen_store_slot(s, cty_int(c, 64), "0", idx)
+    cond: int64 = fresh_label((*s).fb)
+    body: int64 = fresh_label((*s).fb)
+    done: int64 = fresh_label((*s).fb)
+    cl: string = branch_label(cond)
+    br((*s).fb, cl)
+    place_label((*s).fb, cond)
+    iv: string = gen_load_slot(s, cty_int(c, 64), idx)
+    cmp: string = next_tmp((*s).fb)
+    op2((*s).fb, cmp, "icmp slt", "i64", iv, len)
+    bl: string = branch_label(body)
+    dl: string = branch_label(done)
+    br_cond((*s).fb, cmp, bl, dl)
+    place_label((*s).fb, body)
+    ll: string = cty_ll(c, elem)
+    sp: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, sp)
+    sb_push(b0, " = getelementptr ")
+    sb_push(b0, ll)
+    sb_push(b0, ", ptr ")
+    sb_push(b0, data)
+    sb_push(b0, ", i64 ")
+    sb_push(b0, iv)
+    t0: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, t0)
+    free(t0)
+    ev: string = gen_load_slot(s, elem, sp)
+    dp: string = next_tmp((*s).fb)
+    b1: *StringBuilder = alloc(sb_new())
+    sb_push(b1, dp)
+    sb_push(b1, " = getelementptr ")
+    sb_push(b1, ll)
+    sb_push(b1, ", ptr ")
+    sb_push(b1, out)
+    sb_push(b1, ", i64 ")
+    sb_push(b1, iv)
+    t1: string = gs_built(b1)
+    sb_free(b1)
+    free(b1)
+    line((*s).fb, t1)
+    free(t1)
+    gen_store_slot(s, elem, ev, dp)
+    ni: string = next_tmp((*s).fb)
+    op2((*s).fb, ni, "add", "i64", iv, "1")
+    gen_store_slot(s, cty_int(c, 64), ni, idx)
+    br((*s).fb, cl)
+    place_label((*s).fb, done)
+    first: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, first)
+    sb_push(b2, " = insertvalue { ptr, i64 } undef, ptr ")
+    sb_push(b2, out)
+    sb_push(b2, ", 0")
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    result: string = next_tmp((*s).fb)
+    b3: *StringBuilder = alloc(sb_new())
+    sb_push(b3, result)
+    sb_push(b3, " = insertvalue { ptr, i64 } ")
+    sb_push(b3, first)
+    sb_push(b3, ", i64 ")
+    sb_push(b3, len)
+    sb_push(b3, ", 1")
+    t3: string = gs_built(b3)
+    sb_free(b3)
+    free(b3)
+    line((*s).fb, t3)
+    free(t3)
+    free(ll)
+    return Val { ty: ty, op: result }
+}
+
+export func gen_collect(s: *GenFuncState, e: ExprNode) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if e.kind != xk_collect() {
+        emit_error((*s).module, "unsupported collector expression")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    ty: int64 = cty_lower_ast(c, (*(*s).ctx).ast, e.a)
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    if n.kind == ctyk_closure() { return gc_closure(s, e.b) }
+    if n.kind == ctyk_slice() { return gc_slice(s, ty, e.b) }
+    return gc_plain(s, ty, e.b)
+}
+
+export func gen_debug_alloc(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut n: Val = Val { ty: cty_int(c, 64), op: gs_copy("0") }
+    if len > 0 { n = gen_expr(s, vec_get((*a).kids, off)) }
+    ni: string = coerce(s, n.ty, n.op, cty_int(c, 64))
+    p: string = next_tmp((*s).fb)
+    gc_call1(s, p, "ptr", "cool_debug_alloc", "i64", ni)
+    return Val { ty: cty_rawptr(c, cty_int(c, 8)), op: p }
+}
+
+export func gen_debug_free(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if len > 0 {
+        v: Val = gen_expr(s, vec_get((*a).kids, off))
+        gc_call1(s, "", "void", "cool_debug_free", "ptr", v.op)
+    }
+    return Val { ty: cty_void(c), op: gs_copy("") }
+}
+
+export func gen_debug_leaks(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_debug_leaks", cty_int(genctx_ctys((*s).ctx), 64)) }
+export func gen_debug_double_frees(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_debug_double_frees", cty_int(genctx_ctys((*s).ctx), 64)) }
+export func gen_gc_collect(s: *GenFuncState) -> Val { return gc_call0(s, "void", "cool_gc_collect", cty_void(genctx_ctys((*s).ctx))) }
+export func gen_gc_live_blocks(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_gc_live_blocks", cty_int(genctx_ctys((*s).ctx), 64)) }
+export func gen_gc_live_bytes(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_gc_live_bytes", cty_int(genctx_ctys((*s).ctx), 64)) }
+export func gen_gc_collections(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_gc_collections", cty_int(genctx_ctys((*s).ctx), 64)) }

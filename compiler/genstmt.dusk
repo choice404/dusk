@@ -21,11 +21,28 @@
 func gen_for(s: *GenFuncState, st: StmtNode) -> void {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
-    ip: Place = gen_place(s, st.b)
     mut data: string = gs_copy("")
     mut len: string = gs_copy("0")
     mut elem: int64 = cty_int(c, 64)
-    if ip.ok {
+    iter: ExprNode = vec_get((*a).exprs, st.b)
+    mut sliced: bool = false
+    mut slice_range: ExprNode = iter
+    if iter.kind == xk_index() {
+        index: ExprNode = vec_get((*a).exprs, iter.b)
+        if index.kind == xk_range() {
+            sliced = true
+            slice_range = index
+        }
+    }
+    mut ip: Place = Place { ok: false, ty: cty_void(c), ptr: gs_copy("") }
+    if !sliced { ip = gen_place(s, st.b) }
+    if sliced {
+        svs: Val = gen_slice(s, iter.a, slice_range)
+        ds, ls, es := slice_parts(s, svs)
+        data = ds
+        len = ls
+        elem = es
+    } else if ip.ok {
         inn: CTyNode = vec_get(cty_nodes(c), ip.ty)
         if inn.kind == ctyk_array() {
             data = ip.ptr
@@ -124,7 +141,7 @@ export func gen_block(s: *GenFuncState, block_id: int64) -> void {
     }
 }
 
-func gen_emit_defers(s: *GenFuncState) -> void {
+export func gen_emit_defers(s: *GenFuncState) -> void {
     ds: *Vector<int64> = (*s).defers
     mut i: int64 = vec_len(ds) - 1
     while i >= 0 {
@@ -133,7 +150,7 @@ func gen_emit_defers(s: *GenFuncState) -> void {
     }
 }
 
-func gen_default_ret(s: *GenFuncState) -> void {
+export func gen_default_ret(s: *GenFuncState) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), (*s).ret)
     if n.kind == ctyk_void() {
@@ -149,6 +166,7 @@ func gen_default_ret(s: *GenFuncState) -> void {
     if n.kind == ctyk_f64() { sb_push(b, "0.0") }
     else if n.kind == ctyk_f32() { sb_push(b, "0.0") }
     else if n.kind == ctyk_rawptr() { sb_push(b, "null") }
+    else if cty_is_aggregate(c, (*s).ret) { sb_push(b, "zeroinitializer") }
     else { sb_push_char(b, 48) }
     text: string = gs_built(b)
     sb_free(b)

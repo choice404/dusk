@@ -174,15 +174,32 @@ export func alloc_of(s: *GenFuncState, pointee: int64, has_value: bool, value: V
         an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
         lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
         sa: SizeAlign = cty_size_align(c, pointee)
-        sb_push(b, " = call ptr @")
-        sb_push(b, an.text)
-        sb_push(b, ".alloc(ptr ")
-        sb_push(b, lv.op)
+        if an.kind == ctyk_iface() {
+            iv: string = gen_load_slot(s, (*s).allocator_ty, lv.op)
+            slot: IfaceSlot = iface_slot(s, (*s).allocator_ty, iv, "alloc")
+            if !slot.ok { emit_error((*s).module, "allocator interface has no alloc method") }
+            sb_push(b, " = call ptr ")
+            sb_push(b, slot.fp)
+            sb_push(b, "(ptr ")
+            sb_push(b, slot.data)
+        } else if an.kind == ctyk_struct() {
+            sb_push(b, " = call ptr @")
+            sb_push(b, an.text)
+            sb_push(b, ".alloc(ptr ")
+            sb_push(b, lv.op)
+        } else {
+            emit_error((*s).module, "unsupported allocator type")
+            sb_push(b, " = call ptr @cool_gen_alloc(i64 ")
+            sb_push(b, sz.op)
+            sb_push_char(b, 41)
+        }
+        if an.kind == ctyk_iface() || an.kind == ctyk_struct() {
         sb_push(b, ", i64 ")
         sb_push(b, sz.op)
         sb_push(b, ", i64 ")
         sb_push_int(b, sa.align)
         sb_push_char(b, 41)
+        }
     } else {
         sb_push(b, " = call ptr @cool_gen_alloc(i64 ")
         sb_push(b, sz.op)
@@ -229,6 +246,56 @@ export func alloc_of(s: *GenFuncState, pointee: int64, has_value: bool, value: V
     return Val { ty: cty_intern(c, ctyk_ptr(), pointee, 0, ""), op: fat(s, p, gen) }
 }
 
+export func gen_alloc_call_raw(s: *GenFuncState, size: string, align: int64) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    p: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, p)
+    if (*s).allocator_ty == cty_void(c) {
+        sb_push(b, " = call ptr @cool_gen_alloc(i64 ")
+        sb_push(b, size)
+        sb_push_char(b, 41)
+    } else {
+        an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
+        lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        if an.kind == ctyk_struct() {
+            sb_push(b, " = call ptr @")
+            sb_push(b, an.text)
+            sb_push(b, ".alloc(ptr ")
+            sb_push(b, lv.op)
+            sb_push(b, ", i64 ")
+            sb_push(b, size)
+            sb_push(b, ", i64 ")
+            sb_push_int(b, align)
+            sb_push_char(b, 41)
+        } else if an.kind == ctyk_iface() {
+            iv: string = gen_load_slot(s, (*s).allocator_ty, lv.op)
+            slot: IfaceSlot = iface_slot(s, (*s).allocator_ty, iv, "alloc")
+            if !slot.ok { emit_error((*s).module, "allocator interface has no alloc method") }
+            sb_push(b, " = call ptr ")
+            sb_push(b, slot.fp)
+            sb_push(b, "(ptr ")
+            sb_push(b, slot.data)
+            sb_push(b, ", i64 ")
+            sb_push(b, size)
+            sb_push(b, ", i64 ")
+            sb_push_int(b, align)
+            sb_push_char(b, 41)
+        } else {
+            emit_error((*s).module, "unsupported allocator type")
+            sb_push(b, " = call ptr @cool_gen_alloc(i64 ")
+            sb_push(b, size)
+            sb_push_char(b, 41)
+        }
+    }
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return p
+}
+
 export func gen_alloc(s: *GenFuncState, off: int64, len: int64) -> Val {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -251,11 +318,25 @@ export func gen_free(s: *GenFuncState, off: int64, len: int64) -> Val {
         if (*s).allocator_ty != cty_void(c) {
             an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
             lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
-            sb_push(b, "call void @")
-            sb_push(b, an.text)
-            sb_push(b, ".free(ptr ")
-            sb_push(b, lv.op)
-            sb_push(b, ", ptr ")
+            if an.kind == ctyk_iface() {
+                iv: string = gen_load_slot(s, (*s).allocator_ty, lv.op)
+                slot: IfaceSlot = iface_slot(s, (*s).allocator_ty, iv, "free")
+                if !slot.ok { emit_error((*s).module, "allocator interface has no free method") }
+                sb_push(b, "call void ")
+                sb_push(b, slot.fp)
+                sb_push(b, "(ptr ")
+                sb_push(b, slot.data)
+                sb_push(b, ", ptr ")
+            } else if an.kind == ctyk_struct() {
+                sb_push(b, "call void @")
+                sb_push(b, an.text)
+                sb_push(b, ".free(ptr ")
+                sb_push(b, lv.op)
+                sb_push(b, ", ptr ")
+            } else {
+                emit_error((*s).module, "unsupported allocator type")
+                sb_push(b, "call void @cool_gen_free(ptr ")
+            }
         } else { sb_push(b, "call void @cool_gen_free(ptr ") }
         sb_push(b, p)
         sb_push_char(b, 41)

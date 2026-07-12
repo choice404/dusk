@@ -23,6 +23,8 @@
 @import genplace
 @import genenum
 @import generr
+@import genclos
+@import gencollect
 
 func gx_hex(b: int64) -> int64 {
     if b >= 48 {
@@ -340,6 +342,7 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
             loaded: string = gen_load_slot(s, lv.ty, lv.op)
             return Val { ty: lv.ty, op: loaded }
         }
+        if genctx_has_fn((*s).ctx, name) { return gen_func_value(s, name) }
         emit_error((*s).module, "unsupported identifier expression")
         return Val { ty: cty_int(c, 64), op: gs_copy("0") }
     }
@@ -472,10 +475,10 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
     else if e.kind == xk_tuple() { return gen_tuple(s, e) }
     else if e.kind == xk_array() { return gen_array_lit(s, e, -1) }
     else if e.kind == xk_struct_lit() { return gen_struct_lit(s, e) }
-    else if e.kind == xk_lambda() { emit_error((*s).module, "unsupported closure expression") }
+    else if e.kind == xk_lambda() { return gen_lambda(s, e) }
     else if e.kind == xk_match() { return gen_match_expr(s, e) }
     else if e.kind == xk_await() { emit_error((*s).module, "unsupported await expression") }
-    else if e.kind == xk_collect() { emit_error((*s).module, "unsupported collector expression") }
+    else if e.kind == xk_collect() { return gen_collect(s, e) }
     else { emit_error((*s).module, "unsupported expression") }
     return Val { ty: cty_int(c, 64), op: gs_copy("0") }
 }

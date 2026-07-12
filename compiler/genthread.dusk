@@ -1,0 +1,301 @@
+// genthread: synchronous thread spawn, pool submit, and join lowering.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genclos
+@import genptr
+
+func gt_thread_ty(c: *CTyArena) -> int64 {
+    return cty_intern(c, ctyk_thread(), 0, 0, "")
+}
+
+func gt_task_env(s: *GenFuncState, e: ExprNode) -> (string, string) {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if e.kind != xk_lambda() {
+        emit_error((*s).module, "unsupported thread task expression")
+        return (gs_copy(""), gs_copy("null"))
+    }
+    caps: *Vector<LocalVal> = clos_captures(s, e)
+    name: string = clos_lambda_name((*s).module)
+    env_ty: string = clos_env_ty(s, caps)
+    mut env: string = gs_copy("null")
+    if vec_len(caps) > 0 {
+        szp: string = next_tmp((*s).fb)
+        b0: *StringBuilder = alloc(sb_new())
+        sb_push(b0, szp)
+        sb_push(b0, " = getelementptr ")
+        sb_push(b0, env_ty)
+        sb_push(b0, ", ptr null, i64 1")
+        t0: string = gs_built(b0)
+        sb_free(b0)
+        free(b0)
+        line((*s).fb, t0)
+        free(t0)
+        sz: string = next_tmp((*s).fb)
+        b1: *StringBuilder = alloc(sb_new())
+        sb_push(b1, sz)
+        sb_push(b1, " = ptrtoint ptr ")
+        sb_push(b1, szp)
+        sb_push(b1, " to i64")
+        t1: string = gs_built(b1)
+        sb_free(b1)
+        free(b1)
+        line((*s).fb, t1)
+        free(t1)
+        env = next_tmp((*s).fb)
+        b2: *StringBuilder = alloc(sb_new())
+        sb_push(b2, env)
+        sb_push(b2, " = call ptr @cool_alloc_env(i64 ")
+        sb_push(b2, sz)
+        sb_push_char(b2, 41)
+        t2: string = gs_built(b2)
+        sb_free(b2)
+        free(b2)
+        line((*s).fb, t2)
+        free(t2)
+        mut i: int64 = 0
+        while i < vec_len(caps) {
+            cap: LocalVal = vec_get(caps, i)
+            lv: LocalVal = unwrap_or(map_get((*s).locals, cap.op), LocalVal { ty: cty_void(c), op: gs_copy("") })
+            v: string = gen_load_slot(s, lv.ty, lv.op)
+            slot: string = next_tmp((*s).fb)
+            gb: *StringBuilder = alloc(sb_new())
+            sb_push(gb, slot)
+            sb_push(gb, " = getelementptr ")
+            sb_push(gb, env_ty)
+            sb_push(gb, ", ptr ")
+            sb_push(gb, env)
+            sb_push(gb, ", i32 0, i32 ")
+            sb_push_int(gb, i)
+            gt: string = gs_built(gb)
+            sb_free(gb)
+            free(gb)
+            line((*s).fb, gt)
+            free(gt)
+            gen_store_slot(s, cap.ty, v, slot)
+            i = i + 1
+        }
+    }
+    clos_emit_lambda(s, e, name, env_ty, caps)
+    return (name, env)
+}
+
+export func gen_spawn(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    elems: *Vector<int64> = alloc(vec_new())
+    vec_push(elems, gt_thread_ty(c))
+    vec_push(elems, cty_error(c))
+    tty: int64 = cty_tuple_make(c, elems)
+    if len <= 0 { return Val { ty: tty, op: gs_copy("zeroinitializer") } }
+    eid: int64 = vec_get((*a).kids, off)
+    e: ExprNode = vec_get((*a).exprs, eid)
+    if e.kind != xk_lambda() {
+        mut i: int64 = 0
+        while i < len {
+            gen_expr(s, vec_get((*a).kids, off + i))
+            i = i + 1
+        }
+        return Val { ty: tty, op: gs_copy("zeroinitializer") }
+    }
+    fname, env := gt_task_env(s, e)
+    rec: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, rec)
+    sb_push(b0, " = call ptr @cool_thread_spawn(ptr @")
+    sb_push(b0, fname)
+    sb_push(b0, ", ptr ")
+    sb_push(b0, env)
+    sb_push_char(b0, 41)
+    t0: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, t0)
+    free(t0)
+    hslot: string = gen_alloca(s, gt_thread_ty(c))
+    eslot: string = gen_alloca(s, cty_error(c))
+    isnull: string = next_tmp((*s).fb)
+    op2((*s).fb, isnull, "icmp eq", "ptr", rec, "null")
+    bad: int64 = fresh_label((*s).fb)
+    ok: int64 = fresh_label((*s).fb)
+    done: int64 = fresh_label((*s).fb)
+    bl: string = branch_label(bad)
+    ol: string = branch_label(ok)
+    dl: string = branch_label(done)
+    br_cond((*s).fb, isnull, bl, ol)
+    place_label((*s).fb, ok)
+    hp: string = next_tmp((*s).fb)
+    b1: *StringBuilder = alloc(sb_new())
+    sb_push(b1, hp)
+    sb_push(b1, " = getelementptr i8, ptr ")
+    sb_push(b1, rec)
+    sb_push(b1, ", i64 -8")
+    t1: string = gs_built(b1)
+    sb_free(b1)
+    free(b1)
+    line((*s).fb, t1)
+    free(t1)
+    gen: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, gen)
+    sb_push(b2, " = load atomic i64, ptr ")
+    sb_push(b2, hp)
+    sb_push(b2, " seq_cst, align 8")
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    gen_store_slot(s, gt_thread_ty(c), fat(s, rec, gen), hslot)
+    gen_store_slot(s, cty_error(c), "null", eslot)
+    br((*s).fb, dl)
+    place_label((*s).fb, bad)
+    gen_store_slot(s, gt_thread_ty(c), fat(s, "null", "0"), hslot)
+    msg: string = emit_cstring((*s).module, "cannot spawn thread")
+    gen_store_slot(s, cty_error(c), msg, eslot)
+    br((*s).fb, dl)
+    place_label((*s).fb, done)
+    h: string = gen_load_slot(s, gt_thread_ty(c), hslot)
+    er: string = gen_load_slot(s, cty_error(c), eslot)
+    ll: string = cty_ll(c, tty)
+    first: string = next_tmp((*s).fb)
+    b3: *StringBuilder = alloc(sb_new())
+    sb_push(b3, first)
+    sb_push(b3, " = insertvalue ")
+    sb_push(b3, ll)
+    sb_push(b3, " undef, { ptr, i64 } ")
+    sb_push(b3, h)
+    sb_push(b3, ", 0")
+    t3: string = gs_built(b3)
+    sb_free(b3)
+    free(b3)
+    line((*s).fb, t3)
+    free(t3)
+    out: string = next_tmp((*s).fb)
+    b4: *StringBuilder = alloc(sb_new())
+    sb_push(b4, out)
+    sb_push(b4, " = insertvalue ")
+    sb_push(b4, ll)
+    sb_push_char(b4, 32)
+    sb_push(b4, first)
+    sb_push(b4, ", ptr ")
+    sb_push(b4, er)
+    sb_push(b4, ", 1")
+    t4: string = gs_built(b4)
+    sb_free(b4)
+    free(b4)
+    line((*s).fb, t4)
+    free(t4)
+    free(ll)
+    return Val { ty: tty, op: out }
+}
+
+export func gen_submit(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if len <= 0 { return Val { ty: cty_error(c), op: gs_copy("null") } }
+    e: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, off))
+    if e.kind != xk_lambda() {
+        mut i: int64 = 0
+        while i < len {
+            gen_expr(s, vec_get((*a).kids, off + i))
+            i = i + 1
+        }
+        return Val { ty: cty_error(c), op: gs_copy("null") }
+    }
+    fname, env := gt_task_env(s, e)
+    rc: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, rc)
+    sb_push(b0, " = call i64 @cool_pool_submit(ptr @")
+    sb_push(b0, fname)
+    sb_push(b0, ", ptr ")
+    sb_push(b0, env)
+    sb_push_char(b0, 41)
+    text: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, text)
+    free(text)
+    bad: string = next_tmp((*s).fb)
+    op2((*s).fb, bad, "icmp ne", "i64", rc, "0")
+    msg: string = emit_cstring((*s).module, "the thread pool is not running")
+    err: string = next_tmp((*s).fb)
+    b1: *StringBuilder = alloc(sb_new())
+    sb_push(b1, err)
+    sb_push(b1, " = select i1 ")
+    sb_push(b1, bad)
+    sb_push(b1, ", ptr ")
+    sb_push(b1, msg)
+    sb_push(b1, ", ptr null")
+    t1: string = gs_built(b1)
+    sb_free(b1)
+    free(b1)
+    line((*s).fb, t1)
+    free(t1)
+    return Val { ty: cty_error(c), op: err }
+}
+
+export func gen_join(s: *GenFuncState, off: int64, len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if len <= 0 { return Val { ty: cty_error(c), op: gs_copy("null") } }
+    v: Val = gen_expr(s, vec_get((*a).kids, off))
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if n.kind != ctyk_thread() {
+        emit_error((*s).module, "unsupported join expression")
+        return Val { ty: cty_error(c), op: gs_copy("null") }
+    }
+    data: string = fat_data(s, v.op)
+    gen: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, gen)
+    sb_push(b0, " = extractvalue { ptr, i64 } ")
+    sb_push(b0, v.op)
+    sb_push(b0, ", 1")
+    t0: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, t0)
+    free(t0)
+    rc: string = next_tmp((*s).fb)
+    b1: *StringBuilder = alloc(sb_new())
+    sb_push(b1, rc)
+    sb_push(b1, " = call i64 @cool_thread_join(ptr ")
+    sb_push(b1, data)
+    sb_push(b1, ", i64 ")
+    sb_push(b1, gen)
+    sb_push_char(b1, 41)
+    t1: string = gs_built(b1)
+    sb_free(b1)
+    free(b1)
+    line((*s).fb, t1)
+    free(t1)
+    bad: string = next_tmp((*s).fb)
+    op2((*s).fb, bad, "icmp ne", "i64", rc, "0")
+    msg: string = emit_cstring((*s).module, "cannot join thread")
+    err: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, err)
+    sb_push(b2, " = select i1 ")
+    sb_push(b2, bad)
+    sb_push(b2, ", ptr ")
+    sb_push(b2, msg)
+    sb_push(b2, ", ptr null")
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    return Val { ty: cty_error(c), op: err }
+}

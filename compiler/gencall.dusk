@@ -7,6 +7,8 @@
 
 @import std.string
 @import std.vector
+@import std.map
+@import std.functional.maybe
 @import ast
 @import cty
 @import emit
@@ -18,6 +20,115 @@
 @import genagg
 @import genmeth
 @import genio
+@import genclos
+@import genhof
+@import genthread
+@import gencollect
+
+func gc_funcval_thunk(s: *GenFuncState, name: string, sig: GenFnSig) -> void {
+    if !emit_need_funcval_thunk((*s).module, name) { return }
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    b: *StringBuilder = alloc(sb_new())
+    retll: string = cty_ll(c, sig.ret)
+    params: *Vector<int64> = sig.params
+    sb_push(b, "define ")
+    sb_push(b, retll)
+    sb_push(b, " @")
+    sb_push(b, name)
+    sb_push(b, ".funcval(ptr %env")
+    mut i: int64 = 0
+    while i < vec_len(params) {
+        pll: string = cty_ll(c, vec_get(params, i))
+        sb_push(b, ", ")
+        sb_push(b, pll)
+        sb_push(b, " %a")
+        sb_push_int(b, i)
+        free(pll)
+        i = i + 1
+    }
+    sb_push(b, ") {\nentry:\n  ")
+    if !str_eq(retll, "void") { sb_push(b, "%r = ") }
+    sb_push(b, "call ")
+    sb_push(b, retll)
+    sb_push(b, " @")
+    sb_push(b, name)
+    sb_push_char(b, 40)
+    mut j: int64 = 0
+    while j < vec_len(params) {
+        if j > 0 { sb_push(b, ", ") }
+        all: string = cty_ll(c, vec_get(params, j))
+        sb_push(b, all)
+        sb_push(b, " %a")
+        sb_push_int(b, j)
+        free(all)
+        j = j + 1
+    }
+    sb_push(b, ")\n  ret ")
+    sb_push(b, retll)
+    if !str_eq(retll, "void") { sb_push(b, " %r") }
+    sb_push(b, "\n}")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    emit_push_function((*s).module, text)
+    free(text)
+    free(retll)
+}
+
+// The closure type of a bare function name carries the full signature: params
+// encoded like a lambda's (ParamNode kids at a, count b) and the return type
+// ast id at c, so an indirect call adapts each argument against the real
+// parameter type and the slice covariance backstop can see the element.
+func gfv_closure_ty(s: *GenFuncState, name: string) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if str_eq(ast_name(a, f.name), name) {
+                return cty_intern_full(c, ctyk_closure(), f.params_off, f.params_len, f.ret, "lambda")
+            }
+        }
+        i = i + 1
+    }
+    return cty_intern(c, ctyk_closure(), 0, 0, "")
+}
+
+export func gen_func_value(s: *GenFuncState, name: string) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if !genctx_has_fn((*s).ctx, name) {
+        emit_error((*s).module, "unsupported identifier expression")
+        return Val { ty: cty_void(c), op: gs_copy("") }
+    }
+    sig: GenFnSig = genctx_fn((*s).ctx, name)
+    gc_funcval_thunk(s, name, sig)
+    first: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, first)
+    sb_push(b0, " = insertvalue { ptr, ptr } undef, ptr null, 0")
+    text0: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, text0)
+    free(text0)
+    out: string = next_tmp((*s).fb)
+    b1: *StringBuilder = alloc(sb_new())
+    sb_push(b1, out)
+    sb_push(b1, " = insertvalue { ptr, ptr } ")
+    sb_push(b1, first)
+    sb_push(b1, ", ptr @")
+    sb_push(b1, name)
+    sb_push(b1, ".funcval, 1")
+    text1: string = gs_built(b1)
+    sb_free(b1)
+    free(b1)
+    line((*s).fb, text1)
+    free(text1)
+    return Val { ty: gfv_closure_ty(s, name), op: out }
+}
 
 // Lowers a call expression when the callee is a plain top-level name or builtin.
 export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_len: int64) -> Val {
@@ -26,12 +137,32 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind != xk_ident() {
         if callee.kind == xk_field() {
+            base_ty: int64 = static_expr_ty(s, callee.a)
+            bn: CTyNode = vec_get(cty_nodes(c), base_ty)
+            if bn.kind == ctyk_struct() {
+                fi: int64 = cty_struct_field(c, base_ty, ast_name(a, callee.b))
+                if fi >= 0 {
+                    ft: int64 = cty_struct_field_ty(c, base_ty, fi)
+                    ftn: CTyNode = vec_get(cty_nodes(c), ft)
+                    if ftn.kind == ctyk_closure() {
+                        return gen_closure_call(s, gen_expr(s, callee_id), args_off, args_len)
+                    }
+                }
+            }
             return gen_method_call(s, callee.a, ast_name(a, callee.b), args_off, args_len)
         }
         emit_error((*s).module, "unsupported call target")
         return Val { ty: cty_void(c), op: gs_copy("") }
     }
     name: string = ast_name(a, callee.a)
+    locals: *Map<LocalVal> = (*s).locals
+    if map_has(locals, name) {
+        lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        ln: CTyNode = vec_get(cty_nodes(c), lv.ty)
+        if ln.kind == ctyk_closure() {
+            return gen_closure_call(s, gen_expr(s, callee_id), args_off, args_len)
+        }
+    }
     if str_eq(name, "alloc") { return gen_alloc(s, args_off, args_len) }
     if str_eq(name, "free") { return gen_free(s, args_off, args_len) }
     if str_eq(name, "sizeof") { return gen_sizeof(s, args_off, args_len) }
@@ -42,6 +173,18 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     if str_eq(name, "read_line") { return gen_stdin_read(s, "cool_read_line", "end of input") }
     if str_eq(name, "read_all") { return gen_stdin_read(s, "cool_read_all", "cannot read stdin") }
     if str_eq(name, "parse_float") { return gen_parse_float(s, args_off, args_len) }
+    if str_eq(name, "map") { return gen_map(s, args_off, args_len) }
+    if str_eq(name, "filter") { return gen_filter(s, args_off, args_len) }
+    if str_eq(name, "fold") { return gen_fold(s, args_off, args_len) }
+    if str_eq(name, "reduce") { return gen_reduce(s, args_off, args_len) }
+    if str_eq(name, "foreach") { return gen_foreach(s, args_off, args_len) }
+    if str_eq(name, "spawn") { return gen_spawn(s, args_off, args_len) }
+    if str_eq(name, "submit") { return gen_submit(s, args_off, args_len) }
+    if str_eq(name, "join") { return gen_join(s, args_off, args_len) }
+    if str_eq(name, "debug_alloc") { return gen_debug_alloc(s, args_off, args_len) }
+    if str_eq(name, "debug_free") { return gen_debug_free(s, args_off, args_len) }
+    if str_eq(name, "debug_leaks") { return gen_debug_leaks(s) }
+    if str_eq(name, "debug_double_frees") { return gen_debug_double_frees(s) }
     if str_eq(name, "cstr") {
         if args_len > 0 {
             v0: Val = gen_expr(s, vec_get((*a).kids, args_off))

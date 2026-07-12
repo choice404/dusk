@@ -9,7 +9,7 @@
 @import std.functional.maybe
 @import ast
 
-export struct CTyNode { kind: int64, a: int64, b: int64, text: string }
+export struct CTyNode { kind: int64, a: int64, b: int64, c: int64, text: string }
 export struct SizeAlign { size: int64, align: int64 }
 
 export struct CTyArena {
@@ -49,13 +49,15 @@ export func cty_new(a: *Ast) -> *CTyArena {
 export func cty_nodes(c: *CTyArena) -> *Vector<CTyNode> { return (*c).nodes }
 func cty_dedup(c: *CTyArena) -> *Map<int64> { return (*c).dedup }
 
-func cty_key(kind: int64, a: int64, b: int64, text: string) -> string {
+func cty_key(kind: int64, a: int64, b: int64, c0: int64, text: string) -> string {
     out: *StringBuilder = alloc(sb_new())
     sb_push_int(out, kind)
     sb_push_char(out, 124)
     sb_push_int(out, a)
     sb_push_char(out, 124)
     sb_push_int(out, b)
+    sb_push_char(out, 124)
+    sb_push_int(out, c0)
     sb_push_char(out, 124)
     sb_push(out, text)
     s: string = cty_built(out)
@@ -65,12 +67,16 @@ func cty_key(kind: int64, a: int64, b: int64, text: string) -> string {
 }
 
 export func cty_intern(c: *CTyArena, kind: int64, a: int64, b: int64, text: string) -> int64 {
-    key: string = cty_key(kind, a, b, text)
+    return cty_intern_full(c, kind, a, b, 0, text)
+}
+
+export func cty_intern_full(c: *CTyArena, kind: int64, a: int64, b: int64, c0: int64, text: string) -> int64 {
+    key: string = cty_key(kind, a, b, c0, text)
     dedup: *Map<int64> = cty_dedup(c)
     if map_has(dedup, key) { return unwrap_or(map_get(dedup, key), -1) }
     nodes: *Vector<CTyNode> = cty_nodes(c)
     id: int64 = vec_len(nodes)
-    vec_push(nodes, CTyNode { kind: kind, a: a, b: b, text: cty_copy(text) })
+    vec_push(nodes, CTyNode { kind: kind, a: a, b: b, c: c0, text: cty_copy(text) })
     map_put(dedup, key, id)
     return id
 }
@@ -133,8 +139,13 @@ export func cty_lower_ast(c: *CTyArena, a: *Ast, id: int64) -> int64 {
     if t.kind == tk_slice() { return cty_intern(c, ctyk_slice(), cty_lower_ast(c, a, t.a), 0, "") }
     if t.kind == tk_array() { return cty_intern(c, ctyk_array(), cty_lower_ast(c, a, t.a), t.b, "") }
     if t.kind == tk_tuple() { return cty_intern(c, ctyk_tuple(), t.a, t.b, "") }
-    if t.kind == tk_func() { return cty_intern(c, ctyk_closure(), t.a, t.b, "") }
-    if t.kind == tk_collector() { return cty_intern(c, ctyk_ptr(), cty_lower_ast(c, a, t.a), 0, "") }
+    if t.kind == tk_func() { return cty_intern_full(c, ctyk_closure(), t.a, t.b, t.c, "") }
+    if t.kind == tk_collector() {
+        inner: int64 = cty_lower_ast(c, a, t.a)
+        n: CTyNode = vec_get(cty_nodes(c), inner)
+        if n.kind == ctyk_closure() || n.kind == ctyk_slice() { return inner }
+        return cty_intern(c, ctyk_ptr(), inner, 0, "")
+    }
     return cty_intern(c, ctyk_unknown(), 0, 0, "")
 }
 
@@ -256,6 +267,25 @@ export func cty_tuple_elem(c: *CTyArena, ty: int64, index: int64) -> int64 {
     return cty_lower_ast(c, (*c).ast, tid)
 }
 
+export func cty_closure_param(c: *CTyArena, ty: int64, index: int64) -> int64 {
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    if n.kind != ctyk_closure() { return cty_void(c) }
+    if index < 0 || index >= n.b { return cty_void(c) }
+    if str_eq(n.text, "lambda") {
+        pid: int64 = vec_get((*(*c).ast).kids, n.a + index)
+        p: ParamNode = vec_get((*(*c).ast).params, pid)
+        return cty_lower_ast(c, (*c).ast, p.ty)
+    }
+    tid: int64 = vec_get((*(*c).ast).kids, n.a + index)
+    return cty_lower_ast(c, (*c).ast, tid)
+}
+
+export func cty_closure_ret(c: *CTyArena, ty: int64) -> int64 {
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    if n.kind != ctyk_closure() { return cty_void(c) }
+    return cty_lower_ast(c, (*c).ast, n.c)
+}
+
 export func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
     a: *Ast = (*c).ast
     n: CTyNode = vec_get(cty_nodes(c), ty)
@@ -274,6 +304,7 @@ export func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
     if n.kind == ctyk_f32() { return ast_type(a, tk_named(), ast_intern(a, "float32"), 0, 0) }
     if n.kind == ctyk_void() { return ast_type(a, tk_unit(), 0, 0, 0) }
     if n.kind == ctyk_error() { return ast_type(a, tk_named(), ast_intern(a, "error"), 0, 0) }
+    if n.kind == ctyk_thread() { return ast_type(a, tk_named(), ast_intern(a, "thread"), 0, 0) }
     if n.kind == ctyk_struct() || n.kind == ctyk_enum() { return ast_type(a, tk_named(), ast_intern(a, n.text), 0, 0) }
     if n.kind == ctyk_ptr() { return ast_type(a, tk_ptr(), cty_to_ast(c, n.a), 0, 0) }
     if n.kind == ctyk_rawptr() { return ast_type(a, tk_rawptr(), cty_to_ast(c, n.a), 0, 0) }
@@ -404,7 +435,15 @@ export func cty_is_float(c: *CTyArena, id: int64) -> bool {
     return n.kind == ctyk_f64() || n.kind == ctyk_f32()
 }
 
+export func cty_is_aggregate(c: *CTyArena, id: int64) -> bool {
+    n: CTyNode = vec_get(cty_nodes(c), id)
+    if n.kind == ctyk_ptr() || n.kind == ctyk_slice() || n.kind == ctyk_array() { return true }
+    if n.kind == ctyk_struct() || n.kind == ctyk_enum() || n.kind == ctyk_iface() { return true }
+    if n.kind == ctyk_closure() || n.kind == ctyk_thread() || n.kind == ctyk_tuple() { return true }
+    return false
+}
+
 export func cty_is_stub(c: *CTyArena, id: int64) -> bool {
     n: CTyNode = vec_get(cty_nodes(c), id)
-    return n.kind == ctyk_iface() || n.kind == ctyk_closure() || n.kind == ctyk_unknown()
+    return n.kind == ctyk_unknown()
 }

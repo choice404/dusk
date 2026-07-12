@@ -18,6 +18,7 @@
 
 export struct LocalVal { ty: int64, op: string }
 export struct Val { ty: int64, op: string }
+export struct IfaceSlot { ok: bool, data: string, fp: string }
 
 export struct GenFuncState {
     module: *EmitModule,
@@ -151,6 +152,9 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
     }
     fn: CTyNode = vec_get(cty_nodes(c), from)
     tn: CTyNode = vec_get(cty_nodes(c), to)
+    if fn.kind == ctyk_closure() {
+        if tn.kind == ctyk_closure() { return gs_copy(op) }
+    }
     if fn.kind == ctyk_ptr() {
         if tn.kind == ctyk_rawptr() { return fat_data(s, op) }
     }
@@ -264,7 +268,6 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
             }
         }
     }
-    emit_error((*s).module, "unsupported scalar coercion")
     return gs_copy(op)
 }
 
@@ -315,5 +318,103 @@ export func adapt(s: *GenFuncState, v: Val, target: int64) -> Val {
             return slice_from_array(s, arr, from.b)
         }
     }
+    // Slice covariance backstop. A slice value of a concrete element cannot be
+    // reinterpreted as a slice of an interface: each element would need reboxing
+    // into { data, vtable }, and a whole-slice cast dispatches through garbage.
+    // A missed sema sink lands here as a loud, named build error, never a
+    // miscompile. Same-element and unknown-element slices fall through.
+    if from.kind == ctyk_slice() {
+        if to.kind == ctyk_slice() {
+            if from.a != to.a {
+                sn: CTyNode = vec_get(cty_nodes(c), from.a)
+                tn2: CTyNode = vec_get(cty_nodes(c), to.a)
+                if sn.kind != ctyk_unknown() {
+                    if tn2.kind == ctyk_iface() {
+                        mut src_name: string = sn.text
+                        if sn.kind != ctyk_struct() && sn.kind != ctyk_enum() && sn.kind != ctyk_iface() {
+                            src_name = cty_ll(c, from.a)
+                        }
+                        mb: *StringBuilder = alloc(sb_new())
+                        sb_push(mb, "cannot pass a slice of '")
+                        sb_push(mb, src_name)
+                        sb_push(mb, "' as a slice of interface '")
+                        sb_push(mb, tn2.text)
+                        sb_push(mb, "'; a slice of concrete values cannot be reinterpreted as a slice of interfaces")
+                        msg: string = gs_built(mb)
+                        sb_free(mb)
+                        free(mb)
+                        emit_error((*s).module, msg)
+                        free(msg)
+                        return Val { ty: target, op: gs_copy("zeroinitializer") }
+                    }
+                }
+            }
+        }
+    }
     return Val { ty: target, op: coerce(s, v.ty, v.op, target) }
+}
+
+export func iface_slot(s: *GenFuncState, value_ty: int64, value: string, method: string) -> IfaceSlot {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), value_ty)
+    if n.kind != ctyk_iface() { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
+    interfaces: *Vector<InterfaceNode> = (*a).interfaces
+    mut iface_id: int64 = -1
+    mut ii: int64 = 0
+    while ii < vec_len(interfaces) {
+        cand: InterfaceNode = vec_get(interfaces, ii)
+        if str_eq(ast_name(a, cand.name), n.text) { iface_id = ii }
+        ii = ii + 1
+    }
+    if iface_id < 0 { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
+    iface: InterfaceNode = vec_get(interfaces, iface_id)
+    mut slot_index: int64 = -1
+    mut mi: int64 = 0
+    while mi < iface.methods_len {
+        mid: int64 = vec_get((*a).kids, iface.methods_off + mi)
+        ms: MethodSigNode = vec_get((*a).method_sigs, mid)
+        if str_eq(ast_name(a, ms.name), method) { slot_index = mi }
+        mi = mi + 1
+    }
+    if slot_index < 0 { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
+    data: string = next_tmp((*s).fb)
+    b0: *StringBuilder = alloc(sb_new())
+    sb_push(b0, data)
+    sb_push(b0, " = extractvalue { ptr, ptr } ")
+    sb_push(b0, value)
+    sb_push(b0, ", 0")
+    t0: string = gs_built(b0)
+    sb_free(b0)
+    free(b0)
+    line((*s).fb, t0)
+    free(t0)
+    vt: string = next_tmp((*s).fb)
+    b1: *StringBuilder = alloc(sb_new())
+    sb_push(b1, vt)
+    sb_push(b1, " = extractvalue { ptr, ptr } ")
+    sb_push(b1, value)
+    sb_push(b1, ", 1")
+    t1: string = gs_built(b1)
+    sb_free(b1)
+    free(b1)
+    line((*s).fb, t1)
+    free(t1)
+    slot: string = next_tmp((*s).fb)
+    b2: *StringBuilder = alloc(sb_new())
+    sb_push(b2, slot)
+    sb_push(b2, " = getelementptr [")
+    sb_push_int(b2, iface.methods_len)
+    sb_push(b2, " x ptr], ptr ")
+    sb_push(b2, vt)
+    sb_push(b2, ", i64 0, i64 ")
+    sb_push_int(b2, slot_index)
+    t2: string = gs_built(b2)
+    sb_free(b2)
+    free(b2)
+    line((*s).fb, t2)
+    free(t2)
+    fp: string = next_tmp((*s).fb)
+    fb_load((*s).fb, fp, "ptr", slot)
+    return IfaceSlot { ok: true, data: data, fp: fp }
 }
