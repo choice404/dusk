@@ -2,6 +2,31 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 0.9.4
+
+The pyramid. 0.9.3 closed the codegen line, every construct the language surface carries lowering under dusk1; 0.9.4 closes the bootstrap itself, climbing `tools/pyramid.sh`'s stage ladder past the point it stopped at and all the way to the top. stage0 builds `compiler/main.dusk` into stage1, stage1 builds the identical source into stage2, and stage2 builds it once more into stage3, and this release is the first time all three stages run to completion and agree: stage1, stage2, and stage3 land on the identical binary, sha256 `80f1de1f0ca7924f42ef97b7018c800011e7dd78a968606f004228b2d7b8c541`, built from the identical compiler IR, sha256 `d2641455b96b9a47330998de026f19c386a79a4bd2664029559660c9a499db52`. The collapse, stage2's own compiler IR byte equaling stage1's, and the fixpoint, stage3's byte equaling stage2's, both hold at once, the proof a self hosting compiler eventually has to pass. No language surface changes; this is the bootstrap line doing what the freeze promised, the last stage of it closed. Suite 458 unit, 560 golden, 13 parser termination, clippy clean.
+
+The stage ladder, closed.
+
+- `tools/pyramid.sh`'s example comparison now runs both compilers under `dusk1 ir` instead of `dusk1 build`, the same text a build would write to its own `.ll` with no `clang` invocation and no binary to link, so climbing the ladder against the full `examples/` corpus stays link free the same way `tools/differential.sh`'s `ir` mode already does.
+- A collapse check is new: once stage2 is built, its own compiler IR is compared byte for byte against stage1's before anything else runs. A mismatch means the compiler's own output depends on something other than its source and `DUSK_HOME`, and the script now says so by name, `stage1 and stage2 compiler LLVM IR differ`, rather than only noticing three stages later at the fixpoint check.
+- A determinism check is new alongside the example comparison: every program stage1 accepts is asked for its IR a second time, and the two dumps have to match byte for byte or the ladder fails with `stage1 emitted different IR for <file> across two runs`, closing the same class of nondeterminism `dusk ir`'s triple run check already rules out for stage0.
+- The golden suite now runs a second time at the close of the ladder, with stage2 itself as `DUSK_BIN`, so the compiler stage1 built is proven against the same suite stage1 already passed, not only against the corpus comparison above it.
+- Both golden suite runs pass `--test-threads=1` now, with a comment recording why: the self build goldens each peak near eleven gigabytes of resident memory on their own, and running more than one at a time can exhaust the machine the ladder runs on.
+- Stage 2's own self build is timed and sampled: the script forks the build, polls every child process's `VmRSS` every two seconds while it runs, and prints the wall clock time and the peak resident set alongside stage2's own checksums once the build finishes.
+
+Deep expression hardening.
+
+- Three synthetic programs, a flat sum of 2000 terms, an expression parenthesized 200 levels deep, and an `if` chain nested 40 levels deep, went through dusk1's codegen the way the parser's own depth guard has been tested against adversarial input since 0.5.0. All three build under both compilers to byte identical LLVM IR, and neither compiler crashes or hangs on any of them; the recursive walk `gen_expr` and `gen_stmt` use to lower an expression or a statement holds at these depths the same way the parser's own recursive descent already does.
+
+Numbers.
+
+- Suite 458 unit, 560 golden, 13 parser termination, clippy clean.
+- `tools/pyramid.sh` runs stage0, stage1, stage2, and stage3 to completion for the first time; the golden suite passes 560 of 560 with stage1 as the compiler under test and again with stage2, single threaded both times.
+- Across the full 563 file `examples/` corpus, stage1 and stage2 agree byte for byte on the LLVM IR for 304 accepted programs and agree on rejecting the remaining 259; stage1 also emits every one of those 304 programs' IR byte for byte across two separate runs, the determinism the ladder checks directly now rather than assuming it.
+- Measured inside the same resource cage 0.9.3 used, one instance at a time, a virtual memory ceiling, niced down: stage1 building its own roughly 25,000 line source plus the standard library into stage2 takes 82 seconds wall clock and peaks at roughly 13.4 gigabytes of resident memory, sampled directly by the ladder itself rather than by a one off run alongside it as 0.9.3's rougher 90 to 180 second, 11 gigabyte estimate was.
+- This is the last release of the codegen line that opened at 0.9.0: the compiler is written in dusk, and dusk1 now builds itself to a fixpoint, three stages deep, with byte identical binaries and byte identical compiler IR to prove it.
+
 ## 0.9.3
 
 The async machine in dusk. 0.9.2 carried closures, the functional builtins, threads, and the collector; 0.9.3 gives dusk1 the last piece of the codegen line, `async func`, `await`, and `async_run`, lowering a suspending function to a heap task frame and a poll state machine the same way stage0's own generator does. `dusk1` now builds and runs a real async program end to end, a task frame laid out and switched on the way stage0's lowerer lays it out, an `await` that stores its pending future and its own resume state before returning to the scheduler, and `async_run` cranking the loop to completion from a synchronous `main`. This closes the codegen line: every construct the language surface froze at 0.5.4 now lowers under dusk1, and the compiler's own source builds under itself. No language surface changes; this is the bootstrap line doing what the freeze promised, the last pipeline stage closed. Suite 458 unit, 560 golden, 13 parser termination, clippy clean.

@@ -144,23 +144,19 @@ build_example_ll() {
     local output_ll=$3
     local label=$4
     local safe=$5
-    local stem
-    local emitted_ll
     local status
 
-    stem=$(stem_of "$file")
-    emitted_ll="$repo_root/target/dusk-out/$stem.ll"
-
+    # The ir command emits the same text a build writes to its .ll without
+    # invoking clang, so the cross stage comparison stays link free.
     set +e
-    DUSK_HOME="$repo_root" "$builder" build "$file" \
-        >"$work/logs/$label-$safe.stdout" \
+    DUSK_HOME="$repo_root" "$builder" ir "$file" \
+        >"$output_ll" \
         2>"$work/logs/$label-$safe.stderr"
     status=$?
     set -e
 
-    if [[ "$status" -eq 0 ]]; then
-        [[ -f "$emitted_ll" ]] || fail "$label succeeded for $file but did not emit $emitted_ll"
-        cp "$emitted_ll" "$output_ll"
+    if [[ "$status" -ne 0 ]]; then
+        rm -f "$output_ll"
     fi
 
     return "$status"
@@ -226,21 +222,49 @@ fi
 
 # The existing golden suite must pass when the compiler under test is stage1.
 # tests/examples.rs honors DUSK_BIN, so no test harness edit is needed here.
+# Single threaded: the self build tests inside the suite each peak around
+# eleven gigabytes, and running several at once can exhaust the machine.
 echo "stage 1 check: run golden suite against stage1"
-if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage1" cargo test --test examples; then
+if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage1" cargo test --test examples -- --test-threads=1; then
     fail "golden suite failed against stage1"
 fi
 
-# TODO(bootstrap): dusk1 needs a working build command with codegen ported to compiler/*.dusk.
-# Stage 2 is built by the now validated stage1. Matching behavior here shows
-# that the dusk compiler source is self consistent under its own front end.
-build_compiler_stage "$stage1" "$stage2" "$stage2_ll" "stage 2: stage1 builds the dusk compiler source"
+# Stage 2 is built by the now validated stage1. The build is timed and its
+# peak resident set sampled, the recorded cost of a full self build.
+stage2_t0=$(date +%s)
+build_compiler_stage "$stage1" "$stage2" "$stage2_ll" "stage 2: stage1 builds the dusk compiler source" &
+stage2_build_pid=$!
+stage2_peak_kb=0
+while kill -0 "$stage2_build_pid" 2>/dev/null; do
+    for child in $(pgrep -P "$stage2_build_pid" 2>/dev/null) "$stage2_build_pid"; do
+        rss=$(awk '/VmRSS/ {print $2}' "/proc/$child/status" 2>/dev/null || echo 0)
+        for pid2 in $(pgrep -P "$child" 2>/dev/null); do
+            rss2=$(awk '/VmRSS/ {print $2}' "/proc/$pid2/status" 2>/dev/null || echo 0)
+            if [[ "${rss2:-0}" -gt "$rss" ]]; then rss=$rss2; fi
+        done
+        if [[ "${rss:-0}" -gt "$stage2_peak_kb" ]]; then stage2_peak_kb=$rss; fi
+    done
+    sleep 2
+done
+wait "$stage2_build_pid" || fail "stage 2 self build failed"
+stage2_t1=$(date +%s)
+echo "stage 2 self build: $((stage2_t1 - stage2_t0))s wall, peak resident ~$((stage2_peak_kb / 1024))MB"
 print_stage_sha256 "stage2" "$stage2" "$stage2_ll"
 
-# TODO(bootstrap): dusk1 needs a working build command with codegen ported to compiler/*.dusk.
+# The collapse check: the IR stage1 emits for the compiler source must byte
+# equal the IR stage0 emitted for it. A mismatch means the compiler's output
+# depends on something other than the source and DUSK_HOME.
+if ! cmp -s "$stage1_ll" "$stage2_ll"; then
+    echo "pyramid: stage1 and stage2 compiler LLVM IR differ" >&2
+    echo "first diff: $(first_diff_line "$stage1_ll" "$stage2_ll" "stage1 compiler IR" "stage2 compiler IR")" >&2
+    exit 1
+fi
+echo "collapse check: stage2 compiler IR byte equals stage1's"
+
 # Stage1 and stage2 should compile every golden example to the same LLVM IR.
 # Examples that both compilers reject are counted separately; a status mismatch
-# is still a bootstrap failure.
+# is still a bootstrap failure. The same loop doubles as the determinism run:
+# stage1 emits each accepted example twice and the two dumps must byte match.
 echo "stage 2 check: compare stage1 and stage2 emitted LLVM IR for examples"
 compared_examples=0
 rejected_examples=0
@@ -249,7 +273,25 @@ while IFS= read -r -d '' example; do
 done < <(find "$repo_root/examples" -type f -name '*.dusk' -print0 | sort -z)
 echo "stage 2 check: matched $compared_examples compiled examples, $rejected_examples rejected by both"
 
-# TODO(bootstrap): dusk1 needs a working build command with codegen ported to compiler/*.dusk.
+echo "determinism check: stage1 emits each accepted example twice"
+stable_examples=0
+while IFS= read -r -d '' example; do
+    rel=${example#"$repo_root/"}
+    safe=${rel//\//__}
+    safe=${safe%.dusk}
+    ll_a="$work/examples/stage1/$safe.ll"
+    [[ -f "$ll_a" ]] || continue
+    if ! DUSK_HOME="$repo_root" "$stage1" ir "$example" >"$work/examples/stage1/$safe.rerun.ll" 2>/dev/null; then
+        fail "stage1 accepted $rel once and rejected it on the rerun"
+    fi
+    if ! cmp -s "$ll_a" "$work/examples/stage1/$safe.rerun.ll"; then
+        fail "stage1 emitted different IR for $rel across two runs"
+    fi
+    rm -f "$work/examples/stage1/$safe.rerun.ll"
+    stable_examples=$((stable_examples + 1))
+done < <(find "$repo_root/examples" -type f -name '*.dusk' -print0 | sort -z)
+echo "determinism check: $stable_examples examples byte stable across two stage1 runs"
+
 # Stage 3 is built by stage2. Once the bootstrap has converged, the compiler IR
 # that produced stage2 and the compiler IR that produced stage3 are identical.
 build_compiler_stage "$stage2" "$stage3" "$stage3_ll" "stage 3: stage2 builds the dusk compiler source"
@@ -261,5 +303,16 @@ if ! cmp -s "$stage2_ll" "$stage3_ll"; then
     echo "first diff: $(first_diff_line "$stage2_ll" "$stage3_ll" "stage2 compiler IR" "stage3 compiler IR")" >&2
     exit 1
 fi
+echo "fixpoint check: stage3 compiler IR byte equals stage2's"
+
+# The golden suite runs once more with stage2 as the compiler under test, the
+# closing clause of the ladder: the self built compiler passes its own suite.
+echo "stage 2 check: run golden suite against stage2"
+if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage2" cargo test --test examples -- --test-threads=1; then
+    fail "golden suite failed against stage2"
+fi
 
 echo "pyramid complete: stage1, stage2, and stage3 matched the bootstrap checks"
+print_stage_sha256 "stage1" "$stage1" "$stage1_ll"
+print_stage_sha256 "stage2" "$stage2" "$stage2_ll"
+print_stage_sha256 "stage3" "$stage3" "$stage3_ll"
