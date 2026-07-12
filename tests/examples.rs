@@ -622,6 +622,21 @@ fn awaiting_leaf_timers_yields_their_zero_completion() {
 }
 
 #[test]
+fn a_void_async_func_runs_under_async_run() {
+    // async_run of a void async func drives the loop with a raw scratch word
+    // and a zero copy size; there is no result to load back, and the body
+    // still suspends through a timer leaf before printing.
+    assert_eq!(run("voidasyncrun.dusk"), "0\nvoid run done\nafter\n");
+}
+
+#[test]
+fn returning_an_awaited_void_element_replays_the_bare_return() {
+    // `return await g()` with a void element takes the completion and replays
+    // the bare async return path; nothing is loaded from the element slot.
+    assert_eq!(run("retawaitvoid.dusk"), "0\nh returned\n");
+}
+
+#[test]
 fn async_offload_bridges_the_pool_and_sums_three_fetches() {
     // A fetch task parks on a leaf future a pool worker completes from another
     // thread; the loop's gate waits on the in-flight pool task rather than

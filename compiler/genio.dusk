@@ -54,15 +54,18 @@ func gio_read_result(s: *GenFuncState, runtime: string, msg_text: string, with_a
     a: *Ast = (*(*s).ctx).ast
  c: *CTyArena = genctx_ctys((*s).ctx)
  strty: int64 = cty_rawptr(c, cty_char(c))
+    mut p: string = ""
+    if with_arg {
+        v: Val = gen_expr(s, vec_get((*a).kids, args_off))
+        p = coerce(s, v.ty, v.op, strty)
+    }
     buf: string = next_tmp((*s).fb)
  b: *StringBuilder = alloc(sb_new())
  sb_push(b, buf)
  sb_push(b, " = call ptr @")
  sb_push(b, runtime)
  sb_push_char(b, 40)
-    if with_arg { v: Val = gen_expr(s, vec_get((*a).kids, args_off))
- p: string = coerce(s, v.ty, v.op, strty)
- sb_push(b, "ptr ")
+    if with_arg { sb_push(b, "ptr ")
  sb_push(b, p) }
     sb_push_char(b, 41)
  tx: string = gs_built(b)

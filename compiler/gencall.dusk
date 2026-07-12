@@ -24,6 +24,7 @@
 @import genhof
 @import genthread
 @import gencollect
+@import genawait
 
 func gc_funcval_thunk(s: *GenFuncState, name: string, sig: GenFnSig) -> void {
     if !emit_need_funcval_thunk((*s).module, name) { return }
@@ -151,6 +152,11 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
             }
             return gen_method_call(s, callee.a, ast_name(a, callee.b), args_off, args_len)
         }
+        cty: int64 = static_expr_ty(s, callee_id)
+        ctn: CTyNode = vec_get(cty_nodes(c), cty)
+        if ctn.kind == ctyk_closure() {
+            return gen_closure_call(s, gen_expr(s, callee_id), args_off, args_len)
+        }
         emit_error((*s).module, "unsupported call target")
         return Val { ty: cty_void(c), op: gs_copy("") }
     }
@@ -185,6 +191,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     if str_eq(name, "debug_free") { return gen_debug_free(s, args_off, args_len) }
     if str_eq(name, "debug_leaks") { return gen_debug_leaks(s) }
     if str_eq(name, "debug_double_frees") { return gen_debug_double_frees(s) }
+    if str_eq(name, "async_run") { return gen_async_run(s, args_off, args_len) }
     if str_eq(name, "cstr") {
         if args_len > 0 {
             v0: Val = gen_expr(s, vec_get((*a).kids, args_off))
@@ -196,6 +203,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     }
     if genctx_has_fn((*s).ctx, name) {
         sig: GenFnSig = genctx_fn((*s).ctx, name)
+        if sig.is_async { return gen_async_call(s, name, args_off, args_len) }
         mut call_ret: string = cty_ll(c, sig.ret)
         args: *StringBuilder = alloc(sb_new())
         mut i: int64 = 0

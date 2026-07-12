@@ -53,12 +53,16 @@ func stem_of(path: string) -> string {
         if path[i] == 47 { start = i + 1 }
         i = i + 1
     }
+    // A dot in the first basename position is part of the name, not an
+    // extension boundary, so ".dusk" keeps its basename the way file_stem
+    // does; an empty stem still falls back to "out".
     mut end: int64 = str_len(path)
-    mut j: int64 = start
+    mut j: int64 = start + 1
     while j < str_len(path) {
         if path[j] == 46 { end = j }
         j = j + 1
     }
+    if end <= start { return substring("out", 0, 3) }
     return substring(path, start, end)
 }
 
@@ -254,11 +258,20 @@ export func build_module(prog: string, path: string, run_it: bool, argv: string[
     code: int64 = link_only(home, ll, bin)
     if code != 0 { return 1 }
     if run_it {
+        // The child's exit code passes through untouched; a signal death or
+        // missing status lands on 255 the way the stage0 driver's byte cast
+        // does. The language has no int64 to int32 narrowing, so the low
+        // byte crosses through a bounded count.
         rc: int64 = run_linked(bin, argv, arg_start)
-        if rc == 0 { return 0 }
-        if rc == -1 { return -1 }
-        if rc == 255 { return -1 }
-        return -1
+        if rc < 0 { return 255 }
+        low: int64 = rc % 256
+        mut out: int32 = 0
+        mut i: int64 = 0
+        while i < low {
+            out = out + 1
+            i = i + 1
+        }
+        return out
     }
     return 0
 }

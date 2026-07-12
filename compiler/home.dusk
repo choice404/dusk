@@ -65,12 +65,12 @@ func dir_of(path: string) -> string {
     return substring(path, 0, last)
 }
 
-// Whether base holds the toolchain's runtime sources, the test each candidate
-// must pass to be chosen. A shell dir test on base/runtime is enough: it is the
-// same check src/home.rs makes with is_dir, without reading any file into memory.
+// Whether base holds the named toolchain asset directory, the test each
+// candidate must pass to be chosen. A shell dir test on base/name is the same
+// check src/home.rs makes with is_dir, without reading any file into memory.
 // run returns the child's exit code, zero when the directory exists.
-func has_runtime(base: string) -> bool {
-    rt: string = path_join(base, "runtime")
+func has_asset(base: string, name: string) -> bool {
+    rt: string = path_join(base, name)
     q: string = quote(rt)
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "test -d ")
@@ -85,24 +85,29 @@ func has_runtime(base: string) -> bool {
     return code == 0
 }
 
-// Resolves the toolchain home for a given argv[0]. DUSK_HOME wins when it points
-// at a directory that actually holds runtime/, then the directory the binary sits
-// in, and finally the working directory as the last resort. The returned string
-// lives for the whole run and is not freed, since the driver joins runtime paths
-// onto it right through to the final clang invocation.
-export func dusk_home(prog: string) -> string {
+// Resolves the toolchain home for a given argv[0] and the asset it needs.
+// Each candidate is validated against the asset it will actually serve, the
+// way src/home.rs checks each requested directory independently: DUSK_HOME
+// may hold runtime/ but not lib/, and the two lookups must not conflate.
+// The returned string lives for the whole run and is not freed, since the
+// driver joins asset paths onto it right through to the final clang line.
+export func dusk_home_for(prog: string, asset: string) -> string {
     h: string = env("DUSK_HOME")
     if str_len(h) > 0 {
-        if has_runtime(h) {
+        if has_asset(h, asset) {
             return h
         }
     }
     d: string = dir_of(prog)
-    if has_runtime(d) {
+    if has_asset(d, asset) {
         return d
     }
     dot: *raw char = alloc_bytes(2)
     dot[0] = 46
     dot[1] = 0
     return cstr(dot)
+}
+
+export func dusk_home(prog: string) -> string {
+    return dusk_home_for(prog, "runtime")
 }

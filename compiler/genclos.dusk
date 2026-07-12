@@ -12,6 +12,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import frame
 
 func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
     a: *Ast = (*(*s).ctx).ast
@@ -253,7 +254,8 @@ export func clos_emit_lambda(s: *GenFuncState, e: ExprNode, name: string, env_ty
     fb: *FuncBuilder = func_new(retll, name, sig)
     locals: *Map<LocalVal> = alloc(map_new())
     defers: *Vector<int64> = alloc(vec_new())
-    inner: *GenFuncState = alloc(GenFuncState { module: (*s).module, ctx: (*s).ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gs_copy(""), allocator_ty: cty_void(c), terminated: false })
+    dummy: FramePrefix = frame_prefix(0, 1, alloc(vec_new()), alloc(vec_new()))
+    inner: *GenFuncState = alloc(GenFuncState { module: (*s).module, ctx: (*s).ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gs_copy(""), allocator_ty: cty_void(c), terminated: false, frame_on: false, frame: frame_new("", "", "", dummy, 0) })
     mut ci: int64 = 0
     while ci < vec_len(caps) {
         cap: LocalVal = vec_get(caps, ci)
@@ -315,13 +317,31 @@ export func gen_lambda(s: *GenFuncState, e: ExprNode) -> Val {
     if vec_len(caps) > 0 {
         env = next_tmp((*s).fb)
         eb: *StringBuilder = alloc(sb_new())
-        sb_push(eb, env)
-        sb_push(eb, " = alloca ")
-        sb_push(eb, env_ty)
+        if (*s).frame_on {
+            mut env_size: int64 = 0
+            mut env_align: int64 = 1
+            mut si: int64 = 0
+            while si < vec_len(caps) {
+                csa: SizeAlign = cty_size_align(c, vec_get(caps, si).ty)
+                env_size = ((env_size + csa.align - 1) / csa.align) * csa.align + csa.size
+                if csa.align > env_align { env_align = csa.align }
+                si = si + 1
+            }
+            env_size = ((env_size + env_align - 1) / env_align) * env_align
+            sb_push(eb, env)
+            sb_push(eb, " = call ptr @cool_task_env_alloc(ptr %frame, i64 ")
+            sb_push_int(eb, env_size)
+            sb_push_char(eb, 41)
+        } else {
+            sb_push(eb, env)
+            sb_push(eb, " = alloca ")
+            sb_push(eb, env_ty)
+        }
         et: string = gs_built(eb)
         sb_free(eb)
         free(eb)
-        push_entry_alloca((*s).fb, et)
+        if (*s).frame_on { line((*s).fb, et) }
+        else { push_entry_alloca((*s).fb, et) }
         free(et)
         mut i: int64 = 0
         while i < vec_len(caps) {

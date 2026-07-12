@@ -1,0 +1,94 @@
+// genasync: async poll function lowering for dusk1.
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genstmt
+@import genawait
+@import frame
+
+func ga_copy(s: string) -> string { return substring(s, 0, str_len(s)) }
+func ga_built(b: *StringBuilder) -> string { return substring(sb_cstr(b), 0, sb_size(b)) }
+
+export func gen_async_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode) -> string {
+    a: *Ast = (*ctx).ast
+    c: *CTyArena = genctx_ctys(ctx)
+    ret_ty: int64 = cty_lower_ast(c, a, f.ret)
+    ret_sa: SizeAlign = cty_size_align(c, ret_ty)
+    sizes: *Vector<int64> = alloc(vec_new())
+    aligns: *Vector<int64> = alloc(vec_new())
+    param_tys: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < f.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+        pt: int64 = cty_lower_ast(c, a, p.ty)
+        sa: SizeAlign = cty_size_align(c, pt)
+        vec_push(param_tys, pt)
+        vec_push(sizes, sa.size)
+        vec_push(aligns, sa.align)
+        i = i + 1
+    }
+    // The frame layout never handles alignment over 8; a wider type must stop
+    // loud rather than misplace a frame slot.
+    if ret_sa.align > 8 { emit_error(m, "async frame alignment over 8") }
+    mut ai: int64 = 0
+    while ai < vec_len(aligns) {
+        if vec_get(aligns, ai) > 8 { emit_error(m, "async frame alignment over 8") }
+        ai = ai + 1
+    }
+    prefix: FramePrefix = frame_prefix(ret_sa.size, ret_sa.align, sizes, aligns)
+    mut ret_size: int64 = ret_sa.size
+    if ret_ty == cty_void(c) { ret_size = 0 }
+    fb: *FuncBuilder = func_async_new()
+    fr: *FrameCtx = frame_new(next_tmp(fb), next_tmp(fb), next_tmp(fb), prefix, ret_size)
+    locals: *Map<LocalVal> = alloc(map_new())
+    defers: *Vector<int64> = alloc(vec_new())
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: ga_copy(""), allocator_ty: cty_void(c), terminated: false, frame_on: true, frame: fr })
+    mut j: int64 = 0
+    while j < f.params_len {
+        p2: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + j))
+        gep: string = next_tmp(fb)
+        frame_add_param(fr, gep, vec_get(prefix.param_offs, j))
+        map_put(locals, ga_copy(ast_name(a, p2.name)), LocalVal { ty: vec_get(param_tys, j), op: gep })
+        j = j + 1
+    }
+    place_named_label(fb, "start")
+    block: BlockNode = vec_get((*a).blocks, f.body)
+    mut k: int64 = 0
+    while k < block.len {
+        if !(*st).terminated { gen_stmt(st, vec_get((*a).kids, block.off + k)) }
+        k = k + 1
+    }
+    if !(*st).terminated { gen_async_return(st, -1) }
+    frame_size: int64 = frame_finalize(fr)
+    entry: string = frame_entry_text(fr, next_tmp(fb))
+    body: string = body_out(fb)
+    gb: *StringBuilder = alloc(sb_new())
+    sb_push(gb, "@async.")
+sb_push(gb, ast_name(a, f.name))
+sb_push(gb, ".framesize = constant i64 ")
+sb_push_int(gb, frame_size)
+    gt: string = ga_built(gb)
+sb_free(gb)
+free(gb)
+emit_global(m, gt)
+free(gt)
+    out: *StringBuilder = alloc(sb_new())
+    sb_push(out, "define void @async.")
+sb_push(out, ast_name(a, f.name))
+sb_push(out, ".poll(ptr %frame) {\n")
+sb_push(out, entry)
+sb_push(out, body)
+sb_push_char(out, 125)
+    text: string = ga_built(out)
+sb_free(out)
+free(out)
+    return text
+}

@@ -1,0 +1,148 @@
+// frame: async task frame layout and synthesized poll entry block.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+export struct FrameSlot { name: string, llty: string, size: int64, align: int64, off: int64 }
+export struct FrameParam { name: string, off: int64 }
+export struct FrameCase { state: int64, label: string }
+export struct FramePrefix { result_off: int64, param_offs: *Vector<int64>, first_free: int64 }
+
+export struct FrameCtx {
+    slots: *Vector<FrameSlot>,
+    pend_d: string,
+    pend_g: string,
+    res: string,
+    params: *Vector<FrameParam>,
+    result_off: int64,
+    ret_size: int64,
+    first_free: int64,
+    await_count: int64,
+    resume_cases: *Vector<FrameCase>,
+}
+
+func fr_copy(s: string) -> string { return substring(s, 0, str_len(s)) }
+func fr_built(b: *StringBuilder) -> string { return substring(sb_cstr(b), 0, sb_size(b)) }
+
+export func frame_align_up(n: int64, align: int64) -> int64 {
+    if align <= 1 { return n }
+    return ((n + align - 1) / align) * align
+}
+
+export func frame_prefix(ret_size: int64, ret_align: int64, sizes: *Vector<int64>, aligns: *Vector<int64>) -> FramePrefix {
+    offs: *Vector<int64> = alloc(vec_new())
+    mut region: int64 = ret_size
+    if region < 1 { region = 1 }
+    region = frame_align_up(region, 8)
+    mut off: int64 = 24 + region
+    mut i: int64 = 0
+    while i < vec_len(sizes) {
+        al: int64 = vec_get(aligns, i)
+        off = frame_align_up(off, al)
+        vec_push(offs, off)
+        off = off + vec_get(sizes, i)
+        i = i + 1
+    }
+    return FramePrefix { result_off: 24, param_offs: offs, first_free: off }
+}
+
+export func frame_new(pend_d: string, pend_g: string, res: string, prefix: FramePrefix, ret_size: int64) -> *FrameCtx {
+    slots: *Vector<FrameSlot> = alloc(vec_new())
+    params: *Vector<FrameParam> = alloc(vec_new())
+    cases: *Vector<FrameCase> = alloc(vec_new())
+    return alloc(FrameCtx {
+        slots: slots,
+        pend_d: fr_copy(pend_d),
+        pend_g: fr_copy(pend_g),
+        res: fr_copy(res),
+        params: params,
+        result_off: prefix.result_off,
+        ret_size: ret_size,
+        first_free: prefix.first_free,
+        await_count: 0,
+        resume_cases: cases,
+    })
+}
+
+export func frame_add_param(f: *FrameCtx, name: string, off: int64) -> void {
+    vec_push((*f).params, FrameParam { name: fr_copy(name), off: off })
+}
+
+export func frame_add_slot(f: *FrameCtx, name: string, llty: string, size: int64, align: int64) -> void {
+    vec_push((*f).slots, FrameSlot { name: fr_copy(name), llty: fr_copy(llty), size: size, align: align, off: 0 })
+}
+
+export func frame_add_resume(f: *FrameCtx, state: int64, label: string) -> void {
+    vec_push((*f).resume_cases, FrameCase { state: state, label: fr_copy(label) })
+}
+
+export func frame_finalize(f: *FrameCtx) -> int64 {
+    mut off: int64 = (*f).first_free
+    slots: *Vector<FrameSlot> = (*f).slots
+    mut i: int64 = 0
+    while i < vec_len(slots) {
+        mut slot: FrameSlot = vec_get(slots, i)
+        off = frame_align_up(off, slot.align)
+        slot.off = off
+        vec_set(slots, i, slot)
+        off = off + slot.size
+        i = i + 1
+    }
+    off = frame_align_up(off, 16)
+    if off < 16 { off = 16 }
+    return off
+}
+
+func frame_gep(b: *StringBuilder, name: string, off: int64) -> void {
+    sb_push(b, "  ")
+    sb_push(b, name)
+    sb_push(b, " = getelementptr i8, ptr %frame, i64 ")
+    sb_push_int(b, off)
+    sb_push_char(b, 10)
+}
+
+export func frame_entry_text(f: *FrameCtx, state_tmp: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "entry:\n")
+    frame_gep(b, (*f).pend_d, 8)
+    frame_gep(b, (*f).pend_g, 16)
+    frame_gep(b, (*f).res, (*f).result_off)
+    params: *Vector<FrameParam> = (*f).params
+    mut i: int64 = 0
+    while i < vec_len(params) {
+        p: FrameParam = vec_get(params, i)
+        frame_gep(b, p.name, p.off)
+        i = i + 1
+    }
+    slots: *Vector<FrameSlot> = (*f).slots
+    mut j: int64 = 0
+    while j < vec_len(slots) {
+        slot: FrameSlot = vec_get(slots, j)
+        frame_gep(b, slot.name, slot.off)
+        j = j + 1
+    }
+    sb_push(b, "  ")
+    sb_push(b, state_tmp)
+    sb_push(b, " = load i64, ptr %frame\n")
+    sb_push(b, "  switch i64 ")
+    sb_push(b, state_tmp)
+    sb_push(b, ", label %badstate [ i64 0, label %start")
+    cases: *Vector<FrameCase> = (*f).resume_cases
+    mut k: int64 = 0
+    while k < vec_len(cases) {
+        c: FrameCase = vec_get(cases, k)
+        sb_push(b, " i64 ")
+        sb_push_int(b, c.state)
+        sb_push(b, ", label %")
+        sb_push(b, c.label)
+        k = k + 1
+    }
+    sb_push(b, " ]\n")
+    sb_push(b, "badstate:\n  call void @cool_task_state_fault()\n  unreachable\n")
+    out: string = fr_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}

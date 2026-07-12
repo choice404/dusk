@@ -1,0 +1,23 @@
+// A void async func driven by async_run: the run slot is a raw scratch word
+// with a zero copy size, and there is no result to load back. The body still
+// suspends into the loop through a timer leaf before printing.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+
+async func vmain() -> void {
+    v, e := await sleep_async(5)
+    e.ignore()
+    println(v)
+    println("void run done")
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    async_run(vmain())
+    loop_free()
+    println("after")
+    return 0
+}

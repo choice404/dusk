@@ -49,6 +49,12 @@ export func func_new(ret: string, name: string, params: string) -> *FuncBuilder 
     })
 }
 
+export func func_async_new() -> *FuncBuilder {
+    body: *StringBuilder = alloc(sb_new())
+    allocas: *StringBuilder = alloc(sb_new())
+    return alloc(FuncBuilder { header: fb_copy_string(""), body: body, entry_allocas: allocas, tmp: 0, label: 0 })
+}
+
 export func next_tmp(f: *FuncBuilder) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "%t")
@@ -99,6 +105,11 @@ export func fresh_label(f: *FuncBuilder) -> int64 {
 export func place_label(f: *FuncBuilder, n: int64) -> void {
     sb_push_char((*f).body, 76)
     sb_push_int((*f).body, n)
+    sb_push((*f).body, ":\n")
+}
+
+export func place_named_label(f: *FuncBuilder, name: string) -> void {
+    sb_push((*f).body, name)
     sb_push((*f).body, ":\n")
 }
 

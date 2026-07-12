@@ -17,6 +17,7 @@
 @import genplace
 @import genagg
 @import genenum
+@import genawait
 
 func gen_for(s: *GenFuncState, st: StmtNode) -> void {
     a: *Ast = (*(*s).ctx).ast
@@ -260,13 +261,32 @@ func gen_while(s: *GenFuncState, st: StmtNode) -> void {
 export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
     a: *Ast = (*(*s).ctx).ast
     st: StmtNode = vec_get((*a).stmts, sid)
-    if st.kind == sk_let() { gen_let(s, sid)
+    if st.kind == sk_let() {
+        init: ExprNode = vec_get((*a).exprs, st.c)
+        if init.kind == xk_await() { gen_await_let(s, sid) }
+        else { gen_let(s, sid) }
         return }
     if st.kind == sk_assign() { gen_assign(s, st.a, st.b)
         return }
     if st.kind == sk_assign_op() { gen_assign_op(s, st.a, st.b, st.c)
         return }
-    if st.kind == sk_return() { gen_return(s, st.a)
+    if st.kind == sk_return() {
+        if (*s).frame_on {
+            if st.a >= 0 {
+                re: ExprNode = vec_get((*a).exprs, st.a)
+                if re.kind == xk_await() {
+                    take: AwaitTake = gen_await_take(s, st.a)
+                    // A void element has nothing to load; the async return
+                    // path already skips the result store for a void return.
+                    tn: CTyNode = vec_get(cty_nodes(genctx_ctys((*s).ctx)), take.elem_ty)
+                    if tn.kind == ctyk_void() {
+                        gen_async_return_val(s, Val { ty: take.elem_ty, op: gs_copy("") })
+                    } else {
+                        gen_async_return_val(s, Val { ty: take.elem_ty, op: gen_load_slot(s, take.elem_ty, take.elem_slot) })
+                    }
+                } else { gen_async_return(s, st.a) }
+            } else { gen_async_return(s, -1) }
+        } else { gen_return(s, st.a) }
         return }
     if st.kind == sk_defer() {
         ds2: *Vector<int64> = (*s).defers
@@ -276,7 +296,10 @@ export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
         return }
     if st.kind == sk_while() { gen_while(s, st)
         return }
-    if st.kind == sk_expr() { gen_expr(s, st.a)
+    if st.kind == sk_expr() {
+        ex: ExprNode = vec_get((*a).exprs, st.a)
+        if ex.kind == xk_await() { gen_await_take(s, st.a) }
+        else { gen_expr(s, st.a) }
         return }
     if st.kind == sk_for() { gen_for(s, st) }
     else if st.kind == sk_match() { gen_match(s, st.a, st.b, st.c, -1, "") }

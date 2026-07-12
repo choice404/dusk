@@ -1478,6 +1478,12 @@ impl<'a> Fb<'a> {
     /// and a leaf tuple return carries its error inside the tuple.
     fn gen_await_return(&mut self, op: &Expr, el: Option<&Type>) {
         let (el_slot, _err_slot, el_cty) = self.gen_await_take(op, el);
+        // A void element has nothing to load; the async return path already
+        // skips the result store for a void return.
+        if matches!(el_cty, CTy::Void) {
+            self.gen_async_return_val(Val::new(el_cty, String::new()));
+            return;
+        }
         let ev = self.load(&el_cty, &el_slot);
         self.gen_async_return_val(Val::new(el_cty, ev));
     }

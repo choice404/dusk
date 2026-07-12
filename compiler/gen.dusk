@@ -10,6 +10,7 @@
 @import emit
 @import genctx
 @import genfn
+@import genasync
 
 export struct GenResult { ok: bool, text: string }
 
@@ -275,7 +276,9 @@ export func gen_compile(a: *Ast) -> GenResult {
             f: FuncNode = vec_get((*a).funcs, it.id)
             name: string = ast_name(a, f.name)
             if f.is_async {
-                emit_error(m, "unsupported async function in Phase A")
+                abody: string = gen_async_func(m, ctx, f)
+                emit_push_function(m, abody)
+                free(abody)
             } else if str_eq(name, "main") {
                 if main_is_argc_argv(ctx, f) {
                     body: string = gen_func(m, ctx, f, "dusk__main")

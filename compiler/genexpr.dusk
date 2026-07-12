@@ -22,6 +22,7 @@
 @import genptr
 @import genplace
 @import genenum
+@import genawait
 @import generr
 @import genclos
 @import gencollect
@@ -477,7 +478,10 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
     else if e.kind == xk_struct_lit() { return gen_struct_lit(s, e) }
     else if e.kind == xk_lambda() { return gen_lambda(s, e) }
     else if e.kind == xk_match() { return gen_match_expr(s, e) }
-    else if e.kind == xk_await() { emit_error((*s).module, "unsupported await expression") }
+    else if e.kind == xk_await() {
+        take: AwaitTake = gen_await_take(s, id)
+        return Val { ty: take.elem_ty, op: gen_load_slot(s, take.elem_ty, take.elem_slot) }
+    }
     else if e.kind == xk_collect() { return gen_collect(s, e) }
     else { emit_error((*s).module, "unsupported expression") }
     return Val { ty: cty_int(c, 64), op: gs_copy("0") }

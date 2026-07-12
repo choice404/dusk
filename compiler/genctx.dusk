@@ -10,7 +10,7 @@
 @import ast
 @import cty
 
-export struct GenFnSig { ret: int64, params: *Vector<int64> }
+export struct GenFnSig { ret: int64, params: *Vector<int64>, is_async: bool }
 
 export struct GenCtx {
     ast: *Ast,
@@ -69,7 +69,7 @@ export func genctx_new(a: *Ast) -> *GenCtx {
             f: FuncNode = vec_get((*a).funcs, it2.id)
             ret: int64 = cty_lower_ast(ctys, a, f.ret)
             params: *Vector<int64> = genctx_param_ctys(ctx, f)
-            map_put(fns, genctx_copy(ast_name(a, f.name)), GenFnSig { ret: ret, params: params })
+            map_put(fns, genctx_copy(ast_name(a, f.name)), GenFnSig { ret: ret, params: params, is_async: f.is_async })
         } else if it2.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it2.id)
             mut mi: int64 = 0
@@ -88,7 +88,7 @@ export func genctx_new(a: *Ast) -> *GenCtx {
                 key: string = genctx_copy(sb_cstr(kb))
                 sb_free(kb)
  free(kb)
-                map_put(methods, key, GenFnSig { ret: cty_lower_ast(ctys, a, mf.ret), params: ps })
+                map_put(methods, key, GenFnSig { ret: cty_lower_ast(ctys, a, mf.ret), params: ps, is_async: false })
                 mi = mi + 1
             }
         } else if it2.kind == ik_foreign() {
@@ -105,7 +105,7 @@ export func genctx_new(a: *Ast) -> *GenCtx {
                     vec_push(out, cty_lower_ast(ctys, a, param.ty))
                     p = p + 1
                 }
-                map_put(fns, genctx_copy(ast_name(a, ff.name)), GenFnSig { ret: cty_lower_ast(ctys, a, ff.ret), params: out })
+                map_put(fns, genctx_copy(ast_name(a, ff.name)), GenFnSig { ret: cty_lower_ast(ctys, a, ff.ret), params: out, is_async: false })
                 k = k + 1
             }
         }
@@ -123,7 +123,7 @@ func genctx_enums(ctx: *GenCtx) -> *Map<int64> { return (*ctx).enums }
 // Looks up a top-level or foreign function signature by its lowered symbol name.
 export func genctx_fn(ctx: *GenCtx, name: string) -> GenFnSig {
     empty: *Vector<int64> = alloc(vec_new())
-    return unwrap_or(map_get(genctx_fns(ctx), name), GenFnSig { ret: cty_void((*ctx).ctys), params: empty })
+    return unwrap_or(map_get(genctx_fns(ctx), name), GenFnSig { ret: cty_void((*ctx).ctys), params: empty, is_async: false })
 }
 
 export func genctx_has_fn(ctx: *GenCtx, name: string) -> bool {
@@ -133,7 +133,7 @@ export func genctx_has_fn(ctx: *GenCtx, name: string) -> bool {
 export func genctx_has_method(ctx: *GenCtx, name: string) -> bool { return map_has(genctx_methods(ctx), name) }
 export func genctx_method(ctx: *GenCtx, name: string) -> GenFnSig {
     empty: *Vector<int64> = alloc(vec_new())
-    return unwrap_or(map_get(genctx_methods(ctx), name), GenFnSig { ret: cty_void((*ctx).ctys), params: empty })
+    return unwrap_or(map_get(genctx_methods(ctx), name), GenFnSig { ret: cty_void((*ctx).ctys), params: empty, is_async: false })
 }
 
 // Classifies a nominal name for later aggregate lowering while Phase A keeps those

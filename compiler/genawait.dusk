@@ -1,0 +1,414 @@
+// genawait: suspension, completion, async calls, and async_run lowering.
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import cty
+@import emit
+@import emitfb
+@import genctx
+@import genstate
+@import genexpr
+@import frame
+@import monoemit
+
+export struct AwaitTake { elem_ty: int64, elem_slot: string, err_slot: string }
+func aw_copy(s: string) -> string { return substring(s, 0, str_len(s)) }
+func aw_built(b: *StringBuilder) -> string { return substring(sb_cstr(b), 0, sb_size(b)) }
+
+export func gen_async_return_val(s: *GenFuncState, v: Val) -> void {
+    out: Val = adapt(s, v, (*s).ret)
+    gen_emit_defers(s)
+    mut size: int64 = 0
+    if (*s).ret != cty_void(genctx_ctys((*s).ctx)) {
+        gen_store_slot(s, (*s).ret, out.op, (*(*s).frame).res)
+        size = (*(*s).frame).ret_size
+    }
+    b: *StringBuilder = alloc(sb_new())
+sb_push(b, "call void @cool_task_return(ptr %frame, ptr ")
+sb_push(b, (*(*s).frame).res)
+sb_push(b, ", i64 ")
+sb_push_int(b, size)
+sb_push_char(b, 41)
+    t: string = aw_built(b)
+sb_free(b)
+free(b)
+line((*s).fb, t)
+free(t)
+    line((*s).fb, "ret void")
+    (*s).terminated = true
+}
+
+export func gen_async_return(s: *GenFuncState, expr_id: int64) -> void {
+    if expr_id >= 0 { gen_async_return_val(s, gen_expr(s, expr_id))
+return }
+    gen_emit_defers(s)
+    b: *StringBuilder = alloc(sb_new())
+sb_push(b, "call void @cool_task_return(ptr %frame, ptr ")
+sb_push(b, (*(*s).frame).res)
+sb_push(b, ", i64 0)")
+    t: string = aw_built(b)
+sb_free(b)
+free(b)
+line((*s).fb, t)
+free(t)
+    line((*s).fb, "ret void")
+    (*s).terminated = true
+}
+
+func aw_emit_extract(s: *GenFuncState, ll: string, op: string, index: int64) -> string {
+    d: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+sb_push(b, d)
+sb_push(b, " = extractvalue ")
+sb_push(b, ll)
+sb_push_char(b, 32)
+sb_push(b, op)
+sb_push(b, ", ")
+sb_push_int(b, index)
+    t: string = aw_built(b)
+sb_free(b)
+free(b)
+line((*s).fb, t)
+free(t)
+    return d
+}
+
+export func gen_await_take(s: *GenFuncState, await_id: int64) -> AwaitTake {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, await_id)
+    if e.kind != xk_await() {
+        emit_error((*s).module, "unsupported await lowering")
+        return AwaitTake { elem_ty: cty_void(c), elem_slot: aw_copy(""), err_slot: aw_copy("") }
+    }
+    if e.b < 0 {
+        emit_error((*s).module, "unsupported await element type")
+        return AwaitTake { elem_ty: cty_void(c), elem_slot: aw_copy(""), err_slot: aw_copy("") }
+    }
+    elem_ty: int64 = cty_lower_ast(c, a, e.b)
+    fut: Val = gen_expr(s, e.a)
+    futll: string = cty_ll(c, fut.ty)
+    d: string = aw_emit_extract(s, futll, fut.op, 0)
+    g: string = aw_emit_extract(s, futll, fut.op, 1)
+    free(futll)
+    fr: *FrameCtx = (*s).frame
+    (*fr).await_count = (*fr).await_count + 1
+    state: int64 = (*fr).await_count
+    store((*s).fb, "ptr", d, (*fr).pend_d)
+    store((*s).fb, "i64", g, (*fr).pend_g)
+    b0: *StringBuilder = alloc(sb_new())
+sb_push(b0, "store i64 ")
+sb_push_int(b0, state)
+sb_push(b0, ", ptr %frame")
+    t0: string = aw_built(b0)
+sb_free(b0)
+free(b0)
+line((*s).fb, t0)
+free(t0)
+    b1: *StringBuilder = alloc(sb_new())
+sb_push(b1, "call void @cool_task_await(ptr %frame, ptr ")
+sb_push(b1, d)
+sb_push(b1, ", i64 ")
+sb_push(b1, g)
+sb_push_char(b1, 41)
+    t1: string = aw_built(b1)
+sb_free(b1)
+free(b1)
+line((*s).fb, t1)
+free(t1)
+    line((*s).fb, "ret void")
+    rb: *StringBuilder = alloc(sb_new())
+sb_push(rb, "resume.")
+sb_push_int(rb, state)
+    resume: string = aw_built(rb)
+sb_free(rb)
+free(rb)
+    frame_add_resume(fr, state, resume)
+    place_named_label((*s).fb, resume)
+    (*s).terminated = false
+    d2: string = gen_load_slot(s, cty_rawptr(c, cty_void(c)), (*fr).pend_d)
+    g2: string = gen_load_slot(s, cty_int(c, 64), (*fr).pend_g)
+    sa: SizeAlign = cty_size_align(c, elem_ty)
+    mut elem_slot: string = aw_copy("")
+    if sa.size == 0 { elem_slot = gen_alloca_raw(s, "i64") } else { elem_slot = gen_alloca(s, elem_ty) }
+    err_slot: string = gen_alloca_raw(s, "ptr")
+    bt: *StringBuilder = alloc(sb_new())
+sb_push(bt, "call void @cool_future_take(ptr ")
+sb_push(bt, d2)
+sb_push(bt, ", i64 ")
+sb_push(bt, g2)
+sb_push(bt, ", ptr ")
+sb_push(bt, elem_slot)
+sb_push(bt, ", ptr ")
+sb_push(bt, err_slot)
+sb_push_char(bt, 41)
+    tt: string = aw_built(bt)
+sb_free(bt)
+free(bt)
+line((*s).fb, tt)
+free(tt)
+    return AwaitTake { elem_ty: elem_ty, elem_slot: elem_slot, err_slot: err_slot }
+}
+
+func aw_bind(s: *GenFuncState, bind: BindNode, v: Val) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+a: *Ast = (*(*s).ctx).ast
+    mut ty: int64 = v.ty
+    if bind.ty >= 0 { ty = cty_lower_ast(c, a, bind.ty) }
+    av: Val = adapt(s, v, ty)
+    p: string = gen_alloca(s, ty)
+gen_store_slot(s, ty, av.op, p)
+    map_put((*s).locals, aw_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: p })
+}
+
+export func gen_await_let(s: *GenFuncState, sid: int64) -> void {
+    a: *Ast = (*(*s).ctx).ast
+c: *CTyArena = genctx_ctys((*s).ctx)
+    st: StmtNode = vec_get((*a).stmts, sid)
+    take: AwaitTake = gen_await_take(s, st.c)
+    if st.b == 1 {
+        bind: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a))
+        aw_bind(s, bind, Val { ty: take.elem_ty, op: gen_load_slot(s, take.elem_ty, take.elem_slot) })
+        return
+    }
+    n: CTyNode = vec_get(cty_nodes(c), take.elem_ty)
+    if n.kind == ctyk_tuple() {
+        if n.b == st.b {
+            whole: string = gen_load_slot(s, take.elem_ty, take.elem_slot)
+            ll: string = cty_ll(c, take.elem_ty)
+            mut i: int64 = 0
+            while i < st.b {
+                ety: int64 = cty_tuple_elem(c, take.elem_ty, i)
+                bind2: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a + i))
+                aw_bind(s, bind2, Val { ty: ety, op: aw_emit_extract(s, ll, whole, i) })
+                i = i + 1
+            }
+            free(ll)
+            return
+        }
+    }
+    if st.b == 2 {
+        b0: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a))
+        b1: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a + 1))
+        aw_bind(s, b0, Val { ty: take.elem_ty, op: gen_load_slot(s, take.elem_ty, take.elem_slot) })
+        aw_bind(s, b1, Val { ty: cty_error(c), op: gen_load_slot(s, cty_error(c), take.err_slot) })
+        return
+    }
+    emit_error((*s).module, "unsupported await destructuring")
+}
+
+func aw_find_func(s: *GenFuncState, name: string) -> FuncNode {
+    a: *Ast = (*(*s).ctx).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if f.is_async { if str_eq(ast_name(a, f.name), name) { return f } }
+        }
+        i = i + 1
+    }
+    emit_error((*s).module, "unsupported async callee")
+    return vec_get((*a).funcs, 0)
+}
+
+export func gen_async_call(s: *GenFuncState, name: string, args_off: int64, args_len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+c: *CTyArena = genctx_ctys((*s).ctx)
+sig: GenFnSig = genctx_fn((*s).ctx, name)
+    rsa: SizeAlign = cty_size_align(c, sig.ret)
+    sizes: *Vector<int64> = alloc(vec_new())
+    aligns: *Vector<int64> = alloc(vec_new())
+    params: *Vector<int64> = sig.params
+    mut i: int64 = 0
+    while i < vec_len(params) { sa: SizeAlign = cty_size_align(c, vec_get(params, i))
+vec_push(sizes, sa.size)
+vec_push(aligns, sa.align)
+i = i + 1 }
+    prefix: FramePrefix = frame_prefix(rsa.size, rsa.align, sizes, aligns)
+    mut rsize: int64 = rsa.size
+if rsize < 1 { rsize = 1 }
+    fs: string = next_tmp((*s).fb)
+b0: *StringBuilder = alloc(sb_new())
+sb_push(b0, fs)
+sb_push(b0, " = load i64, ptr @async.")
+sb_push(b0, name)
+sb_push(b0, ".framesize")
+    t0: string = aw_built(b0)
+sb_free(b0)
+free(b0)
+line((*s).fb, t0)
+free(t0)
+    fut: string = next_tmp((*s).fb)
+b1: *StringBuilder = alloc(sb_new())
+sb_push(b1, fut)
+sb_push(b1, " = call ptr @cool_task_new(ptr @async.")
+sb_push(b1, name)
+sb_push(b1, ".poll, i64 ")
+sb_push(b1, fs)
+sb_push(b1, ", i64 ")
+sb_push_int(b1, rsize)
+sb_push_char(b1, 41)
+    t1: string = aw_built(b1)
+sb_free(b1)
+free(b1)
+line((*s).fb, t1)
+free(t1)
+    fr: string = next_tmp((*s).fb)
+b2: *StringBuilder = alloc(sb_new())
+sb_push(b2, fr)
+sb_push(b2, " = call ptr @cool_task_frame(ptr ")
+sb_push(b2, fut)
+sb_push_char(b2, 41)
+    t2: string = aw_built(b2)
+sb_free(b2)
+free(b2)
+line((*s).fb, t2)
+free(t2)
+    mut j: int64 = 0
+    while j < args_len {
+        ty: int64 = vec_get(params, j)
+v: Val = adapt(s, gen_expr(s, vec_get((*a).kids, args_off + j)), ty)
+        dst: string = next_tmp((*s).fb)
+bb: *StringBuilder = alloc(sb_new())
+sb_push(bb, dst)
+sb_push(bb, " = getelementptr i8, ptr ")
+sb_push(bb, fr)
+sb_push(bb, ", i64 ")
+sb_push_int(bb, vec_get(prefix.param_offs, j))
+        tx: string = aw_built(bb)
+sb_free(bb)
+free(bb)
+line((*s).fb, tx)
+free(tx)
+gen_store_slot(s, ty, v.op, dst)
+j = j + 1
+    }
+    bc: *StringBuilder = alloc(sb_new())
+sb_push(bc, "call void @cool_task_start(ptr ")
+sb_push(bc, fut)
+sb_push_char(bc, 41)
+tc: string = aw_built(bc)
+sb_free(bc)
+free(bc)
+line((*s).fb, tc)
+free(tc)
+    hp: string = next_tmp((*s).fb)
+bh: *StringBuilder = alloc(sb_new())
+sb_push(bh, hp)
+sb_push(bh, " = getelementptr i8, ptr ")
+sb_push(bh, fut)
+sb_push(bh, ", i64 -8")
+th: string = aw_built(bh)
+sb_free(bh)
+free(bh)
+line((*s).fb, th)
+free(th)
+    gen: string = next_tmp((*s).fb)
+bg: *StringBuilder = alloc(sb_new())
+sb_push(bg, gen)
+sb_push(bg, " = load atomic i64, ptr ")
+sb_push(bg, hp)
+sb_push(bg, " seq_cst, align 8")
+tg: string = aw_built(bg)
+sb_free(bg)
+free(bg)
+line((*s).fb, tg)
+free(tg)
+    f: FuncNode = aw_find_func(s, name)
+ma: *Vector<int64> = alloc(vec_new())
+vec_push(ma, f.ret)
+    fut_name: string = mono_mangle(a, "Future", ma)
+fut_ty: int64 = cty_intern(c, ctyk_struct(), 0, 0, fut_name)
+ll: string = cty_ll(c, fut_ty)
+    x: string = next_tmp((*s).fb)
+bx: *StringBuilder = alloc(sb_new())
+sb_push(bx, x)
+sb_push(bx, " = insertvalue ")
+sb_push(bx, ll)
+sb_push(bx, " undef, ptr ")
+sb_push(bx, fut)
+sb_push(bx, ", 0")
+tx2: string = aw_built(bx)
+sb_free(bx)
+free(bx)
+line((*s).fb, tx2)
+free(tx2)
+    y: string = next_tmp((*s).fb)
+by: *StringBuilder = alloc(sb_new())
+sb_push(by, y)
+sb_push(by, " = insertvalue ")
+sb_push(by, ll)
+sb_push_char(by, 32)
+sb_push(by, x)
+sb_push(by, ", i64 ")
+sb_push(by, gen)
+sb_push(by, ", 1")
+ty2: string = aw_built(by)
+sb_free(by)
+free(by)
+line((*s).fb, ty2)
+free(ty2)
+free(ll)
+    return Val { ty: fut_ty, op: y }
+}
+
+export func gen_async_run(s: *GenFuncState, args_off: int64, args_len: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+a: *Ast = (*(*s).ctx).ast
+    if args_len < 1 { return Val { ty: cty_int(c, 64), op: aw_copy("0") } }
+    eid: int64 = vec_get((*a).kids, args_off)
+e: ExprNode = vec_get((*a).exprs, eid)
+mut ret_ty: int64 = cty_int(c, 32)
+    if e.kind == xk_call() { ce: ExprNode = vec_get((*a).exprs, e.a)
+if ce.kind == xk_ident() { sig: GenFnSig = genctx_fn((*s).ctx, ast_name(a, ce.a))
+if sig.is_async { ret_ty = sig.ret } } }
+    fv: Val = gen_expr(s, eid)
+ll: string = cty_ll(c, fv.ty)
+h: string = aw_emit_extract(s, ll, fv.op, 0)
+g: string = aw_emit_extract(s, ll, fv.op, 1)
+free(ll)
+    // A void async run gets a raw i64 scratch slot and a zero copy size; there
+    // is no result to load back.
+    rn: CTyNode = vec_get(cty_nodes(c), ret_ty)
+    if rn.kind == ctyk_void() {
+        vout: string = gen_alloca_raw(s, "i64")
+        vb: *StringBuilder = alloc(sb_new())
+        sb_push(vb, "call void @cool_loop_run(ptr ")
+        sb_push(vb, h)
+        sb_push(vb, ", i64 ")
+        sb_push(vb, g)
+        sb_push(vb, ", ptr ")
+        sb_push(vb, vout)
+        sb_push(vb, ", i64 0)")
+        vt: string = aw_built(vb)
+        sb_free(vb)
+        free(vb)
+        line((*s).fb, vt)
+        free(vt)
+        return Val { ty: ret_ty, op: aw_copy("") }
+    }
+    out: string = gen_alloca(s, ret_ty)
+sa: SizeAlign = cty_size_align(c, ret_ty)
+    size: int64 = sa.size
+    b: *StringBuilder = alloc(sb_new())
+sb_push(b, "call void @cool_loop_run(ptr ")
+sb_push(b, h)
+sb_push(b, ", i64 ")
+sb_push(b, g)
+sb_push(b, ", ptr ")
+sb_push(b, out)
+sb_push(b, ", i64 ")
+sb_push_int(b, size)
+sb_push_char(b, 41)
+    t: string = aw_built(b)
+sb_free(b)
+free(b)
+line((*s).fb, t)
+free(t)
+    return Val { ty: ret_ty, op: gen_load_slot(s, ret_ty, out) }
+}
