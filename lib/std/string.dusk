@@ -359,3 +359,19 @@ export func concat(a: string, b: string) -> *StringBuilder {
     sb_push(s, b)
     return s
 }
+
+// Copies a char slice into a fresh heap string owned by the caller. The
+// bridge from stack text back to the dynamic string world: a char array
+// slices to char[] and lands here.
+export func str_from_chars(cs: char[]) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < cs.len {
+        sb_push_char(s, cs[i])
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}

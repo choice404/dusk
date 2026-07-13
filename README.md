@@ -68,7 +68,7 @@ Browse `examples/` for runnable programs. `examples/app.dusk` is a multi module 
 
 ## Language
 
-- Primitive ints and floats, `bool`, `char`, `string`, slices `T[]`, and fixed arrays `T[N]`.
+- Primitive ints and floats, `bool`, `char`, `string`, slices `T[]`, and fixed arrays `T[N]`. A `char[N]` or `char[]` is text too: it prints as bytes, a `for` loop iterates it, and a string literal initializes a `char[N]` directly.
 - `struct`, `enum` with payloads and exhaustive `match`, and `interface` with vtable dispatch.
 - Monomorphized generics `<T>`.
 - Lambdas and closures that capture outer variables by immutable copy.

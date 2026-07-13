@@ -18,6 +18,17 @@
 @import tcown
 @import tcesc
 
+func cannot_iterate_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot iterate ")
+    sb_push(b, rendered)
+    sb_push(b, "; a for loop takes an array, a slice, or a string")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 func infer_await_operand(tc: *TypeChecker, await_expr: ExprNode) -> int64 {
     ft: int64 = infer_expr(tc, await_expr.a)
     fn: TyNode = ty_get((*tc).ty, ft)
@@ -149,7 +160,9 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         rt: int64 = infer_expr(tc, s.b)
         lhs: ExprNode = vec_get((*a).exprs, s.a)
         if !compat((*tc).ty, lt, rt) {
-            tc_emit(tc, "assignment type mismatch", lhs.lo, lhs.hi)
+            if !check_char_array_lit(tc, lt, s.b) {
+                tc_emit(tc, "assignment type mismatch", lhs.lo, lhs.hi)
+            }
         }
         check_int_fits(tc, s.b, lt)
         if lhs.kind == xk_ident() {
@@ -228,6 +241,24 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         loop_body_fixpoint(tc, s.b)
     } else if s.kind == sk_for() {
         it: int64 = infer_expr(tc, s.b)
+        // A for iterand must have an element: an array, a slice, or a string
+        // (bytes as chars). A ground iterand with no element is rejected here;
+        // a generic or unresolved one stays permissive on the surface pass and
+        // the ground pass re-checks it once mono makes it concrete. A types
+        // only rule, so both passes run it.
+        itn: TyNode = ty_get((*tc).ty, it)
+        mut ground: bool = itn.kind != tyk_unknown()
+        if itn.kind == tyk_named() {
+            gmap: *Map<int64> = (*tc).cur_generics
+            if map_has(gmap, ty_name((*tc).ty, it)) { ground = false }
+        }
+        if ground {
+            eln: TyNode = ty_get((*tc).ty, elem_of((*tc).ty, it))
+            if eln.kind == tyk_unknown() {
+                iter_e: ExprNode = vec_get((*a).exprs, s.b)
+                tc_emit(tc, cannot_iterate_msg(ty_render((*tc).ty, it)), iter_e.lo, iter_e.hi)
+            }
+        }
         push_scope(tc)
         declare(tc, ast_name(a, s.a), ty_unknown((*tc).ty))
         set_esc(tc, ast_name(a, s.a), false, false)

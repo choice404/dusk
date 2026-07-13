@@ -19,6 +19,35 @@
 @import genptr
 @import genplace
 
+// Copies a string literal's decoded bytes into a char array slot through
+// llvm.memcpy. The interned global carries a trailing NUL that is deliberately
+// not copied; the checker already matched the byte length to the array.
+func gl_char_lit_copy(s: *GenFuncState, ptr: string, len: int64, init: ExprNode) -> void {
+    a: *Ast = (*(*s).ctx).ast
+    g: string = emit_cstring_body((*s).module, ast_name(a, init.a))
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @llvm.memcpy.p0.p0.i64(ptr ")
+    sb_push(b, ptr)
+    sb_push(b, ", ptr ")
+    sb_push(b, g)
+    sb_push(b, ", i64 ")
+    sb_push_int(b, len)
+    sb_push(b, ", i1 false)")
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+// Whether the lowered type is a char array, the target of the literal copy.
+func gl_is_char_array(c: *CTyArena, ty: int64) -> bool {
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    if n.kind != ctyk_array() { return false }
+    en: CTyNode = vec_get(cty_nodes(c), n.a)
+    return en.kind == ctyk_char()
+}
+
 // Lowers a scalar binding and records its stack slot for later loads and stores.
 export func gen_let(s: *GenFuncState, sid: int64) -> void {
     a: *Ast = (*(*s).ctx).ast
@@ -82,6 +111,12 @@ export func gen_let(s: *GenFuncState, sid: int64) -> void {
             if tn.kind == ctyk_array() { v = gen_array_lit(s, init, tn.a) }
             else if tn.kind == ctyk_slice() { v = slice_from_array(s, gen_array_lit(s, init, tn.a), init.b) }
             else { v = gen_expr(s, st.c) }
+        } else if init.kind == xk_str() && gl_is_char_array(c, ty) {
+            // `s: char[N] = "lit"` copies the literal's bytes into the slot.
+            ptr0: string = gen_alloca(s, ty)
+            gl_char_lit_copy(s, ptr0, tn.b, init)
+            map_put((*s).locals, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: ptr0 })
+            return
         } else { v = gen_expr(s, st.c) }
     } else {
         v = gen_expr(s, st.c)
@@ -102,6 +137,16 @@ export func gen_assign(s: *GenFuncState, lhs: int64, rhs: int64) -> void {
     p: Place = gen_place(s, lhs)
     if !p.ok {
         emit_error((*s).module, "unsupported assignment target")
+        return
+    }
+    a: *Ast = (*(*s).ctx).ast
+    r: ExprNode = vec_get((*a).exprs, rhs)
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if r.kind == xk_str() && gl_is_char_array(c, p.ty) {
+        // A char array place assigned a string literal copies the literal's
+        // bytes, the same lowering as the let form.
+        pn: CTyNode = vec_get(cty_nodes(c), p.ty)
+        gl_char_lit_copy(s, p.ptr, pn.b, r)
         return
     }
     v: Val = gen_expr(s, rhs)

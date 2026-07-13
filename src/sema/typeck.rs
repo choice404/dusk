@@ -2795,7 +2795,7 @@ impl TypeChecker {
             Stmt::Assign(lhs, rhs) => {
                 let lt = self.infer(lhs);
                 let rt = self.infer(rhs);
-                if !compatible(&lt, &rt) {
+                if !compatible(&lt, &rt) && !self.check_char_array_lit(&lt, rhs) {
                     self.err("assignment type mismatch", lhs.span);
                 }
                 self.check_int_fits(rhs, &lt);
@@ -2987,6 +2987,23 @@ impl TypeChecker {
             }
             Stmt::For(f) => {
                 let it_ty = self.infer(&f.iter);
+                // A for iterand must have an element: an array, a slice, or a
+                // string (bytes as chars). A ground iterand with no element is
+                // rejected here; a generic or unresolved one stays permissive
+                // on the surface pass and the ground pass re-checks it once
+                // mono makes it concrete. A types-only rule, so both passes
+                // run it.
+                let ground = !matches!(&it_ty, Ty::Unknown)
+                    && !matches!(&it_ty, Ty::Named(n) if self.cur_generics.contains(n));
+                if ground && matches!(elem_of(&it_ty), Ty::Unknown) {
+                    self.err(
+                        format!(
+                            "cannot iterate {}; a for loop takes an array, a slice, or a string",
+                            ty_str(&it_ty)
+                        ),
+                        f.iter.span,
+                    );
+                }
                 self.push_scope();
                 self.declare(&f.var, Ty::Unknown);
                 // The loop variable views an element of the iterand. When the
@@ -3150,7 +3167,7 @@ impl TypeChecker {
                             scope.insert(b.name.clone(), raw.clone());
                         }
                     }
-                    if !compatible(&lt, &vt) {
+                    if !compatible(&lt, &vt) && !self.check_char_array_lit(&lt, &l.value) {
                         self.err(
                             format!(
                                 "'{}' has a type annotation that does not match its value",
@@ -3302,7 +3319,20 @@ impl TypeChecker {
                 Some(t) => {
                     self.reject_iface_targ(t, l.value.span);
                     self.reject_reserved_uint(t, l.value.span);
-                    self.lower(t)
+                    let lt = self.lower(t);
+                    // The annotation must match the tuple member it binds;
+                    // without this check a mismatched binder reaches codegen,
+                    // which stores the member as the annotated type.
+                    if !matches!(pt, Ty::Unknown) && !compatible(&lt, pt) {
+                        self.err(
+                            format!(
+                                "'{}' has a type annotation that does not match its value",
+                                b.name
+                            ),
+                            l.value.span,
+                        );
+                    }
+                    lt
                 }
                 None => harden(pt.clone()),
             };
@@ -4676,6 +4706,17 @@ impl TypeChecker {
                 let tx = self.infer(x);
                 self.infer(i);
                 if matches!(i.kind, ExprKind::Range(..)) {
+                    // A range slice validates against its base's length, and a
+                    // raw pointer has none: the fat slice it would mint claims
+                    // a length no backing vouches for. Index reads through the
+                    // raw pointer stay legal; only the range form is refused.
+                    let voidish = matches!(&tx, Ty::Ptr(p) if matches!(**p, Ty::Unit));
+                    if matches!(&tx, Ty::RawPtr(_)) || voidish {
+                        self.err(
+                            "cannot take a range slice of a raw pointer; it has no length to check the range against",
+                            e.span,
+                        );
+                    }
                     Ty::Slice(Box::new(elem_of(&tx)))
                 } else {
                     elem_of(&tx)
@@ -5525,6 +5566,34 @@ impl TypeChecker {
         }
     }
 
+    /// `s: char[N] = "lit"`: a string literal initializes a char array when its
+    /// byte length is exactly N, with no NUL appended and no padding. Only a
+    /// literal converts; a string typed value never does, so the rule lives at
+    /// the let and assign sites where the expression is in hand, not in the
+    /// type compatibility relation. Returns true when the target is a char
+    /// array and the value is a string literal, having emitted the byte-count
+    /// reject on a length mismatch, so the caller skips its generic mismatch
+    /// error.
+    fn check_char_array_lit(&mut self, target: &Ty, value: &Expr) -> bool {
+        let Ty::Array(el, n) = target else {
+            return false;
+        };
+        if !matches!(**el, Ty::Char) {
+            return false;
+        }
+        let ExprKind::Str(s) = &value.kind else {
+            return false;
+        };
+        let m = s.len() as u64;
+        if m != *n {
+            self.err(
+                format!("the string literal has {m} byte(s); the annotation says char[{n}]"),
+                value.span,
+            );
+        }
+        true
+    }
+
     /// Whether a value of this type can be printed. Scalars, strings, and errors
     /// have printers; a struct prints through its Display impl's toString; and
     /// everything else is rejected, since a silently empty print is the worst of
@@ -5539,6 +5608,10 @@ impl TypeChecker {
             | Ty::Str
             | Ty::Error
             | Ty::Unknown => {}
+            // A char array or a char slice prints its bytes as text; any other
+            // element type keeps the reject below.
+            Ty::Array(e, _) if matches!(**e, Ty::Char) => {}
+            Ty::Slice(e) if matches!(**e, Ty::Char) => {}
             Ty::Named(n) => {
                 if self.structs.contains_key(n) {
                     if !self.impls.contains(&("Display".to_string(), n.clone())) {

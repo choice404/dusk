@@ -165,10 +165,14 @@ export func encode_cstring(text: string) -> EncodedCString {
     return encode_cstring_n(text, str_len(text))
 }
 
-export func emit_cstring(m: *EmitModule, text: string) -> string {
+// Interns an already encoded constant body under its encoded text. Every
+// cstring path lands here, so a literal and an equal runtime built text share
+// one global; the encoded form is a bijection of the constant's bytes, so an
+// embedded NUL cannot truncate the key the way a decoded dusk string would.
+func emit_intern_cstr(m: *EmitModule, enc_text: string, enc_len: int64) -> string {
     strings: *Map<string> = (*m).strings
-    if map_has(strings, text) {
-        return unwrap_or(map_get(strings, text), "")
+    if map_has(strings, enc_text) {
+        return unwrap_or(map_get(strings, enc_text), "")
     }
 
     lb: *StringBuilder = alloc(sb_new())
@@ -179,21 +183,120 @@ export func emit_cstring(m: *EmitModule, text: string) -> string {
     free(lb)
     (*m).str_count = (*m).str_count + 1
 
-    enc: EncodedCString = encode_cstring(text)
     gb: *StringBuilder = alloc(sb_new())
     sb_push(gb, label)
     sb_push(gb, " = private unnamed_addr constant [")
-    sb_push_int(gb, enc.len)
+    sb_push_int(gb, enc_len)
     sb_push(gb, " x i8] c\"")
-    sb_push(gb, enc.text)
+    sb_push(gb, enc_text)
     sb_push_char(gb, 34)
     global_line: string = built_string(gb)
     sb_free(gb)
     free(gb)
-    free(enc.text)
 
     vec_push((*m).globals, global_line)
-    map_put(strings, copy_string(text), label)
+    map_put(strings, copy_string(enc_text), label)
+    return label
+}
+
+export func emit_cstring(m: *EmitModule, text: string) -> string {
+    enc: EncodedCString = encode_cstring(text)
+    label: string = emit_intern_cstr(m, enc.text, enc.len)
+    free(enc.text)
+    return label
+}
+
+// The UTF-8 bytes of one scalar pushed straight into the encoded constant
+// form, so a NUL or any other byte survives without a dusk string carrying it.
+func emit_encode_scalar(b: *StringBuilder, cp: int64) -> int64 {
+    if cp < 128 {
+        emit_encode_byte(b, cp)
+        return 1
+    }
+    if cp < 2048 {
+        emit_encode_byte(b, 192 + (cp >> 6))
+        emit_encode_byte(b, 128 + (cp & 63))
+        return 2
+    }
+    if cp < 65536 {
+        emit_encode_byte(b, 224 + (cp >> 12))
+        emit_encode_byte(b, 128 + ((cp >> 6) & 63))
+        emit_encode_byte(b, 128 + (cp & 63))
+        return 3
+    }
+    emit_encode_byte(b, 240 + (cp >> 18))
+    emit_encode_byte(b, 128 + ((cp >> 12) & 63))
+    emit_encode_byte(b, 128 + ((cp >> 6) & 63))
+    emit_encode_byte(b, 128 + (cp & 63))
+    return 4
+}
+
+func emit_encode_byte(b: *StringBuilder, byte: int64) -> void {
+    if byte == 92 {
+        sb_push(b, "\\5C")
+    } else if byte == 34 {
+        sb_push(b, "\\22")
+    } else if byte >= 32 && byte <= 126 {
+        sb_push_char(b, byte)
+    } else {
+        push_hex_byte(b, byte)
+    }
+}
+
+func emit_hex_val(c: int64) -> int64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0
+}
+
+// Interns a C string constant from a string literal body in its internal
+// escaped form: a backslash stored as \u{5c}, every other non printable
+// scalar as \u{hex}, printable bytes raw. Each escape decodes to UTF-8 bytes
+// straight into the encoded constant, so an embedded NUL neither truncates
+// the constant nor its length.
+export func emit_cstring_body(m: *EmitModule, body: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut count: int64 = 0
+    mut i: int64 = 0
+    while i < str_len(body) {
+        mut consumed: bool = false
+        if body[i] == 92 {
+            if i + 3 < str_len(body) {
+                if body[i + 1] == 117 {
+                    if body[i + 2] == 123 {
+                        mut p: int64 = i + 3
+                        mut cp: int64 = 0
+                        mut scanning: bool = true
+                        while scanning {
+                            if p >= str_len(body) { scanning = false }
+                            else if body[p] == 125 { scanning = false }
+                            else {
+                                cp = cp * 16 + emit_hex_val(body[p])
+                                p = p + 1
+                            }
+                        }
+                        if p < str_len(body) {
+                            count = count + emit_encode_scalar(b, cp)
+                            i = p + 1
+                            consumed = true
+                        }
+                    }
+                }
+            }
+        }
+        if !consumed {
+            emit_encode_byte(b, body[i])
+            count = count + 1
+            i = i + 1
+        }
+    }
+    sb_push(b, "\\00")
+    enc_text: string = built_string(b)
+    sb_free(b)
+    free(b)
+    label: string = emit_intern_cstr(m, enc_text, count + 1)
+    free(enc_text)
     return label
 }
 

@@ -206,6 +206,10 @@ export func gen_place(s: *GenFuncState, id: int64) -> Place {
         }
     }
     if e.kind == xk_index() {
+        // A range index is a slice rvalue, not a place; it falls to the
+        // rvalue slice path so a chained range like s[0..4][1..3] lowers.
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        if idx.kind == xk_range() { return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") } }
         iv: Val = gen_expr(s, e.b)
         io: string = coerce(s, iv.ty, iv.op, cty_int(c, 64))
         return elem_addr(s, e.a, io)

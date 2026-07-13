@@ -4138,7 +4138,148 @@ fn assigning_to_a_string_element_is_rejected() {
     assert!(err.contains("StringBuilder"), "{err}");
 }
 
-golden!(stridxread_ok, "stridxread_ok.dusk", "104\n");
+golden!(stridxread_ok, "stridxread_ok.dusk", "h\n");
+
+#[test]
+fn char_values_print_as_text_bytes() {
+    // A char, a char array, and a char slice write their bytes as text through
+    // every print shape: direct, format hole, and stderr. The numeric reading
+    // stays one int-annotated binding away, and a multibyte string's bytes
+    // pass through untouched so the glyphs survive.
+    let (out, err, ok) = run_raw("charprint.dusk");
+    assert!(ok, "{err}");
+    assert_eq!(
+        out,
+        "h\nHello\nell\neHelloell\nchar e in Hello\n101\nhéllo\n"
+    );
+    assert_eq!(err, "Hello\n");
+}
+
+#[test]
+fn a_string_literal_initializes_a_char_array_by_exact_byte_count() {
+    // The exact fit, the mut reassign, an element write after the copy, a
+    // multibyte literal counted in bytes, and a decoded escape.
+    assert_eq!(run("chararrlit.dusk"), "Hello\nxyz\nqyz\nhéllo\na\nb\n");
+}
+
+#[test]
+fn a_char_array_refuses_a_literal_of_the_wrong_byte_length() {
+    // "héllo" is six bytes; the reject names both counts.
+    let err = check_fails("chararrlit_fail.dusk");
+    assert!(
+        err.contains("the string literal has 6 byte(s); the annotation says char[5]"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_string_value_never_converts_to_a_char_array() {
+    // Only a literal converts; a binding does not launder the conversion.
+    let err = check_fails("chararrval_fail.dusk");
+    assert!(
+        err.contains("has a type annotation that does not match its value"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_char_array_call_argument_stays_rejected() {
+    // The literal conversion is scoped to let and assignment.
+    let err = check_fails("chararrarg_fail.dusk");
+    assert!(err.contains("argument 1 has the wrong type"), "{err}");
+}
+
+#[test]
+fn a_for_loop_iterates_a_string_by_byte() {
+    // Six bytes for the five glyphs of "héllo", glyphs intact through byte
+    // printing, and the loop var widens to an int like any char.
+    assert_eq!(run("forstring.dusk"), "héllo\n6\n97\n98\n");
+}
+
+#[test]
+fn a_for_loop_rejects_a_non_iterable_source() {
+    // Was accept-then-clang-error; now a clean check reject.
+    let err = check_fails("forstring_fail.dusk");
+    assert!(
+        err.contains(
+            "cannot iterate an integer literal; a for loop takes an array, a slice, or a string"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_string_range_slice_validates_its_window() {
+    // "abc"[1..9] reaches past the NUL scanned length and faults like any
+    // other out of range window.
+    let (out, err, ok) = run_raw("strrangefault.dusk");
+    assert!(!ok, "must fault");
+    assert_eq!(out, "");
+    assert!(err.contains("index out of bounds"), "{err}");
+}
+
+#[test]
+fn in_bounds_string_ranges_slice_every_base_shape() {
+    // A binding, a literal, a call result, the full window, and the empty
+    // window all mint valid char slices.
+    assert_eq!(run("strrange.dusk"), "bc\nabcd\nbc\nwx\n0\nbc\n");
+}
+
+#[test]
+fn a_raw_pointer_refuses_a_range_slice() {
+    // A raw pointer has no length to validate a range against.
+    let err = check_fails("rawrange_fail.dusk");
+    assert!(
+        err.contains("cannot take a range slice of a raw pointer"),
+        "{err}"
+    );
+}
+
+#[test]
+fn str_from_chars_copies_a_char_slice_into_a_heap_string() {
+    // The bridge from stack text to the dynamic string world; the result is
+    // a real heap string that str_len and concat accept.
+    assert_eq!(run("strfromchars.dusk"), "Hello\n5\nell!\n");
+}
+
+#[test]
+fn an_embedded_nul_is_an_ordinary_char_array_byte() {
+    // The literal copy carries the NUL and the byte printer writes through
+    // it; the plain heap string keeps its C string reading and stops there.
+    assert_eq!(run("charnul.dusk"), "120 0 121\nx\n");
+}
+
+#[test]
+fn a_literal_backslash_before_a_brace_is_not_an_escape() {
+    // Six plain bytes, in the char array count and in the printed text.
+    assert_eq!(run("charbackslash.dusk"), "\\u{41}\n\\u{7a}\n");
+}
+
+#[test]
+fn a_destructuring_annotation_must_match_its_member() {
+    let err = check_fails("destructannot_fail.dusk");
+    assert!(
+        err.contains("'a' has a type annotation that does not match its value"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_void_pointer_refuses_a_range_slice() {
+    // The raw pointer refusal covers *void, which has no length either.
+    let err = check_fails("voidrange_fail.dusk");
+    assert!(
+        err.contains("cannot take a range slice of a raw pointer"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_non_char_array_still_has_no_printer() {
+    // The char text arms must not open printing for other element types.
+    let err = check_fails("charprint_fail.dusk");
+    assert!(err.contains("cannot print"), "{err}");
+}
 
 #[test]
 fn a_parameter_of_an_undeclared_type_is_rejected() {
@@ -4357,7 +4498,7 @@ fn bootstrap_scaffold_demo() {
     );
     assert_eq!(
         String::from_utf8_lossy(&version.stdout),
-        "dusk 1.0.1\n",
+        "dusk 1.1.0\n",
         "version prints the canonical compiler version"
     );
 }

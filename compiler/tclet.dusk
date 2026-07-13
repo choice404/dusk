@@ -52,6 +52,96 @@ func reject_reserved_uint_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi: in
     }
 }
 
+func lit_hex_val(b: int64) -> int64 {
+    if b >= 48 && b <= 57 { return b - 48 }
+    if b >= 97 && b <= 102 { return b - 87 }
+    if b >= 65 && b <= 70 { return b - 55 }
+    return 0
+}
+
+func utf8_width_of(cp: int64) -> int64 {
+    if cp < 128 { return 1 }
+    if cp < 2048 { return 2 }
+    if cp < 65536 { return 3 }
+    return 4
+}
+
+// The decoded byte length of a string literal body in its canonical interned
+// form, where every non printable scalar sits as a \u{hex} escape and every
+// printable byte sits raw. Mirrors the codegen decoder's walk exactly, so the
+// length the checker approves is the length the initializer copies.
+export func str_lit_byte_len(text: string) -> int64 {
+    mut count: int64 = 0
+    mut i: int64 = 0
+    while i < str_len(text) {
+        mut consumed: bool = false
+        if text[i] == 92 {
+            if i + 3 < str_len(text) {
+                if text[i + 1] == 117 {
+                    if text[i + 2] == 123 {
+                        mut p: int64 = i + 3
+                        mut cp: int64 = 0
+                        mut scanning: bool = true
+                        while scanning {
+                            if p >= str_len(text) { scanning = false }
+                            else if text[p] == 125 { scanning = false }
+                            else {
+                                cp = cp * 16 + lit_hex_val(text[p])
+                                p = p + 1
+                            }
+                        }
+                        if p < str_len(text) {
+                            count = count + utf8_width_of(cp)
+                            i = p + 1
+                            consumed = true
+                        }
+                    }
+                }
+            }
+        }
+        if !consumed {
+            count = count + 1
+            i = i + 1
+        }
+    }
+    return count
+}
+
+func char_lit_len_msg(have: int64, want: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "the string literal has ")
+    sb_push_int(b, have)
+    sb_push(b, " byte(s); the annotation says char[")
+    sb_push_int(b, want)
+    sb_push_char(b, 93)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// `s: char[N] = "lit"`: a string literal initializes a char array when its
+// byte length is exactly N, with no NUL appended and no padding. Only a
+// literal converts; a string typed value never does, so the rule lives at the
+// let and assign sites where the expression is in hand, not in the type
+// compatibility relation. Returns true when the target is a char array and
+// the value is a string literal, having emitted the byte count reject on a
+// length mismatch, so the caller skips its generic mismatch error.
+export func check_char_array_lit(tc: *TypeChecker, target: int64, value_id: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, target)
+    if n.kind != tyk_array() { return false }
+    en: TyNode = ty_get((*tc).ty, n.a)
+    if en.kind != tyk_char() { return false }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, value_id)
+    if e.kind != xk_str() { return false }
+    have: int64 = str_lit_byte_len(ast_name(a, e.a))
+    if have != n.w {
+        tc_emit(tc, char_lit_len_msg(have, n.w), e.lo, e.hi)
+    }
+    return true
+}
+
 func annot_mismatch_msg(name: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push_char(b, 39)
@@ -165,7 +255,9 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         reject_reserved_uint_annot(tc, b.ty, value.lo, value.hi)
         lt: int64 = tc_type(tc, b.ty)
         if !compat((*tc).ty, lt, vt) {
-            tc_emit(tc, annot_mismatch_msg(ast_name(a, b.name)), value.lo, value.hi)
+            if !check_char_array_lit(tc, lt, stmt.c) {
+                tc_emit(tc, annot_mismatch_msg(ast_name(a, b.name)), value.lo, value.hi)
+            }
         }
         check_int_fits(tc, stmt.c, lt)
         tyid = lt
@@ -231,7 +323,15 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         if b.ty >= 0 {
             reject_iface_targ_annot(tc, b.ty, value.lo, value.hi)
             reject_reserved_uint_annot(tc, b.ty, value.lo, value.hi)
-            tyid = tc_type(tc, b.ty)
+            lt: int64 = tc_type(tc, b.ty)
+            // The annotation must match the tuple member it binds; without
+            // this check a mismatched binder reaches codegen, which stores the
+            // member as the annotated type.
+            pn: TyNode = ty_get((*tc).ty, tyid)
+            if pn.kind != tyk_unknown() && !compat((*tc).ty, lt, tyid) {
+                tc_emit(tc, annot_mismatch_msg(ast_name(a, b.name)), value.lo, value.hi)
+            }
+            tyid = lt
         } else {
             tyid = harden((*tc).ty, tyid)
         }

@@ -381,7 +381,21 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         infer_expr(tc, e.b)
         idx: ExprNode = vec_get((*a).exprs, e.b)
         bn2: TyNode = ty_get((*tc).ty, base_ty2)
-        if idx.kind == xk_range() { return ty_slice((*tc).ty, elem_of((*tc).ty, base_ty2)) }
+        if idx.kind == xk_range() {
+            // A range slice validates against its base's length, and a raw
+            // pointer has none: the fat slice it would mint claims a length no
+            // backing vouches for. Index reads through the raw pointer stay
+            // legal; only the range form is refused.
+            mut lengthless: bool = bn2.kind == tyk_rawptr()
+            if bn2.kind == tyk_ptr() {
+                pin: TyNode = ty_get((*tc).ty, bn2.a)
+                if pin.kind == tyk_unit() { lengthless = true }
+            }
+            if lengthless {
+                tc_emit(tc, "cannot take a range slice of a raw pointer; it has no length to check the range against", e.lo, e.hi)
+            }
+            return ty_slice((*tc).ty, elem_of((*tc).ty, base_ty2))
+        }
         if bn2.kind == tyk_slice() || bn2.kind == tyk_array() || bn2.kind == tyk_str() || bn2.kind == tyk_collector() || bn2.kind == tyk_unknown() {
             return elem_of((*tc).ty, base_ty2)
         }

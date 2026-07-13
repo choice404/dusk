@@ -52,6 +52,54 @@ func push_canonical(out: *StringBuilder, cp: int64) -> void {
     sb_push_char(out, 125)
 }
 
+// Appends one scalar in the internal interned form: the canonical form with one
+// difference, a backslash is stored as \u{5c} rather than raw, so a consumer
+// walking the stored text can always read a backslash as the start of a
+// synthetic escape. The dump renderers convert it back to the canonical form.
+func push_internal(out: *StringBuilder, cp: int64) -> void {
+    if cp == 92 {
+        sb_push(out, "\\u{5c}")
+        return
+    }
+    push_canonical(out, cp)
+}
+
+// The internal interned form of a string literal body for the AST, no quotes,
+// for the span [lo, hi). The body is decoded like the lexer decodes it, an
+// invalid escape adding nothing, then each scalar is emitted in internal form.
+export func string_body_internal(src: string, n: int64, lo: int64, hi: int64) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    mut p: int64 = lo + 1
+    mut going: bool = true
+    while going {
+        if p >= hi {
+            going = false
+        } else {
+            b: int64 = bytes.byte_at(src, n, p)
+            if b == 34 {
+                going = false
+            } else if b == 92 {
+                res: Escape = scan_escape(src, n, p + 1)
+                if res.scalar >= 0 {
+                    push_internal(out, res.scalar)
+                }
+                p = res.next
+            } else if b < 128 {
+                push_internal(out, b)
+                p = p + 1
+            } else {
+                d: Decoded = bytes.decode_utf8(src, n, p)
+                push_internal(out, d.scalar)
+                p = p + d.len
+            }
+        }
+    }
+    r: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))
+    sb_free(out)
+    free(out)
+    return r
+}
+
 // The canonical rendering of a string token's body, quotes included, for the span
 // [lo, hi). The body is decoded like the lexer decodes it, an invalid escape adding
 // nothing, then each scalar is emitted in canonical form.

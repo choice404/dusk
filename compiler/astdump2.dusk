@@ -19,6 +19,28 @@ func push_bool(out: *StringBuilder, b: bool) -> void {
     if b { sb_push(out, "true") } else { sb_push(out, "false") }
 }
 
+// Renders an interned string literal body in the canonical dump form. The
+// interned text stores a backslash as \u{5c} so decoders stay unambiguous;
+// the dump form shows it raw, matching stage0's canonical escape.
+func push_str_body(out: *StringBuilder, s: string) -> void {
+    sb_push_char(out, 34)
+    mut i: int64 = 0
+    while i < str_len(s) {
+        mut esc: bool = false
+        if i + 5 < str_len(s) {
+            if s[i] == 92 && s[i + 1] == 117 && s[i + 2] == 123 && s[i + 3] == 53 && s[i + 4] == 99 && s[i + 5] == 125 { esc = true }
+        }
+        if esc {
+            sb_push_char(out, 92)
+            i = i + 6
+        } else {
+            sb_push_char(out, s[i])
+            i = i + 1
+        }
+    }
+    sb_push_char(out, 34)
+}
+
 func push_string(out: *StringBuilder, s: string) -> void {
     sb_push_char(out, 34)
     sb_push(out, s)
@@ -538,7 +560,7 @@ func render_expr_kind(out: *StringBuilder, a: *Ast, e: ExprNode, level: int64) -
     if e.kind == xk_str() {
         sb_push(out, "Str(\n")
         ind(out, level + 1)
-        push_string(out, ast_name(a, e.a))
+        push_str_body(out, ast_name(a, e.a))
         sb_push(out, ",\n")
         ind(out, level)
         sb_push_char(out, 41)

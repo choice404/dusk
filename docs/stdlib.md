@@ -152,6 +152,7 @@ Helpers over NUL terminated strings: length and comparison, signed integer parsi
 | `parse_int(s: string) -> (int64, error)`              | Parse a signed base 10 integer.             |
 | `parse_int_radix(s: string, base: int64) -> (int64, error)` | Parse a signed integer in a base from 2 to 36. |
 | `parse_float(s: string) -> (float64, error)`          | Parse a base 10 float.                      |
+| `str_from_chars(cs: char[]) -> string`                | Copy a char slice into a fresh heap string the caller owns. |
 
 ```text
 @import std.string
@@ -163,7 +164,13 @@ v, e := parse_int("42")      // 42
 e.ignore()
 h, he := parse_int_radix("0xFF", 16)   // 255
 he.ignore()
+
+a: char[5] = "Hello"
+s := str_from_chars(a[0..5])   // "Hello", a heap string
+free(s)
 ```
+
+`str_from_chars` is the bridge back to the dynamic string world: a `char[N]` slices down to a `char[]` and `str_from_chars` copies its bytes into a fresh heap allocated `string`, the same ownership `substring` hands back.
 
 `parse_int` takes a base 10 string, so a `0x`, `0o`, or `0b` prefix fails on the prefix letter. `parse_int_radix` takes the base and accepts the matching prefix, `0x` for 16, `0o` for 8, `0b` for 2, but never infers the base from the prefix. Each parser returns the value with an error you must handle.
 

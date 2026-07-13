@@ -33,6 +33,22 @@ void cool_println_cstr(const char *s) {
     puts(s ? s : "");
 }
 
+/* Byte counted text writers for char, char array, and char slice printing.
+   The buffer is not NUL terminated; exactly n bytes go to the stream, so an
+   embedded NUL or a multibyte UTF-8 sequence passes through untouched. */
+void cool_print_bytes(const char *p, int64_t n) {
+    if (n > 0) {
+        fwrite(p, 1, (size_t)n, stdout);
+    }
+}
+
+void cool_eprint_bytes(const char *p, int64_t n) {
+    fflush(stdout);
+    if (n > 0) {
+        fwrite(p, 1, (size_t)n, stderr);
+    }
+}
+
 /* Stderr printers for the printerr builtin. None appends a newline; codegen
    emits the newline as its own segment, so one set serves every call shape.
    Each flushes stdout first, so buffered program output lands before the

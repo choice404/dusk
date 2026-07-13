@@ -19,6 +19,34 @@
 @import genenum
 @import genawait
 
+// The data pointer, length, and element type of a non-array for source. A
+// string iterates its bytes as chars: the pointer is the data and the length
+// is a strlen snapshot taken once here, before gen_for spills it, so a
+// mutation inside the body cannot move the bound. The typeck iterand rule
+// keeps every other raw char pointer out of a for. Everything else is a slice.
+func gf_source_parts(s: *GenFuncState, sv: Val) -> (string, string, int64) {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), sv.ty)
+    if n.kind == ctyk_rawptr() {
+        en: CTyNode = vec_get(cty_nodes(c), n.a)
+        if en.kind == ctyk_char() {
+            out: string = next_tmp((*s).fb)
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, out)
+            sb_push(b, " = call i64 @strlen(ptr ")
+            sb_push(b, sv.op)
+            sb_push_char(b, 41)
+            text: string = gs_built(b)
+            sb_free(b)
+            free(b)
+            line((*s).fb, text)
+            free(text)
+            return (sv.op, out, cty_char(c))
+        }
+    }
+    return slice_parts(s, sv)
+}
+
 func gen_for(s: *GenFuncState, st: StmtNode) -> void {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -55,7 +83,7 @@ func gen_for(s: *GenFuncState, st: StmtNode) -> void {
             free(nb)
         } else {
             sv0: Val = gen_expr(s, st.b)
-            d0, l0, e0 := slice_parts(s, sv0)
+            d0, l0, e0 := gf_source_parts(s, sv0)
             data = d0
             len = l0
             elem = e0
@@ -73,7 +101,7 @@ func gen_for(s: *GenFuncState, st: StmtNode) -> void {
             sb_free(nb2)
             free(nb2)
         } else {
-            d1, l1, e1 := slice_parts(s, sv)
+            d1, l1, e1 := gf_source_parts(s, sv)
             data = d1
             len = l1
             elem = e1

@@ -45,6 +45,82 @@ func gp_call_num(s: *GenFuncState, fn: string, ty: string, op: string) -> void {
     free(text)
 }
 
+func gp_call_bytes(s: *GenFuncState, fn: string, ptr: string, count: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @")
+    sb_push(b, fn)
+    sb_push(b, "(ptr ")
+    sb_push(b, ptr)
+    sb_push(b, ", i64 ")
+    sb_push(b, count)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+func gp_extract_part(s: *GenFuncState, ll: string, op: string, idx: int64) -> string {
+    out: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, out)
+    sb_push(b, " = extractvalue ")
+    sb_push(b, ll)
+    sb_push_char(b, 32)
+    sb_push(b, op)
+    sb_push(b, ", ")
+    sb_push_int(b, idx)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return out
+}
+
+// Prints a char, a char array, or a char slice as text bytes through the
+// byte counted printer, which has no ln variant, so the newline is emitted
+// explicitly. Returns whether the value was handled here.
+func gp_print_char_text(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> bool {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    mut bytes_fn: string = "cool_print_bytes"
+    if errout { bytes_fn = "cool_eprint_bytes" }
+    if n.kind == ctyk_char() {
+        slot: string = gen_alloca(s, v.ty)
+        gen_store_slot(s, v.ty, v.op, slot)
+        gp_call_bytes(s, bytes_fn, slot, "1")
+        if newline { gp_newline(s, errout) }
+        return true
+    }
+    if n.kind == ctyk_array() {
+        en: CTyNode = vec_get(cty_nodes(c), n.a)
+        if en.kind == ctyk_char() {
+            slot2: string = gen_alloca(s, v.ty)
+            gen_store_slot(s, v.ty, v.op, slot2)
+            count: string = int_to_string(n.b)
+            gp_call_bytes(s, bytes_fn, slot2, count)
+            free(count)
+            if newline { gp_newline(s, errout) }
+            return true
+        }
+    }
+    if n.kind == ctyk_slice() {
+        en2: CTyNode = vec_get(cty_nodes(c), n.a)
+        if en2.kind == ctyk_char() {
+            ll: string = cty_ll(c, v.ty)
+            p: string = gp_extract_part(s, ll, v.op, 0)
+            cnt: string = gp_extract_part(s, ll, v.op, 1)
+            free(ll)
+            gp_call_bytes(s, bytes_fn, p, cnt)
+            if newline { gp_newline(s, errout) }
+            return true
+        }
+    }
+    return false
+}
+
 func gp_newline(s: *GenFuncState, errout: bool) -> void {
     nl: string = emit_cstring((*s).module, "\n")
     if errout {
@@ -85,6 +161,7 @@ func gp_display_string(s: *GenFuncState, v: Val) -> string {
 func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if gp_print_char_text(s, v, newline, errout) { return }
     if errout {
         if n.kind == ctyk_rawptr() || n.kind == ctyk_error() { gp_call_cstr(s, "cool_eprint_cstr", v.op) }
         else if cty_is_float(c, v.ty) {
@@ -164,9 +241,7 @@ func gp_emit_fmt_lit(s: *GenFuncState, fmt: string, lo: int64, hi: int64, errout
     }
     if sb_size(lit) > 0 {
         piece: string = gs_built(lit)
-        decoded: string = gx_string_bytes(piece)
-        label: string = emit_cstring((*s).module, decoded)
-        free(decoded)
+        label: string = emit_cstring_body((*s).module, piece)
         if errout { gp_call_cstr(s, "cool_eprint_cstr", label) } else { gp_call_cstr(s, "cool_print_cstr", label) }
     }
     sb_free(lit)

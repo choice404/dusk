@@ -27,56 +27,6 @@
 @import genclos
 @import gencollect
 
-func gx_hex(b: int64) -> int64 {
-    if b >= 48 {
-        if b <= 57 { return b - 48 }
-    }
-    if b >= 97 {
-        if b <= 102 { return b - 87 }
-    }
-    return b - 55
-}
-
-export func gx_string_bytes(text: string) -> string {
-    out: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < str_len(text) {
-        mut consumed: bool = false
-        if text[i] == 92 {
-            if i + 3 < str_len(text) {
-                if text[i + 1] == 117 {
-                    if text[i + 2] == 123 {
-                        mut p: int64 = i + 3
-                        mut cp: int64 = 0
-                        mut scanning: bool = true
-                        while scanning {
-                            if p >= str_len(text) { scanning = false }
-                            else if text[p] == 125 { scanning = false }
-                            else {
-                                cp = cp * 16 + gx_hex(text[p])
-                                p = p + 1
-                            }
-                        }
-                        if p < str_len(text) {
-                            bytes.push_utf8(out, cp)
-                            i = p + 1
-                            consumed = true
-                        }
-                    }
-                }
-            }
-        }
-        if !consumed {
-            sb_push_char(out, text[i])
-            i = i + 1
-        }
-    }
-    result: string = gs_built(out)
-    sb_free(out)
-    free(out)
-    return result
-}
-
 func gx_hex_digit(n: int64) -> int64 {
     if n >= 10 { return 55 + n }
     return 48 + n
@@ -330,9 +280,7 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
         return Val { ty: cty_int(c, 32), op: text2 }
     }
     if e.kind == xk_str() {
-        decoded: string = gx_string_bytes(ast_name(a, e.a))
-        label: string = emit_cstring((*s).module, decoded)
-        free(decoded)
+        label: string = emit_cstring_body((*s).module, ast_name(a, e.a))
         return Val { ty: cty_rawptr(c, cty_char(c)), op: label }
     }
     if e.kind == xk_ident() {

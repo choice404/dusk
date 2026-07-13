@@ -2,6 +2,47 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.1.0
+
+The byte behind the glyph. 1.0.0 reopened the language surface after the bootstrap freeze, and 1.1.0 is the first release to actually move it: a `char`, a `char[N]`, and a `char[]` are now first class string material, printed as text instead of numbers, iterated by a `for` loop, sliced by range with the same bounds discipline a string already carries, and bridged back to a heap `string` through `std.string`. Alongside the surface work, three preexisting soundness gaps close: a string range slice past its terminator used to mint a slice over foreign bytes instead of faulting, a `for` loop over a non iterable source used to pass `check` and die inside `clang`, and a destructuring binder's annotation went unchecked against the tuple member it bound. No pipeline stage changes; this release is entirely in the type checker, the print and slice codegen, and the standard library, on both the seed and dusk1.
+
+Char and string, printed as text.
+
+- `print`, `println`, and `printerr` write a `char`, a `char[N]`, and a `char[]` as the raw bytes they are rather than the numeric byte value they used to print. `s := "hi"; println(s[0])` now prints `h`, not `104`; `println(a)` on a `char[5]` writes the five bytes as glyphs; a format hole, `println("char {} in {}", c, a)`, does the same for a value sitting in `{}`. The bytes go through two new runtime writers, `cool_print_bytes` and `cool_eprint_bytes` in `runtime/runtime.c`, byte counted `fwrite` calls rather than a NUL terminated print, so an embedded NUL passes through untouched and a multibyte UTF-8 sequence prints its glyph whole rather than one byte's worth of mangled text. `rune` keeps printing its codepoint number, `println(r'中')` still prints `20013`: a `char` is one byte of a string's own text, a `rune` is a 4 byte scalar, and only `std.unicode`'s `encode_rune` turns the scalar into displayed text. This asymmetry, a printed `char` now a glyph and a printed `rune` still a number, is by design and is recorded in the spec next to both types. Reading a char's numeric value is one annotated binding away, `b: int64 = c`, exactly as it always was.
+- Printing anything else built from `char` still rejects: an `int64[]` or any other element type has no printer, `check_printable` opens the text arm only for a `char[N]` or `char[]` and keeps the reject for everything else, so opening this door does not widen what a struct, an enum, a slice, a tuple, or a pointer can be handed to `print`.
+
+A string literal initializes a `char[N]`.
+
+- `s: char[5] = "Hello"` is legal when the literal's byte length is exactly `N`: the bytes copy in with no NUL appended and no padding. A length mismatch is rejected at the annotation and names both counts, `the string literal has 6 byte(s); the annotation says char[5]`. Only a literal converts; a `string` typed value never does, so the conversion cannot be laundered through a binding, `t := "x"; s: char[1] = t` stays `'s' has a type annotation that does not match its value`. The conversion is scoped to a `let` and an assignment, a struct field or an index place assignment included, so `m[0] = 'q'` after `mut m: char[3] = "abc"` and a later reassignment `m = "xyz"` both work; a call argument, a return, a struct literal field, and a tuple member still reject the same literal, since the rule lives at the specific `let` and assign sites that have the expression in hand rather than in the general type compatibility relation. An embedded `\u{0}` inside the literal is an ordinary byte the array keeps in full; the equivalent `string` literal still reads through `str_len` as C text and stops at the same NUL.
+
+`for` over a string, and a cleaner reject for what it doesn't take.
+
+- `for c in s` iterates a string's bytes as `char`, front to back, with the length scanned once by `strlen` at loop entry rather than rechecked every iteration, so a decode loop reads a stable window even if the body mutates something the string aliases. A `for` source with no element, an integer among them, is now rejected at `check`, `cannot iterate an integer literal; a for loop takes an array, a slice, or a string`, in place of the old silent accept that only failed once `clang` tried to link the mistake.
+
+String range slices validate their window, and a raw pointer refuses one outright.
+
+- `s[lo..hi]` on a string now validates `lo <= hi <= len` against the same NUL scanned length a `for` loop uses, and an out of range window faults instead of minting a slice over whatever bytes happen to sit past the terminator: `"abc"[1..9]` used to construct a live slice over foreign memory with no check at all, and now faults, `index out of bounds`, the same fault every other out of range window raises. A chained range, `s[0..4][1..3]`, and every base shape, a binding, a literal, and a call result, all slice correctly, and the empty window, `s[2..2]`, still mints a zero length slice rather than tripping the check. A raw pointer and a `*void` pointer have no length to validate a range against, so the range form on either is now a compile time reject, `cannot take a range slice of a raw pointer; it has no length to check the range against`; an ordinary index read through either stays legal, only the range form is refused.
+
+A destructuring binder's annotation is checked against its member.
+
+- `a: char[2], b: int64 := ("hi", 1)` used to pass `check` with the annotation unchecked against the tuple member it binds, and die inside `clang` once codegen stored a two character string as a two byte array; the annotation is now checked the same way a `let` binding's is, `'a' has a type annotation that does not match its value`.
+
+The bridge back to a heap string.
+
+- `std.string` adds `str_from_chars(cs: char[]) -> string`, copying a char slice into a fresh heap allocated string the caller owns, the bridge from stack held text, a `char[N]` sliced down to a `char[]`, back into the dynamic `string` world where `str_len`, `concat`, and the rest of `std.string` already live.
+
+Two literal encoding bugs, fixed on the dusk1 side.
+
+- dusk1's own string literal handling stored a literal body as a decoded dusk `string`, which truncates at an embedded NUL and cannot tell a literal backslash from the start of a `\u{...}` escape once decoded. `compiler/emit.dusk` now carries every literal constant through in its internal escaped form instead, a backslash stored as `\u{5c}`, so an embedded NUL no longer truncates the constant it lands in and a literal backslash directly before `u{` is no longer misread as the start of an escape. `compiler/parse.dusk`'s string body extraction and `compiler/emit.dusk`'s interning both move onto this encoded form, and the LLVM module gains two new declares, `llvm.memcpy.p0.p0.i64` for the char array literal copy and `strlen` for the byte counted string iteration and range checks above.
+
+Numbers.
+
+- Suite 458 unit, 577 golden, 13 parser termination, clippy clean.
+- The full suite passes a second time with dusk1 standing in as `DUSK_BIN`, the same verdicts on both sides.
+- `tools/differential.sh`'s `check`, `mono`, and `ir` modes still agree with stage0 across the full 603 file corpus, lex through ir, zero exclusions, zero advisories, zero crashes.
+- `dusk1` building its own source still produces LLVM IR byte identical to the seed's build of the same source, the self hosting byte parity holding across this release's changes to both sides.
+- The stage ladder re-verified at the fixpoint: stage1, stage2, and stage3 share one binary sha256 (fbfaaca5...) and one compiler IR sha256 (cbce60a6...), with the full golden suite green under stage1 along the way.
+
 ## 1.0.1
 
 The installed compiler. 1.0.0 named `compiler/main.dusk` the canonical dusk compiler, but a packaged install of it still needed `DUSK_HOME` set by hand: the seed's own `src/home.rs` has probed a share directory beside the running binary since before the bootstrap began, and the canonical compiler's resolver never picked up the same search, falling back to an unchecked working directory instead. 1.0.1 closes that gap so an installed canonical compiler finds its own assets the way the seed already does. No language surface changes; this is the installed layout catching up to the seed's own resolver.

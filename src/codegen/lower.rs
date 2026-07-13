@@ -34,6 +34,8 @@ pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> Resul
     m.declare("void @cool_eprint_i64(i64)");
     m.declare("void @cool_eprint_f64(double)");
     m.declare("void @cool_eprint_cstr(ptr)");
+    m.declare("void @cool_print_bytes(ptr, i64)");
+    m.declare("void @cool_eprint_bytes(ptr, i64)");
     m.declare("ptr @cool_alloc(i64)");
     m.declare("void @cool_free(ptr)");
     m.declare("ptr @cool_gen_alloc(i64)");
@@ -45,6 +47,8 @@ pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> Resul
     m.declare("i64 @cool_pow_i64(i64, i64)");
     m.declare("double @llvm.pow.f64(double, double)");
     m.declare("float @llvm.pow.f32(float, float)");
+    m.declare("void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
+    m.declare("i64 @strlen(ptr)");
     m.declare("ptr @cool_debug_alloc(i64)");
     m.declare("void @cool_debug_free(ptr)");
     m.declare("i64 @cool_debug_leaks()");
@@ -1513,6 +1517,17 @@ impl<'a> Fb<'a> {
             }
             Stmt::Assign(lhs, rhs) => {
                 if let Some((ty, ptr)) = self.gen_place(lhs) {
+                    // A char array place assigned a string literal copies the
+                    // literal's bytes, the same lowering as the let form.
+                    if let (ExprKind::Str(text), CTy::Array(el, n)) = (&rhs.kind, &ty) {
+                        if matches!(**el, CTy::Char) {
+                            let g = self.m.cstring(text);
+                            self.line(&format!(
+                                "call void @llvm.memcpy.p0.p0.i64(ptr {ptr}, ptr {g}, i64 {n}, i1 false)"
+                            ));
+                            return;
+                        }
+                    }
                     let v = self.gen_expr(rhs);
                     // adapt, not coerce: `s.f = someStruct` where f is an
                     // interface boxes, and `arr[i] = [..]` views an array literal
@@ -1587,6 +1602,21 @@ impl<'a> Fb<'a> {
         }
         let bind = &l.binds[0];
         let declared = bind.ty.as_ref().map(|t| lower_ty(t, &|n| self.ctx.nom(n)));
+        // `s: char[N] = "lit"` copies the literal's bytes into the array slot.
+        // The interned global carries a trailing NUL that is deliberately not
+        // copied; typeck already guaranteed the byte length equals N.
+        if let (ExprKind::Str(text), Some(CTy::Array(el, n))) = (&l.value.kind, &declared) {
+            if matches!(**el, CTy::Char) {
+                let ty = CTy::Array(el.clone(), *n);
+                let g = self.m.cstring(text);
+                let ptr = self.alloca(&ty);
+                self.line(&format!(
+                    "call void @llvm.memcpy.p0.p0.i64(ptr {ptr}, ptr {g}, i64 {n}, i1 false)"
+                ));
+                self.locals.insert(bind.name.clone(), (ty, ptr));
+                return;
+            }
+        }
         let v = match (&l.value.kind, &declared) {
             (ExprKind::Array(elems), Some(CTy::Array(elem, _))) => {
                 let hint = (**elem).clone();
@@ -1758,6 +1788,15 @@ impl<'a> Fb<'a> {
             let slot = self.alloca(&sv.ty);
             self.line(&format!("store {} {}, ptr {slot}", sv.ty.ll(), sv.op));
             return (slot, n.to_string(), *elem);
+        }
+        // A string iterates its bytes as chars: the pointer is the data and
+        // the length is a strlen snapshot taken once here, before gen_for
+        // spills it, so a mutation inside the body cannot move the bound. The
+        // typeck iterand rule keeps every other RawPtr(Char) out of a for.
+        if matches!(&sv.ty, CTy::RawPtr(el) if matches!(**el, CTy::Char)) {
+            let n = self.fresh();
+            self.line(&format!("{n} = call i64 @strlen(ptr {})", sv.op));
+            return (sv.op, n, CTy::Char);
         }
         self.slice_parts(&sv)
     }
@@ -2510,8 +2549,14 @@ impl<'a> Fb<'a> {
                     Some((data, Some(len), (**elem).clone()))
                 }
                 CTy::RawPtr(elem) => {
+                    // Sema rejects a range over a raw pointer, so the only
+                    // RawPtr base reaching a range slice is a string; its
+                    // length is the NUL scan, and gen_slice validates the
+                    // window against it like any other base.
                     let pv = self.load(&bty, &bptr);
-                    Some((pv, None, (**elem).clone()))
+                    let n = self.fresh();
+                    self.line(&format!("{n} = call i64 @strlen(ptr {pv})"));
+                    Some((pv, Some(n), (**elem).clone()))
                 }
                 CTy::Ptr(elem) => {
                     let fat = self.load(&bty, &bptr);
@@ -2543,7 +2588,13 @@ impl<'a> Fb<'a> {
                 ));
                 Some((p, Some(n.to_string()), *elem))
             }
-            CTy::RawPtr(elem) => Some((bv.op, None, *elem)),
+            CTy::RawPtr(elem) => {
+                // The rvalue twin of the place arm above: a string base gets
+                // its NUL-scanned length so the range window is validated.
+                let n = self.fresh();
+                self.line(&format!("{n} = call i64 @strlen(ptr {})", bv.op));
+                Some((bv.op, Some(n), *elem))
+            }
             CTy::Ptr(elem) => {
                 let pv = self.fat_checked(&bv.op);
                 Some((pv, None, *elem))
@@ -3059,7 +3110,10 @@ impl<'a> Fb<'a> {
                 return Val::new(CTy::Void, "");
             }
             let d = self.fresh();
-            self.line(&format!("{d} = call {} @{tyname}.{mname}({argstr})", ret.ll()));
+            self.line(&format!(
+                "{d} = call {} @{tyname}.{mname}({argstr})",
+                ret.ll()
+            ));
             return Val::new(ret, d);
         }
         // Not an impl method. A struct field holding a function value is called
@@ -3117,7 +3171,8 @@ impl<'a> Fb<'a> {
     /// enough to surface the diagnostic.
     fn unresolved_method(&mut self, tyname: &str, mname: &str) -> Val {
         let disp = tyname.split('$').next().unwrap_or(tyname);
-        self.m.error(format!("no method '{mname}' on type '{disp}'"));
+        self.m
+            .error(format!("no method '{mname}' on type '{disp}'"));
         Val::i0()
     }
 
@@ -4078,6 +4133,46 @@ impl<'a> Fb<'a> {
     /// prints through its Display impl's `toString`; sema rejects everything
     /// else that has no printer.
     fn print_value(&mut self, v: &Val, newline: bool, errout: bool) {
+        // A char, a char array, or a char slice writes its bytes as text
+        // through the byte-counted printer, which has no ln variant, so the
+        // newline is emitted explicitly and the arms return early.
+        let bytes_fn = if errout {
+            "cool_eprint_bytes"
+        } else {
+            "cool_print_bytes"
+        };
+        match &v.ty {
+            CTy::Char => {
+                let slot = self.alloca(&CTy::Char);
+                self.line(&format!("store i8 {}, ptr {slot}", v.op));
+                self.line(&format!("call void @{bytes_fn}(ptr {slot}, i64 1)"));
+                if newline {
+                    self.print_newline(errout);
+                }
+                return;
+            }
+            CTy::Array(e, n) if matches!(**e, CTy::Char) => {
+                let slot = self.alloca(&v.ty);
+                self.line(&format!("store {} {}, ptr {slot}", v.ty.ll(), v.op));
+                self.line(&format!("call void @{bytes_fn}(ptr {slot}, i64 {n})"));
+                if newline {
+                    self.print_newline(errout);
+                }
+                return;
+            }
+            CTy::Slice(e) if matches!(**e, CTy::Char) => {
+                let p = self.fresh();
+                self.line(&format!("{p} = extractvalue {} {}, 0", v.ty.ll(), v.op));
+                let n = self.fresh();
+                self.line(&format!("{n} = extractvalue {} {}, 1", v.ty.ll(), v.op));
+                self.line(&format!("call void @{bytes_fn}(ptr {p}, i64 {n})"));
+                if newline {
+                    self.print_newline(errout);
+                }
+                return;
+            }
+            _ => {}
+        }
         if errout {
             match &v.ty {
                 CTy::RawPtr(_) | CTy::Error => {
@@ -4893,8 +4988,10 @@ mod tests {
     #[test]
     fn char_widens_with_zext_not_sext() {
         // A char is an unsigned byte. Widening to an int must zero extend so a
-        // byte at or above 128 stays 0 to 255, not a negative from sext.
-        let out = ir("func f() -> void {\n  print('A')\n}");
+        // byte at or above 128 stays 0 to 255, not a negative from sext. A
+        // printed char writes its byte as text without widening, so the
+        // widening under test comes from the int-annotated binding.
+        let out = ir("func f() -> void {\n  c: char = 'A'\n  b: int64 = c\n  print(b)\n}");
         assert!(out.contains("zext i8"), "{out}");
         assert!(!out.contains("sext i8"), "{out}");
     }

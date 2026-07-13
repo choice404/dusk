@@ -224,8 +224,86 @@ export func gen_slice(s: *GenFuncState, base_id: int64, range: ExprNode) -> Val 
             line((*s).fb, ltx)
             free(ltx)
             has_len = true
-        } else if bn.kind == ctyk_rawptr() { data0 = gen_load_slot(s, bp.ty, bp.ptr) }
+        } else if bn.kind == ctyk_rawptr() {
+            // Sema rejects a range over a raw pointer, so the only raw pointer
+            // base reaching a range slice is a string; its length is the NUL
+            // scan, and the window is validated against it below like any
+            // other base.
+            data0 = gen_load_slot(s, bp.ty, bp.ptr)
+            blen = next_tmp((*s).fb)
+            sb0: *StringBuilder = alloc(sb_new())
+            sb_push(sb0, blen)
+            sb_push(sb0, " = call i64 @strlen(ptr ")
+            sb_push(sb0, data0)
+            sb_push_char(sb0, 41)
+            stx: string = gs_built(sb0)
+            sb_free(sb0)
+            free(sb0)
+            line((*s).fb, stx)
+            free(stx)
+            has_len = true
+        }
         else if bn.kind == ctyk_ptr() { data0 = fat_checked(s, gen_load_slot(s, bp.ty, bp.ptr)) }
+    } else {
+        bv: Val = gen_expr(s, base_id)
+        bvn: CTyNode = vec_get(cty_nodes(c), bv.ty)
+        elem = bvn.a
+        if bvn.kind == ctyk_slice() {
+            data0 = fat_data(s, bv.op)
+            blen = next_tmp((*s).fb)
+            rl: *StringBuilder = alloc(sb_new())
+            sb_push(rl, blen)
+            sb_push(rl, " = extractvalue { ptr, i64 } ")
+            sb_push(rl, bv.op)
+            sb_push(rl, ", 1")
+            rtx: string = gs_built(rl)
+            sb_free(rl)
+            free(rl)
+            line((*s).fb, rtx)
+            free(rtx)
+            has_len = true
+        } else if bvn.kind == ctyk_array() {
+            rslot: string = gen_alloca(s, bv.ty)
+            gen_store_slot(s, bv.ty, bv.op, rslot)
+            data0 = next_tmp((*s).fb)
+            rall: string = cty_ll(c, bv.ty)
+            rb: *StringBuilder = alloc(sb_new())
+            sb_push(rb, data0)
+            sb_push(rb, " = getelementptr ")
+            sb_push(rb, rall)
+            sb_push(rb, ", ptr ")
+            sb_push(rb, rslot)
+            sb_push(rb, ", i64 0, i64 0")
+            rtx2: string = gs_built(rb)
+            sb_free(rb)
+            free(rb)
+            line((*s).fb, rtx2)
+            free(rtx2)
+            rnb: *StringBuilder = alloc(sb_new())
+            sb_push_int(rnb, bvn.b)
+            blen = gs_built(rnb)
+            sb_free(rnb)
+            free(rnb)
+            has_len = true
+        } else if bvn.kind == ctyk_rawptr() {
+            // The rvalue twin of the place arm above: a string base gets its
+            // NUL-scanned length so the range window is validated.
+            data0 = bv.op
+            blen = next_tmp((*s).fb)
+            rs: *StringBuilder = alloc(sb_new())
+            sb_push(rs, blen)
+            sb_push(rs, " = call i64 @strlen(ptr ")
+            sb_push(rs, bv.op)
+            sb_push_char(rs, 41)
+            rtx3: string = gs_built(rs)
+            sb_free(rs)
+            free(rs)
+            line((*s).fb, rtx3)
+            free(rtx3)
+            has_len = true
+        } else if bvn.kind == ctyk_ptr() {
+            data0 = fat_checked(s, bv.op)
+        }
     }
     bad: string = next_tmp((*s).fb)
     op2((*s).fb, bad, "icmp ugt", "i64", loi, hii)

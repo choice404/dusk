@@ -1,14 +1,14 @@
 # dusk Language Specification
 
-## Status, the 0.5.4 frozen surface is the 1.0.0 surface
+## Status, the 1.1.0 surface
 
-This is the language reference for dusk. It describes the language as of 0.5.4: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, and Unicode strings with the `rune` primitive. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
+This is the language reference for dusk. It describes the language as of 1.1.0: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, and Unicode strings with the `rune` primitive. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
 
 ### The bootstrap freeze
 
 The surface described in this spec was frozen as of 0.5.4 for the bootstrap. The releases from 0.6.x through 0.9.4 changed the compiler, not the language, as dusk was rewritten in itself, so a program that compiled against this spec at 0.5.4 kept compiling across that whole line without a source change. Three kinds of work stayed live during the freeze: diagnostics could improve, the standard library could grow, and a soundness fix could land, since none of those change the surface a correct program relies on.
 
-The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface this chapter describes is the 1.0.0 surface, unchanged start to finish across the line that carried it. New language surface is open to propose again starting with the releases after 1.0.0.
+The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface 1.0.0 carried forward is unchanged start to finish across the whole line that held the freeze. 1.1.0 is the first release to add to the surface since: a `char`, a `char[N]`, and a `char[]` are now printable text, a string literal initializes a `char[N]` directly, and a `for` loop and a range slice both treat a string's bytes with the same discipline described in [Strings](#strings), [Arrays and Slices](#arrays-and-slices), and the [Builtins](#builtins) chapter.
 
 The one exception the freeze carried was a soundness hole. A hole found during the bootstrap could force a surface change to close it, and when that happened the change was named in the changelog of the release that made it.
 
@@ -227,6 +227,19 @@ while s[i] != 0 {
 
 A string literal is checked at compile time and rejected if it is not valid UTF-8, `string literal is not valid UTF-8`; a source file with a malformed byte sequence inside a string literal no longer compiles silently with the bad bytes replaced.
 
+A string literal also initializes a `char[N]` directly, in `let` and assignment position, when its byte length is exactly `N`.
+
+```text
+s: char[5] = "Hello"   // ok, 5 bytes into a 5 element array, no NUL, no padding
+mut m: char[3] = "abc"
+m = "xyz"              // reassignment through the same rule
+m[0] = 'q'             // an element write after the copy is an ordinary place store
+```
+
+No NUL is appended and no padding happens; the array holds exactly the literal's bytes. A byte count that does not match `N` is rejected and names both counts, `the string literal has 6 byte(s); the annotation says char[5]`. Only a literal converts this way; a `string` typed value never does, since the rule reads the literal's own bytes at the site that holds the expression rather than living in the general type compatibility relation, so the conversion cannot be laundered through a binding: `t := "x"; s: char[1] = t` is `'s' has a type annotation that does not match its value`. The conversion applies at a `let` binding and an assignment, a struct field or an index place among them, and nowhere else; a call argument, a return, a struct literal field, and a tuple member all keep the ordinary type mismatch a `string` and a `char[N]` otherwise have. An embedded `\u{0}` inside the literal is an ordinary byte the array keeps; the same escape inside a plain `string` literal is likewise an ordinary byte, but a `string`'s own NUL terminated reading, `str_len` among it, stops at the first zero regardless of where it came from.
+
+A `char`, a `char[N]`, and a `char[]` print as the text they are, not as numbers. `print`, `println`, and `printerr` write a `char`'s single byte, a `char[N]`'s `N` bytes, or a `char[]`'s bytes straight to the stream, exactly as given, so `s := "hi"; println(s[0])` prints `h` and a `char[5]` holding `['H','e','l','l','o']` prints `Hello`. A format hole, `{}`, prints the same way when the value behind it is one of these three types. The bytes are written whole, not scanned for a NUL and not decoded, so an embedded NUL prints through and a multibyte UTF-8 sequence prints its glyph intact rather than one raw byte's worth of garbled text. Reading the numeric value behind a `char` is one annotated binding away, `b: int64 = c`, unchanged from before. `rune` does not follow this rule; see [Runes and Unicode](#runes-and-unicode) for why `println(rune)` still prints a codepoint number.
+
 ### Runes and Unicode
 
 `rune` is a 4 byte primitive holding one Unicode scalar value, the codepoint alone with no encoding attached. Where `char` is one byte and stands for a single ASCII byte in a string, `rune` is wide enough to name any character in Unicode, `中`, `😀`, or an ASCII letter alike.
@@ -246,7 +259,7 @@ y: rune = v + 1        // ok, arithmetic happens on the int, then narrows back
 
 A rune carries no arithmetic of its own. Adding, subtracting, or otherwise computing on codepoints happens by binding the rune to an `int64`, doing the arithmetic there, and assigning the result back to a `rune`. Comparison is allowed directly between two runes, and between a rune and an int literal, the same as `char`. `sizeof(rune)` is 4. Across the foreign function boundary a `rune` passes as a C `i32`. No user defined type may be named `rune`; the name is reserved for the primitive.
 
-`println(rune)` prints the scalar's codepoint number, not a glyph: `println(r'中')` prints `20013`. Printing the character itself goes through `std.unicode`'s `encode_rune`, which writes the scalar's UTF-8 bytes into a buffer for display.
+`println(rune)` prints the scalar's codepoint number, not a glyph: `println(r'中')` prints `20013`. Printing the character itself goes through `std.unicode`'s `encode_rune`, which writes the scalar's UTF-8 bytes into a buffer for display. This is the opposite of what `println` does for a `char`, a `char[N]`, or a `char[]`, which print their bytes as text directly: a `char` is one byte of a string's own text and a `rune` is a 4 byte scalar with no text form of its own, so the two types print by different rules even though both ride an integer register underneath.
 
 A `match` pattern does not bind a rune literal, a char literal, or an int literal; the pattern grammar covers a wildcard, a bound name, and an enum variant only. Comparing a rune scrutinee against a literal is written as an `if` chain, not a `match` arm.
 
@@ -269,7 +282,8 @@ argv: string[]                // slice of strings, as passed to main
 
 - Slice length is always known. No scanning, no null terminator.
 - Every array and slice index is bounds checked and traps when it misses, negatives included.
-- A range slice validates `lo <= hi <= len` against its base, so a slice can never claim a length past its backing.
+- A range slice validates `lo <= hi <= len` against its base, so a slice can never claim a length past its backing. A `string`'s own range slice, `s[lo..hi]`, validates the same way against its length as read by a NUL scan, so `"abc"[1..9]` faults, `index out of bounds`, rather than minting a slice over whatever bytes sit past the terminator. A chained range, `s[0..4][1..3]`, and every base shape a range can sit on, a bound name, a literal, and a call result, all validate the same way.
+- A raw pointer, `*raw T`, and `*void` have no length to validate a range against, so the range form on either is rejected at check, `cannot take a range slice of a raw pointer; it has no length to check the range against`. An ordinary index read through either stays legal; only `p[lo..hi]` is refused.
 - A dynamic array is provided in the standard library as `std.vector`, a heap backed generic type.
 
 ### Immutability and Mutability
@@ -907,7 +921,7 @@ e.check(lambda (err: error) -> void {
 
 ### Every Error Must Be Handled
 
-The tuple return is destructured at the call site. Both values must be bound to named variables. Binding the whole pair to one name, `r := x.pop_back()`, is rejected, `a fallible result must be destructured; bind the value and the error`, naming `v, e := f()` as the fix, so the error can never hide unread inside an aggregate. The error binding must be used. Using an error means one of three things.
+The tuple return is destructured at the call site. Both values must be bound to named variables. Binding the whole pair to one name, `r := x.pop_back()`, is rejected, `a fallible result must be destructured; bind the value and the error`, naming `v, e := f()` as the fix, so the error can never hide unread inside an aggregate. This is one case of the general tuple destructuring form, `a, b := (x, y)`, and a binder's own type annotation there, when given, is checked against the tuple member it binds the same way an ordinary `let` annotation is: `a: char[2], b: int64 := ("hi", 1)` is `'a' has a type annotation that does not match its value` rather than a mismatch that reaches codegen and stores the member as the wrong type. The error binding must be used. Using an error means one of three things.
 
 - inspecting it with `exists()` (usually followed by control flow),
 - handling it with `check(...)`,
@@ -1346,6 +1360,8 @@ Builtins are always available regardless of paradigm directives unless noted.
 | do while           | do while loop               |
 | mut                | declares a mutable variable |
 
+`for x in xs` takes an array, a slice, or a string. Over a string it iterates the bytes as `char`, front to back, with the string's length read once by a NUL scan at loop entry rather than rechecked each iteration. A source with no element type is rejected at check, `cannot iterate <type>; a for loop takes an array, a slice, or a string`, rather than being accepted and failing to link.
+
 ### Display Interface
 
 Any type that implements the `Display` interface can be passed to `print` and `println`.
@@ -1356,4 +1372,4 @@ interface Display {
 }
 ```
 
-Passing a struct with no `Display` impl to a print builtin is a compile error, as is printing an enum, a slice, a tuple, or a pointer. Print never emits silence for a value it cannot render.
+Passing a struct with no `Display` impl to a print builtin is a compile error, as is printing an enum, a tuple, or a pointer. Print never emits silence for a value it cannot render. A slice is not printable, with one exception: a `char[]`, like a `char[N]` and a `char` themselves, prints its bytes as text rather than being rejected; see [Strings](#strings) for the rule and the exact bytes each of the three writes.
