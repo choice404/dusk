@@ -1,0 +1,38 @@
+// testrun report: every line the runner prints. A failure and the manifest lint
+// dump go to stderr, where a message that is not a test's own summary belongs;
+// the selected count and the final tally go to stdout so a caller can read the
+// result off the last line without sifting stderr.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+
+// Prints the count of records selected after filtering, before any command runs.
+export func report_selected(n: int64) -> void {
+    println("testrun: selected " + int_to_string(n) + " tests")
+}
+
+// Prints one failure to stderr: the test name, its mode, and the first difference
+// found. The detail may span several lines and is printed as is.
+export func report_fail(name: string, mode: string, detail: string) -> void {
+    printerr("FAIL " + name + " [" + mode + "]: " + detail)
+}
+
+// Prints every manifest lint error to stderr, then a count, so a malformed
+// manifest names each problem before the runner declines to run anything.
+export func report_lint(errors: *Vector<string>) -> void {
+    printerr("testrun: manifest has " + int_to_string(vec_len(errors)) + " error(s):")
+    mut i: int64 = 0
+    while i < vec_len(errors) {
+        printerr("  " + vec_get(errors, i))
+        i = i + 1
+    }
+}
+
+// Prints the final tally to stdout. This is the line a caller greps: the exit
+// code is zero exactly when failed is zero.
+export func report_summary(total: int64, passed: int64, failed: int64) -> void {
+    println("testrun: " + int_to_string(total) + " tests, " + int_to_string(passed) + " passed, " + int_to_string(failed) + " failed")
+}

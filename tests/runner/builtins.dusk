@@ -1,0 +1,152 @@
+// testrun builtins: the special modes, checks that need more than one command and
+// so cannot be expressed as a single run line. installed_layout is the first,
+// mirroring the Rust golden that proves a packaged install resolves its stdlib and
+// runtime through the share directory. The dawn family is named but not yet
+// implemented; each fails loudly rather than passing as a no op, since the dawn
+// port defines the interface those checks will drive.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.os
+@import manifest
+@import exec
+
+// Strips trailing blanks and newlines from a captured line, so the path mktemp
+// prints reads clean into a command.
+func trim_end(s: string) -> string {
+    mut n: int64 = str_len(s)
+    while n > 0 {
+        c: char = s[n - 1]
+        if c == 10 || c == 13 || c == 32 || c == 9 {
+            n = n - 1
+        } else {
+            return substring(s, 0, n)
+        }
+    }
+    return substring(s, 0, 0)
+}
+
+// The minimal program the installed layout check compiles and runs. It imports
+// one symbol from std.io, so a clean run proves the installed compiler found the
+// stdlib under share, and its output pins the run end to end.
+func hello_source() -> string {
+    mut s: string = "@paradigm procedural\n"
+    s += "@import std.io.print_line\n"
+    s += "func main() -> int32 {\n"
+    s += "    print_line(\"hello, world\")\n"
+    s += "    return 0\n"
+    s += "}\n"
+    return s
+}
+
+// Builds a throwaway install prefix, copies the compiler under test into its bin,
+// and copies the stdlib and runtime under share/dusk-lang, exactly the packaged
+// layout. Then it runs a hello program from inside the prefix with DUSK_HOME
+// unset, so the only way the compiler finds its assets is the walk from its own
+// executable up to the share directory. A mismatch or a non zero exit fails; the
+// prefix is removed either way. Returns the empty string on success.
+func installed_layout(bin: string) -> string {
+    mk: int64 = run("mkdir -p target/testrun; mktemp -d > target/testrun/prefix.txt")
+    if mk != 0 {
+        return "could not run mktemp for a temp prefix"
+    }
+    prefix: string = trim_end(slurp("target/testrun/prefix.txt"))
+    if str_eq(prefix, "") {
+        return "mktemp produced no prefix path"
+    }
+    qp: string = quote(prefix)
+    qbin: string = quote(bin)
+    setup: *StringBuilder = alloc(sb_new())
+    sb_push(setup, "mkdir -p ")
+    sb_push(setup, qp)
+    sb_push(setup, "/bin ")
+    sb_push(setup, qp)
+    sb_push(setup, "/share/dusk-lang && cp ")
+    sb_push(setup, qbin)
+    sb_push(setup, " ")
+    sb_push(setup, qp)
+    sb_push(setup, "/bin/dusk && cp -r lib ")
+    sb_push(setup, qp)
+    sb_push(setup, "/share/dusk-lang/ && cp -r runtime ")
+    sb_push(setup, qp)
+    sb_push(setup, "/share/dusk-lang/")
+    setup_line: string = substring(sb_cstr(setup), 0, sb_size(setup))
+    sb_free(setup)
+    free(setup)
+    sc: int64 = run(setup_line)
+    free(setup_line)
+    free(qbin)
+    if sc != 0 {
+        run_teardown(qp)
+        free(qp)
+        return "could not build the fake install prefix"
+    }
+    we: error = write_file(prefix + "/hello.dusk", hello_source())
+    we.ignore()
+    result: string = run_installed(prefix, qp)
+    run_teardown(qp)
+    free(qp)
+    return result
+}
+
+// Removes the temp prefix, quoted.
+func run_teardown(qp: string) -> void {
+    line: string = "rm -rf " + qp
+    rc: int64 = run(line)
+    free(line)
+    if rc != 0 {
+        printerr("testrun: could not remove the temp prefix")
+    }
+}
+
+// Runs the hello program from inside the prefix with DUSK_HOME unset and checks
+// the output byte for byte. cwd is the prefix, so the compiler cannot reach the
+// repository stdlib through the working directory and must resolve it through the
+// installed share directory alone.
+func run_installed(prefix: string, qp: string) -> string {
+    run_line: *StringBuilder = alloc(sb_new())
+    sb_push(run_line, "cd ")
+    sb_push(run_line, qp)
+    sb_push(run_line, " && env -u DUSK_HOME ")
+    sb_push(run_line, qp)
+    sb_push(run_line, "/bin/dusk run hello.dusk > ")
+    sb_push(run_line, qp)
+    sb_push(run_line, "/out.txt 2> ")
+    sb_push(run_line, qp)
+    sb_push(run_line, "/err.txt; echo $? > ")
+    sb_push(run_line, qp)
+    sb_push(run_line, "/code.txt")
+    line: string = substring(sb_cstr(run_line), 0, sb_size(run_line))
+    sb_free(run_line)
+    free(run_line)
+    rc: int64 = run(line)
+    free(line)
+    if rc != 0 {
+        return "the harness could not run the installed compiler"
+    }
+    code: int64 = slurp_int(prefix + "/code.txt")
+    out: string = slurp(prefix + "/out.txt")
+    if code != 0 {
+        return "the installed compiler exited with code " + int_to_string(code)
+    }
+    if !str_eq(out, "hello, world\n") {
+        return "installed run printed '" + out + "', want 'hello, world\\n'"
+    }
+    return ""
+}
+
+// Dispatches a special record to its handler. A dawn special is named but not
+// implemented and fails loudly, and an unrecognized special name fails the same
+// way rather than silently passing.
+export func run_special(rec: Record, bin: string) -> string {
+    name: string = rec.special
+    if str_eq(name, "installed_layout") {
+        return installed_layout(bin)
+    }
+    if starts_with(name, "dawn_") {
+        return "special '" + name + "' not implemented"
+    }
+    return "unknown special '" + name + "'"
+}

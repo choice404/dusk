@@ -1,0 +1,209 @@
+// testrun exec: turn a record into a shell command, run it under a timeout, and
+// capture what it wrote. Every path and every argument is single quoted through
+// std.os so a space or a shell metacharacter in a path is one literal word. The
+// child's own exit code is written to a file with echo, not read from the shell's
+// exit, so a killed child reports 128 plus its signal and a timeout reports 124
+// through timeout(1) rather than the exit of the wc that closes the line.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import manifest
+
+// The captured result of one run: the child's exit code, its stdout and stderr,
+// and the true byte length of each stream measured with wc so a stream that hides
+// content behind an embedded NUL is still counted in full. infra_ok is false only
+// when the harness itself could not read a code back, never when the child failed.
+export struct RunResult {
+    code: int64,
+    out: string,
+    out_bytes: int64,
+    err: string,
+    err_bytes: int64,
+    infra_ok: bool,
+}
+
+// Reads a whole file, dropping the read error since every capture file is written
+// by the shell line just before this reads it.
+export func slurp(path: string) -> string {
+    s, e := read_file(path)
+    e.ignore()
+    return s
+}
+
+// Reads the leading base ten integer of a file, skipping leading blanks. Returns
+// -1 when no digit leads, which marks a capture the harness failed to write.
+export func slurp_int(path: string) -> int64 {
+    s: string = slurp(path)
+    n: int64 = str_len(s)
+    mut i: int64 = 0
+    while i < n && (s[i] == 32 || s[i] == 9) {
+        i = i + 1
+    }
+    mut acc: int64 = 0
+    mut any: bool = false
+    while i < n && s[i] >= 48 && s[i] <= 57 {
+        acc = acc * 10 + (int64(s[i]) - 48)
+        any = true
+        i = i + 1
+    }
+    if !any {
+        return -1
+    }
+    return acc
+}
+
+// Splits a value into whitespace separated words, collapsing runs of spaces and
+// dropping empty words. Each word becomes one quoted argument on the command
+// line, so an argument that itself holds a space is not expressible here, the one
+// concession a space delimited args field makes.
+export func split_ws(s: string) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    n: int64 = str_len(s)
+    mut i: int64 = 0
+    while i < n {
+        while i < n && s[i] == 32 {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        start: int64 = i
+        while i < n && s[i] != 32 {
+            i = i + 1
+        }
+        vec_push(out, substring(s, start, i))
+    }
+    return out
+}
+
+// Appends one word to the command, single quoted and preceded by a space.
+func push_word(cmd: *StringBuilder, w: string) -> void {
+    q: string = quote(w)
+    sb_push(cmd, " ")
+    sb_push(cmd, q)
+    free(q)
+}
+
+// Appends every whitespace separated word of s as its own quoted argument.
+func push_words(cmd: *StringBuilder, s: string) -> void {
+    words: *Vector<string> = split_ws(s)
+    mut i: int64 = 0
+    while i < vec_len(words) {
+        push_word(cmd, vec_get(words, i))
+        i = i + 1
+    }
+    vec_free(words)
+    free(words)
+}
+
+// The true byte count of a file, measured with wc. Used to guard the manifest
+// against an embedded NUL: read_file stops at the first NUL, so a byte count that
+// exceeds the read length means the file hides content the parse never saw.
+// Returns -1 when the count could not be taken.
+export func file_bytes(path: string) -> int64 {
+    q: string = quote(path)
+    line: string = "mkdir -p target/testrun; wc -c < " + q + " > target/testrun/mb.txt"
+    free(q)
+    rc: int64 = run(line)
+    free(line)
+    if rc != 0 {
+        return -1
+    }
+    return slurp_int("target/testrun/mb.txt")
+}
+
+// Makes the capture directory, run once before the record loop so writing a
+// stdin file for the first record has somewhere to land.
+export func ensure_out_dir() -> void {
+    rc: int64 = run("mkdir -p target/testrun")
+    if rc != 0 {
+        printerr("testrun: could not create target/testrun")
+    }
+}
+
+// Writes the timeout, compiler, subcommand, and arguments of the core command for
+// a record's mode. The redirections and the exit capture are added by the caller.
+func append_core(cmd: *StringBuilder, rec: Record, bin: string, timeout: int64) -> void {
+    sb_push(cmd, "timeout ")
+    sb_push_int(cmd, timeout)
+    push_word(cmd, bin)
+    mode: string = rec.mode
+    if str_eq(mode, "run") || str_eq(mode, "run_raw") {
+        sb_push(cmd, " run")
+        push_word(cmd, rec.file)
+        push_words(cmd, rec.args)
+        return
+    }
+    if str_eq(mode, "check_fail") || str_eq(mode, "check_ok") {
+        sb_push(cmd, " check")
+        push_word(cmd, rec.file)
+        return
+    }
+    if str_eq(mode, "build_fail") {
+        sb_push(cmd, " build")
+        push_word(cmd, rec.file)
+        return
+    }
+    if str_eq(mode, "tool") {
+        push_words(cmd, rec.argv)
+        return
+    }
+}
+
+// Builds the full shell line: make the capture dir, optionally cap the child's
+// virtual memory, run the core command with stdin, stdout, and stderr redirected
+// to files, then write the child's exit code and the byte length of each stream.
+func build_line(rec: Record, bin: string, timeout: int64, limit_kb: int64) -> string {
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "mkdir -p target/testrun; ")
+    if limit_kb > 0 {
+        sb_push(cmd, "ulimit -v ")
+        sb_push_int(cmd, limit_kb)
+        sb_push(cmd, "; ")
+    }
+    append_core(cmd, rec, bin, timeout)
+    if rec.has_stdin {
+        sb_push(cmd, " < target/testrun/stdin.txt")
+    }
+    sb_push(cmd, " > target/testrun/out.txt 2> target/testrun/err.txt")
+    sb_push(cmd, "; echo $? > target/testrun/code.txt")
+    sb_push(cmd, "; wc -c < target/testrun/out.txt > target/testrun/ob.txt")
+    sb_push(cmd, "; wc -c < target/testrun/err.txt > target/testrun/eb.txt")
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    sb_free(cmd)
+    free(cmd)
+    return line
+}
+
+// Runs one record's command and reads back what it produced. The stdin file is
+// written first when the record supplies one, then the whole line runs through
+// one shell so the capture files exist by the time this reads them.
+export func run_record(rec: Record, bin: string, timeout: int64, limit_kb: int64) -> RunResult {
+    if rec.has_stdin {
+        we: error = write_file("target/testrun/stdin.txt", rec.stdin)
+        we.ignore()
+    }
+    line: string = build_line(rec, bin, timeout, limit_kb)
+    sh: int64 = run(line)
+    free(line)
+    code: int64 = slurp_int("target/testrun/code.txt")
+    mut ob: int64 = slurp_int("target/testrun/ob.txt")
+    mut eb: int64 = slurp_int("target/testrun/eb.txt")
+    out: string = slurp("target/testrun/out.txt")
+    err: string = slurp("target/testrun/err.txt")
+    if ob < 0 {
+        ob = str_len(out)
+    }
+    if eb < 0 {
+        eb = str_len(err)
+    }
+    infra: bool = code >= 0 && sh == 0
+    return RunResult {
+        code: code, out: out, out_bytes: ob,
+        err: err, err_bytes: eb, infra_ok: infra,
+    }
+}

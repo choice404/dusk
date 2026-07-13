@@ -34,6 +34,15 @@ void cool_println_cstr(const char *s) {
     puts(s ? s : "");
 }
 
+/* Flushes buffered stdout so a line printed just before a child process runs
+   reaches the shared file descriptor first, keeping the parent's output and the
+   child's in order even when stdout is a pipe. dawn uses this before it runs a
+   built binary, matching the line-buffered flush the Rust standard library does
+   on every newline. */
+void cool_flush(void) {
+    fflush(stdout);
+}
+
 /* Byte counted text writers for char, char array, and char slice printing.
    The buffer is not NUL terminated; exactly n bytes go to the stream, so an
    embedded NUL or a multibyte UTF-8 sequence passes through untouched. */

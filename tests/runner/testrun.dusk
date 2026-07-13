@@ -1,0 +1,315 @@
+// testrun: a golden test runner for dusk, written in dusk. It reads a manifest of
+// records, runs each through the compiler under test, and checks stdout, stderr,
+// and exit code against the record. The compiler under test comes from --bin or
+// the DUSK_BIN environment variable; there is no default, so a run always names
+// the binary it exercised. The working directory must be the repository root,
+// since every path in a manifest is relative to it.
+//
+// usage: testrun <manifest> [--filter substr] [--timeout secs] [--bin path] [--limit-kb n]
+//
+// The runner is itself a dusk program built with the seed compiler, so it also
+// serves as a working example of the language surface it tests.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import manifest
+@import exec
+@import compare
+@import report
+@import builtins
+
+// The parsed command line. ok is false when a required piece is missing, and err
+// then names what, so main can print one message and exit.
+struct Config {
+    manifest: string,
+    filter: string,
+    timeout: int64,
+    bin: string,
+    limit_kb: int64,
+    ok: bool,
+    err: string,
+}
+
+func usage() -> void {
+    printerr("usage: testrun <manifest> [--filter substr] [--timeout secs] [--bin path] [--limit-kb n]")
+    printerr("  the compiler under test comes from --bin or DUSK_BIN; there is no default")
+    printerr("  run from the repository root, since manifest paths are relative to it")
+}
+
+// Whether a following value is present for a flag that needs one.
+func has_value(argv: string[], i: int64) -> bool {
+    return i < argv.len
+}
+
+// Parses the command line into a Config. A flag with no value, an unknown flag,
+// a non integer timeout or limit, a second positional argument, a missing
+// manifest, and a missing compiler each fail with a named error.
+func parse_argv(argv: string[]) -> Config {
+    mut manifest: string = ""
+    mut filter: string = ""
+    mut timeout: int64 = 60
+    mut bin: string = ""
+    mut limit_kb: int64 = 0
+    mut i: int64 = 1
+    while i < argv.len {
+        a: string = argv[i]
+        if str_eq(a, "--filter") {
+            i = i + 1
+            if !has_value(argv, i) { return cfg_err("--filter needs a value") }
+            filter = argv[i]
+        } else {
+            if str_eq(a, "--timeout") {
+                i = i + 1
+                if !has_value(argv, i) { return cfg_err("--timeout needs a value") }
+                t, e := parse_int(argv[i])
+                if e.exists() { return cfg_err("--timeout needs an integer") }
+                timeout = t
+            } else {
+                if str_eq(a, "--bin") {
+                    i = i + 1
+                    if !has_value(argv, i) { return cfg_err("--bin needs a value") }
+                    bin = argv[i]
+                } else {
+                    if str_eq(a, "--limit-kb") {
+                        i = i + 1
+                        if !has_value(argv, i) { return cfg_err("--limit-kb needs a value") }
+                        lk, le := parse_int(argv[i])
+                        if le.exists() { return cfg_err("--limit-kb needs an integer") }
+                        limit_kb = lk
+                    } else {
+                        if starts_with(a, "--") {
+                            return cfg_err("unknown flag '" + a + "'")
+                        }
+                        if !str_eq(manifest, "") {
+                            return cfg_err("unexpected extra argument '" + a + "'")
+                        }
+                        manifest = a
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if str_eq(bin, "") {
+        bin = env("DUSK_BIN")
+    }
+    if str_eq(manifest, "") {
+        return cfg_err("no manifest given")
+    }
+    if str_eq(bin, "") {
+        return cfg_err("no compiler under test: pass --bin or set DUSK_BIN")
+    }
+    return Config {
+        manifest: manifest, filter: filter, timeout: timeout,
+        bin: bin, limit_kb: limit_kb, ok: true, err: "",
+    }
+}
+
+// A failed parse carrying its reason.
+func cfg_err(msg: string) -> Config {
+    return Config {
+        manifest: "", filter: "", timeout: 60, bin: "",
+        limit_kb: 0, ok: false, err: msg,
+    }
+}
+
+// Names why a non zero exit is a failure, distinguishing a timeout and a signal
+// death from an ordinary non zero code.
+func reason_nonzero(code: int64) -> string {
+    if code == 124 {
+        return "timed out"
+    }
+    if code >= 128 {
+        return "killed by signal " + int_to_string(code - 128)
+    }
+    return "exited with code " + int_to_string(code)
+}
+
+// The first err_has fragment missing from a captured stream, rendered with its
+// control bytes shown, or the empty string when every fragment is present.
+func missing_detail(hay: string, needles: *Vector<string>) -> string {
+    miss: int64 = first_missing(hay, needles)
+    if miss < 0 {
+        return ""
+    }
+    return "stderr missing: " + escape_show(vec_get(needles, miss))
+}
+
+// The first err_absent fragment that appeared in a captured stream, rendered with
+// its control bytes shown, or the empty string when no forbidden fragment is
+// present. A stream must not carry any of these, so a single hit is a failure.
+func forbidden_detail(hay: string, needles: *Vector<string>) -> string {
+    hit: int64 = first_present(hay, needles)
+    if hit < 0 {
+        return ""
+    }
+    return "stderr contains forbidden: " + escape_show(vec_get(needles, hit))
+}
+
+// Decides one record against its captured result. Returns the empty string on a
+// pass, or the first difference found on a failure. Each mode checks exactly what
+// its contract promises and nothing more, so a run mode never inspects stderr and
+// a check mode never inspects stdout.
+func verdict(rec: Record, rr: RunResult) -> string {
+    if !rr.infra_ok {
+        return "the harness could not capture an exit code"
+    }
+    mode: string = rec.mode
+    eh: *Vector<string> = rec.err_has
+    ea: *Vector<string> = rec.err_absent
+    if str_eq(mode, "run") {
+        if rr.code != 0 {
+            return reason_nonzero(rr.code)
+        }
+        if rec.has_out && !exact_eq(rr.out, rr.out_bytes, rec.out) {
+            return diff_detail("stdout", rec.out, rr.out, rr.out_bytes)
+        }
+        return ""
+    }
+    if str_eq(mode, "run_raw") {
+        clean: bool = rr.code == 0
+        if clean != rec.ok {
+            mut want: string = "a non zero exit"
+            if rec.ok {
+                want = "a clean exit"
+            }
+            return "expected " + want + ", got code " + int_to_string(rr.code)
+        }
+        if rec.has_out && !exact_eq(rr.out, rr.out_bytes, rec.out) {
+            return diff_detail("stdout", rec.out, rr.out, rr.out_bytes)
+        }
+        md: string = missing_detail(rr.err, eh)
+        if !str_eq(md, "") {
+            return md
+        }
+        fd: string = forbidden_detail(rr.err, ea)
+        if !str_eq(fd, "") {
+            return fd
+        }
+        if rec.has_err_eq && !exact_eq(rr.err, rr.err_bytes, rec.err_eq) {
+            return diff_detail("stderr", rec.err_eq, rr.err, rr.err_bytes)
+        }
+        return ""
+    }
+    if str_eq(mode, "check_fail") {
+        if rr.code == 0 {
+            return "check unexpectedly succeeded"
+        }
+        md: string = missing_detail(rr.err, eh)
+        if !str_eq(md, "") {
+            return md
+        }
+        return forbidden_detail(rr.err, ea)
+    }
+    if str_eq(mode, "check_ok") {
+        if rr.code != 0 {
+            return "check failed: " + reason_nonzero(rr.code)
+        }
+        return ""
+    }
+    if str_eq(mode, "build_fail") {
+        if rr.code == 0 {
+            return "build unexpectedly succeeded"
+        }
+        md: string = missing_detail(rr.err, eh)
+        if !str_eq(md, "") {
+            return md
+        }
+        return forbidden_detail(rr.err, ea)
+    }
+    if str_eq(mode, "tool") {
+        if rec.has_code && rr.code != rec.code {
+            return "exit code " + int_to_string(rr.code) + ", want " + int_to_string(rec.code)
+        }
+        if rec.has_out && !exact_eq(rr.out, rr.out_bytes, rec.out) {
+            return diff_detail("stdout", rec.out, rr.out, rr.out_bytes)
+        }
+        return ""
+    }
+    return "internal: unhandled mode '" + mode + "'"
+}
+
+// Runs one record and reports it, returning whether it passed. A special record
+// dispatches to a builtin; every other mode runs a command and takes a verdict.
+func run_one(rec: Record, bin: string, timeout: int64, limit_kb: int64) -> bool {
+    if str_eq(rec.mode, "special") {
+        sd: string = run_special(rec, bin)
+        if str_eq(sd, "") {
+            return true
+        }
+        report_fail(rec.name, rec.mode, sd)
+        return false
+    }
+    rr: RunResult = run_record(rec, bin, timeout, limit_kb)
+    d: string = verdict(rec, rr)
+    if str_eq(d, "") {
+        return true
+    }
+    report_fail(rec.name, rec.mode, d)
+    return false
+}
+
+// Selects the records whose name contains the filter, or all when the filter is
+// empty.
+func select_records(recs: *Vector<Record>, filter: string) -> *Vector<Record> {
+    out: *Vector<Record> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(recs) {
+        r: Record = vec_get(recs, i)
+        if str_eq(filter, "") || str_contains(r.name, filter) {
+            vec_push(out, r)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+func main(argc: int32, argv: string[]) -> int32 {
+    cfg: Config = parse_argv(argv)
+    if !cfg.ok {
+        printerr("testrun: " + cfg.err)
+        usage()
+        return 2
+    }
+    text, re := read_file(cfg.manifest)
+    if re.exists() {
+        printerr("testrun: cannot read manifest '" + cfg.manifest + "'")
+        return 2
+    }
+    nbytes: int64 = file_bytes(cfg.manifest)
+    if nbytes >= 0 && nbytes != str_len(text) {
+        printerr("testrun: manifest '" + cfg.manifest + "' contains a NUL byte")
+        return 2
+    }
+    pr: ParseResult = parse_manifest(text)
+    errs: *Vector<string> = pr.errors
+    if vec_len(errs) > 0 {
+        report_lint(errs)
+        return 1
+    }
+    ensure_out_dir()
+    recs: *Vector<Record> = pr.records
+    selected: *Vector<Record> = select_records(recs, cfg.filter)
+    report_selected(vec_len(selected))
+    mut passed: int64 = 0
+    mut failed: int64 = 0
+    mut j: int64 = 0
+    while j < vec_len(selected) {
+        r: Record = vec_get(selected, j)
+        if run_one(r, cfg.bin, cfg.timeout, cfg.limit_kb) {
+            passed = passed + 1
+        } else {
+            failed = failed + 1
+        }
+        j = j + 1
+    }
+    report_summary(vec_len(selected), passed, failed)
+    if failed == 0 {
+        return 0
+    }
+    return 1
+}

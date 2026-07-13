@@ -220,12 +220,18 @@ if ! stage_supports_build "$stage1"; then
     exit 0
 fi
 
-# The existing golden suite must pass when the compiler under test is stage1.
-# tests/examples.rs honors DUSK_BIN, so no test harness edit is needed here.
-# Single threaded: the self build tests inside the suite each peak around
-# eleven gigabytes, and running several at once can exhaust the machine.
+# The golden suite must pass when the compiler under test is stage1. The
+# runner is built once by the seed binary the script received, before stage1
+# is trusted, and honors DUSK_BIN like the old harness did. Sequential by
+# design: the self build class inside the suite peaks around eleven
+# gigabytes, and running several at once can exhaust the machine.
+echo "build the test runner with the seed compiler"
+if ! DUSK_HOME="$repo_root" "$stage0" build tests/runner/testrun.dusk; then
+    fail "seed compiler failed to build the test runner"
+fi
+testrun="$repo_root/target/dusk-out/testrun"
 echo "stage 1 check: run golden suite against stage1"
-if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage1" cargo test --test examples -- --test-threads=1; then
+if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage1" "$testrun" tests/goldens.manifest; then
     fail "golden suite failed against stage1"
 fi
 
@@ -308,7 +314,7 @@ echo "fixpoint check: stage3 compiler IR byte equals stage2's"
 # The golden suite runs once more with stage2 as the compiler under test, the
 # closing clause of the ladder: the self built compiler passes its own suite.
 echo "stage 2 check: run golden suite against stage2"
-if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage2" cargo test --test examples -- --test-threads=1; then
+if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage2" "$testrun" tests/goldens.manifest; then
     fail "golden suite failed against stage2"
 fi
 

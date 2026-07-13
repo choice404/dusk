@@ -1,0 +1,391 @@
+// dawn: the package tool for the dusk language, written in dusk. It is a second
+// entry point over the same compiler tree the main binary drives, so a package
+// build walks the identical pipeline. Imports are git repository paths, the Go
+// way: an @import like "github.com/user/repo/mod" names a module mod inside the
+// repository github.com/user/repo, and dawn get clones each repository into the
+// package cache ($DAWN_CACHE or ~/.dawn/cache) so the loader can resolve it.
+//
+// Every message that is not a built program's own output is a dawn line: the get
+// progress and the [dawn] build line go to stdout, and usage and error lines go
+// to stderr, the same split the stage0 dawn keeps.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import home
+@import source
+@import prescan
+@import loader
+@import driver
+
+foreign "C" {
+    func cool_flush() -> void
+}
+
+// The outcome of a fetch pass: the git package count on success, or an error
+// message on the first read or clone that failed. count is meaningful only when
+// ok, and mirrors the usize the stage0 fetch_imports returns.
+struct Fetched {
+    ok: bool,
+    count: int64,
+    err: string,
+}
+
+// Whether s holds a path separator. A slash-bearing import is a git package the
+// Go way; a dotted import like std.io names a stdlib module and is skipped. The
+// scan runs to the NUL the way the loader's own has_slash does.
+func contains_slash(s: string) -> bool {
+    mut i: int64 = 0
+    while s[i] != 0 {
+        if s[i] == 47 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The repository root of an import: its first three path segments, host/user/repo.
+// A deeper import names a module inside that repository, so the clone target is
+// always the three-segment root. This matches import.split('/').take(3).join("/"):
+// an import with fewer than three segments returns unchanged. The result is a
+// fresh heap string the caller owns.
+func repo_root(imp: string) -> string {
+    n: int64 = str_len(imp)
+    mut slashes: int64 = 0
+    mut i: int64 = 0
+    while i < n {
+        if imp[i] == 47 {
+            slashes = slashes + 1
+            if slashes == 3 {
+                return substring(imp, 0, i)
+            }
+        }
+        i = i + 1
+    }
+    return substring(imp, 0, n)
+}
+
+// The parent directory of a path: everything up to the last separator, or "." when
+// there is none, the same fact stage0's clone gets from Path::parent before it makes
+// the directory. The result is a fresh heap string the caller owns.
+func parent_dir(path: string) -> string {
+    n: int64 = str_len(path)
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if path[i] == 47 {
+            last = i
+        }
+        i = i + 1
+    }
+    if last < 0 {
+        return substring(".", 0, 1)
+    }
+    return substring(path, 0, last)
+}
+
+// Whether path is an existing directory. There is no is_dir builtin, so a shell
+// dir test answers it, the same check home.dusk makes for a toolchain asset: run
+// returns the child's exit code, zero when the directory exists.
+func is_dir(path: string) -> bool {
+    q: string = quote(path)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "test -d ")
+    sb_push(b, q)
+    line: string = substring(sb_cstr(b), 0, sb_size(b))
+    code: int64 = run(line)
+    free(line)
+    free(q)
+    sb_free(b)
+    free(b)
+    return code == 0
+}
+
+// Builds a stdout line by concatenating a prefix and a value, then prints it. The
+// dawn progress lines are all of this shape: "dawn: cached <repo>", "dawn: fetching
+// <url>", "[dawn] <bin>". The joined line is freed after the print.
+func say(prefix: string, val: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push(b, val)
+    line: string = substring(sb_cstr(b), 0, sb_size(b))
+    println(line)
+    free(line)
+    sb_free(b)
+    free(b)
+}
+
+// The stderr twin of say: a prefix and a value joined and written to stderr, for
+// the "dawn: <error>" and usage lines the stage0 dawn puts there.
+func say_err(prefix: string, val: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push(b, val)
+    line: string = substring(sb_cstr(b), 0, sb_size(b))
+    printerr(line)
+    free(line)
+    sb_free(b)
+    free(b)
+}
+
+// Prints the ready summary, "dawn: N package(s) ready", the line stage0 closes a
+// clean get with.
+func say_ready(count: int64) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dawn: ")
+    sb_push_int(b, count)
+    sb_push(b, " package(s) ready")
+    line: string = substring(sb_cstr(b), 0, sb_size(b))
+    println(line)
+    free(line)
+    sb_free(b)
+    free(b)
+}
+
+// The https clone URL for a repository root, "https://<repo>". The result is a
+// fresh heap string the caller owns.
+func https_url(repo: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "https://")
+    sb_push(b, repo)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The message for a clone that exited non-zero, "git clone <url> exited with exit
+// status: <code>". The result is a fresh heap string the caller owns.
+func clone_err_msg(url: string, code: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "git clone ")
+    sb_push(b, url)
+    sb_push(b, " exited with exit status: ")
+    sb_push_int(b, code)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Shallow clones a git repository into dest. The parent directory is created
+// first, the same order Path::parent + create_dir_all keeps, and both the URL and
+// the destination are single-quoted so a path with an awkward character survives
+// the shell as one word. Returns the child's exit code, zero on success.
+func git_clone(url: string, dest: string) -> int64 {
+    parent: string = parent_dir(dest)
+    mk: *StringBuilder = alloc(sb_new())
+    sb_push(mk, "mkdir -p ")
+    pq: string = quote(parent)
+    sb_push(mk, pq)
+    mkline: string = substring(sb_cstr(mk), 0, sb_size(mk))
+    mkcode: int64 = run(mkline)
+    free(mkline)
+    free(pq)
+    sb_free(mk)
+    free(mk)
+    free(parent)
+    if mkcode != 0 {
+        return mkcode
+    }
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "git clone --depth 1 ")
+    uq: string = quote(url)
+    sb_push(cmd, uq)
+    sb_push_char(cmd, 32)
+    dq: string = quote(dest)
+    sb_push(cmd, dq)
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    code: int64 = run(line)
+    free(line)
+    free(uq)
+    free(dq)
+    sb_free(cmd)
+    free(cmd)
+    return code
+}
+
+// Runs a built binary with no program arguments and returns its exit code narrowed
+// to a process code. dawn run forwards the child's status untouched; a signal death
+// or a missing status lands on 255, and the low byte crosses through a bounded
+// count since the language has no int64 to int32 narrowing. This is the same
+// passthrough the compiler's own run path walks.
+func run_and_narrow(bin: string) -> int32 {
+    q: string = quote(bin)
+    rc: int64 = run(q)
+    free(q)
+    if rc < 0 {
+        return 255
+    }
+    low: int64 = rc % 256
+    mut out: int32 = 0
+    mut i: int64 = 0
+    while i < low {
+        out = out + 1
+        i = i + 1
+    }
+    return out
+}
+
+// Parses a file's @import directives through the pre scan and clones every git
+// package it names, skipping ones already cached. A dotted stdlib import is not a
+// package and is not counted; a slash-bearing import is, and each cached one prints
+// "dawn: cached <repo>" while each fetched one prints "dawn: fetching <url>" before
+// the clone. Returns the package count on success, or the first read or clone error.
+func fetch_imports(path: string) -> Fetched {
+    s, e := source_load(path)
+    if e.exists() {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "read ")
+        sb_push(b, path)
+        sb_push(b, ": ")
+        sb_push(b, e.message)
+        msg: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        return Fetched { ok: false, count: 0, err: msg }
+    }
+    p: Prescan = prescan(s.text, s.len)
+    imports: *Vector<string> = p.imports
+    cache: string = dawn_cache()
+    mut count: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(imports) {
+        imp: string = vec_get(imports, i)
+        i = i + 1
+        if !contains_slash(imp) {
+            continue
+        }
+        count = count + 1
+        repo: string = repo_root(imp)
+        dest: string = path_join(cache, repo)
+        if is_dir(dest) {
+            say("dawn: cached ", repo)
+            free(dest)
+            free(repo)
+            continue
+        }
+        url: string = https_url(repo)
+        say("dawn: fetching ", url)
+        code: int64 = git_clone(url, dest)
+        if code != 0 {
+            msg: string = clone_err_msg(url, code)
+            free(url)
+            free(dest)
+            free(repo)
+            return Fetched { ok: false, count: count, err: msg }
+        }
+        free(url)
+        free(dest)
+        free(repo)
+    }
+    return Fetched { ok: true, count: count, err: "" }
+}
+
+// Fetches every git package a file imports, printing the ready summary on success
+// and a "dawn: <error>" line on the first failure. A missing file argument is a
+// usage error on stderr with a non-zero exit.
+func cmd_get(argv: string[]) -> int32 {
+    if argv.len < 3 {
+        printerr("usage: dawn get <file.dusk>")
+        return 1
+    }
+    r: Fetched = fetch_imports(argv[2])
+    if r.ok {
+        say_ready(r.count)
+        return 0
+    }
+    say_err("dawn: ", r.err)
+    return 1
+}
+
+// Fetches packages, then compiles the file through the shared pipeline into
+// target/dawn-out, printing "[dawn] <bin>". When run is set, the linked binary is
+// executed and its exit code is forwarded. A fetch failure or a compile failure
+// exits non-zero; a missing file argument is a usage error on stderr.
+func cmd_build(argv: string[], run_it: bool) -> int32 {
+    if argv.len < 3 {
+        if run_it {
+            printerr("usage: dawn run <file.dusk>")
+        } else {
+            printerr("usage: dawn build <file.dusk>")
+        }
+        return 1
+    }
+    path: string = argv[2]
+    r: Fetched = fetch_imports(path)
+    if !r.ok {
+        say_err("dawn: ", r.err)
+        return 1
+    }
+    empty: string[] = []
+    bcode: int32 = build_module_to(argv[0], path, false, empty, 0, "target/dawn-out")
+    if bcode != 0 {
+        return 1
+    }
+    stem: string = stem_of(path)
+    bin: string = path_join("target/dawn-out", stem)
+    free(stem)
+    say("[dawn] ", bin)
+    if run_it {
+        // Flush every dawn line to the shared descriptor before the child runs,
+        // so the built program's output follows the [dawn] line the way it does
+        // under the line-buffered stage0 dawn instead of trailing it under a pipe.
+        cool_flush()
+        rc: int32 = run_and_narrow(bin)
+        free(bin)
+        return rc
+    }
+    free(bin)
+    return 0
+}
+
+// Prints the command list and cache note. This is the response to no command, an
+// unknown command, and any of help's aliases, byte for byte the stage0 help text.
+func dawn_help() -> void {
+    println("dawn 1.3.0 - package tool for the dusk language")
+    println("")
+    println("usage:")
+    println("  dawn get <file.dusk>     clone the git packages a file imports")
+    println("  dawn build <file.dusk>   fetch packages, then compile")
+    println("  dawn run <file.dusk>     fetch packages, compile, and run")
+    println("  dawn version             print version")
+    println("")
+    println("imports are git paths, e.g. @import \"github.com/user/repo/module\"")
+    println("cache: $DAWN_CACHE or ~/.dawn/cache")
+}
+
+func main(argc: int32, argv: string[]) -> int32 {
+    if argv.len < 2 {
+        dawn_help()
+        return 0
+    }
+    cmd: string = argv[1]
+    if str_eq(cmd, "get") {
+        return cmd_get(argv)
+    }
+    if str_eq(cmd, "build") {
+        return cmd_build(argv, false)
+    }
+    if str_eq(cmd, "run") {
+        return cmd_build(argv, true)
+    }
+    if str_eq(cmd, "version") {
+        println("dawn 1.3.0")
+        return 0
+    }
+    if str_eq(cmd, "--version") {
+        println("dawn 1.3.0")
+        return 0
+    }
+    if str_eq(cmd, "-V") {
+        println("dawn 1.3.0")
+        return 0
+    }
+    dawn_help()
+    return 0
+}

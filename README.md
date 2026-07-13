@@ -39,6 +39,8 @@ cargo run --bin dusk -- version
 cargo test
 ```
 
+The golden cases also run through `testrun`, a dusk native runner that reads the same cases out of a flat manifest instead of a hard coded Rust function; see [docs/testing.md](docs/testing.md) for the manifest format and the command line. Both paths currently exist side by side.
+
 ## Build the binaries
 
 For standalone `dusk` and `dawn` binaries, build once and call them directly. They land in `target/release`.

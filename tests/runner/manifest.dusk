@@ -1,0 +1,447 @@
+// testrun manifest: the record model plus the parse and lint pass. A manifest is
+// a flat text file of records separated by a line of three dashes. Each record is
+// a run of single space key value lines; a line beginning with a hash is a
+// comment and a blank line is ignored. Every value carries the escapes \n, \t,
+// and \\, and a literal NUL is rejected. Parsing collects every error it can find
+// before the runner executes a single command, so a malformed manifest fails
+// loudly here rather than passing as an empty run.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+
+// One numbered source line, kept together so an error names the line it sits on.
+struct Line {
+    no: int64,
+    text: string,
+}
+
+// One parsed test case. The has_ flags mark a field whose empty value is still
+// meaningful: an empty out expects empty stdout, distinct from no out field. A
+// file, argv, or special that is absent is left as the empty string, since none
+// of the three is ever legitimately empty.
+export struct Record {
+    name: string,
+    mode: string,
+    file: string,
+    args: string,
+    stdin: string,
+    has_stdin: bool,
+    out: string,
+    has_out: bool,
+    ok: bool,
+    has_ok: bool,
+    err_has: *Vector<string>,
+    err_absent: *Vector<string>,
+    err_eq: string,
+    has_err_eq: bool,
+    argv: string,
+    code: int64,
+    has_code: bool,
+    special: string,
+    line: int64,
+}
+
+// The result of a parse: the accepted records and every lint error found. The
+// runner runs the records only when errors is empty.
+export struct ParseResult {
+    records: *Vector<Record>,
+    errors: *Vector<string>,
+}
+
+// The mutable accumulator for one record under construction. Fields are written
+// through the pointer as each key line is applied, then read back once at the end
+// to mint the immutable Record.
+struct BlockState {
+    name: string,
+    mode: string,
+    file: string,
+    args: string,
+    stdin: string,
+    has_stdin: bool,
+    out: string,
+    has_out: bool,
+    ok: bool,
+    has_ok: bool,
+    err_has: *Vector<string>,
+    err_absent: *Vector<string>,
+    err_eq: string,
+    has_err_eq: bool,
+    argv: string,
+    code: int64,
+    has_code: bool,
+    special: string,
+    valid: bool,
+    keys_seen: *Vector<string>,
+    start_line: int64,
+}
+
+// The outcome of unescaping one value. A struct rather than a tuple keeps the
+// message field a plain string read, clear of the error value message path.
+struct Unesc {
+    ok: bool,
+    value: string,
+    msg: string,
+}
+
+// Whether v already holds s. A linear scan is fine for the small key and name
+// sets a single record and a single manifest carry.
+func vec_has(v: *Vector<string>, s: string) -> bool {
+    mut i: int64 = 0
+    while i < vec_len(v) {
+        cur: string = vec_get(v, i)
+        if str_eq(cur, s) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Records a lint error, tagged with the line it was found on so the report names
+// a spot in the file.
+func push_err(errors: *Vector<string>, no: int64, msg: string) -> void {
+    vec_push(errors, "line " + int_to_string(no) + ": " + msg)
+}
+
+// Splits the manifest text into numbered lines, normalizing a trailing carriage
+// return so a file with CRLF endings does not leave a stray byte on every value.
+// The newline itself is dropped; a final line with no newline still counts.
+func split_lines(text: string) -> *Vector<Line> {
+    out: *Vector<Line> = alloc(vec_new())
+    n: int64 = str_len(text)
+    mut i: int64 = 0
+    mut start: int64 = 0
+    mut no: int64 = 1
+    while i < n {
+        if text[i] == 10 {
+            mut hi: int64 = i
+            if hi > start {
+                if text[hi - 1] == 13 {
+                    hi = hi - 1
+                }
+            }
+            vec_push(out, Line { no: no, text: substring(text, start, hi) })
+            no = no + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start < n {
+        mut hi2: int64 = n
+        if text[hi2 - 1] == 13 {
+            hi2 = hi2 - 1
+        }
+        vec_push(out, Line { no: no, text: substring(text, start, hi2) })
+    }
+    return out
+}
+
+// Decodes the escapes a value may carry: \n, \t, and \\. Any other escape, or a
+// backslash at the very end, is a hard error named at its position. A raw NUL
+// cannot appear in a line read this far, so the file level byte count guards it.
+func unescape(raw: string) -> Unesc {
+    b: *StringBuilder = alloc(sb_new())
+    n: int64 = str_len(raw)
+    mut i: int64 = 0
+    while i < n {
+        c: char = raw[i]
+        if c == 92 {
+            if i + 1 >= n {
+                sb_free(b)
+                free(b)
+                return Unesc { ok: false, value: "", msg: "a value ends with a lone backslash" }
+            }
+            d: char = raw[i + 1]
+            if d == 110 {
+                sb_push_char(b, 10)
+            } else {
+                if d == 116 {
+                    sb_push_char(b, 9)
+                } else {
+                    if d == 92 {
+                        sb_push_char(b, 92)
+                    } else {
+                        sb_free(b)
+                        free(b)
+                        return Unesc { ok: false, value: "", msg: "unknown escape; only \\n, \\t, and \\\\ are allowed" }
+                    }
+                }
+            }
+            i = i + 2
+        } else {
+            sb_push_char(b, c)
+            i = i + 1
+        }
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return Unesc { ok: true, value: out, msg: "" }
+}
+
+// Whether key names a field the manifest defines.
+func known_key(key: string) -> bool {
+    if str_eq(key, "test") { return true }
+    if str_eq(key, "mode") { return true }
+    if str_eq(key, "file") { return true }
+    if str_eq(key, "args") { return true }
+    if str_eq(key, "stdin") { return true }
+    if str_eq(key, "out") { return true }
+    if str_eq(key, "ok") { return true }
+    if str_eq(key, "err_has") { return true }
+    if str_eq(key, "err_absent") { return true }
+    if str_eq(key, "err_eq") { return true }
+    if str_eq(key, "argv") { return true }
+    if str_eq(key, "code") { return true }
+    if str_eq(key, "special") { return true }
+    return false
+}
+
+// Whether mode names one of the seven verdict modes.
+export func known_mode(mode: string) -> bool {
+    if str_eq(mode, "run") { return true }
+    if str_eq(mode, "run_raw") { return true }
+    if str_eq(mode, "check_fail") { return true }
+    if str_eq(mode, "check_ok") { return true }
+    if str_eq(mode, "build_fail") { return true }
+    if str_eq(mode, "tool") { return true }
+    if str_eq(mode, "special") { return true }
+    return false
+}
+
+func new_block(start_line: int64) -> *BlockState {
+    eh: *Vector<string> = alloc(vec_new())
+    ea: *Vector<string> = alloc(vec_new())
+    ks: *Vector<string> = alloc(vec_new())
+    return alloc(BlockState {
+        name: "", mode: "", file: "", args: "", stdin: "",
+        has_stdin: false, out: "", has_out: false, ok: false, has_ok: false,
+        err_has: eh, err_absent: ea, err_eq: "", has_err_eq: false, argv: "",
+        code: 0, has_code: false, special: "", valid: true,
+        keys_seen: ks, start_line: start_line,
+    })
+}
+
+// Applies one key line to the record under construction. A bad escape, an unknown
+// key, a duplicate scalar field, or an out of range enumerated value each records
+// an error and marks the block invalid, so a later record still parses but no
+// malformed record is ever run.
+func apply_field(st: *BlockState, key: string, rawval: string, no: int64, errors: *Vector<string>) -> void {
+    if !known_key(key) {
+        push_err(errors, no, "unknown field '" + key + "'")
+        (*st).valid = false
+        return
+    }
+    u: Unesc = unescape(rawval)
+    if !u.ok {
+        push_err(errors, no, u.msg)
+        (*st).valid = false
+        return
+    }
+    v: string = u.value
+    if !str_eq(key, "err_has") && !str_eq(key, "err_absent") {
+        seen: *Vector<string> = (*st).keys_seen
+        if vec_has(seen, key) {
+            push_err(errors, no, "duplicate field '" + key + "'")
+            (*st).valid = false
+            return
+        }
+        vec_push(seen, key)
+    }
+    if str_eq(key, "test") {
+        (*st).name = v
+        return
+    }
+    if str_eq(key, "mode") {
+        (*st).mode = v
+        return
+    }
+    if str_eq(key, "file") {
+        (*st).file = v
+        return
+    }
+    if str_eq(key, "args") {
+        (*st).args = v
+        return
+    }
+    if str_eq(key, "argv") {
+        (*st).argv = v
+        return
+    }
+    if str_eq(key, "special") {
+        (*st).special = v
+        return
+    }
+    if str_eq(key, "stdin") {
+        (*st).stdin = v
+        (*st).has_stdin = true
+        return
+    }
+    if str_eq(key, "out") {
+        (*st).out = v
+        (*st).has_out = true
+        return
+    }
+    if str_eq(key, "err_eq") {
+        (*st).err_eq = v
+        (*st).has_err_eq = true
+        return
+    }
+    if str_eq(key, "err_has") {
+        eh: *Vector<string> = (*st).err_has
+        vec_push(eh, v)
+        return
+    }
+    if str_eq(key, "err_absent") {
+        ea: *Vector<string> = (*st).err_absent
+        vec_push(ea, v)
+        return
+    }
+    if str_eq(key, "ok") {
+        if str_eq(v, "true") {
+            (*st).ok = true
+            (*st).has_ok = true
+            return
+        }
+        if str_eq(v, "false") {
+            (*st).ok = false
+            (*st).has_ok = true
+            return
+        }
+        push_err(errors, no, "ok must be 'true' or 'false'")
+        (*st).valid = false
+        return
+    }
+    if str_eq(key, "code") {
+        cv, ce := parse_int(v)
+        if ce.exists() {
+            push_err(errors, no, "code must be an integer")
+            (*st).valid = false
+            return
+        }
+        (*st).code = cv
+        (*st).has_code = true
+        return
+    }
+}
+
+// Checks the fields a mode requires and the uniqueness of the test name, then
+// mints the record when the block is still valid. Returns nothing; an accepted
+// record is pushed onto records and its name onto seen.
+func finalize(st: *BlockState, records: *Vector<Record>, errors: *Vector<string>, seen: *Vector<string>) -> void {
+    line: int64 = (*st).start_line
+    name: string = (*st).name
+    mode: string = (*st).mode
+    if str_eq(name, "") {
+        push_err(errors, line, "a record needs a non empty test name")
+        (*st).valid = false
+    }
+    if str_eq(mode, "") {
+        push_err(errors, line, "record '" + name + "' has no 'mode'")
+        (*st).valid = false
+    } else {
+        if !known_mode(mode) {
+            push_err(errors, line, "unknown mode '" + mode + "' in record '" + name + "'")
+            (*st).valid = false
+        }
+    }
+    needs_file: bool = str_eq(mode, "run") || str_eq(mode, "run_raw") || str_eq(mode, "check_fail") || str_eq(mode, "check_ok") || str_eq(mode, "build_fail")
+    if needs_file && str_eq((*st).file, "") {
+        push_err(errors, line, "mode '" + mode + "' needs a 'file'")
+        (*st).valid = false
+    }
+    if str_eq(mode, "tool") && str_eq((*st).argv, "") {
+        push_err(errors, line, "mode 'tool' needs an 'argv'")
+        (*st).valid = false
+    }
+    if str_eq(mode, "special") && str_eq((*st).special, "") {
+        push_err(errors, line, "mode 'special' needs a 'special' name")
+        (*st).valid = false
+    }
+    if vec_has(seen, name) {
+        push_err(errors, line, "duplicate test name '" + name + "'")
+        (*st).valid = false
+    }
+    if !(*st).valid {
+        return
+    }
+    vec_push(seen, name)
+    vec_push(records, Record {
+        name: name, mode: mode, file: (*st).file, args: (*st).args,
+        stdin: (*st).stdin, has_stdin: (*st).has_stdin,
+        out: (*st).out, has_out: (*st).has_out,
+        ok: (*st).ok, has_ok: (*st).has_ok,
+        err_has: (*st).err_has, err_absent: (*st).err_absent,
+        err_eq: (*st).err_eq, has_err_eq: (*st).has_err_eq,
+        argv: (*st).argv, code: (*st).code, has_code: (*st).has_code,
+        special: (*st).special, line: line,
+    })
+}
+
+// Parses the lines in the half open range lo to hi, the field lines that fall
+// between two separators. Comment and blank lines are skipped inside the range. A
+// range that holds no field line is nothing, the space around a separator. The
+// first field of a real block must be test, so a stray field with no leading test
+// is caught rather than silently starting a nameless record.
+func parse_range(lines: *Vector<Line>, lo: int64, hi: int64, records: *Vector<Record>, errors: *Vector<string>, seen: *Vector<string>) -> void {
+    st: *BlockState = new_block(0)
+    mut started: bool = false
+    mut nfields: int64 = 0
+    mut i: int64 = lo
+    while i < hi {
+        ln: Line = vec_get(lines, i)
+        txt: string = ln.text
+        if str_len(txt) == 0 || starts_with(txt, "#") {
+            i = i + 1
+        } else {
+            if !started {
+                (*st).start_line = ln.no
+                started = true
+            }
+            sp: int64 = str_find(txt, " ")
+            mut key: string = txt
+            mut rawval: string = ""
+            if sp >= 0 {
+                key = substring(txt, 0, sp)
+                rawval = substring(txt, sp + 1, str_len(txt))
+            }
+            if nfields == 0 && !str_eq(key, "test") {
+                push_err(errors, ln.no, "a record must begin with a 'test' field")
+                (*st).valid = false
+            }
+            apply_field(st, key, rawval, ln.no, errors)
+            nfields = nfields + 1
+            i = i + 1
+        }
+    }
+    if !started {
+        return
+    }
+    finalize(st, records, errors, seen)
+}
+
+// Parses a whole manifest into records and lint errors. Records are separated by
+// a line of exactly three dashes; each record is the range of lines between two
+// separators, with comment and blank lines skipped inside the range.
+export func parse_manifest(text: string) -> ParseResult {
+    lines: *Vector<Line> = split_lines(text)
+    records: *Vector<Record> = alloc(vec_new())
+    errors: *Vector<string> = alloc(vec_new())
+    seen: *Vector<string> = alloc(vec_new())
+    n: int64 = vec_len(lines)
+    mut lo: int64 = 0
+    mut i: int64 = 0
+    while i < n {
+        ln: Line = vec_get(lines, i)
+        if str_eq(ln.text, "---") {
+            parse_range(lines, lo, i, records, errors, seen)
+            lo = i + 1
+        }
+        i = i + 1
+    }
+    parse_range(lines, lo, n, records, errors, seen)
+    return ParseResult { records: records, errors: errors }
+}

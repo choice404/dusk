@@ -3000,6 +3000,19 @@ fn an_assignment_needs_a_place_on_the_left() {
 }
 
 #[test]
+fn str_find_and_str_contains_scan_by_byte() {
+    // Hits at the front, middle, and end, a miss, the empty needle, and a
+    // needle longer than the haystack.
+    assert_eq!(run("strfind.dusk"), "0\n4\n16\n-1\n0\n-1\n1\n0\n");
+}
+
+#[test]
+fn str_find_rejects_a_non_string_haystack() {
+    let err = check_fails("strfind_fail.dusk");
+    assert!(err.contains("argument 1 has the wrong type"), "{err}");
+}
+
+#[test]
 fn a_function_cannot_take_a_primitive_type_name() {
     // The width names double as the cast builtins; a user function named
     // int32 would make every call ambiguous.
@@ -4676,7 +4689,7 @@ fn bootstrap_scaffold_demo() {
     );
     assert_eq!(
         String::from_utf8_lossy(&version.stdout),
-        "dusk 1.2.0\n",
+        "dusk 1.3.0\n",
         "version prints the canonical compiler version"
     );
 }

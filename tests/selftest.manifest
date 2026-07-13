@@ -1,0 +1,82 @@
+# testrun selftest manifest. Every mode carries one record that must pass and one
+# that must fail, so a run proves the runner accepts a correct expectation and
+# rejects a wrong one. The names ending in _bad are the deliberate failures;
+# tools/testrun-selftest.sh asserts the failing set is exactly that set.
+
+test run_ok
+mode run
+file examples/hello.dusk
+out hello, world\n
+---
+test run_bad
+mode run
+file examples/hello.dusk
+out this is the wrong output\n
+---
+test runraw_ok
+mode run_raw
+file examples/slicebound.dusk
+ok false
+out 2\n
+err_has index out of bounds
+---
+test runraw_bad
+mode run_raw
+file examples/slicebound.dusk
+ok true
+---
+test checkfail_ok
+mode check_fail
+file examples/break_fail.dusk
+err_has break is only legal inside a loop
+---
+test checkfail_bad
+mode check_fail
+file examples/hello.dusk
+---
+test checkok_ok
+mode check_ok
+file examples/hello.dusk
+---
+test checkok_bad
+mode check_ok
+file examples/break_fail.dusk
+---
+test buildfail_ok
+mode build_fail
+file examples/methodunresolved_fail.dusk
+err_has no method 'toString' on type 'V'
+---
+test buildfail_bad
+mode build_fail
+file examples/hello.dusk
+---
+test tool_ok
+mode tool
+argv version
+code 0
+out dusk 1.3.0\n
+---
+test tool_bad
+mode tool
+argv version
+out this is not the version line\n
+---
+test errabsent_ok
+mode check_fail
+file examples/break_fail.dusk
+err_has break is only legal inside a loop
+err_absent this fragment never appears in the diagnostic
+---
+test errabsent_bad
+mode check_fail
+file examples/break_fail.dusk
+err_absent break is only legal inside a loop
+---
+test special_ok
+mode special
+special installed_layout
+---
+test special_bad
+mode special
+special dawn_get

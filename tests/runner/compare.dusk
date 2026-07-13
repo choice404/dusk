@@ -1,0 +1,102 @@
+// testrun compare: the assertions a verdict is built from. An exact match checks
+// the bytes agree and, separately, that the true byte count agrees, so a stream
+// that ends in a NUL followed by more bytes never reads equal to a shorter
+// expected value the way a plain C string compare would. A substring match runs
+// through std.string, and a diff renders a value with its newlines and tabs shown
+// so a multi line expectation stays on one readable line in the report.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+
+// Renders a value with its control bytes shown rather than acted on, so a newline
+// reads as a backslash n and a tab as a backslash t. This keeps a captured stream
+// on one line in a failure report and mirrors how the manifest encodes the same
+// value.
+export func escape_show(s: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    n: int64 = str_len(s)
+    mut i: int64 = 0
+    while i < n {
+        c: char = s[i]
+        if c == 10 {
+            sb_push_char(b, 92)
+            sb_push_char(b, 110)
+        } else {
+            if c == 9 {
+                sb_push_char(b, 92)
+                sb_push_char(b, 116)
+            } else {
+                if c == 92 {
+                    sb_push_char(b, 92)
+                    sb_push_char(b, 92)
+                } else {
+                    sb_push_char(b, c)
+                }
+            }
+        }
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Whether got equals expected exactly. The byte count guard is the point: a plain
+// str_eq stops at the first NUL, so got could be expected followed by a NUL and
+// trailing junk and still compare equal by content alone. Comparing the true byte
+// length, measured by the caller with wc, against the expected length rejects that
+// trailing content. An expected value never holds a NUL, so its str_len is its
+// full length.
+export func exact_eq(got: string, got_bytes: int64, expected: string) -> bool {
+    if !str_eq(got, expected) {
+        return false
+    }
+    return got_bytes == str_len(expected)
+}
+
+// The index of the first needle absent from hay, or -1 when every needle is
+// present. The order of the list is the order checked, so the report names the
+// first expected fragment that did not appear.
+export func first_missing(hay: string, needles: *Vector<string>) -> int64 {
+    mut i: int64 = 0
+    while i < vec_len(needles) {
+        needle: string = vec_get(needles, i)
+        if !str_contains(hay, needle) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// The index of the first needle present in hay, or -1 when none of them appears.
+// This is the mirror of first_missing, for the forbidden fragments a stream must
+// not carry: any hit is a failure, and the index names which fragment appeared.
+export func first_present(hay: string, needles: *Vector<string>) -> int64 {
+    mut i: int64 = 0
+    while i < vec_len(needles) {
+        needle: string = vec_get(needles, i)
+        if str_contains(hay, needle) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// A two line rendering of a failed exact match, want over got, each with its byte
+// count and its control bytes shown. The byte counts make a pure length mismatch,
+// a trailing NUL or a missing newline, visible even when the shown text looks the
+// same.
+export func diff_detail(label: string, expected: string, got: string, got_bytes: int64) -> string {
+    ew: string = escape_show(expected)
+    gw: string = escape_show(got)
+    mut d: string = label + " mismatch\n"
+    d += "    want (" + int_to_string(str_len(expected)) + " bytes): " + ew + "\n"
+    d += "    got  (" + int_to_string(got_bytes) + " bytes): " + gw
+    return d
+}

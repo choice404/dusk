@@ -46,7 +46,7 @@ func make_out_dir(out: string) -> bool {
     return true
 }
 
-func stem_of(path: string) -> string {
+export func stem_of(path: string) -> string {
     mut start: int64 = 0
     mut i: int64 = 0
     while i < str_len(path) {
@@ -230,13 +230,24 @@ export func run_demo(prog: string) -> int32 {
 
 // Builds a source file through the shared IR spine, writes target/dusk-out, and
 // links the runtime. The run flag controls whether the linked binary is executed.
+// This is the compiler's own entry; it pins the output to out_dir(), the stage0
+// parallel target/dusk-out.
 export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64) -> int32 {
+    return build_module_to(prog, path, run_it, argv, arg_start, out_dir())
+}
+
+// The general form: build into an explicit output directory. build_module fixes
+// that directory to target/dusk-out; dawn passes its own target/dawn-out so a
+// package build and the compiler's own build never overwrite each other's IR or
+// binary. Everything else, the front end gates, the readback check, the clang
+// line, and the exit-code passthrough, is shared, so the two entry points differ
+// only in where the two files land.
+export func build_module_to(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string) -> int32 {
     ir: CliIrResult = compile_ir_text(path, prog)
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
         return 1
     }
-    out: string = out_dir()
     if !make_out_dir(out) { return 1 }
     stem: string = stem_of(path)
     ll_name: *StringBuilder = alloc(sb_new())
