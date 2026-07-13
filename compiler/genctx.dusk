@@ -9,6 +9,7 @@
 @import std.functional.maybe
 @import ast
 @import cty
+@import diag
 
 export struct GenFnSig { ret: int64, params: *Vector<int64>, is_async: bool }
 
@@ -19,6 +20,11 @@ export struct GenCtx {
     methods: *Map<GenFnSig>,
     structs: *Map<int64>,
     enums: *Map<int64>,
+    // The loaded source files and the merged-source offsets of every newline,
+    // both for rendering a fault site's "path:line". The newline offsets are
+    // sorted, so a line number is two binary searches.
+    files: *Vector<FileSrc>,
+    newlines: *Vector<int64>,
 }
 
 func genctx_copy(s: string) -> string {
@@ -40,13 +46,26 @@ func genctx_param_ctys(ctx: *GenCtx, f: FuncNode) -> *Vector<int64> {
 
 // Builds the scalar-relevant lookup tables before any function body lowers, so a
 // call site sees the same signature regardless of item order.
-export func genctx_new(a: *Ast) -> *GenCtx {
+export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
     ctys: *CTyArena = cty_new(a)
     fns: *Map<GenFnSig> = alloc(map_new())
     methods: *Map<GenFnSig> = alloc(map_new())
     structs: *Map<int64> = alloc(map_new())
     enums: *Map<int64> = alloc(map_new())
-    ctx: *GenCtx = alloc(GenCtx { ast: a, ctys: ctys, fns: fns, methods: methods, structs: structs, enums: enums })
+    // The files arrive in base order, so the newlines collected file by file are
+    // already globally sorted.
+    newlines: *Vector<int64> = alloc(vec_new())
+    mut fi: int64 = 0
+    while fi < vec_len(files) {
+        f: FileSrc = vec_get(files, fi)
+        mut nj: int64 = 0
+        while nj < f.len {
+            if f.src[nj] == 10 { vec_push(newlines, f.base + nj) }
+            nj = nj + 1
+        }
+        fi = fi + 1
+    }
+    ctx: *GenCtx = alloc(GenCtx { ast: a, ctys: ctys, fns: fns, methods: methods, structs: structs, enums: enums, files: files, newlines: newlines })
 
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
@@ -142,4 +161,46 @@ export func genctx_nom(ctx: *GenCtx, name: string) -> int64 {
     if map_has(genctx_structs(ctx), name) { return 1 }
     if map_has(genctx_enums(ctx), name) { return 2 }
     return 0
+}
+
+// The number of newlines before the merged-source offset, a binary search over
+// the sorted newline table. This is the count of entries strictly less than off,
+// mirroring the stage0 partition_point.
+func genctx_newlines_before(nls: *Vector<int64>, off: int64) -> int64 {
+    mut lo: int64 = 0
+    mut hi: int64 = vec_len(nls)
+    while lo < hi {
+        mid: int64 = (lo + hi) / 2
+        if vec_get(nls, mid) < off {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    return lo
+}
+
+// Renders the "path:line" of a merged-source offset: the owning file is the one
+// with the greatest base not past the offset, and the line is one plus the
+// newlines between that base and the offset.
+export func genctx_loc_text(ctx: *GenCtx, off: int64) -> string {
+    fls: *Vector<FileSrc> = (*ctx).files
+    nls: *Vector<int64> = (*ctx).newlines
+    mut i: int64 = vec_len(fls) - 1
+    while i >= 0 {
+        f: FileSrc = vec_get(fls, i)
+        if off >= f.base {
+            line: int64 = genctx_newlines_before(nls, off) - genctx_newlines_before(nls, f.base) + 1
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, f.path)
+            sb_push_char(b, 58)
+            sb_push_int(b, line)
+            out: string = genctx_copy(sb_cstr(b))
+            sb_free(b)
+            free(b)
+            return out
+        }
+        i = i - 1
+    }
+    return genctx_copy("?:0")
 }

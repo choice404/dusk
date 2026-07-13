@@ -26,6 +26,9 @@ pub mod sema;
 pub struct Analysis {
     pub module: parser::ast::Module,
     pub mut_tuple_types: mono::MutTupleTypes,
+    /// The per-file sources the module was merged from, threaded into codegen
+    /// so a runtime fault site can carry its "path:line".
+    pub files: Vec<loader::FileSrc>,
 }
 
 impl Analysis {
@@ -51,6 +54,7 @@ pub fn analyze(path: &str) -> (Option<Analysis>, Vec<String>) {
             Some(Analysis {
                 module: desugared,
                 mut_tuple_types,
+                files: prog.files,
             }),
             Vec::new(),
         )

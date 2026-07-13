@@ -346,6 +346,7 @@ impl<'a> FnState<'a> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Break(_) | Stmt::Continue(_) => {}
             Stmt::Let(l) => self.let_stmt(l),
             Stmt::Assign(lhs, rhs) => {
                 let rv = self.eval(rhs);

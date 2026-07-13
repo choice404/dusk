@@ -20,6 +20,11 @@ const BUILTINS: &[&str] = &[
     "println",
     "printerr",
     "sizeof",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "char",
     "alloc_bytes",
     "ptr_add",
     "map",
@@ -71,9 +76,25 @@ struct Resolver {
 impl Resolver {
     fn new(module: &Module) -> Self {
         let mut globals = HashSet::new();
+        let mut errors = Vec::new();
         for item in &module.items {
             match item {
                 Item::Func(f) => {
+                    // The primitive width names double as the cast builtins,
+                    // so a function cannot take one: the call form would be
+                    // ambiguous between the cast and the user function.
+                    if matches!(
+                        f.name.as_str(),
+                        "int8" | "int16" | "int32" | "int64" | "char"
+                    ) {
+                        errors.push(Diagnostic::new(
+                            format!(
+                                "'{}' is a primitive type name; a function cannot take it",
+                                f.name
+                            ),
+                            f.span,
+                        ));
+                    }
                     globals.insert(f.name.clone());
                 }
                 Item::Struct(s) => {
@@ -111,7 +132,7 @@ impl Resolver {
             scopes: Vec::new(),
             cur_generics: HashSet::new(),
             depth: 0,
-            errors: Vec::new(),
+            errors,
         }
     }
 
@@ -222,6 +243,7 @@ impl Resolver {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Break(_) | Stmt::Continue(_) => {}
             Stmt::Let(l) => {
                 self.expr(&l.value);
                 for bind in &l.binds {

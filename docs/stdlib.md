@@ -228,6 +228,7 @@ A growable array, generic over its element type. The buffer lives on the heap an
 | `vec_new<T>() -> Vector<T>`                | A new empty vector.                    |
 | `vec_push<T>(v: *Vector<T>, x: T) -> void` | Append one element, growing if needed. |
 | `vec_get<T>(v: *Vector<T>, i: int64) -> T` | The element at index `i`.              |
+| `vec_pop<T>(v: *Vector<T>) -> void`        | Drop the last element. A no op on an empty vector. |
 | `vec_len<T>(v: *Vector<T>) -> int64`       | The element count.                     |
 | `vec_free<T>(v: *Vector<T>) -> void`       | Free the backing buffer.               |
 

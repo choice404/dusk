@@ -142,6 +142,8 @@ impl Gate {
                 self.expr(&f.iter);
                 self.block(&f.body);
             }
+            Stmt::Break(sp) => self.need_procedural("the 'break' statement", *sp),
+            Stmt::Continue(sp) => self.need_procedural("the 'continue' statement", *sp),
             Stmt::Match(m) => self.match_(m),
         }
     }

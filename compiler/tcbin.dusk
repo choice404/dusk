@@ -3,8 +3,10 @@
 @paradigm procedural
 
 @import std.string
+@import std.map
 @import ast
 @import ty
+@import tysigs
 @import tcstate
 
 func binop_spelling(op: int64) -> string {
@@ -76,6 +78,30 @@ export func check_unary(tc: *TypeChecker, op: int64, t: int64, lo: int64, hi: in
     return ty_unknown((*tc).ty)
 }
 
+// Whether a type has a value comparison. Scalars and strings compare (a
+// string by content, through its own arm); everything else, pointers,
+// aggregates, errors, and handles, has no meaningful `==`. A named type that
+// is not a known struct, enum, or interface stays permissive, so a generic
+// parameter compares on the surface pass and re-checks once mono makes it
+// concrete.
+func comparable(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_bool() || n.kind == tyk_char() || n.kind == tyk_rune() || n.kind == tyk_str() || n.kind == tyk_unknown() {
+        return true
+    }
+    if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        structs: *Map<StructSig> = (*tc).structs
+        if map_has(structs, name) { return false }
+        enums: *Map<EnumSig> = (*tc).enums
+        if map_has(enums, name) { return false }
+        ifaces: *Map<int64> = (*tc).ifaces
+        if map_has(ifaces, name) { return false }
+        return true
+    }
+    return false
+}
+
 export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: int64, hi: int64) -> int64 {
     ta: TyNode = ty_get((*tc).ty, a)
     tb: TyNode = ty_get((*tc).ty, b)
@@ -84,6 +110,12 @@ export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: in
         if unknown {
             if ta.kind == tyk_unknown() { return b }
             return a
+        }
+        // String concatenation: `a + b` mints a fresh heap string, the same
+        // allocation substring returns, so the result frees like any other
+        // heap string. Only `+`; the other arithmetic forms keep their reject.
+        if op == bop_add() && ta.kind == tyk_str() && tb.kind == tyk_str() {
+            return ty_str((*tc).ty)
         }
         if ta.kind == tyk_int() && tb.kind == tyk_int() {
             if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_int((*tc).ty, max_width(ta.w, tb.w)) }
@@ -99,6 +131,37 @@ export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: in
         return ty_unknown((*tc).ty)
     }
     if op == bop_eq() || op == bop_ne() || op == bop_lt() || op == bop_le() || op == bop_gt() || op == bop_ge() {
+        // Strings compare by content with == and !=, through the runtime
+        // byte compare; they have no ordering.
+        if ta.kind == tyk_str() && tb.kind == tyk_str() {
+            if !(op == bop_eq() || op == bop_ne()) {
+                tc_emit(tc, "strings compare with == and !=; they have no ordering", lo, hi)
+            }
+            return ty_bool((*tc).ty)
+        }
+        // Everything that is not a comparable scalar rejects here rather
+        // than reaching codegen as the address or aggregate compare that
+        // was never meaningful.
+        if !comparable(tc, a) || !comparable(tc, b) {
+            mut off: int64 = a
+            if comparable(tc, a) { off = b }
+            on: TyNode = ty_get((*tc).ty, off)
+            if on.kind == tyk_ptr() || on.kind == tyk_rawptr() {
+                tc_emit(tc, "pointers do not compare; compare the values they point to", lo, hi)
+            } else if on.kind == tyk_error() {
+                tc_emit(tc, "an error does not compare; test it with exists()", lo, hi)
+            } else {
+                cb: *StringBuilder = alloc(sb_new())
+                sb_push(cb, "cannot compare ")
+                sb_push(cb, ty_render((*tc).ty, off))
+                sb_push(cb, "; compare its parts instead")
+                cout: string = substring(sb_cstr(cb), 0, sb_size(cb))
+                sb_free(cb)
+                free(cb)
+                tc_emit(tc, cout, lo, hi)
+            }
+            return ty_bool((*tc).ty)
+        }
         if !compat((*tc).ty, a, b) { tc_emit(tc, "comparison needs two operands of the same type", lo, hi) }
         return ty_bool((*tc).ty)
     }

@@ -25,6 +25,12 @@ foreign "C" {
 // stage0 loader uses. This keeps a diagnostic's file path byte-identical to
 // stage0 when an import resolves under a directory that carried a stray slash.
 export func path_join(dir: string, name: string) -> string {
+    // An empty directory joins to the name alone, the same result Rust's
+    // PathBuf::from("").join(name) gives, so a sibling import of a bare
+    // filename resolves without a leading separator.
+    if str_len(dir) == 0 {
+        return substring(name, 0, str_len(name))
+    }
     mut dl: int64 = str_len(dir)
     // dusk's && is eager, so the index guard and the character read cannot share
     // one condition: at dl == 0 the read would be dir[-1]. Step with a flag.

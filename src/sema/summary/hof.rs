@@ -57,6 +57,7 @@ fn collect_fn_binds_stmt(
     poisoned: &mut HashSet<String>,
 ) {
     match s {
+        Stmt::Break(_) | Stmt::Continue(_) => {}
         Stmt::Let(l) => {
             collect_fn_binds_expr(&l.value, fns, candidate, poisoned);
             // A single `name := g` to a module function is the only resolvable

@@ -154,7 +154,9 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     locals: *Map<LocalVal> = alloc(map_new())
     defers: *Vector<int64> = alloc(vec_new())
     dummy: FramePrefix = frame_prefix(0, 1, alloc(vec_new()), alloc(vec_new()))
-    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, frame_on: false, frame: frame_new("", "", "", dummy, 0) })
+    lc: *Vector<string> = alloc(vec_new())
+    lb: *Vector<string> = alloc(vec_new())
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
     bind_params(st, f)
     mut ui: int64 = 0
     while ui < f.params_len {
@@ -215,7 +217,9 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
     map_put(locals, gf_copy("self"), LocalVal { ty: cty_intern(c, ctyk_struct(), 0, 0, owner), op: gf_copy("%a0") })
     defers: *Vector<int64> = alloc(vec_new())
     dummy: FramePrefix = frame_prefix(0, 1, alloc(vec_new()), alloc(vec_new()))
-    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, frame_on: false, frame: frame_new("", "", "", dummy, 0) })
+    lc: *Vector<string> = alloc(vec_new())
+    lb: *Vector<string> = alloc(vec_new())
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
     mut j: int64 = 0
     while j < f.params_len {
         pid2: int64 = vec_get((*a).kids, f.params_off + j)

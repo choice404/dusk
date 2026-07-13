@@ -31,8 +31,16 @@ export struct GenFuncState {
     allocator_name: string,
     allocator_ty: int64,
     terminated: bool,
+    // The innermost enclosing loop's continue and break targets, stacks so
+    // nested loops resolve to their own labels. A for loop's continue target
+    // is its increment block, a while loop's is its condition.
+    loop_cont: *Vector<string>,
+    loop_brk: *Vector<string>,
     frame_on: bool,
     frame: *FrameCtx,
+    // The merged-source offset of the statement currently being lowered, stamped
+    // at the top of gen_stmt, so a fault emitted anywhere under it names its line.
+    cur_lo: int64,
 }
 
 export func gs_copy(s: string) -> string {
@@ -45,6 +53,34 @@ export func gs_built(b: *StringBuilder) -> string {
 
 export func gen_val(ty: int64, op: string) -> Val {
     return Val { ty: ty, op: gs_copy(op) }
+}
+
+// The interned "path:line" constant for the statement being lowered, the argument
+// every location-carrying fault call passes. The label is owned by the module's
+// string table, so the caller must not free it.
+export func fault_loc(s: *GenFuncState) -> string {
+    text: string = genctx_loc_text((*s).ctx, (*s).cur_lo)
+    label: string = emit_cstring((*s).module, text)
+    free(text)
+    return label
+}
+
+// Emits a located fault call `call void @<name>(ptr <loc>)`, interning the
+// current statement's "path:line" as it goes. Every guarded read and pointer
+// check routes its fault through here so the site names its source line.
+export func fault_call(s: *GenFuncState, name: string) -> void {
+    loc: string = fault_loc(s)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @")
+    sb_push(b, name)
+    sb_push(b, "(ptr ")
+    sb_push(b, loc)
+    sb_push_char(b, 41)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
 }
 
 // Allocates storage through the entry funnel so loop-body bindings do not emit a

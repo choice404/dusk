@@ -174,6 +174,7 @@ impl Renamer {
 
     fn stmt(&self, s: &mut Stmt, skip: &HashSet<String>, bound: &mut Vec<HashSet<String>>) {
         match s {
+            Stmt::Break(_) | Stmt::Continue(_) => {}
             Stmt::Let(l) => {
                 self.expr(&mut l.value, skip, bound);
                 for bind in &mut l.binds {

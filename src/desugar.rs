@@ -107,6 +107,8 @@ impl Desugar<'_> {
                 value: self.expr(&l.value),
             }),
             Stmt::Assign(a, b) => Stmt::Assign(self.expr(a), self.expr(b)),
+            Stmt::Break(sp) => Stmt::Break(*sp),
+            Stmt::Continue(sp) => Stmt::Continue(*sp),
             Stmt::AssignOp(op, a, b) => Stmt::AssignOp(*op, self.expr(a), self.expr(b)),
             Stmt::Return(Some(e)) => Stmt::Return(Some(self.expr(e))),
             Stmt::Return(None) => Stmt::Return(None),

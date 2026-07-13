@@ -257,6 +257,10 @@ struct TypeChecker {
     // `self` gets the ordinary mismatch message, not the receiver-value one.
     in_method: bool,
     cur_generics: HashSet<String>,
+    /// Nesting depth of the loop bodies currently being checked, so a `break`
+    /// or `continue` outside any loop rejects. Reset per function and saved
+    /// across a lambda body, which is its own function scope.
+    loop_depth: usize,
     cur_ret: Ty,
     // Each mangled `Future$T` name mono minted, mapped to its element type. Mono
     // lowers the `Future<T>` struct to a named type, so a `Future<T>` written in
@@ -402,6 +406,7 @@ impl TypeChecker {
             in_async: false,
             in_method: false,
             cur_generics: HashSet::new(),
+            loop_depth: 0,
             cur_ret: Ty::Unit,
             future_elems: HashMap::new(),
             types_only: false,
@@ -788,6 +793,7 @@ impl TypeChecker {
         self.cur_generics = f.generics.iter().cloned().collect();
         self.cur_ret = self.unmangle(lower(&f.ret, &self.cur_generics));
         self.branch_depth = 0;
+        self.loop_depth = 0;
         self.in_async = f.is_async;
         self.in_method = self_ty.is_some();
         self.cur_params = f.params.iter().map(|p| p.name.clone()).collect();
@@ -2528,6 +2534,7 @@ impl TypeChecker {
     /// is silent (see `err`) and the final pass emits diagnostics against the
     /// settled state, so nothing is doubled and nothing is missed.
     fn loop_body_fixpoint(&mut self, body: &Block) {
+        self.loop_depth += 1;
         let cap = 64usize;
         self.suppress += 1;
         let mut prev = self.esc_snapshot();
@@ -2541,6 +2548,7 @@ impl TypeChecker {
         }
         self.suppress -= 1;
         self.branch_block(body);
+        self.loop_depth -= 1;
     }
 
     /// A comparable snapshot of the raise-only escape-flag stacks, so the loop
@@ -2795,6 +2803,12 @@ impl TypeChecker {
             Stmt::Assign(lhs, rhs) => {
                 let lt = self.infer(lhs);
                 let rt = self.infer(rhs);
+                if !is_place_expr(lhs) {
+                    self.err(
+                        "the left side of an assignment must be a place: a name, a field, an index, or a dereference",
+                        lhs.span,
+                    );
+                }
                 if !compatible(&lt, &rt) && !self.check_char_array_lit(&lt, rhs) {
                     self.err("assignment type mismatch", lhs.span);
                 }
@@ -2896,6 +2910,12 @@ impl TypeChecker {
             Stmt::AssignOp(op, lhs, rhs) => {
                 // The place type governs the operation. The result must be
                 // compatible with it, and the mut rules are the plain assignment's.
+                if !is_place_expr(lhs) {
+                    self.err(
+                        "the left side of an assignment must be a place: a name, a field, an index, or a dereference",
+                        lhs.span,
+                    );
+                }
                 let lt = self.infer(lhs);
                 let rt = self.infer(rhs);
                 let result = self.check_binary(*op, &lt, &rt, lhs.span);
@@ -2976,6 +2996,16 @@ impl TypeChecker {
                 self.branch_block(&i.then);
                 if let Some(els) = &i.els {
                     self.branch_block(els);
+                }
+            }
+            Stmt::Break(sp) => {
+                if self.loop_depth == 0 {
+                    self.err("break is only legal inside a loop", *sp);
+                }
+            }
+            Stmt::Continue(sp) => {
+                if self.loop_depth == 0 {
+                    self.err("continue is only legal inside a loop", *sp);
                 }
             }
             Stmt::While(w) => {
@@ -5067,6 +5097,33 @@ impl TypeChecker {
                     }
                     return ty;
                 }
+                // A width cast: int8/int16/int32/int64/char applied like a
+                // call converts an integer explicitly, two's complement
+                // truncation on the way down and the ordinary extension on
+                // the way up. Only integer-family values cast; a float or a
+                // pointer keeps its reject.
+                // A local binding of a cast name shadows the cast, the same
+                // precedence codegen gives a local closure, so the checker and
+                // the backend agree on which call this is; the shadowed call
+                // types through the ordinary local-call path below.
+                if let Some(target) = cast_target(name).filter(|_| !self.is_local(name)) {
+                    let t = args.first().map(|a| self.infer(a)).unwrap_or(Ty::Unknown);
+                    if args.len() != 1 {
+                        self.err(format!("{name}(v) takes exactly one value"), f.span);
+                    } else if !matches!(
+                        t,
+                        Ty::Int(_) | Ty::Char | Ty::Rune | Ty::Bool | Ty::Unknown
+                    ) {
+                        self.err(
+                            format!(
+                                "a width cast takes an integer value; {} does not cast",
+                                ty_str(&t)
+                            ),
+                            args[0].span,
+                        );
+                    }
+                    return target;
+                }
                 // print, println, and printerr take an optional format string. A
                 // string literal first argument is always a format string, so a
                 // stray hole or a doubled brace behaves the same at any arity,
@@ -5648,6 +5705,8 @@ impl TypeChecker {
     fn infer_lambda(&mut self, l: &Lambda, span: Span, borrowed: &[String]) -> Ty {
         let saved_ret = self.cur_ret.clone();
         let saved_depth = self.branch_depth;
+        let saved_loops = self.loop_depth;
+        self.loop_depth = 0;
         self.cur_ret = self.lower(&l.ret);
         self.branch_depth = 0;
         let params: Vec<Ty> = l.params.iter().map(|p| self.lower(&p.ty)).collect();
@@ -5668,6 +5727,7 @@ impl TypeChecker {
         }
         self.cur_ret = saved_ret;
         self.branch_depth = saved_depth;
+        self.loop_depth = saved_loops;
         Ty::Func(params, Box::new(ret))
     }
 
@@ -5845,6 +5905,26 @@ impl TypeChecker {
         }
     }
 
+    /// Whether a type has a value comparison. Scalars and strings compare (a
+    /// string by content, through its own arm); everything else, pointers,
+    /// aggregates, errors, and handles, has no meaningful `==`. A named type
+    /// that is not a known struct, enum, or interface stays permissive, so a
+    /// generic parameter compares on the surface pass and re-checks once
+    /// mono makes it concrete.
+    fn comparable(&self, t: &Ty) -> bool {
+        match t {
+            Ty::Int(_) | Ty::Float(_) | Ty::Bool | Ty::Char | Ty::Rune | Ty::Str | Ty::Unknown => {
+                true
+            }
+            Ty::Named(n) => {
+                !self.structs.contains_key(n)
+                    && !self.enums.contains_key(n)
+                    && !self.ifaces.contains(n)
+            }
+            _ => false,
+        }
+    }
+
     fn check_binary(&mut self, op: BinOp, a: &Ty, b: &Ty, span: Span) -> Ty {
         use BinOp::*;
         let unknown = matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown);
@@ -5858,6 +5938,11 @@ impl TypeChecker {
                     };
                 }
                 match (a, b) {
+                    // String concatenation: `a + b` mints a fresh heap string,
+                    // the same allocation substring returns, so the result
+                    // frees like any other heap string. Only `+`; the other
+                    // arithmetic forms keep their reject.
+                    (Ty::Str, Ty::Str) if matches!(op, Add) => Ty::Str,
                     // Same kind: the widths must agree, with a bare literal
                     // (width 0) adapting to the other side. Mixing widths would
                     // silently truncate in codegen, so it is an error here.
@@ -5891,6 +5976,35 @@ impl TypeChecker {
                 }
             }
             Eq | Ne | Lt | Le | Gt | Ge => {
+                // Strings compare by content with == and !=, through the
+                // runtime byte compare; they have no ordering.
+                if matches!(a, Ty::Str) && matches!(b, Ty::Str) {
+                    if !matches!(op, Eq | Ne) {
+                        self.err(
+                            "strings compare with == and !=; they have no ordering",
+                            span,
+                        );
+                    }
+                    return Ty::Bool;
+                }
+                // Everything that is not a comparable scalar rejects here
+                // rather than reaching codegen as the address or aggregate
+                // compare that was never meaningful.
+                if !self.comparable(a) || !self.comparable(b) {
+                    let offender = if !self.comparable(a) { a } else { b };
+                    let msg = match offender {
+                        Ty::Ptr(_) | Ty::RawPtr(_) => {
+                            "pointers do not compare; compare the values they point to".to_string()
+                        }
+                        Ty::Error => "an error does not compare; test it with exists()".to_string(),
+                        _ => format!(
+                            "cannot compare {}; compare its parts instead",
+                            ty_str(offender)
+                        ),
+                    };
+                    self.err(msg, span);
+                    return Ty::Bool;
+                }
                 if !compatible(a, b) {
                     self.err("comparison needs two operands of the same type", span);
                 }
@@ -6050,6 +6164,20 @@ fn const_int(e: &Expr) -> Option<i128> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Whether an expression names storage an assignment can write: a binding, a
+/// field chain, a scalar index (a range mints an rvalue slice), or a
+/// dereference. Everything else has no address, and codegen would silently
+/// drop the store.
+fn is_place_expr(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) => true,
+        ExprKind::Field(base, _) => is_place_expr(base),
+        ExprKind::Index(_, idx) => !matches!(idx.kind, ExprKind::Range(..)),
+        ExprKind::Unary(UnOp::Deref, _) => true,
+        _ => false,
     }
 }
 
@@ -6359,6 +6487,18 @@ fn named_ty(n: &str) -> Ty {
         "thread" => Ty::Thread,
         "void" => Ty::Unit,
         _ => Ty::Named(n.to_string()),
+    }
+}
+
+/// The target type of a width cast builtin, or None for any other name.
+fn cast_target(name: &str) -> Option<Ty> {
+    match name {
+        "int8" => Some(Ty::Int(8)),
+        "int16" => Some(Ty::Int(16)),
+        "int32" => Some(Ty::Int(32)),
+        "int64" => Some(Ty::Int(64)),
+        "char" => Some(Ty::Char),
+        _ => None,
     }
 }
 

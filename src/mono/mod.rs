@@ -859,6 +859,8 @@ impl<'a> Mono<'a> {
 
     fn rw_stmt(&mut self, s: &Stmt, subst: &Subst, env: &mut Env, ret: &Type) -> Stmt {
         match s {
+            Stmt::Break(sp) => Stmt::Break(*sp),
+            Stmt::Continue(sp) => Stmt::Continue(*sp),
             Stmt::Let(l) => {
                 let exp = l
                     .binds
@@ -1768,6 +1770,11 @@ fn builtin_ret(name: &str) -> Option<Type> {
         "write_file" => Some(named("error")),
         "cstr" => Some(named("string")),
         "sizeof" => Some(named("int64")),
+        "int8" => Some(named("int8")),
+        "int16" => Some(named("int16")),
+        "int32" => Some(named("int32")),
+        "int64" => Some(named("int64")),
+        "char" => Some(named("char")),
         "spawn" => Some(pair(named("thread"))),
         "join" => Some(named("error")),
         "submit" => Some(named("error")),
@@ -2490,6 +2497,7 @@ mod tests {
                 Stmt::Let(l) => walk_expr(&l.value),
                 Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Defer(e) => walk_expr(e),
                 Stmt::If(i) => walk_block(&i.then).or_else(|| i.els.as_ref().and_then(walk_block)),
+                Stmt::Break(_) | Stmt::Continue(_) => None,
                 Stmt::While(w) => walk_block(&w.body),
                 Stmt::For(f) => walk_block(&f.body),
                 Stmt::Match(m) => m.arms.iter().find_map(|a| walk_block(&a.body)),

@@ -40,7 +40,14 @@ func collect_globals(r: *Resolver) -> void {
         it: ItemNode = vec_get(items, i)
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
-            map_put((*r).globals, ast_name(a, f.name), 1)
+            fname: string = ast_name(a, f.name)
+            // The primitive width names double as the cast builtins, so a
+            // function cannot take one: the call form would be ambiguous
+            // between the cast and the user function.
+            if str_eq(fname, "int8") || str_eq(fname, "int16") || str_eq(fname, "int32") || str_eq(fname, "int64") || str_eq(fname, "char") {
+                emit(r, quoted_msg("", fname, " is a primitive type name; a function cannot take it"), f.lo, f.hi)
+            }
+            map_put((*r).globals, fname, 1)
         } else if it.kind == ik_struct() {
             s: StructNode = vec_get((*a).structs, it.id)
             map_put((*r).globals, ast_name(a, s.name), 1)
@@ -383,6 +390,7 @@ func resolve_stmt(r: *Resolver, id: int64) -> void {
         if s.c >= 0 {
             resolve_block(r, s.c)
         }
+    } else if s.kind == sk_break() || s.kind == sk_continue() {
     } else if s.kind == sk_while() {
         resolve_expr(r, s.a)
         resolve_block(r, s.b)

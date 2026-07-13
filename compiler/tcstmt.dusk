@@ -18,6 +18,24 @@
 @import tcown
 @import tcesc
 
+// Whether an expression names storage an assignment can write: a binding, a
+// field chain, a scalar index (a range mints an rvalue slice), or a
+// dereference. Everything else has no address, and codegen would silently
+// drop the store.
+func is_place_expr(a: *Ast, id: int64) -> bool {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() { return true }
+    if e.kind == xk_field() { return is_place_expr(a, e.a) }
+    if e.kind == xk_index() {
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        return idx.kind != xk_range()
+    }
+    if e.kind == xk_unary() {
+        if e.a == uop_deref() { return true }
+    }
+    return false
+}
+
 func cannot_iterate_msg(rendered: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "cannot iterate ")
@@ -108,6 +126,7 @@ func branch_block(tc: *TypeChecker, block_id: int64) -> void {
 }
 
 func loop_body_fixpoint(tc: *TypeChecker, block_id: int64) -> void {
+    (*tc).loop_depth = (*tc).loop_depth + 1
     (*tc).suppress = (*tc).suppress + 1
     mut prev: string = esc_snapshot(tc)
     mut i: int64 = 0
@@ -124,6 +143,7 @@ func loop_body_fixpoint(tc: *TypeChecker, block_id: int64) -> void {
     }
     (*tc).suppress = (*tc).suppress - 1
     branch_block(tc, block_id)
+    (*tc).loop_depth = (*tc).loop_depth - 1
 }
 
 func check_match_stmt(tc: *TypeChecker, scrut: int64, off: int64, len: int64) -> void {
@@ -159,6 +179,9 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         lt: int64 = infer_expr(tc, s.a)
         rt: int64 = infer_expr(tc, s.b)
         lhs: ExprNode = vec_get((*a).exprs, s.a)
+        if !is_place_expr(a, s.a) {
+            tc_emit(tc, "the left side of an assignment must be a place: a name, a field, an index, or a dereference", lhs.lo, lhs.hi)
+        }
         if !compat((*tc).ty, lt, rt) {
             if !check_char_array_lit(tc, lt, s.b) {
                 tc_emit(tc, "assignment type mismatch", lhs.lo, lhs.hi)
@@ -193,6 +216,9 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         lt2: int64 = infer_expr(tc, s.b)
         rt2: int64 = infer_expr(tc, s.c)
         lhs2: ExprNode = vec_get((*a).exprs, s.b)
+        if !is_place_expr(a, s.b) {
+            tc_emit(tc, "the left side of an assignment must be a place: a name, a field, an index, or a dereference", lhs2.lo, lhs2.hi)
+        }
         result: int64 = check_binary(tc, s.a, lt2, rt2, lhs2.lo, lhs2.hi)
         if s.a == bop_shl() || s.a == bop_shr() { check_shift_amount(tc, s.c, lt2, lhs2.lo, lhs2.hi) }
         if s.a == bop_pow() { check_pow_exponent(tc, lt2, rt2, s.c, lhs2.lo, lhs2.hi) }
@@ -231,6 +257,14 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         }
         branch_block(tc, s.b)
         if s.c >= 0 { branch_block(tc, s.c) }
+    } else if s.kind == sk_break() {
+        if (*tc).loop_depth == 0 {
+            tc_emit(tc, "break is only legal inside a loop", s.a, s.b)
+        }
+    } else if s.kind == sk_continue() {
+        if (*tc).loop_depth == 0 {
+            tc_emit(tc, "continue is only legal inside a loop", s.a, s.b)
+        }
     } else if s.kind == sk_while() {
         ct2: int64 = infer_expr(tc, s.a)
         cn2: TyNode = ty_get((*tc).ty, ct2)

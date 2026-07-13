@@ -726,6 +726,7 @@ fn collect_callees_block(b: &Block, fns: &HashSet<String>, out: &mut HashSet<Str
 
 fn collect_callees_stmt(s: &Stmt, fns: &HashSet<String>, out: &mut HashSet<String>) {
     match s {
+        Stmt::Break(_) | Stmt::Continue(_) => {}
         Stmt::Let(l) => collect_callees_expr(&l.value, fns, out),
         Stmt::Assign(a, b) => {
             collect_callees_expr(a, fns, out);

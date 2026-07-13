@@ -7,6 +7,7 @@
 @import std.vector
 @import ast
 @import cty
+@import diag
 @import emit
 @import genctx
 @import genfn
@@ -38,15 +39,17 @@ func declare_prelude(m: *EmitModule) -> void {
     emit_declare(m, "void @cool_free(ptr)")
     emit_declare(m, "ptr @cool_gen_alloc(i64)")
     emit_declare(m, "void @cool_gen_free(ptr)")
-    emit_declare(m, "void @cool_gen_fault()")
-    emit_declare(m, "void @cool_null_fault()")
-    emit_declare(m, "void @cool_bounds_fault()")
-    emit_declare(m, "void @cool_shift_fault()")
+    emit_declare(m, "void @cool_gen_fault_at(ptr)")
+    emit_declare(m, "void @cool_null_fault_at(ptr)")
+    emit_declare(m, "void @cool_bounds_fault_at(ptr)")
+    emit_declare(m, "void @cool_shift_fault_at(ptr)")
     emit_declare(m, "i64 @cool_pow_i64(i64, i64)")
     emit_declare(m, "double @llvm.pow.f64(double, double)")
     emit_declare(m, "float @llvm.pow.f32(float, float)")
     emit_declare(m, "void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)")
     emit_declare(m, "i64 @strlen(ptr)")
+    emit_declare(m, "i64 @cool_str_eq(ptr, ptr)")
+    emit_declare(m, "ptr @cool_str_concat(ptr, ptr)")
     emit_declare(m, "ptr @cool_debug_alloc(i64)")
     emit_declare(m, "void @cool_debug_free(ptr)")
     emit_declare(m, "i64 @cool_debug_leaks()")
@@ -267,8 +270,8 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
 
 // Lowers a ground, monomorphized AST to textual LLVM IR. Unsupported Phase A
 // constructs record faults so callers never observe a malformed partial module.
-export func gen_compile(a: *Ast) -> GenResult {
-    ctx: *GenCtx = genctx_new(a)
+export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
+    ctx: *GenCtx = genctx_new(a, files)
     m: *EmitModule = emit_module_new("dusk", "x86_64-pc-linux-gnu")
     declare_prelude(m)
     emit_ground_types(m, ctx)

@@ -274,6 +274,7 @@ fn cmd_build(path: Option<&String>) -> ExitCode {
     match driver::build_module(
         &analysis.module,
         &analysis.mut_tuple_types,
+        &analysis.files,
         &out,
         &stem_of(&path),
     ) {
@@ -297,7 +298,7 @@ fn cmd_ir(path: Option<&String>) -> ExitCode {
     let Some(analysis) = front_end(&path) else {
         return ExitCode::FAILURE;
     };
-    match codegen::compile(&analysis.module, &analysis.mut_tuple_types) {
+    match codegen::compile(&analysis.module, &analysis.mut_tuple_types, &analysis.files) {
         Ok(ir) => {
             print!("{ir}");
             ExitCode::SUCCESS
@@ -322,6 +323,7 @@ fn cmd_run(path: Option<&String>, prog_args: &[String]) -> ExitCode {
     let art = match driver::build_module(
         &analysis.module,
         &analysis.mut_tuple_types,
+        &analysis.files,
         &out,
         &stem_of(&path),
     ) {

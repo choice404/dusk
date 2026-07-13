@@ -161,6 +161,11 @@ pub enum Stmt {
     While(While),
     For(For),
     Match(Match),
+    /// `break`, jumping past the innermost loop. The span reports a use
+    /// outside any loop.
+    Break(Span),
+    /// `continue`, jumping to the innermost loop's next iteration.
+    Continue(Span),
     Expr(Expr),
 }
 
@@ -332,6 +337,7 @@ pub fn collect_block(b: &Block, used: &mut Vec<String>, bound: &mut HashSet<Stri
 
 pub fn collect_stmt(s: &Stmt, used: &mut Vec<String>, bound: &mut HashSet<String>) {
     match s {
+        Stmt::Break(_) | Stmt::Continue(_) => {}
         Stmt::Let(l) => {
             collect_expr(&l.value, used, bound);
             for b in &l.binds {

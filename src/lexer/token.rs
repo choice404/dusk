@@ -45,6 +45,8 @@ pub enum Keyword {
     While,
     Do,
     In,
+    Break,
+    Continue,
 }
 
 impl Keyword {
@@ -71,6 +73,8 @@ impl Keyword {
             "while" => Keyword::While,
             "do" => Keyword::Do,
             "in" => Keyword::In,
+            "break" => Keyword::Break,
+            "continue" => Keyword::Continue,
             _ => return None,
         };
         Some(kw)

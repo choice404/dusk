@@ -264,6 +264,10 @@ func copy_expr(dst: *Ast, src: *Ast, id: int64) -> int64 {
 }
 
 func copy_stmt(dst: *Ast, src: *Ast, id: int64) -> int64 {
+    s0: StmtNode = vec_get((*src).stmts, id)
+    if s0.kind == sk_break() || s0.kind == sk_continue() {
+        return ast_stmt(dst, s0.kind, s0.a, s0.b, 0, 0)
+    }
     s: StmtNode = vec_get((*src).stmts, id)
     if s.kind == sk_let() {
         off, len := copy_bind_list(dst, src, s.a, s.b)
@@ -509,6 +513,8 @@ func shift_stmt(a: *Ast, id: int64, base: int64) -> void {
         if s.c >= 0 {
             shift_block(a, s.c, base)
         }
+    } else if s.kind == sk_break() || s.kind == sk_continue() {
+        vec_set((*a).stmts, id, StmtNode { kind: s.kind, a: s.a + base, b: s.b + base, c: 0, d: 0 })
     } else if s.kind == sk_while() {
         shift_expr(a, s.a, base)
         shift_block(a, s.b, base)
@@ -682,6 +688,7 @@ func fold_stmt(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, 
         if s.c >= 0 {
             fold_block(a, s.c, ns, exports, files, errors)
         }
+    } else if s.kind == sk_break() || s.kind == sk_continue() {
     } else if s.kind == sk_while() {
         fold_expr(a, s.a, ns, exports, files, errors)
         fold_block(a, s.b, ns, exports, files, errors)

@@ -2905,6 +2905,184 @@ fn a_match_binder_alias_with_only_a_scalar_store_is_accepted() {
     assert_eq!(run("aliasmatch_ok.dusk"), "42\n");
 }
 
+#[test]
+fn short_circuit_and_or_skip_the_unneeded_operand() {
+    // `&&` short circuits on a false left operand and `||` short circuits on a
+    // true one, so the right side's side effect (a println inside `f`) only
+    // fires when the left side did not already decide the answer. The guard
+    // `i < n && a[i] == 10` with `i` past the end proves the same discipline
+    // stops an out of bounds read rather than just skipping a print, and the
+    // while loop and the value-position `v := true && false` exercise the
+    // same lowering in a condition and in an ordinary expression.
+    assert_eq!(
+        run("shortcircuit.dusk"),
+        "0\n1\nf\n1\nf\n0\nguarded\n3\n0\n"
+    );
+}
+
+#[test]
+fn a_non_bool_operand_to_a_logical_operator_is_rejected() {
+    // `&&` and `||` take bool on both sides; an int operand is rejected at the
+    // operator rather than coerced through some truthiness rule dusk doesn't have.
+    let err = check_fails("shortcircuit_fail.dusk");
+    assert!(
+        err.contains("logical operators need bool operands"),
+        "{err}"
+    );
+}
+
+#[test]
+fn strings_compare_by_content_with_eq_and_ne() {
+    // A string built at runtime (through str_from_chars and substring) compares
+    // equal to an equal literal by content, not by address, and the empty string
+    // and an error's empty message both compare equal to the empty literal.
+    assert_eq!(run("streq.dusk"), "1\n0\n1\n0\n1\n1\n0\n1\n");
+}
+
+#[test]
+fn a_relational_compare_between_strings_is_rejected() {
+    // Strings have no ordering, only equality, so `<` between two strings is
+    // rejected instead of comparing them by address or byte order silently.
+    let err = check_fails("strlt_fail.dusk");
+    assert!(
+        err.contains("strings compare with == and !=; they have no ordering"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_pointer_equality_compare_is_rejected() {
+    // Comparing two pointers with == would compare addresses, not the values
+    // they point to, so it is rejected rather than silently doing the wrong thing.
+    let err = check_fails("ptreq_fail.dusk");
+    assert!(
+        err.contains("pointers do not compare; compare the values they point to"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_array_equality_compare_is_rejected() {
+    // An array has no whole-value comparison; == between two arrays is rejected
+    // so a caller compares elements instead of getting an address compare.
+    let err = check_fails("arrcmp_fail.dusk");
+    assert!(
+        err.contains("cannot compare an array; compare its parts instead"),
+        "{err}"
+    );
+}
+
+#[test]
+fn string_concatenation_builds_and_appends() {
+    // `+` concatenates two strings into a fresh heap string and chains left to
+    // right, and `+=` on a mut string rebinds it to a new concatenation each
+    // call, so repeated appends grow the same binding.
+    assert_eq!(run("strconcat.dusk"), "hello, world\na!?\nxyz\n3\n");
+}
+
+#[test]
+fn a_width_cast_truncates_narrowing_and_extends_widening() {
+    // int32/int8/int64/char applied like a call convert an integer explicitly:
+    // int32(300) keeps 300, int8(300) truncates to 44 by two's complement,
+    // char(101) and int64 back round trip through 'e', int16(-1) keeps -1
+    // narrowing, and int64 widening an int8 sign extends a negative value.
+    assert_eq!(run("casts.dusk"), "300\n44\ne\n101\n-1\n-5\n");
+}
+
+#[test]
+fn an_assignment_needs_a_place_on_the_left() {
+    // A range slice is an rvalue view; the store would silently vanish.
+    let err = check_fails("assignplace_fail.dusk");
+    assert!(
+        err.contains("the left side of an assignment must be a place"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_function_cannot_take_a_primitive_type_name() {
+    // The width names double as the cast builtins; a user function named
+    // int32 would make every call ambiguous.
+    let err = check_fails("castshadow_fail.dusk");
+    assert!(
+        err.contains("'int32' is a primitive type name; a function cannot take it"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_float_operand_to_a_width_cast_is_rejected() {
+    // A width cast only takes an integer-family value; a float operand is
+    // rejected rather than silently truncating toward zero.
+    let err = check_fails("castfloat_fail.dusk");
+    assert!(
+        err.contains("a width cast takes an integer value; float64 does not cast"),
+        "{err}"
+    );
+}
+
+#[test]
+fn break_and_continue_bind_to_the_innermost_loop() {
+    // break exits its own loop and continue skips to its next iteration, both
+    // binding to the innermost enclosing loop: an inner while's break never
+    // escapes the outer while around it, a for loop's continue and break work
+    // together over an array, and a for loop over a string's bytes shows the
+    // same continue/break pair walking chars instead of array elements.
+    assert_eq!(run("breakcontinue.dusk"), "3\n7\n4\n2\n");
+}
+
+#[test]
+fn a_bare_break_outside_a_loop_is_rejected() {
+    // break outside any loop has nothing to exit, so it is rejected at the
+    // statement rather than accepted as a no-op.
+    let err = check_fails("break_fail.dusk");
+    assert!(err.contains("break is only legal inside a loop"), "{err}");
+}
+
+#[test]
+fn a_bare_continue_outside_a_loop_is_rejected() {
+    // continue outside any loop has no iteration to skip to, so it is rejected
+    // at the statement rather than accepted as a no-op.
+    let err = check_fails("continue_fail.dusk");
+    assert!(
+        err.contains("continue is only legal inside a loop"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_break_inside_a_lambda_body_is_rejected_even_inside_a_loop() {
+    // A lambda is its own function boundary, so a break inside a lambda body
+    // called from inside an enclosing while loop is still rejected; the loop
+    // the lambda executes under does not lend it a break target.
+    let err = check_fails("breaklambda_fail.dusk");
+    assert!(err.contains("break is only legal inside a loop"), "{err}");
+}
+
+#[test]
+fn an_out_of_bounds_index_fault_names_its_file_and_line() {
+    // A runtime fault carries the source location of the operation that
+    // faulted, not just a bare message, so the index that actually went out
+    // of bounds is named by file and line.
+    let (out, err, ok) = run_raw("faultloc.dusk");
+    assert!(!ok, "an out of bounds index must fault");
+    assert_eq!(out, "8\n", "the in bounds index prints before the fault");
+    assert!(err.contains("index out of bounds at "), "{err}");
+    assert!(err.contains("faultloc.dusk:8"), "{err}");
+}
+
+#[test]
+fn a_use_after_free_fault_names_its_file_and_line() {
+    // The same location tagging on the generation check: a use after free
+    // faults at the deref that reads through the stale pointer, not just at
+    // some generic runtime trap site.
+    let (out, err, ok) = run_raw("uafloc.dusk");
+    assert!(!ok, "use after free must fault");
+    assert_eq!(out, "9\n", "the valid deref prints before the fault");
+    assert!(err.contains("use of a freed or stale pointer at "), "{err}");
+    assert!(err.contains("uafloc.dusk:9"), "{err}");
+}
+
 macro_rules! golden {
     ($name:ident, $file:literal, $expected:literal) => {
         #[test]
@@ -4498,7 +4676,7 @@ fn bootstrap_scaffold_demo() {
     );
     assert_eq!(
         String::from_utf8_lossy(&version.stdout),
-        "dusk 1.1.0\n",
+        "dusk 1.2.0\n",
         "version prints the canonical compiler version"
     );
 }

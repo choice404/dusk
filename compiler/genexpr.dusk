@@ -158,13 +158,37 @@ func gx_shift_check(s: *GenFuncState, amount: string, ty: int64) -> void {
     ol: string = branch_label(ok)
     br_cond((*s).fb, bad, fl, ol)
     place_label((*s).fb, fault)
-    line((*s).fb, "call void @cool_shift_fault()")
+    fault_call(s, "cool_shift_fault_at")
     br((*s).fb, ol)
     place_label((*s).fb, ok)
     free(ll)
     free(bad)
     free(fl)
     free(ol)
+}
+
+// `&&` and `||` evaluate the right operand only when the left has not already
+// decided the answer, so a guarded read like `i < n && a[i] == x` cannot
+// fault on the guard's own miss. The result rides a slot rather than a phi,
+// the same discipline every other label-crossing value in this backend uses.
+func gx_short_circuit(s: *GenFuncState, op: int64, lhs: int64, rhs: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    av: Val = gen_expr(s, lhs)
+    slot: string = gen_alloca(s, cty_bool(c))
+    gen_store_slot(s, cty_bool(c), av.op, slot)
+    rl: int64 = fresh_label((*s).fb)
+    el: int64 = fresh_label((*s).fb)
+    rls: string = branch_label(rl)
+    els: string = branch_label(el)
+    if op == bop_and() { br_cond((*s).fb, av.op, rls, els) }
+    else { br_cond((*s).fb, av.op, els, rls) }
+    place_label((*s).fb, rl)
+    bv: Val = gen_expr(s, rhs)
+    gen_store_slot(s, cty_bool(c), bv.op, slot)
+    br((*s).fb, els)
+    place_label((*s).fb, el)
+    out: string = gen_load_slot(s, cty_bool(c), slot)
+    return Val { ty: cty_bool(c), op: out }
 }
 
 func gx_binary_vals(s: *GenFuncState, op: int64, av: Val, rhs: int64) -> Val {
@@ -194,6 +218,63 @@ func gx_binary_vals(s: *GenFuncState, op: int64, av: Val, rhs: int64) -> Val {
         }
     }
     bo: string = coerce(s, bv.ty, bv.op, av.ty)
+    // The string forms route through the runtime: `+` mints a fresh heap
+    // string and `==`/`!=` compare content. Sema rejects every other operator
+    // on strings and every comparison on bare pointers, so a char pointer
+    // reaching these arms is always a string.
+    tn0: CTyNode = vec_get(cty_nodes(c), ty)
+    if tn0.kind == ctyk_rawptr() {
+        en0: CTyNode = vec_get(cty_nodes(c), tn0.a)
+        if en0.kind == ctyk_char() {
+            if op == bop_add() {
+                d0: string = next_tmp((*s).fb)
+                cb0: *StringBuilder = alloc(sb_new())
+                sb_push(cb0, d0)
+                sb_push(cb0, " = call ptr @cool_str_concat(ptr ")
+                sb_push(cb0, av.op)
+                sb_push(cb0, ", ptr ")
+                sb_push(cb0, bo)
+                sb_push_char(cb0, 41)
+                ct0: string = gs_built(cb0)
+                sb_free(cb0)
+                free(cb0)
+                line((*s).fb, ct0)
+                free(ct0)
+                return Val { ty: ty, op: d0 }
+            }
+            if op == bop_eq() || op == bop_ne() {
+                d1: string = next_tmp((*s).fb)
+                cb1: *StringBuilder = alloc(sb_new())
+                sb_push(cb1, d1)
+                sb_push(cb1, " = call i64 @cool_str_eq(ptr ")
+                sb_push(cb1, av.op)
+                sb_push(cb1, ", ptr ")
+                sb_push(cb1, bo)
+                sb_push_char(cb1, 41)
+                ct1: string = gs_built(cb1)
+                sb_free(cb1)
+                free(cb1)
+                line((*s).fb, ct1)
+                free(ct1)
+                mut cond0: string = "ne"
+                if op == bop_ne() { cond0 = "eq" }
+                r0: string = next_tmp((*s).fb)
+                cb2: *StringBuilder = alloc(sb_new())
+                sb_push(cb2, r0)
+                sb_push(cb2, " = icmp ")
+                sb_push(cb2, cond0)
+                sb_push(cb2, " i64 ")
+                sb_push(cb2, d1)
+                sb_push(cb2, ", 0")
+                ct2: string = gs_built(cb2)
+                sb_free(cb2)
+                free(cb2)
+                line((*s).fb, ct2)
+                free(ct2)
+                return Val { ty: cty_bool(c), op: r0 }
+            }
+        }
+    }
     is_float: bool = cty_is_float(c, ty)
     if op <= bop_mod() {
         r: string = gx_op_line(s, gx_arith_opcode(op, is_float), ty, av.op, bo)
@@ -337,6 +418,7 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
         return v
     }
     if e.kind == xk_binary() {
+        if e.a == bop_and() || e.a == bop_or() { return gx_short_circuit(s, e.a, e.b, e.c) }
         av: Val = gen_expr(s, e.b)
         return gx_binary_vals(s, e.a, av, e.c)
     }

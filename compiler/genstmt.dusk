@@ -117,9 +117,11 @@ func gen_for(s: *GenFuncState, st: StmtNode) -> void {
     gen_store_slot(s, cty_int(c, 64), "0", idx)
     cond: int64 = fresh_label((*s).fb)
     body: int64 = fresh_label((*s).fb)
+    incl: int64 = fresh_label((*s).fb)
     done: int64 = fresh_label((*s).fb)
     cl: string = branch_label(cond)
     bl: string = branch_label(body)
+    il: string = branch_label(incl)
     dl: string = branch_label(done)
     br((*s).fb, cl)
     place_label((*s).fb, cond)
@@ -148,14 +150,25 @@ func gen_for(s: *GenFuncState, st: StmtNode) -> void {
     free(gtx)
     ev: string = gen_load_slot(s, elem, ep)
     gen_store_slot(s, elem, ev, slot)
+    fconts: *Vector<string> = (*s).loop_cont
+    fbrks: *Vector<string> = (*s).loop_brk
+    vec_push(fconts, gs_copy(il))
+    vec_push(fbrks, gs_copy(dl))
     gen_block(s, st.c)
+    vec_pop(fconts)
+    vec_pop(fbrks)
     if !(*s).terminated {
-        iv2: string = gen_load_slot(s, cty_int(c, 64), idx)
-        ni: string = next_tmp((*s).fb)
-        op2((*s).fb, ni, "add", "i64", iv2, "1")
-        gen_store_slot(s, cty_int(c, 64), ni, idx)
-        br((*s).fb, cl)
+        br((*s).fb, il)
     }
+    // The increment is its own block so `continue` can land on it: the index
+    // still advances on a skipped iteration. Reloading the index here keeps
+    // the resume-edge discipline; no value crosses a label.
+    place_label((*s).fb, incl)
+    iv2: string = gen_load_slot(s, cty_int(c, 64), idx)
+    ni: string = next_tmp((*s).fb)
+    op2((*s).fb, ni, "add", "i64", iv2, "1")
+    gen_store_slot(s, cty_int(c, 64), ni, idx)
+    br((*s).fb, cl)
     place_label((*s).fb, done)
     (*s).terminated = false
 }
@@ -171,12 +184,20 @@ export func gen_block(s: *GenFuncState, block_id: int64) -> void {
 }
 
 export func gen_emit_defers(s: *GenFuncState) -> void {
+    a: *Ast = (*(*s).ctx).ast
     ds: *Vector<int64> = (*s).defers
+    // A fault inside a deferred expression names the defer's own line, not
+    // the return that flushed it.
+    saved: int64 = (*s).cur_lo
     mut i: int64 = vec_len(ds) - 1
     while i >= 0 {
-        gen_expr(s, vec_get(ds, i))
+        did: int64 = vec_get(ds, i)
+        de: ExprNode = vec_get((*a).exprs, did)
+        (*s).cur_lo = de.lo
+        gen_expr(s, did)
         i = i - 1
     }
+    (*s).cur_lo = saved
 }
 
 export func gen_default_ret(s: *GenFuncState) -> void {
@@ -260,6 +281,10 @@ func gen_while(s: *GenFuncState, st: StmtNode) -> void {
     cl: string = branch_label(cond_l)
     bl: string = branch_label(body_l)
     el: string = branch_label(end_l)
+    wconts: *Vector<string> = (*s).loop_cont
+    wbrks: *Vector<string> = (*s).loop_brk
+    vec_push(wconts, gs_copy(cl))
+    vec_push(wbrks, gs_copy(el))
     if st.c != 0 {
         br((*s).fb, bl)
         place_label((*s).fb, body_l)
@@ -280,8 +305,32 @@ func gen_while(s: *GenFuncState, st: StmtNode) -> void {
         gen_block(s, st.b)
         if !(*s).terminated { br((*s).fb, cl) }
     }
+    vec_pop(wconts)
+    vec_pop(wbrks)
     place_label((*s).fb, end_l)
     (*s).terminated = false
+}
+
+// The merged-source offset a statement reports for a fault raised while lowering
+// it: its leading expression's, or the statement's own for break and continue. A
+// bare return returns -1 so the previous statement's offset stands.
+func gen_stmt_lo(a: *Ast, st: StmtNode) -> int64 {
+    if st.kind == sk_let() { e: ExprNode = vec_get((*a).exprs, st.c) return e.lo }
+    if st.kind == sk_assign() { e: ExprNode = vec_get((*a).exprs, st.a) return e.lo }
+    if st.kind == sk_assign_op() { e: ExprNode = vec_get((*a).exprs, st.b) return e.lo }
+    if st.kind == sk_return() {
+        if st.a >= 0 { e: ExprNode = vec_get((*a).exprs, st.a) return e.lo }
+        return -1
+    }
+    if st.kind == sk_defer() { e: ExprNode = vec_get((*a).exprs, st.a) return e.lo }
+    if st.kind == sk_if() { e: ExprNode = vec_get((*a).exprs, st.a) return e.lo }
+    if st.kind == sk_while() { e: ExprNode = vec_get((*a).exprs, st.a) return e.lo }
+    if st.kind == sk_for() { e: ExprNode = vec_get((*a).exprs, st.b) return e.lo }
+    if st.kind == sk_match() { e: ExprNode = vec_get((*a).exprs, st.a) return e.lo }
+    if st.kind == sk_break() { return st.a }
+    if st.kind == sk_continue() { return st.a }
+    if st.kind == sk_expr() { e: ExprNode = vec_get((*a).exprs, st.a) return e.lo }
+    return -1
 }
 
 // Dispatches one scalar statement and records clean faults for shapes owned by
@@ -289,6 +338,8 @@ func gen_while(s: *GenFuncState, st: StmtNode) -> void {
 export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
     a: *Ast = (*(*s).ctx).ast
     st: StmtNode = vec_get((*a).stmts, sid)
+    lo: int64 = gen_stmt_lo(a, st)
+    if lo >= 0 { (*s).cur_lo = lo }
     if st.kind == sk_let() {
         init: ExprNode = vec_get((*a).exprs, st.c)
         if init.kind == xk_await() { gen_await_let(s, sid) }
@@ -322,6 +373,24 @@ export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
         return }
     if st.kind == sk_if() { gen_if(s, st)
         return }
+    if st.kind == sk_break() {
+        brks: *Vector<string> = (*s).loop_brk
+        n0: int64 = vec_len(brks)
+        if n0 > 0 {
+            br((*s).fb, vec_get(brks, n0 - 1))
+            (*s).terminated = true
+        }
+        return
+    }
+    if st.kind == sk_continue() {
+        conts: *Vector<string> = (*s).loop_cont
+        n1: int64 = vec_len(conts)
+        if n1 > 0 {
+            br((*s).fb, vec_get(conts, n1 - 1))
+            (*s).terminated = true
+        }
+        return
+    }
     if st.kind == sk_while() { gen_while(s, st)
         return }
     if st.kind == sk_expr() {

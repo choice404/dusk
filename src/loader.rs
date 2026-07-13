@@ -242,6 +242,10 @@ fn shift_block(b: &mut Block, base: u32) {
 
 fn shift_stmt(s: &mut Stmt, base: u32) {
     match s {
+        Stmt::Break(sp) | Stmt::Continue(sp) => {
+            sp.lo += base;
+            sp.hi += base;
+        }
         Stmt::Let(l) => shift_expr(&mut l.value, base),
         Stmt::Assign(a, b) => {
             shift_expr(a, base);
@@ -383,6 +387,7 @@ fn fold_block(b: &mut Block, ctx: &mut FoldCtx) {
 
 fn fold_stmt(s: &mut Stmt, ctx: &mut FoldCtx) {
     match s {
+        Stmt::Break(_) | Stmt::Continue(_) => {}
         Stmt::Let(l) => fold_expr(&mut l.value, ctx),
         Stmt::Assign(a, b) => {
             fold_expr(a, ctx);

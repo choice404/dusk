@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::codegen::llvm::Module;
 use crate::codegen::DEFAULT_TRIPLE;
+use crate::diag::Span;
 use crate::parser::ast::{
     self, Arm, BinOp, Block, Expr, ExprKind, For, Func, If, Item, Lambda, Let, Pattern, Stmt, Type,
     UnOp, While,
@@ -20,10 +21,31 @@ use crate::parser::ast::{
 /// Compiles a module to LLVM IR text. Generics are monomorphized first. `muts`
 /// carries the reconciled storage types of the narrow mutable-tuple class, which
 /// mono stamps onto those bindings so their slots are sized as slices.
-pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> Result<String, String> {
+/// The span a statement reports for a fault raised while lowering it: its
+/// leading expression's, or the statement's own for break and continue. A bare
+/// `return` keeps the previous statement's span.
+fn stmt_span(s: &Stmt) -> Option<Span> {
+    match s {
+        Stmt::Let(l) => Some(l.value.span),
+        Stmt::Assign(a, _) | Stmt::AssignOp(_, a, _) => Some(a.span),
+        Stmt::Return(Some(e)) | Stmt::Defer(e) | Stmt::Expr(e) => Some(e.span),
+        Stmt::Return(None) => None,
+        Stmt::If(i) => Some(i.cond.span),
+        Stmt::While(w) => Some(w.cond.span),
+        Stmt::For(f) => Some(f.iter.span),
+        Stmt::Match(m) => Some(m.scrut.span),
+        Stmt::Break(sp) | Stmt::Continue(sp) => Some(*sp),
+    }
+}
+
+pub fn compile(
+    module: &ast::Module,
+    muts: &crate::mono::MutTupleTypes,
+    files: &[crate::loader::FileSrc],
+) -> Result<String, String> {
     let expanded = crate::mono::expand(module, muts);
     let module = &expanded;
-    let ctx = Ctx::new(module);
+    let ctx = Ctx::new(module, files);
     let mut m = Module::new("dusk", DEFAULT_TRIPLE);
     m.declare("void @cool_print_i64(i64)");
     m.declare("void @cool_println_i64(i64)");
@@ -40,15 +62,17 @@ pub fn compile(module: &ast::Module, muts: &crate::mono::MutTupleTypes) -> Resul
     m.declare("void @cool_free(ptr)");
     m.declare("ptr @cool_gen_alloc(i64)");
     m.declare("void @cool_gen_free(ptr)");
-    m.declare("void @cool_gen_fault()");
-    m.declare("void @cool_null_fault()");
-    m.declare("void @cool_bounds_fault()");
-    m.declare("void @cool_shift_fault()");
+    m.declare("void @cool_gen_fault_at(ptr)");
+    m.declare("void @cool_null_fault_at(ptr)");
+    m.declare("void @cool_bounds_fault_at(ptr)");
+    m.declare("void @cool_shift_fault_at(ptr)");
     m.declare("i64 @cool_pow_i64(i64, i64)");
     m.declare("double @llvm.pow.f64(double, double)");
     m.declare("float @llvm.pow.f32(float, float)");
     m.declare("void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
     m.declare("i64 @strlen(ptr)");
+    m.declare("i64 @cool_str_eq(ptr, ptr)");
+    m.declare("ptr @cool_str_concat(ptr, ptr)");
     m.declare("ptr @cool_debug_alloc(i64)");
     m.declare("void @cool_debug_free(ptr)");
     m.declare("i64 @cool_debug_leaks()");
@@ -374,6 +398,11 @@ pub(crate) struct AsyncInfo {
 }
 
 pub(crate) struct Ctx {
+    /// (path, base) per merged source file, and the merged-source offsets of
+    /// every newline, both for rendering a fault site's "path:line". The
+    /// newline offsets are sorted, so a line number is two binary searches.
+    files: Vec<(String, u32)>,
+    newlines: Vec<u32>,
     structs: Vec<(String, Vec<(String, CTy)>)>,
     enums: Vec<EnumDef>,
     ifaces: Vec<IfaceDef>,
@@ -389,7 +418,17 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
-    fn new(module: &ast::Module) -> Self {
+    fn new(module: &ast::Module, files: &[crate::loader::FileSrc]) -> Self {
+        let file_table: Vec<(String, u32)> =
+            files.iter().map(|f| (f.path.clone(), f.base)).collect();
+        let mut newlines: Vec<u32> = Vec::new();
+        for f in files {
+            for (i, b) in f.src.bytes().enumerate() {
+                if b == b'\n' {
+                    newlines.push(f.base + i as u32);
+                }
+            }
+        }
         let mut noms: HashMap<String, Nom> = HashMap::new();
         for item in &module.items {
             match item {
@@ -522,6 +561,8 @@ impl Ctx {
             }
         }
         Ctx {
+            files: file_table,
+            newlines,
             structs,
             enums,
             ifaces,
@@ -530,6 +571,25 @@ impl Ctx {
             methods,
             noms,
             async_fns,
+        }
+    }
+
+    /// The number of newlines before the merged-source offset, a binary
+    /// search over the sorted newline table.
+    fn newlines_before(&self, off: u32) -> usize {
+        self.newlines.partition_point(|&n| n < off)
+    }
+
+    /// Renders the "path:line" of a merged-source offset: the owning file is
+    /// the one with the greatest base not past the offset, and the line is
+    /// one plus the newlines between that base and the offset.
+    fn loc_of(&self, off: u32) -> String {
+        match self.files.iter().rev().find(|(_, base)| off >= *base) {
+            Some((path, base)) => {
+                let line = self.newlines_before(off) - self.newlines_before(*base) + 1;
+                format!("{path}:{line}")
+            }
+            None => "?:0".to_string(),
         }
     }
 
@@ -852,6 +912,13 @@ pub(crate) struct Fb<'a> {
     pub(crate) locals: HashMap<String, (CTy, String)>,
     defers: Vec<Expr>,
     pub(crate) terminated: bool,
+    /// The span of the statement currently being lowered, stamped at the top
+    /// of gen_stmt, so a fault emitted anywhere under it can name its line.
+    cur_span: Span,
+    /// The innermost enclosing loop's (continue target, break target), a stack
+    /// so nested loops resolve to their own labels. A for loop's continue
+    /// target is its increment block, a while loop's is its condition.
+    loop_targets: Vec<(String, String)>,
     allocator: Option<(String, CTy)>,
     // In async mode this holds the task frame: alloca and alloca_raw route every
     // slot through it and return an entry-block GEP name rather than emitting an
@@ -880,6 +947,8 @@ impl<'a> Fb<'a> {
             locals: HashMap::new(),
             defers: Vec::new(),
             terminated: false,
+            cur_span: Span { lo: 0, hi: 0 },
+            loop_targets: Vec::new(),
             allocator: None,
             frame: None,
             entry_allocas: String::new(),
@@ -890,6 +959,13 @@ impl<'a> Fb<'a> {
         let t = format!("%t{}", self.tmp);
         self.tmp += 1;
         t
+    }
+
+    /// The interned "path:line" constant for the statement being lowered, the
+    /// argument every location-carrying fault call passes.
+    fn fault_loc(&mut self) -> String {
+        let text = self.ctx.loc_of(self.cur_span.lo);
+        self.m.cstring(&text)
     }
 
     fn new_label(&mut self) -> String {
@@ -1039,7 +1115,8 @@ impl<'a> Fb<'a> {
         let nfault = self.new_label();
         self.cond_br(&isnull, &nfault, &skip);
         self.place_label(&nfault);
-        self.line("call void @cool_null_fault()");
+        let loc = self.fault_loc();
+        self.line(&format!("call void @cool_null_fault_at(ptr {loc})"));
         self.br(&skip);
         self.place_label(&chk);
         let hp = self.fresh();
@@ -1055,7 +1132,8 @@ impl<'a> Fb<'a> {
         let fault = self.new_label();
         self.cond_br(&bad, &fault, &skip);
         self.place_label(&fault);
-        self.line("call void @cool_gen_fault()");
+        let loc = self.fault_loc();
+        self.line(&format!("call void @cool_gen_fault_at(ptr {loc})"));
         self.br(&skip);
         self.place_label(&skip);
         data
@@ -1071,7 +1149,8 @@ impl<'a> Fb<'a> {
         let ok = self.new_label();
         self.cond_br(&bad, &fault, &ok);
         self.place_label(&fault);
-        self.line("call void @cool_bounds_fault()");
+        let loc = self.fault_loc();
+        self.line(&format!("call void @cool_bounds_fault_at(ptr {loc})"));
         self.br(&ok);
         self.place_label(&ok);
     }
@@ -1304,9 +1383,14 @@ impl<'a> Fb<'a> {
 
     fn emit_defers(&mut self) {
         let ds = self.defers.clone();
+        // A fault inside a deferred expression names the defer's own line, not
+        // the return that flushed it.
+        let saved = self.cur_span;
         for e in ds.iter().rev() {
+            self.cur_span = e.span;
             self.gen_expr(e);
         }
+        self.cur_span = saved;
     }
 
     /// The async return path: evaluate and adapt the value, replay defers at true
@@ -1507,6 +1591,9 @@ impl<'a> Fb<'a> {
     }
 
     fn gen_stmt(&mut self, s: &Stmt) {
+        if let Some(sp) = stmt_span(s) {
+            self.cur_span = sp;
+        }
         match s {
             Stmt::Let(l) => {
                 if let ExprKind::Await(op, el) = &l.value.kind {
@@ -1583,6 +1670,20 @@ impl<'a> Fb<'a> {
             Stmt::Defer(e) => self.defers.push(e.clone()),
             Stmt::If(i) => self.gen_if(i),
             Stmt::While(w) => self.gen_while(w),
+            Stmt::Break(_) => {
+                if let Some((_, brk)) = self.loop_targets.last() {
+                    let l = brk.clone();
+                    self.br(&l);
+                    self.terminated = true;
+                }
+            }
+            Stmt::Continue(_) => {
+                if let Some((cont, _)) = self.loop_targets.last() {
+                    let l = cont.clone();
+                    self.br(&l);
+                    self.terminated = true;
+                }
+            }
             Stmt::Expr(e) => {
                 if let ExprKind::Await(op, el) = &e.kind {
                     self.gen_await_void(op, el.as_ref());
@@ -1698,6 +1799,7 @@ impl<'a> Fb<'a> {
         let cond_l = self.new_label();
         let body_l = self.new_label();
         let end_l = self.new_label();
+        self.loop_targets.push((cond_l.clone(), end_l.clone()));
         if w.post_test {
             self.br(&body_l);
             self.place_label(&body_l);
@@ -1721,6 +1823,7 @@ impl<'a> Fb<'a> {
                 self.br(&cond_l);
             }
         }
+        self.loop_targets.pop();
         self.place_label(&end_l);
     }
 
@@ -1745,6 +1848,7 @@ impl<'a> Fb<'a> {
         self.line(&format!("store i64 0, ptr {i}"));
         let cond = self.new_label();
         let body = self.new_label();
+        let inc = self.new_label();
         let end = self.new_label();
         self.br(&cond);
         self.place_label(&cond);
@@ -1763,15 +1867,20 @@ impl<'a> Fb<'a> {
         ));
         let ev = self.load(&elem, &ep);
         self.line(&format!("store {} {ev}, ptr {slot}", elem.ll()));
+        self.loop_targets.push((inc.clone(), end.clone()));
         self.gen_block(&f.body.stmts);
+        self.loop_targets.pop();
         if !self.terminated {
-            // Reload the index after the body: the body may span a resume edge,
-            // so the value loaded at the top of the block cannot be reused here.
-            let iv2 = self.load(&CTy::Int(64), &i);
-            let ni = self.op2("add", "i64", &iv2, "1");
-            self.line(&format!("store i64 {ni}, ptr {i}"));
-            self.br(&cond);
+            self.br(&inc);
         }
+        // The increment is its own block so `continue` can land on it: the
+        // index still advances on a skipped iteration. Reloading the index
+        // here keeps the resume-edge discipline; no value crosses a label.
+        self.place_label(&inc);
+        let iv2 = self.load(&CTy::Int(64), &i);
+        let ni = self.op2("add", "i64", &iv2, "1");
+        self.line(&format!("store i64 {ni}, ptr {i}"));
+        self.br(&cond);
         self.place_label(&end);
     }
 
@@ -2254,8 +2363,36 @@ impl<'a> Fb<'a> {
     }
 
     fn gen_binary(&mut self, op: BinOp, a: &Expr, b: &Expr) -> Val {
+        if matches!(op, BinOp::And | BinOp::Or) {
+            return self.gen_short_circuit(op, a, b);
+        }
         let av = self.gen_expr(a);
         self.gen_binop_vals(op, av, b)
+    }
+
+    /// `&&` and `||` evaluate the right operand only when the left has not
+    /// already decided the answer, so a guarded read like `i < n && a[i] == x`
+    /// cannot fault on the guard's own miss. The result rides a slot rather
+    /// than a phi, the same discipline every other label-crossing value in
+    /// this backend uses.
+    fn gen_short_circuit(&mut self, op: BinOp, a: &Expr, b: &Expr) -> Val {
+        let av = self.gen_expr(a);
+        let slot = self.alloca(&CTy::Bool);
+        self.line(&format!("store i1 {}, ptr {slot}", av.op));
+        let rhs = self.new_label();
+        let end = self.new_label();
+        if matches!(op, BinOp::And) {
+            self.cond_br(&av.op, &rhs, &end);
+        } else {
+            self.cond_br(&av.op, &end, &rhs);
+        }
+        self.place_label(&rhs);
+        let bv = self.gen_expr(b);
+        self.line(&format!("store i1 {}, ptr {slot}", bv.op));
+        self.br(&end);
+        self.place_label(&end);
+        let out = self.load(&CTy::Bool, &slot);
+        Val::new(CTy::Bool, out)
     }
 
     /// Lowers a binary operation given a pre-evaluated left value and the right
@@ -2280,6 +2417,31 @@ impl<'a> Fb<'a> {
             return Val::new(ty, back);
         }
         let bo = self.coerce(&bv.ty, &bv.op, &av.ty);
+        // The string forms route through the runtime: `+` mints a fresh heap
+        // string and `==`/`!=` compare content. Sema rejects every other
+        // operator on strings and every comparison on bare pointers, so a
+        // char pointer reaching these arms is always a string.
+        if matches!(&ty, CTy::RawPtr(el) if matches!(**el, CTy::Char)) {
+            if matches!(op, Add) {
+                let d = self.fresh();
+                self.line(&format!(
+                    "{d} = call ptr @cool_str_concat(ptr {}, ptr {bo})",
+                    av.op
+                ));
+                return Val::new(ty, d);
+            }
+            if matches!(op, Eq | Ne) {
+                let d = self.fresh();
+                self.line(&format!(
+                    "{d} = call i64 @cool_str_eq(ptr {}, ptr {bo})",
+                    av.op
+                ));
+                let cond = if matches!(op, Eq) { "ne" } else { "eq" };
+                let r = self.fresh();
+                self.line(&format!("{r} = icmp {cond} i64 {d}, 0"));
+                return Val::new(CTy::Bool, r);
+            }
+        }
         let is_float = ty.is_float();
         match op {
             Add | Sub | Mul | Div | Mod => {
@@ -2358,7 +2520,8 @@ impl<'a> Fb<'a> {
         let ok = self.new_label();
         self.cond_br(&bad, &fault, &ok);
         self.place_label(&fault);
-        self.line("call void @cool_shift_fault()");
+        let loc = self.fault_loc();
+        self.line(&format!("call void @cool_shift_fault_at(ptr {loc})"));
         self.br(&ok);
         self.place_label(&ok);
     }
@@ -2495,7 +2658,8 @@ impl<'a> Fb<'a> {
         let ok = self.new_label();
         self.cond_br(&bad, &fault, &ok);
         self.place_label(&fault);
-        self.line("call void @cool_bounds_fault()");
+        let loc = self.fault_loc();
+        self.line(&format!("call void @cool_bounds_fault_at(ptr {loc})"));
         self.br(&ok);
         self.place_label(&ok);
         if let Some(bl) = &base_len {
@@ -2505,7 +2669,8 @@ impl<'a> Fb<'a> {
             let ok2 = self.new_label();
             self.cond_br(&over, &fault2, &ok2);
             self.place_label(&fault2);
-            self.line("call void @cool_bounds_fault()");
+            let loc = self.fault_loc();
+            self.line(&format!("call void @cool_bounds_fault_at(ptr {loc})"));
             self.br(&ok2);
             self.place_label(&ok2);
         }
@@ -2952,6 +3117,7 @@ impl<'a> Fb<'a> {
                 "fold" => self.gen_fold(args),
                 "foreach" => self.gen_foreach(args),
                 "sizeof" => self.gen_sizeof(args),
+                "int8" | "int16" | "int32" | "int64" | "char" => self.gen_cast(name, args),
                 "alloc_bytes" => self.gen_alloc_bytes(args),
                 "ptr_add" => self.gen_ptr_add(args),
                 "debug_alloc" => {
@@ -4286,6 +4452,25 @@ impl<'a> Fb<'a> {
         Val::new(CTy::Void, "")
     }
 
+    /// A width cast builtin: int32(v) converts v to the named width through
+    /// the standard coercion, two's complement truncation on the way down and
+    /// the ordinary sign or zero extension on the way up.
+    fn gen_cast(&mut self, name: &str, args: &[Expr]) -> Val {
+        let target = match name {
+            "int8" => CTy::Int(8),
+            "int16" => CTy::Int(16),
+            "int32" => CTy::Int(32),
+            "int64" => CTy::Int(64),
+            _ => CTy::Char,
+        };
+        let v = args
+            .first()
+            .map(|a| self.gen_expr(a))
+            .unwrap_or_else(Val::i0);
+        let out = self.coerce(&v.ty, &v.op, &target);
+        Val::new(target, out)
+    }
+
     /// sizeof(x): the byte size of x's type. The argument may be a value
     /// expression or a bare type name such as `int64` or a struct name.
     fn gen_sizeof(&mut self, args: &[Expr]) -> Val {
@@ -4659,7 +4844,7 @@ mod tests {
         let (t, _) = lex(src);
         let (m, e) = parse(t);
         assert!(e.is_empty(), "parse errors: {e:?}");
-        compile(&m, &crate::mono::MutTupleTypes::new()).expect("codegen error")
+        compile(&m, &crate::mono::MutTupleTypes::new(), &[]).expect("codegen error")
     }
 
     #[test]
@@ -4706,7 +4891,7 @@ mod tests {
     fn dynamic_shift_is_guarded() {
         let out = ir("func f(x: int64, n: int64) -> int64 { return x << n }");
         assert!(out.contains("icmp uge i64"), "{out}");
-        assert!(out.contains("call void @cool_shift_fault()"), "{out}");
+        assert!(out.contains("call void @cool_shift_fault_at(ptr"), "{out}");
     }
 
     #[test]
@@ -4715,7 +4900,7 @@ mod tests {
         // call is absent even though the fault is always declared.
         let out = ir("func f() -> int64 { return 1 << 3 }");
         assert!(out.contains("shl i64 1, 3"), "{out}");
-        assert!(!out.contains("call void @cool_shift_fault()"), "{out}");
+        assert!(!out.contains("call void @cool_shift_fault_at(ptr"), "{out}");
     }
 
     #[test]
@@ -4731,7 +4916,7 @@ mod tests {
             geps, 1,
             "expected one place computation, got {geps}:\n{out}"
         );
-        let checks = out.matches("call void @cool_bounds_fault()").count();
+        let checks = out.matches("call void @cool_bounds_fault_at(ptr").count();
         assert_eq!(checks, 1, "expected one bounds check, got {checks}:\n{out}");
     }
 
@@ -4799,7 +4984,7 @@ mod tests {
         // remembered generation against the header, faulting on a stale pointer.
         assert!(out.contains("call ptr @cool_gen_alloc"), "{out}");
         assert!(out.contains("getelementptr i64, ptr null"), "{out}");
-        assert!(out.contains("call void @cool_gen_fault()"), "{out}");
+        assert!(out.contains("call void @cool_gen_fault_at(ptr"), "{out}");
     }
 
     #[test]

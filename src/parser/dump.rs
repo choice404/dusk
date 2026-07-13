@@ -309,6 +309,8 @@ impl Debug for Dump<'_, Stmt> {
             Stmt::While(while_) => f.debug_tuple("While").field(&Dump(while_)).finish(),
             Stmt::For(for_) => f.debug_tuple("For").field(&Dump(for_)).finish(),
             Stmt::Match(match_) => f.debug_tuple("Match").field(&Dump(match_)).finish(),
+            Stmt::Break(_) => f.write_str("Break"),
+            Stmt::Continue(_) => f.write_str("Continue"),
             Stmt::Expr(expr) => f.debug_tuple("Expr").field(&Dump(expr)).finish(),
         }
     }

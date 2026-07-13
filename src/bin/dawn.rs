@@ -71,6 +71,7 @@ fn cmd_build(path: Option<&String>, run: bool) -> ExitCode {
     let art = match driver::build_module(
         &analysis.module,
         &analysis.mut_tuple_types,
+        &analysis.files,
         &out,
         stem(path),
     ) {

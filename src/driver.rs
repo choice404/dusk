@@ -19,13 +19,14 @@ pub struct BuildArtifacts {
 pub fn build_module(
     module: &Module,
     muts: &MutTupleTypes,
+    files: &[crate::loader::FileSrc],
     out_dir: &Path,
     stem: &str,
 ) -> Result<BuildArtifacts, String> {
     std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
     let ll = out_dir.join(format!("{stem}.ll"));
     let bin = out_dir.join(stem);
-    let ir = codegen::compile(module, muts)?;
+    let ir = codegen::compile(module, muts, files)?;
     std::fs::write(&ll, &ir).map_err(|e| format!("write {}: {e}", ll.display()))?;
     let rt = runtime_sources();
     let mut inputs: Vec<&Path> = vec![ll.as_path()];

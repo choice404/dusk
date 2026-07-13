@@ -14,6 +14,7 @@
 static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void cool_gen_fault(void);
+void *cool_gen_alloc(int64_t n);
 
 /* The collector's free guard. A collected address must never enter the
    generational free list, so both free paths consult this first and no op on a
@@ -47,6 +48,30 @@ void cool_eprint_bytes(const char *p, int64_t n) {
     if (n > 0) {
         fwrite(p, 1, (size_t)n, stderr);
     }
+}
+
+/* Content equality for the string == and != operators. A null operand reads
+   as empty, matching the printers, so the empty error message compares equal
+   to "" instead of crashing. */
+int64_t cool_str_eq(const char *a, const char *b) {
+    const char *x = a ? a : "";
+    const char *y = b ? b : "";
+    return strcmp(x, y) == 0 ? 1 : 0;
+}
+
+/* String concatenation for the + operator. The result is a fresh string on
+   the generational heap, the same allocation substring returns, so free()
+   reclaims it like any other heap string. */
+char *cool_str_concat(const char *a, const char *b) {
+    const char *x = a ? a : "";
+    const char *y = b ? b : "";
+    size_t la = strlen(x);
+    size_t lb = strlen(y);
+    char *out = (char *)cool_gen_alloc((int64_t)(la + lb + 1));
+    memcpy(out, x, la);
+    memcpy(out + la, y, lb);
+    out[la + lb] = 0;
+    return out;
 }
 
 /* Stderr printers for the printerr builtin. None appends a newline; codegen
@@ -378,6 +403,33 @@ void cool_null_fault(void) {
 void cool_bounds_fault(void) {
     fflush(stdout);
     fputs("fatal: index out of bounds\n", stderr);
+    abort();
+}
+
+/* Location carrying fault variants. Codegen interns one "path:line" constant
+   per fault site and passes it here, so a runtime fault names the statement
+   that raised it instead of leaving a binary-wide search. */
+void cool_bounds_fault_at(const char *loc) {
+    fflush(stdout);
+    fprintf(stderr, "fatal: index out of bounds at %s\n", loc);
+    abort();
+}
+
+void cool_gen_fault_at(const char *loc) {
+    fflush(stdout);
+    fprintf(stderr, "fatal: use of a freed or stale pointer at %s\n", loc);
+    abort();
+}
+
+void cool_null_fault_at(const char *loc) {
+    fflush(stdout);
+    fprintf(stderr, "fatal: dereference of a null pointer at %s\n", loc);
+    abort();
+}
+
+void cool_shift_fault_at(const char *loc) {
+    fflush(stdout);
+    fprintf(stderr, "fatal: shift amount out of range at %s\n", loc);
     abort();
 }
 

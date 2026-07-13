@@ -132,6 +132,23 @@ export func gen_func_value(s: *GenFuncState, name: string) -> Val {
 }
 
 // Lowers a call expression when the callee is a plain top-level name or builtin.
+// A width cast builtin: int32(v) converts v to the named width through the
+// standard coercion, two's complement truncation on the way down and the
+// ordinary sign or zero extension on the way up.
+func gen_cast(s: *GenFuncState, name: string, args_off: int64, args_len: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut target: int64 = cty_char(c)
+    if str_eq(name, "int8") { target = cty_int(c, 8) }
+    if str_eq(name, "int16") { target = cty_int(c, 16) }
+    if str_eq(name, "int32") { target = cty_int(c, 32) }
+    if str_eq(name, "int64") { target = cty_int(c, 64) }
+    a: *Ast = (*(*s).ctx).ast
+    mut v: Val = Val { ty: cty_int(c, 64), op: gs_copy("0") }
+    if args_len > 0 { v = gen_expr(s, vec_get((*a).kids, args_off)) }
+    out: string = coerce(s, v.ty, v.op, target)
+    return Val { ty: target, op: out }
+}
+
 export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_len: int64) -> Val {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -172,6 +189,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     if str_eq(name, "alloc") { return gen_alloc(s, args_off, args_len) }
     if str_eq(name, "free") { return gen_free(s, args_off, args_len) }
     if str_eq(name, "sizeof") { return gen_sizeof(s, args_off, args_len) }
+    if str_eq(name, "int8") || str_eq(name, "int16") || str_eq(name, "int32") || str_eq(name, "int64") || str_eq(name, "char") { return gen_cast(s, name, args_off, args_len) }
     if str_eq(name, "alloc_bytes") { return gen_alloc_bytes(s, args_off, args_len) }
     if str_eq(name, "ptr_add") { return gen_ptr_add(s, args_off, args_len) }
     if str_eq(name, "read_file") { return gen_read_file(s, args_off, args_len) }

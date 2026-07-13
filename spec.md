@@ -1,14 +1,14 @@
 # dusk Language Specification
 
-## Status, the 1.1.0 surface
+## Status, the 1.2.0 surface
 
-This is the language reference for dusk. It describes the language as of 1.1.0: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, and Unicode strings with the `rune` primitive. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
+This is the language reference for dusk. It describes the language as of 1.2.0: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, and Unicode strings with the `rune` primitive. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
 
 ### The bootstrap freeze
 
 The surface described in this spec was frozen as of 0.5.4 for the bootstrap. The releases from 0.6.x through 0.9.4 changed the compiler, not the language, as dusk was rewritten in itself, so a program that compiled against this spec at 0.5.4 kept compiling across that whole line without a source change. Three kinds of work stayed live during the freeze: diagnostics could improve, the standard library could grow, and a soundness fix could land, since none of those change the surface a correct program relies on.
 
-The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface 1.0.0 carried forward is unchanged start to finish across the whole line that held the freeze. 1.1.0 is the first release to add to the surface since: a `char`, a `char[N]`, and a `char[]` are now printable text, a string literal initializes a `char[N]` directly, and a `for` loop and a range slice both treat a string's bytes with the same discipline described in [Strings](#strings), [Arrays and Slices](#arrays-and-slices), and the [Builtins](#builtins) chapter.
+The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface 1.0.0 carried forward is unchanged start to finish across the whole line that held the freeze. 1.1.0 is the first release to add to the surface since: a `char`, a `char[N]`, and a `char[]` are now printable text, a string literal initializes a `char[N]` directly, and a `for` loop and a range slice both treat a string's bytes with the same discipline described in [Strings](#strings), [Arrays and Slices](#arrays-and-slices), and the [Builtins](#builtins) chapter. 1.2.0 keeps adding to it: `&&` and `||` now short circuit instead of evaluating both operands unconditionally, `==` and `!=` on a string compare content instead of pointer identity while comparison closes on a named list of comparable types, `+` concatenates two strings, a width cast converts an integer explicitly, `break` and `continue` are new statement keywords, and a runtime fault now names the source line that raised it. Each is a genuine change to what a program can write and what it means, recorded in full in [Expressions and Operators](#expressions-and-operators), [Strings](#strings), the [Builtins](#builtins) chapter, and [Memory Management](#memory-management).
 
 The one exception the freeze carried was a soundness hole. A hole found during the bootstrap could force a surface change to close it, and when that happened the change was named in the changelog of the release that made it.
 
@@ -214,6 +214,18 @@ s: string = "hello"   // a pointer to the NUL terminated bytes
 - A string's length is found by scanning to the NUL, which `std.string`'s `str_len` does. The NUL keeps a string view compatible with C and the foreign interface.
 - The `cstr` builtin reinterprets a NUL terminated `*char` buffer as a string at no runtime cost.
 
+Added in 1.2.0: `==` and `!=` compare two strings by content, a byte for byte comparison of the bytes up to each string's own NUL, not by the pointer each one happens to hold. A null operand, an error's empty `message` among them, reads as the empty string rather than crashing. `<`, `<=`, `>`, and `>=` between two strings reject, since a string carries no ordering; see [Comparison](#comparison). `+` and `+=` concatenate: `a + b` allocates a fresh heap string holding both operands' bytes back to back with one NUL at the end, the same allocation `substring` already returns, so the result frees with an ordinary `free` and a `mut string` grows across repeated `+=` calls. `+` is the only arithmetic operator a string accepts; mixing a string with a non string operand on either side of any operator is still a type mismatch.
+
+```text
+a := "hi" + "!"          // a fresh heap string, "hi!"
+mut s: string = "x"
+s += "y"                 // s is now "xy", a fresh heap string
+free(a)
+free(s)
+println("ab" == "ab")    // true, by content, not by address
+println("ab" < "cd")     // rejected: strings compare with == and != only
+```
+
 A string's representation never changed to add Unicode support. It stays the same NUL terminated byte view it always was, UTF-8 by convention rather than by any different layout. `s[i]` reads one byte, exactly as it always has, not one character and not one scalar. Iterating scalar by scalar is a decoding walk over that byte view, not an indexing operation: `std.unicode`'s `decode_rune(s, i)` reads the bytes starting at `i` and returns the decoded scalar paired with its width in bytes, so a caller steps forward by the width it gets back.
 
 ```text
@@ -281,7 +293,7 @@ argv: string[]                // slice of strings, as passed to main
 ```
 
 - Slice length is always known. No scanning, no null terminator.
-- Every array and slice index is bounds checked and traps when it misses, negatives included.
+- Every array and slice index is bounds checked and traps when it misses, negatives included, naming its own file and line since 1.2.0; see [Runtime Faults](#runtime-faults).
 - A range slice validates `lo <= hi <= len` against its base, so a slice can never claim a length past its backing. A `string`'s own range slice, `s[lo..hi]`, validates the same way against its length as read by a NUL scan, so `"abc"[1..9]` faults, `index out of bounds`, rather than minting a slice over whatever bytes sit past the terminator. A chained range, `s[0..4][1..3]`, and every base shape a range can sit on, a bound name, a literal, and a call result, all validate the same way.
 - A raw pointer, `*raw T`, and `*void` have no length to validate a range against, so the range form on either is rejected at check, `cannot take a range slice of a raw pointer; it has no length to check the range against`. An ordinary index read through either stays legal; only `p[lo..hi]` is refused.
 - A dynamic array is provided in the standard library as `std.vector`, a heap backed generic type.
@@ -399,11 +411,41 @@ Added in 0.4.2. Every binary and unary operator sits on one precedence ladder, t
 
 Shifts sit between `&` and `+`, and the bitwise trio nests `|` loosest, `^` in the middle, `&` tightest, so `4 | 2 ^ 3 & 1` groups as `4 | (2 ^ (3 & 1))` and `1 + 2 << 3` groups as `(1 + 2) << 3`. `**` binds tighter than the multiplicatives and right associates, so `2 ** 3 ** 2` is `2 ** (3 ** 2)`, while unary minus binds tighter than `**` at the call site, so `-2 ** 2` is `(-2) ** 2`, which is `4`.
 
+### Logical operators
+
+Added in 1.2.0. `&&` and `||` both take a `bool` on each side; a non `bool` operand rejects, `logical operators need bool operands`, on whichever side has one. Both short circuit: `&&` evaluates its right operand only when the left is `true`, and `||` only when the left is `false`, so a guard like `i < n && a[i] == x` never reaches the array read once the length check has already failed, and a right side with a side effect, a call that prints or a call that faults, does not run when the left side has already settled the answer.
+
+```text
+i: int64 = 5
+n: int64 = 3
+if i < n && a[i] == x { ... }   // a[i] never evaluates; i < n is false
+```
+
+Before 1.2.0 both operands evaluated unconditionally, so a right side call always ran. This is a change to evaluation order, not to typing: both sides still type check regardless of which one runs at a given call, so a non `bool` operand behind a condition that would skip it is still a compile error.
+
+### Comparison
+
+`== != < <= > >=` compare two operands of the same type. An integer, a float, `bool`, `char`, `rune`, and a string all support the family, though a string supports only `==` and `!=`; a `<`, `<=`, `>`, or `>=` between two strings rejects, `strings compare with == and !=; they have no ordering`, since a string has no meaningful order to compare by. A string compares by content, through a runtime byte compare, not by the pointer identity every other value compares by; see [Strings](#strings).
+
+A managed pointer, a raw pointer, an `error`, an array, a slice, a tuple, a struct, an enum, an interface, a future, a collector, and a thread handle have no meaningful `==`. Each rejects at check instead:
+
+```text
+p == q   // pointers do not compare; compare the values they point to
+xs == ys // cannot compare an array; compare its parts instead (also a slice, tuple, struct, enum, interface, future, collector, thread)
+e == f   // an error does not compare; test it with exists()
+```
+
+Compare a pointer by dereferencing both sides, an aggregate by comparing its parts, and an `error` with `exists()`. A generic type parameter stays permissive on the surface pass, since its concrete shape is not yet known, and is checked again once monomorphization makes it ground: a generic function comparing a type parameter that turns out to be one of the rejected kinds is caught on the ground pass rather than accepted forever.
+
 ### Bitwise operators
 
 `&`, `|`, and `^` are binary and `~` is unary, all on integer operands only, two's complement throughout. `~0` is `-1`, `-1 & 255` masks down to the low byte, and each width truncates the way ordinary arithmetic does, so an `int8` operand keeps the mask honest at eight bits.
 
-`<<` and `>>` shift by an integer amount. `<<` is a plain logical shift; `>>` is always an arithmetic shift, sign extending the top bit, because dusk does not track signedness separately from the type at the point a shift lowers. A constant shift amount outside `[0, width)` is a compile error, a negative constant included. A dynamic amount is checked at the shift itself and a miss aborts with the named fault `fatal: shift amount out of range`, never a silently masked or poison result.
+`<<` and `>>` shift by an integer amount. `<<` is a plain logical shift; `>>` is always an arithmetic shift, sign extending the top bit, because dusk does not track signedness separately from the type at the point a shift lowers. A constant shift amount outside `[0, width)` is a compile error, a negative constant included. A dynamic amount is checked at the shift itself and a miss aborts with the named fault `fatal: shift amount out of range`, at the file and line of the shift itself since 1.2.0, never a silently masked or poison result. See [Runtime Faults](#runtime-faults).
+
+### Assignment targets
+
+The left side of an assignment, plain or compound, must name storage the write can land in: a binding, a field chain, a scalar index, or a dereference. Anything else is rejected at check, `the left side of an assignment must be a place: a name, a field, an index, or a dereference`. A range index in particular is not a place: `xs[0..2]` mints an rvalue slice, so `xs[0..2] = [7, 8]` rejects; write the elements through scalar indexes instead.
 
 ### Compound assignment
 
@@ -536,6 +578,23 @@ The leak and double free counters report at exit. These are debug build diagnost
 ### Safety
 
 0.1.0 does no ownership tracking, so freeing is manual. `defer` and arenas keep cleanup deterministic, and the debug allocator catches mistakes in tests. Generational references for sound use after free and double free detection arrive in 0.2.0. A generation token rides inside each reference and is checked at dereference, so it survives copies.
+
+### Runtime Faults
+
+Four runtime checks abort the process by name rather than corrupting memory or returning a wrong value: an out of bounds array, slice, or string index; a null pointer dereference; a stale or freed pointer dereference, the generational check; and a dynamic shift amount outside its operand's width. Since 1.2.0 each one names the source location of the statement that raised it.
+
+| Check                         | Message                                                |
+| ------------------------------ | ------------------------------------------------------ |
+| Bounds                        | `fatal: index out of bounds at path:line`              |
+| Null dereference               | `fatal: dereference of a null pointer at path:line`     |
+| Generational (use after free)  | `fatal: use of a freed or stale pointer at path:line`   |
+| Shift                          | `fatal: shift amount out of range at path:line`         |
+
+```text
+fatal: index out of bounds at examples/x.dusk:7
+```
+
+Codegen interns one `"path:line"` constant per fault site at compile time, computed from the merged source's own line table, and passes it to the runtime function that raises the fault. The location names the statement that raised it, the same one however deep the expression underneath it that actually triggers the check, and holds the same way inside an async body, a lambda, or a nested loop as it does at a function's top level. Every other named fault, the async and task family included, still aborts with a bare message and no location.
 
 ### Escaping Value Lifetimes
 
@@ -1332,6 +1391,11 @@ Builtins are always available regardless of paradigm directives unless noted.
 | println   | println(...) -> void                    | print to stdout with a newline                                    |
 | printerr  | printerr(...) -> void                   | println to stderr                                                 |
 | sizeof    | sizeof(T) -> int64                      | size of a type in bytes at compile time                           |
+| int8      | int8(v) -> int8                         | width cast, truncating or extending to int8                       |
+| int16     | int16(v) -> int16                       | width cast, truncating or extending to int16                      |
+| int32     | int32(v) -> int32                       | width cast, truncating or extending to int32                      |
+| int64     | int64(v) -> int64                       | width cast, truncating or extending to int64                      |
+| char      | char(v) -> char                         | width cast, truncating or extending to char                       |
 | spawn     | spawn(f: () -> void) -> (thread, error) | start an OS thread running a lambda literal                       |
 | join      | join(t: thread) -> error                | wait for a thread; retires the handle                             |
 | submit    | submit(f: () -> void) -> error          | queue a lambda literal on the global thread pool                  |
@@ -1340,6 +1404,21 @@ Builtins are always available regardless of paradigm directives unless noted.
 `alloc` and `free` resolve to the in scope allocator. See [Memory Management](#memory-management).
 
 `async func` and `await` are keywords, not builtins, added in 0.4.2 and gated behind no paradigm, the same as `spawn` and `submit`. `async func` marks a function's task frame and state machine transform; `await` suspends inside one, in exactly the four statement positions [the async chapter](#threads-and-the-memory-model) names. `async_run` is a builtin like `alloc`, callable from any file regardless of paradigm, but only outside an async body; see the async chapter for its rules and the whole keyword layer.
+
+### Width Casts
+
+Added in 1.2.0. `int8(v)`, `int16(v)`, `int32(v)`, `int64(v)`, and `char(v)` convert an integer family value, an `int` of any width, a `char`, a `rune`, or a `bool`, to the named width explicitly, through the same coercion an annotated widening or narrowing assignment already uses: two's complement truncation going down, sign or zero extension going up.
+
+```text
+int32(300)   // 300, fits
+int8(300)    // 44, truncated: 300 mod 256 read as signed
+char(101)    // 'e'
+int64(x)     // widens an int8 x, sign extending if x is negative
+```
+
+A float operand rejects rather than truncating toward zero the way a C style cast would, `a width cast takes an integer value; float64 does not cast`, and a pointer keeps the same reject. Each takes exactly one argument; any other count is `<name>(v) takes exactly one value`.
+
+The five names are reserved as builtin call forms: a function cannot be declared with one of them, `'int32' is a primitive type name; a function cannot take it`, since a call to the name would otherwise be ambiguous between the cast and the function. A variable, a struct field, or any other binding may still use one of the names; only a function declaration collides.
 
 ### Functional Builtins (require `@paradigm functional`)
 
@@ -1353,14 +1432,32 @@ Builtins are always available regardless of paradigm directives unless noted.
 
 ### Procedural Builtins (require `@paradigm procedural`)
 
-| Builtin or Keyword | Description                 |
-| ------------------ | --------------------------- |
-| for                | for loop                    |
-| while              | while loop                  |
-| do while           | do while loop               |
-| mut                | declares a mutable variable |
+| Builtin or Keyword | Description                       |
+| ------------------ | ---------------------------------- |
+| for                | for loop                           |
+| while              | while loop                         |
+| do while           | do while loop                      |
+| mut                | declares a mutable variable        |
+| break              | jumps past the innermost loop      |
+| continue           | jumps to the innermost loop's next iteration |
 
 `for x in xs` takes an array, a slice, or a string. Over a string it iterates the bytes as `char`, front to back, with the string's length read once by a NUL scan at loop entry rather than rechecked each iteration. A source with no element type is rejected at check, `cannot iterate <type>; a for loop takes an array, a slice, or a string`, rather than being accepted and failing to link.
+
+`break` and `continue`, added in 1.2.0, are reserved keywords rather than plain identifiers, gated to `@paradigm procedural` the same as the loop forms themselves. Each binds to the innermost enclosing loop, a `while` or a `for`: `break` exits it immediately, and `continue` skips the rest of the current body and jumps straight to the next iteration. In a `for` loop, `continue` jumps to the loop's own index increment rather than back to the top of the body, so the index still advances on a skipped iteration instead of the loop stalling on the same element. A lambda body is its own function boundary and lends neither statement a target, even when the lambda executes from inside an enclosing loop: a `break` or `continue` written inside a lambda's own body is checked against that lambda's nesting, not the loop the lambda happens to run under. Used outside any loop, each is a compile error naming the rule: `break is only legal inside a loop`, `continue is only legal inside a loop`.
+
+```text
+mut i: int64 = 0
+while true {
+    if i == 3 { break }
+    i = i + 1
+}
+
+for x in xs {
+    if x < 0 { continue }   // skip, but the loop's own index still advances
+    if x > 100 { break }
+    sum = sum + x
+}
+```
 
 ### Display Interface
 

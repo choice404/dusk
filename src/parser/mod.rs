@@ -777,6 +777,16 @@ impl Parser {
             TokenKind::Kw(Keyword::For) => Some(Stmt::For(self.for_())),
             TokenKind::Kw(Keyword::Match) => Some(Stmt::Match(self.match_())),
             TokenKind::Kw(Keyword::Do) => Some(self.do_stmt()),
+            TokenKind::Kw(Keyword::Break) => {
+                let sp = self.span();
+                self.bump();
+                Some(Stmt::Break(sp))
+            }
+            TokenKind::Kw(Keyword::Continue) => {
+                let sp = self.span();
+                self.bump();
+                Some(Stmt::Continue(sp))
+            }
             TokenKind::Kw(Keyword::Mut) => {
                 self.bump();
                 Some(Stmt::Let(self.let_rest(true, false)))
