@@ -42,6 +42,15 @@ cd "$repo_root"
 work="$repo_root/target/bootstrap-pyramid"
 mkdir -p "$work/bin" "$work/ll" "$work/logs" "$work/examples/stage1" "$work/examples/stage2"
 
+# The seed is copied aside before anything builds. The compiler's own output
+# path is target/dusk-out/dusk, so a seed handed in at that path would be
+# overwritten by stage 1's build, and the runner below would then be built by
+# stage1 rather than the seed. The copy keeps the trust ordering honest for
+# any seed path.
+cp "$stage0" "$work/bin/stage0"
+chmod +x "$work/bin/stage0"
+stage0="$work/bin/stage0"
+
 stage1="$work/bin/stage1"
 stage2="$work/bin/stage2"
 stage3="$work/bin/stage3"
@@ -96,7 +105,13 @@ build_compiler_stage() {
     emitted_ll="$repo_root/target/dusk-out/$stem.ll"
 
     echo "$label"
-    if ! DUSK_HOME="$repo_root" "$builder" build "$compiler_root"; then
+    # Every self build runs caged: 24GB address space, a CPU ceiling, lowest
+    # priority, an outer wall clock timeout.
+    if ! DUSK_HOME="$repo_root" timeout 600 bash -c '
+        ulimit -v 25165824
+        ulimit -t 900
+        exec nice -n 19 "$0" build "$1"
+    ' "$builder" "$compiler_root"; then
         fail "$label failed while building $compiler_root"
     fi
 
@@ -131,7 +146,7 @@ stage_supports_build() {
 
     cat "$stdout_path" "$stderr_path" >"$combined_path"
 
-    if [[ "$status" -ne 0 ]] && grep -Fq "dusk1: unknown command" "$combined_path"; then
+    if [[ "$status" -ne 0 ]] && grep -Eq "dusk1?: unknown command" "$combined_path"; then
         return 1
     fi
 
@@ -213,10 +228,10 @@ build_compiler_stage "$stage0" "$stage1" "$stage1_ll" "stage 1: stage0 builds th
 print_stage_sha256 "stage1" "$stage1" "$stage1_ll"
 
 if ! stage_supports_build "$stage1"; then
-    echo "stage 1 check: SKIP (dusk1 has no build command yet)"
-    echo "stage 2: SKIP (dusk1 has no build command yet)"
-    echo "stage 3: SKIP (dusk1 has no build command yet)"
-    echo "stage 2 check: SKIP (dusk1 has no build command yet)"
+    echo "stage 1 check: SKIP (stage1 has no build command)"
+    echo "stage 2: SKIP (stage1 has no build command)"
+    echo "stage 3: SKIP (stage1 has no build command)"
+    echo "stage 2 check: SKIP (stage1 has no build command)"
     exit 0
 fi
 
@@ -240,14 +255,17 @@ fi
 stage2_t0=$(date +%s)
 build_compiler_stage "$stage1" "$stage2" "$stage2_ll" "stage 2: stage1 builds the dusk compiler source" &
 stage2_build_pid=$!
+descendants() {
+    local p
+    for p in $(pgrep -P "$1" 2>/dev/null); do
+        echo "$p"
+        descendants "$p"
+    done
+}
 stage2_peak_kb=0
 while kill -0 "$stage2_build_pid" 2>/dev/null; do
-    for child in $(pgrep -P "$stage2_build_pid" 2>/dev/null) "$stage2_build_pid"; do
-        rss=$(awk '/VmRSS/ {print $2}' "/proc/$child/status" 2>/dev/null || echo 0)
-        for pid2 in $(pgrep -P "$child" 2>/dev/null); do
-            rss2=$(awk '/VmRSS/ {print $2}' "/proc/$pid2/status" 2>/dev/null || echo 0)
-            if [[ "${rss2:-0}" -gt "$rss" ]]; then rss=$rss2; fi
-        done
+    for pid in "$stage2_build_pid" $(descendants "$stage2_build_pid"); do
+        rss=$(awk '/VmRSS/ {print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)
         if [[ "${rss:-0}" -gt "$stage2_peak_kb" ]]; then stage2_peak_kb=$rss; fi
     done
     sleep 2

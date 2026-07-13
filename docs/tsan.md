@@ -10,7 +10,7 @@ files under `clang -fsanitize=thread`, then runs the result in a loop.
 Emit the `.ll` for a golden with `dusk build`:
 
 ```sh
-cargo run --bin dusk -- build examples/reactorsum.dusk
+DUSK_HOME=$PWD target/dusk-out/dusk build examples/reactorsum.dusk
 ```
 
 This writes `target/dusk-out/reactorsum.ll` beside the native binary.

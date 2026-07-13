@@ -17,7 +17,10 @@ The same toolchain the compiler needs everywhere.
 
 - `clang` and LLVM 22.x on the path. The textual IR targets one LLVM major
   version, so the major must match exactly.
-- A Rust toolchain able to build the compiler crate.
+- A working `dusk` binary. `tools/bootstrap.sh` stands one up from a release
+  artifact, but the `dusk.ll.xz` IR pins x86_64 Linux, so a BSD or macOS host
+  starts from a binary already built for it, or walks the release tags forward
+  from the archived Rust seed as the README's audit path describes.
 
 On macOS the system `clang` may not be LLVM 22.x. Install the matching LLVM,
 for example through Homebrew, and put its `clang` first on the path before
@@ -31,7 +34,7 @@ kqueue translation unit for the first time, so a compile error here is the
 first thing to find and fix.
 
 ```sh
-cargo build --release
+DUSK_HOME=$PWD target/dusk-out/dusk build compiler/dusk.dusk
 ```
 
 The platform guard in `reactor_kqueue.c` selects the kqueue body on
@@ -47,7 +50,7 @@ Each golden below compiles and runs a real program through the built `dusk`
 binary. Run them one at a time so a failure names itself.
 
 ```sh
-cargo test --test examples <name>
+DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest --filter <name>
 ```
 
 Run the reactor family first. These are the arm, fire, gate, and lifecycle
@@ -83,7 +86,7 @@ A run that runs the whole suite at once is the final check once the families
 above pass individually.
 
 ```sh
-cargo test --release
+DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest
 ```
 
 ## ThreadSanitizer

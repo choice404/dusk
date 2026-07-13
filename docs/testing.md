@@ -5,9 +5,9 @@
 `testrun` is a golden test runner for dusk, written in dusk. It reads a manifest
 of test records, runs each one through a compiler you name, and checks the
 program's stdout, stderr, and exit code against what the record expects. It is the
-manifest driven counterpart to the Rust golden suite in `tests/examples.rs`: the
-Rust suite hard codes each case as a function, and `testrun` reads the same kind
-of cases out of a flat text file so a case is data, not code.
+manifest driven successor to the golden suite that shipped with the retired Rust
+implementation: that suite hard coded each case as a function, and `testrun`
+reads the same kind of cases out of a flat text file so a case is data, not code.
 
 The runner is itself a small dusk program under `tests/runner/`, so it doubles as
 a working example of the language surface it exercises: records live in a growable
@@ -20,7 +20,7 @@ Build the runner with the compiler, the same way you build any dusk program. The
 binary takes the stem of its root file, so it lands at `target/dusk-out/testrun`.
 
 ```sh
-./target/release/dusk build tests/runner/testrun.dusk
+./target/dusk-out/dusk build tests/runner/testrun.dusk
 ```
 
 Run it against a manifest. The compiler under test comes from `--bin` or the
@@ -30,7 +30,7 @@ and run from the repository root, since every path in a manifest is relative to
 it.
 
 ```sh
-DUSK_HOME=$PWD DUSK_BIN=target/release/dusk target/dusk-out/testrun tests/goldens.manifest
+DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest
 ```
 
 The command line is:

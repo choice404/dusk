@@ -1,55 +1,52 @@
 # dusk
 
-Dusk is a small systems language that compiles to native code through textual LLVM IR. Every file picks a paradigm with `@paradigm procedural`, `functional`, or `oop`, and that choice unlocks the matching builtins. Values are immutable by default, memory is explicit, and errors are values you handle. The compiler is written in Rust with zero dependencies and links each program against a small C runtime.
+Dusk is a small systems language that compiles to native code through textual LLVM IR. Every file picks a paradigm with `@paradigm procedural`, `functional`, or `oop`, and that choice unlocks the matching builtins. Values are immutable by default, memory is explicit, and errors are values you handle. The compiler is written in dusk itself, `compiler/*.dusk`, and links each program against a small C runtime.
 
-Dawn is an accompanying package tool. A Dusk package is a git repository, inspired by the Go style of importing libraries and modules.
+Dawn is an accompanying package tool, also written in dusk. A Dusk package is a git repository, inspired by the Go style of importing libraries and modules.
 
 ## Requirements
 
-- Rust stable and Cargo.
 - clang and LLVM 22.x on your path. The textual IR targets one LLVM major version.
+- coreutils' `timeout`, used to cage a self build with a wall clock limit.
 
 ## Install
 
 ```sh
-# from crates.io
-cargo install dusk-lang
-
 # on Arch Linux, from the AUR, builds the latest main
 paru -S dusk-lang-git
 ```
 
-Both install the `dusk` and `dawn` binaries. The compiler finds its standard library and C runtime beside itself, in the share directory for a packaged install or inside the cargo registry checkout for `cargo install`, and the `DUSK_HOME` environment variable overrides the search when you want a binary to use a different toolchain tree, such as a source checkout.
+Installs the `dusk` and `dawn` binaries beside the standard library and C runtime they need, so a packaged install needs no `DUSK_HOME` override at all. The old Rust implementation is frozen and archived at [dusk-rust](https://github.com/choice404/dusk-rust) rather than installable from here; the AUR package and the bootstrap below both build the canonical compiler, the one written in dusk itself.
 
-The canonical dusk compiler is `compiler/main.dusk`, written in dusk itself and built by the seed compiler above. Run directly, it resolves `lib/` and `runtime/` through the same shape of search the seed does: `DUSK_HOME`, checked against the specific asset being asked for, then the directory the running executable sits in, then a `share/dusk-lang` directory one level above that, then the directory `argv[0]` names, and finally the working directory as a source checkout fallback. A compiler installed at `prefix/bin` beside `prefix/share/dusk-lang` finds its own assets with no `DUSK_HOME` set at all, the same as a packaged install of the seed. `DUSK_HOME` still overrides the search, point it at a checkout root when running the canonical compiler standalone rather than relying on the working directory fallback.
+`compiler/dusk.dusk` resolves `lib/` and `runtime/` through a five step search: `DUSK_HOME`, checked against the specific asset being asked for, then the directory the running executable sits in, then a `share/dusk-lang` directory one level above that, then the directory `argv[0]` names, and finally the working directory as a source checkout fallback. A compiler installed at `prefix/bin` beside `prefix/share/dusk-lang`, the AUR package's layout, finds its own assets with no `DUSK_HOME` set at all. Point `DUSK_HOME` at a checkout root when running the compiler standalone against a different toolchain tree, such as the bootstrap below.
 
-## Try it without building a binary
+## Bootstrap
 
-`cargo run` compiles the toolchain on first use and runs it in one step, so you never manage a binary yourself. Pick the binary with `--bin`, then pass arguments after `--`.
-
-```sh
-# compile and run an example program
-cargo run --bin dusk -- run examples/app.dusk
-
-# type check only, or print the version
-cargo run --bin dusk -- check examples/m9.dusk
-cargo run --bin dusk -- version
-
-# run the test suite, unit tests plus golden program tests
-cargo test
-```
-
-The golden cases also run through `testrun`, a dusk native runner that reads the same cases out of a flat manifest instead of a hard coded Rust function; see [docs/testing.md](docs/testing.md) for the manifest format and the command line. Both paths currently exist side by side.
-
-## Build the binaries
-
-For standalone `dusk` and `dawn` binaries, build once and call them directly. They land in `target/release`.
+Each release tag carries three artifacts: the `dusk` binary itself, `dusk.ll.xz`, the compiler's own LLVM IR compressed, and a `sha256sums` file whose IR hash is the one the release's stage ladder printed. Either artifact stands up a compiler on a machine that starts with none.
 
 ```sh
-cargo build --release
-./target/release/dusk run examples/app.dusk
-./target/release/dusk version
+# from the binary artifact
+tools/bootstrap.sh dusk
+
+# trusting only text: link the IR, then the seed rebuilds from source
+tools/bootstrap.sh dusk.ll.xz
 ```
+
+The binary path trusts the binary outright. The IR path trusts only text plus `clang`: the IR links against the C runtime into a throwaway seed, and the seed rebuilds the compiler from source. Both paths land a fresh compiler at `target/dusk-out/dusk`, built from this tree's source. The IR pins x86_64 linux, so on another platform, or to trust neither artifact, take the audit path instead: clone [dusk-rust](https://github.com/choice404/dusk-rust), `cargo build --release` the Rust compiler it froze at `v1.3.0`, build `compiler/main.dusk` there with it, and hand that binary to `tools/ratchet.sh` here. Every tag in the archive carries the full Rust tree, so any earlier release re-derives the same way, from its own tag's Rust seed rather than by chaining binaries across releases.
+
+## Build and test
+
+```sh
+tools/bootstrap.sh <artifact>          # first compiler on a fresh machine
+target/dusk-out/dusk run examples/app.dusk
+DUSK_HOME=$PWD target/dusk-out/dusk build tests/runner/testrun.dusk
+DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest
+tools/testrun-selftest.sh              # prove the runner itself
+tools/ratchet.sh <prev-release-dusk>   # release gate: previous release builds this source
+tools/pyramid.sh <seed> compiler/dusk.dusk   # full stage ladder
+```
+
+`tools/bootstrap.sh` stands up the first compiler; everything after it runs standalone. `testrun`, built like any other dusk program, reads `tests/goldens.manifest`'s flat records and runs each one through the compiler named by `DUSK_BIN`, checking stdout, stderr, and exit code; see [docs/testing.md](docs/testing.md) for the manifest format. `tools/testrun-selftest.sh` proves the runner itself against a manifest with deliberate failures baked in. `tools/ratchet.sh` is the release gate: it hands a named previous release binary the current compiler source, then the current test runner source, and requires the golden suite to pass against what that binary produced, the proof that a machine holding only the previous release can reach this one from source alone. `tools/pyramid.sh` climbs the full stage ladder from a seed binary and this release's compiler root: the seed builds stage1, stage1 builds stage2, stage2 builds stage3, and the script checks that stage2's compiler IR collapses onto stage1's and that stage3 reaches the same fixpoint stage2 did.
 
 The `dusk` binary has thirteen commands. `lex`, `scan`, `parse`, `load`, `desugar`, `check`, `mono`, and `esc` each stop the pipeline at that stage and dump its output, for inspecting a single pass; `build`, `ir`, and `run` compile, and `ir` prints the generated LLVM IR straight to stdout with no `clang` invocation; `demo` builds and runs a hardcoded IR spine as a toolchain smoke test, and `version` prints the compiler version. `dusk run` forwards any trailing arguments to the program, so an argc and argv main sees them.
 
@@ -93,12 +90,8 @@ An import is a stdlib or local dotted path, or a quoted git path.
 The first three segments of a git path, `host/user/repo`, name the repository. The rest names a module inside it. dawn clones each repository into a cache, either `$DAWN_CACHE` or `~/.dawn/cache`, and the dusk loader resolves git imports from there. dawn shells out to the system `git`, so git has to be on your path to fetch.
 
 ```sh
-# without building a binary
-cargo run --bin dawn -- get examples/app.dusk    # clone the git packages a file imports
-cargo run --bin dawn -- run examples/app.dusk    # fetch, then compile and run
-
-# or with the built binary
-./target/release/dawn run examples/app.dusk
+target/dusk-out/dawn get examples/app.dusk    # clone the git packages a file imports
+target/dusk-out/dawn run examples/app.dusk    # fetch, then compile and run
 ```
 
 The `dawn` binary has four commands. They are `get`, `build`, `run`, and `version`. Currently an import resolves against the latest clone in the cache. Version pinning, a lock file, and fetching across a dependency graph come in a later release.
@@ -106,6 +99,8 @@ The `dawn` binary has four commands. They are `get`, `build`, `run`, and `versio
 ## Status
 
 See [CHANGELOG.md](CHANGELOG.md) for the release by release history.
+
+1.3.1. The repository is pure dusk. The Rust implementation that seeded the bootstrap is archived at [dusk-rust](https://github.com/choice404/dusk-rust), frozen at the 1.2.0 surface, and everything here, the compiler, dawn, and the test runner, builds with the compiler itself. Fresh machines bootstrap from release artifacts through `tools/bootstrap.sh`, the golden suite runs through `testrun`, and the `v1.0.0` seed pin with the whole tag history stays reachable in both repositories.
 
 1.0.0. The compiler runs the whole pipeline. It lexes, parses, resolves names, type checks, monomorphizes, and emits code, backed by a golden and unit test suite. The standard library and the multi module sample both build and run. The language surface froze for the bootstrap at 0.5.4, and the freeze held through the whole 0.6.x to 0.9.x rewrite: a program that compiled against that surface keeps compiling today with no source change. 1.0.0 declares the bootstrap done and opens the surface back up; a release past it is free to add to the language again.
 

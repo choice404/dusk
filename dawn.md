@@ -32,6 +32,16 @@ dawn version
 
 `build` and `run` are wrappers that fetch every imported package, then hand the program to the dusk compiler. You can also fetch with `dawn get` and then call `dusk` directly.
 
+## Building dawn
+
+`compiler/dawn.dusk` is a second root over the compiler's own tree, importing the loader, the driver, and the toolchain search directly, so a package build walks the identical front end, sema, mono, and codegen pipeline `dusk` itself does. `dusk` builds it like any other dusk program.
+
+```sh
+DUSK_HOME=$PWD target/dusk-out/dusk build compiler/dawn.dusk
+```
+
+This produces `target/dusk-out/dawn`. A packaged install places `dawn` beside `dusk` in the same `bin` directory, so it resolves `lib/` and `runtime/` the same way `dusk` does, with no separate `DUSK_HOME` of its own.
+
 ## The cache
 
 Dawn clones each repository into a content cache, and the dusk loader resolves git imports from there. The cache root is `$DAWN_CACHE`, or `~/.dawn/cache` when that is unset. The layout mirrors the import path.

@@ -209,7 +209,7 @@ pipeline stage. For example, a stage-N compiler and the stage-(N-1) compiler
 that built it should produce identical dumps for each source file.
 
 ```sh
-stage_a=target/release/dusk
+stage_a=target/dusk-out/dusk
 stage_b=target/bootstrap/stage1/dusk
 
 "$stage_a" lex examples/app.dusk > /tmp/a.lex
@@ -354,28 +354,10 @@ goes wrong.
 
 ## The Sema Corpus
 
-`tests/sema_corpus/` is a fixed corpus of `.dusk` programs, one file per
-case, split into subdirectories, `summary/`, `typeck/`, and `mono/` at the
-time of writing, each aimed at one part of semantic analysis, alongside a
-single `manifest.tsv` recording what `dusk check` does to every file in the
-corpus.
-
-The manifest is three tab separated columns, one row per file, in the
-corpus's own sorted path order:
-
-```text
-{path}\t{exit}\t{first_diag_prefix}
-```
-
-`{path}` is the file's path relative to the repository root. `{exit}` is the
-exit code `dusk check` produced for that file, `0` or `1`. `{first_diag_prefix}`
-is the same `{path}: {line}:` prefix the `check` differential contract gates
-on above, taken from the first `error:` line in that run's stderr; a file
-that exits `0` has no such line, so its third column is empty.
-
-The manifest is generated, never hand edited: `tools/sema_manifest.sh
-<binary>` runs `<binary> check` over every file in the corpus and rewrites
-`manifest.tsv` from scratch. Adding a case, or changing an existing case's
-expected outcome on purpose, goes through the script, not a manual edit to
-the tsv; nothing reads a hand edited row as authoritative, and the next run
-of the script overwrites it anyway, so a hand edit never actually holds.
+The bootstrap era kept a fixed reject corpus, `tests/sema_corpus/`, with a
+generated `manifest.tsv` recording every file's `dusk check` verdict and
+first diagnostic prefix, maintained by `tools/sema_manifest.sh`. Both
+retired with the Rust tree and are preserved in the dusk-rust archive, where
+the script still runs against any compiler binary. In this repository, the
+same class of coverage lives in `tests/goldens.manifest` as `check_fail` and
+`check_ok` records.

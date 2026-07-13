@@ -1,6 +1,6 @@
 // home: locates the directory the toolchain ships beside the compiler, the one
 // that holds runtime/ (the C runtime sources) and lib/ (the standard library).
-// This mirrors the stage0 resolver in src/home.rs: the DUSK_HOME environment
+// This mirrors the archived Rust resolver: the DUSK_HOME environment
 // variable wins when it points at a real toolchain, then the directory of the
 // running executable, then the share directory of a packaged install one level
 // above the executable's bin/, then the directory argv[0] names, and finally
@@ -79,7 +79,7 @@ func dir_of(path: string) -> string {
 
 // Whether base holds the named toolchain asset directory, the test each
 // candidate must pass to be chosen. A shell dir test on base/name is the same
-// check src/home.rs makes with is_dir, without reading any file into memory.
+// check the archived Rust resolver makes with is_dir, without reading any file into memory.
 // run returns the child's exit code, zero when the directory exists.
 func has_asset(base: string, name: string) -> bool {
     rt: string = path_join(base, name)
@@ -99,7 +99,7 @@ func has_asset(base: string, name: string) -> bool {
 
 // The absolute path of the running executable, or the empty string when the
 // platform cannot answer. The runtime shim reads /proc/self/exe on Linux and
-// asks the loader on Apple, the same fact src/home.rs gets from current_exe.
+// asks the loader on Apple, the same fact the archived Rust resolver gets from current_exe.
 func exe_path() -> string {
     buf: *raw char = alloc_bytes(4097)
     n: int64 = cool_exe_path(buf, 4096)
@@ -114,7 +114,7 @@ func exe_path() -> string {
 
 // Resolves the toolchain home for a given argv[0] and the asset it needs.
 // Each candidate is validated against the asset it will actually serve, the
-// way src/home.rs checks each requested directory independently: DUSK_HOME
+// way the archived Rust resolver checks each requested directory independently: DUSK_HOME
 // may hold runtime/ but not lib/, and the two lookups must not conflate.
 // After DUSK_HOME the walk follows the executable: the directory it sits in
 // covers a source checkout running target/dusk-out/main, and the share

@@ -91,7 +91,7 @@ diag_header_multiset() {
 count=0
 skipped=0
 while IFS= read -r -d '' file; do
-    # dusk1 now carries the full sema verdicts for check, mono, and esc: the
+    # The dusk compiler carries the full sema verdicts for check, mono, and esc: the
     # paradigm gate (the impl-requires-oop fixture), the surface type pass, mono,
     # and the ground double pass that rejects the generic-do width class. Every
     # corpus file is compared on all three modes with no exclusions.

@@ -1,0 +1,131 @@
+// dusk: the command line entry for the dusk compiler, written in dusk. The
+// full pipeline lives here: lex through codegen, clang linking, and the dump
+// commands that expose each pass. Every message that is not a built program's
+// own output goes to stderr with a non zero exit, so a script can tell a
+// toolchain error apart from a clean run.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import driver
+@import cli
+
+// The version string the version command prints.
+func version_string() -> string {
+    return "dusk 1.3.1"
+}
+
+// Prints the command list to stderr, where every message that is not a built
+// program's own output goes.
+func usage() -> void {
+    printerr("usage: dusk <command> [file]")
+    printerr("commands:")
+    printerr("  version       print the compiler version")
+    printerr("  demo          emit the spine IR, link it with clang, and run it")
+    printerr("  lex <file>    dump the token stream of a source file")
+    printerr("  scan <file>   dump the paradigm and import directives of a file")
+    printerr("  parse <file>  lex + parse, dump the AST")
+    printerr("  load <file>   load imports, dump the merged AST")
+    printerr("  desugar <file> load + desugar, dump the merged AST")
+    printerr("  check <file>  type check a source file and report diagnostics")
+    printerr("  mono <file>   check, then dump the mono-expanded ground module")
+    printerr("  ir <file>     lower the mono-expanded module to LLVM IR")
+    printerr("  build <file>  lower, link, and write target/dusk-out")
+    printerr("  run <file>    build and run, forwarding trailing args")
+    printerr("  esc <file>    dump native escape summaries")
+}
+
+// Dispatches a command that takes a source file argument, reporting a usage error
+// when the file is missing.
+func run_file_cmd(cmd: string, argv: string[]) -> int32 {
+    if argv.len < 3 {
+        printerr("dusk: this command needs a file argument")
+        usage()
+        return 1
+    }
+    path: string = argv[2]
+    if str_eq(cmd, "lex") {
+        return cmd_lex(path)
+    }
+    if str_eq(cmd, "parse") {
+        return cmd_parse(path)
+    }
+    if str_eq(cmd, "load") {
+        return cmd_load(path, argv[0])
+    }
+    if str_eq(cmd, "desugar") {
+        return cmd_desugar(path, argv[0])
+    }
+    if str_eq(cmd, "check") {
+        return cmd_check(path, argv[0])
+    }
+    if str_eq(cmd, "mono") {
+        return cmd_mono(path, argv[0])
+    }
+    if str_eq(cmd, "ir") {
+        return cmd_ir(path, argv[0])
+    }
+    if str_eq(cmd, "build") {
+        return build_module(argv[0], path, false, argv, 3)
+    }
+    if str_eq(cmd, "run") {
+        return build_module(argv[0], path, true, argv, 3)
+    }
+    if str_eq(cmd, "esc") {
+        return cmd_esc(path, argv[0])
+    }
+    return cmd_scan(path)
+}
+
+func main(argc: int32, argv: string[]) -> int32 {
+    if argv.len < 2 {
+        printerr("dusk: no command given")
+        usage()
+        return 1
+    }
+    cmd: string = argv[1]
+    if str_eq(cmd, "version") {
+        println(version_string())
+        return 0
+    }
+    if str_eq(cmd, "demo") {
+        return run_demo(argv[0])
+    }
+    if str_eq(cmd, "lex") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "scan") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "parse") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "load") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "desugar") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "check") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "mono") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "ir") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "build") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "run") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "esc") {
+        return run_file_cmd(cmd, argv)
+    }
+    printerr("dusk: unknown command")
+    usage()
+    return 1
+}

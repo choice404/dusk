@@ -13,9 +13,9 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-DUSK="${DUSK:-$ROOT/target/release/dusk}"
+DUSK="${DUSK:-$ROOT/target/dusk-out/dusk}"
 if [ ! -x "$DUSK" ]; then
-    echo "selftest: no compiler at $DUSK; run 'cargo build --release' first" >&2
+    echo "selftest: no compiler at $DUSK; build one first (see tools/bootstrap.sh) or set DUSK" >&2
     exit 1
 fi
 
