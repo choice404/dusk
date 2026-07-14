@@ -182,3 +182,38 @@ export func parse_params(p: *Parser) -> *Vector<int64> {
     p_expect(p, k_rparen())
     return ps
 }
+
+// Parses a foreign function's parameter list, which may end in a bare `...` that
+// marks the function variadic in the C sense. The trailing bool is that marker.
+// A `...` in any position but the last is rejected, since a variadic tail must
+// close the list; the ordinary parse_params path never accepts `...`, so a plain
+// dusk function cannot be variadic.
+export func parse_foreign_params(p: *Parser) -> (*Vector<int64>, bool) {
+    ps: *Vector<int64> = alloc(vec_new())
+    mut variadic: bool = false
+    p_expect(p, k_lparen())
+    if !p_at(p, k_rparen()) {
+        mut reading: bool = true
+        while reading {
+            if p_at(p, k_ellipsis()) {
+                p_bump(p)
+                variadic = true
+                reading = false
+                if !p_at(p, k_rparen()) {
+                    p_error(p, "'...' must be the last parameter of a variadic foreign function")
+                }
+            } else {
+                is_using: bool = p_eat_kw(p, "using")
+                name: int64 = p_ident(p)
+                p_expect(p, k_colon())
+                ty: int64 = parse_type(p)
+                vec_push(ps, ast_param(p_ast(p), is_using, name, ty))
+                if !p_eat(p, k_comma()) {
+                    reading = false
+                }
+            }
+        }
+    }
+    p_expect(p, k_rparen())
+    return (ps, variadic)
+}

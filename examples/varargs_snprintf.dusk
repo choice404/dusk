@@ -1,0 +1,32 @@
+@paradigm procedural
+
+@import std.string
+
+// snprintf formats into a caller supplied buffer. The buffer and size are fixed
+// parameters; the value beyond the format is a variadic int64 promoted to a C
+// long. The formatted bytes are read back through cstr and printed.
+foreign "C" {
+    func snprintf(buf: *raw char, size: int64, fmt: *raw char, ...) -> int32
+}
+
+func to_cbuf(s: string) -> *raw char {
+    n: int64 = str_len(s)
+    buf: *raw char = alloc_bytes(n + 1)
+    mut i: int64 = 0
+    while i < n {
+        buf[i] = s[i]
+        i = i + 1
+    }
+    buf[n] = 0
+    return buf
+}
+
+func main() -> int64 {
+    fmt: *raw char = to_cbuf("sum=%ld")
+    out: *raw char = alloc_bytes(64)
+    snprintf(out, 64, fmt, 42)
+    println(cstr(out))
+    free(fmt)
+    free(out)
+    return 0
+}

@@ -43,6 +43,13 @@ func parse_module_head(p: *Parser) -> void {
                 vec_push((*p_ast(p)).paradigms, p_ident(p))
             } else if str_eq(d, "import") {
                 vec_push((*p_ast(p)).imports, parse_import_path(p))
+            } else if str_eq(d, "link") || str_eq(d, "csource") {
+                // The prescan owns the @link and @csource values, which the
+                // loader threads to the linker; the parser only steps over the
+                // string argument so the module head parses cleanly.
+                if p_at(p, k_str()) {
+                    p_bump(p)
+                }
             } else {
                 p_error(p, "unknown directive")
             }
@@ -292,11 +299,11 @@ func parse_foreign_item(p: *Parser) -> int64 {
             before: int64 = (*p).pos
             p_expect_kw(p, "func")
             name: int64 = p_ident(p)
-            params: *Vector<int64> = parse_params(p)
+            params, variadic := parse_foreign_params(p)
             p_expect(p, k_arrow())
             ret: int64 = parse_type(p)
             p_eat(p, k_semi())
-            vec_push(funcs, ast_foreign_func(p_ast(p), name, params, ret))
+            vec_push(funcs, ast_foreign_func(p_ast(p), name, params, ret, variadic))
             p_guard_progress(p, before, "unexpected token in foreign block")
         }
     }

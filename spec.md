@@ -1,14 +1,14 @@
 # dusk Language Specification
 
-## Status, the 1.2.0 surface
+## Status, the 1.4.0 surface
 
-This is the language reference for dusk. It describes the language as of 1.2.0: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, and Unicode strings with the `rune` primitive. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
+This is the language reference for dusk. It describes the language as of 1.4.0: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, Unicode strings with the `rune` primitive, and a foreign boundary that now reaches variadic C functions and third party libraries. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
 
 ### The bootstrap freeze
 
 The surface described in this spec was frozen as of 0.5.4 for the bootstrap. The releases from 0.6.x through 0.9.4 changed the compiler, not the language, as dusk was rewritten in itself, so a program that compiled against this spec at 0.5.4 kept compiling across that whole line without a source change. Three kinds of work stayed live during the freeze: diagnostics could improve, the standard library could grow, and a soundness fix could land, since none of those change the surface a correct program relies on.
 
-The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface 1.0.0 carried forward is unchanged start to finish across the whole line that held the freeze. 1.1.0 is the first release to add to the surface since: a `char`, a `char[N]`, and a `char[]` are now printable text, a string literal initializes a `char[N]` directly, and a `for` loop and a range slice both treat a string's bytes with the same discipline described in [Strings](#strings), [Arrays and Slices](#arrays-and-slices), and the [Builtins](#builtins) chapter. 1.2.0 keeps adding to it: `&&` and `||` now short circuit instead of evaluating both operands unconditionally, `==` and `!=` on a string compare content instead of pointer identity while comparison closes on a named list of comparable types, `+` concatenates two strings, a width cast converts an integer explicitly, `break` and `continue` are new statement keywords, and a runtime fault now names the source line that raised it. Each is a genuine change to what a program can write and what it means, recorded in full in [Expressions and Operators](#expressions-and-operators), [Strings](#strings), the [Builtins](#builtins) chapter, and [Memory Management](#memory-management).
+The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface 1.0.0 carried forward is unchanged start to finish across the whole line that held the freeze. 1.1.0 is the first release to add to the surface since: a `char`, a `char[N]`, and a `char[]` are now printable text, a string literal initializes a `char[N]` directly, and a `for` loop and a range slice both treat a string's bytes with the same discipline described in [Strings](#strings), [Arrays and Slices](#arrays-and-slices), and the [Builtins](#builtins) chapter. 1.2.0 keeps adding to it: `&&` and `||` now short circuit instead of evaluating both operands unconditionally, `==` and `!=` on a string compare content instead of pointer identity while comparison closes on a named list of comparable types, `+` concatenates two strings, a width cast converts an integer explicitly, `break` and `continue` are new statement keywords, and a runtime fault now names the source line that raised it. Each is a genuine change to what a program can write and what it means, recorded in full in [Expressions and Operators](#expressions-and-operators), [Strings](#strings), the [Builtins](#builtins) chapter, and [Memory Management](#memory-management). 1.4.0 opens the foreign boundary further: a `foreign` block may declare a variadic C function, a `@link` directive names a library for the linker and a `@csource` directive compiles a C file in alongside the runtime, and `!=` between two floats is corrected to the unordered comparison IEEE 754 defines. Recorded in full in [Foreign Functions](#foreign-functions), [Linking and C Sources](#linking-and-c-sources), and [Comparison](#comparison).
 
 The one exception the freeze carried was a soundness hole. A hole found during the bootstrap could force a surface change to close it, and when that happened the change was named in the changelog of the release that made it.
 
@@ -112,6 +112,28 @@ export func area(s: Shape) -> float64 { ... }
 Only exported names can be imported elsewhere. There is no paradigm restriction on exports. An exported function or type is usable from any file regardless of either file's paradigm directives. This keeps the cross file story simple and matches the rule that user defined names are paradigm agnostic.
 
 A private name never crosses a file boundary, neither as a qualified call nor as a bare one, and two imported modules may each keep a private helper of the same name without colliding.
+
+### Linking and C Sources
+
+Added in 1.4.0. Two more top of file directives reach the link line a build's `clang` invocation runs, alongside a `foreign` block's own bound symbols.
+
+```text
+@link "m"
+@csource "adder.c"
+```
+
+- `@link <value>` names something for the linker. A value containing a path separator, or ending in `.a`, `.o`, or `.so`, is passed to `clang` verbatim as a file argument; every other value is a bare library name, turned into a `-l` flag, so `@link "m"` becomes `-lm` and `@link "curl"` becomes `-lcurl`. There is no third form: a value is always read as a library name or a path, never spliced in as an arbitrary flag.
+- `@csource "<path>"` names a C source file, resolved against the directory of the file that declares it, that `clang` compiles and links in beside the dusk runtime's own C sources. A `foreign` block in the same file, or any file, then binds against whatever that source defines.
+
+Both directives are collected the same way `@import` is, at the top of a file before any declaration, and both fold into one module wide, deduplicated, order preserving list: a `@link` or `@csource` value already seen in an earlier file is not repeated on the command line, and first appearance, in the loader's own file walk order, wins. The clang invocation itself is a pure function of that list, every runtime source first, then each `@csource` file, then each `@link` value as a file argument or a `-l` flag, then the fixed `-pthread -lm` and the output path; it carries no flags any directive did not name, and no directive can inject one, since a value is always read as a bare library name or a bare path, never interpreted as an arbitrary argument.
+
+```text
+@csource "adder.c"
+
+foreign "C" {
+    func add(a: int64, b: int64) -> int64
+}
+```
 
 ---
 
@@ -351,7 +373,45 @@ foreign "C" {
 The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function. A `*raw T` passes anywhere `*void` is expected, both are the same bare word. The reverse binding is rejected, since a `*void` that could become a typed `*raw T` would let a managed pointer launder through `*void` into a dereferenceable alias the generation check cannot see. A managed `*T` that round trips through `*void` back to a managed annotation comes back untracked, with no generation for the check to read, so everything through it afterward is the raw layer's honor system. Keep managed pointers on the managed layer.
 
 - Only the `"C"` calling convention is supported.
-- A struct passed by value across the boundary, a variadic foreign function, and linking a third party library are deferred to a later interop release.
+- A struct passed by value across the boundary and a callback that hands a dusk function to C are deferred to a later interop release.
+
+#### Variadic foreign functions
+
+Added in 1.4.0. A `foreign` block's parameter list may end in a bare `...`, marking the function variadic in the C sense.
+
+```text
+foreign "C" {
+    func printf(fmt: *raw char, ...) -> int32
+}
+```
+
+`...` is legal only as the last parameter; writing it anywhere else is rejected, `'...' must be the last parameter of a variadic foreign function`. Only a `foreign` declaration can take `...` at all, an ordinary dusk function cannot be variadic. A call must supply at least the fixed parameters; falling short of that count is rejected by name, `expected at least N argument(s), found M`, before a single argument is checked against a type.
+
+Every fixed argument checks against its declared parameter type exactly as an ordinary call does. An argument beyond the fixed parameters, the vararg tail itself, is checked against the same admitted set the boundary already enforces: a scalar (an integer of any width, a `float32` or `float64`, `bool`, `char`, `rune`), a `*raw T`, or a `*void` rides across; everything else is rejected by name at the argument that carries it:
+
+- a managed pointer: `argument N to a variadic foreign function is a managed pointer; pass a *raw T or *void, since a managed *T carries a generation C cannot read`
+- a string: `argument N to a variadic foreign function is a string; pass a *raw char, a string view cannot cross a C vararg directly`
+- a slice or an array: `pass its backing as a *raw T`
+- a tuple: `pass its elements individually`
+- a struct: `pass a pointer to it`
+- a closure, a collected value, a future, an interface value, or an error: each named outright, none of them may ride a C vararg
+
+C reads a vararg positionally with no type information of its own to check against, so a fat or generation carrying value handed across would read as garbage or corrupt the read; the reject list keeps every value on the wire a bare word C's own calling convention already knows how to place.
+
+A value beyond the fixed parameters also takes the C default argument promotions before it is passed, the same widening a C compiler applies to its own variadic call sites:
+
+| Argument type            | Crosses as                    |
+| ------------------------- | ------------------------------ |
+| `int8`, `int16`          | `int32`, sign extended         |
+| `char`, `bool`           | `int32`, zero extended         |
+| `float32`                | `float64`                      |
+| `int32`, `int64`, `rune`, a raw pointer, `*void` | unchanged |
+
+A fixed parameter never promotes; only a value riding the `...` tail does, since a fixed parameter's own declared type already tells C exactly what to expect at that position.
+
+#### The errno convention
+
+Added in 1.4.0. dusk never sets the C library's `errno` itself; a read only ever reports whatever the most recent foreign call, a libc function or a third party one, left behind. `std.os` exposes it directly: `errno() -> int64` reads the current value, and `errstr(code: int64) -> string` returns `strerror`'s message for a code, copied off `strerror`'s own static buffer into a fresh heap string the caller owns. `errno` is thread local under the pthreads runtime dusk links, so a read never races another thread's foreign call, only the calling thread's own next one. Read it immediately after the call whose failure it reports: any foreign call in between, including a call `std.os` or another stdlib wrapper makes internally, is free to overwrite it, so an `errno()` read after such a call has gone stale and reports someone else's failure instead.
 
 ### Sum Types (Enums)
 
@@ -436,6 +496,8 @@ e == f   // an error does not compare; test it with exists()
 ```
 
 Compare a pointer by dereferencing both sides, an aggregate by comparing its parts, and an `error` with `exists()`. A generic type parameter stays permissive on the surface pass, since its concrete shape is not yet known, and is checked again once monomorphization makes it ground: a generic function comparing a type parameter that turns out to be one of the rejected kinds is caught on the ground pass rather than accepted forever.
+
+A float comparison follows IEEE 754: `==`, `<`, `<=`, `>`, and `>=` are ordered, so any comparison against NaN, on either side, answers `false`. `!=` is the one unordered operator: `x != y` is the negation of `x == y` at every input, so `NaN != x` answers `true` for every `x`, NaN included, the same fact `is_nan` in `std.math` is built on, `!(x == x)`, true only when `x` is NaN. A comparison between two ordinary, non NaN floats reads the same under either convention.
 
 ### Bitwise operators
 
@@ -1364,6 +1426,8 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.map                | hash map                                                        |
 | std.string             | string manipulation utilities                                   |
 | std.unicode            | UTF-8 decode, encode, and validation over the byte view string  |
+| std.math               | libm's scalar functions over float64, pi, e, is_nan, is_inf     |
+| std.rand               | xoshiro256** pseudorandom generator, seeded through splitmix64  |
 | std.concurrent.atomic  | sequentially consistent int64 atomics                           |
 | std.concurrent.channel | bounded thread safe queue between threads                       |
 | std.concurrent.pool    | the global thread pool behind the submit builtin                |

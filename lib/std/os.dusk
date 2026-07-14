@@ -1,30 +1,19 @@
-// std.os: a thin wrapper over the process environment and the command shell. run
-// shells a command out through the C library system, env reads an environment
-// variable, and quote wraps an argument in single quotes so a POSIX shell reads
-// it as one literal word. Every string argument is copied into a NUL terminated
-// raw byte buffer for the C boundary, since a string view is typed apart from a
-// raw pointer and the C shims cannot take it directly.
+// std.os: a thin wrapper over the process environment, the command shell, and
+// errno. run shells a command out through the C library system, env reads an
+// environment variable, quote wraps an argument in single quotes so a POSIX
+// shell reads it as one literal word, and errno/errstr read back the last
+// foreign call's failure. Every string argument crosses the C boundary through
+// std.string's cbuf, a fresh NUL terminated raw byte buffer, since a string
+// view is typed apart from a raw pointer and the C shims cannot take it
+// directly.
 
 @import std.string
 
 foreign "C" {
     func system(cmd: *void) -> int64
     func cool_env(name: *void) -> *raw char
-}
-
-// Copies a string into a fresh NUL terminated raw byte buffer the C boundary can
-// read. The caller owns the buffer and frees it once the call that reads it has
-// returned.
-func to_cbuf(s: string) -> *raw char {
-    n: int64 = str_len(s)
-    buf: *raw char = alloc_bytes(n + 1)
-    mut i: int64 = 0
-    while i < n {
-        buf[i] = s[i]
-        i = i + 1
-    }
-    buf[n] = 0
-    return buf
+    func cool_errno() -> int64
+    func strerror(errnum: int32) -> *raw char
 }
 
 // Runs cmd through the C library system, which hands it to /bin/sh -c, and
@@ -38,7 +27,7 @@ func to_cbuf(s: string) -> *raw char {
 // C int to int64 read leaves unspecified, and only the bits the C value defines
 // feed the result.
 export func run(cmd: string) -> int64 {
-    buf: *raw char = to_cbuf(cmd)
+    buf: *raw char = cbuf(cmd)
     status: int64 = system(buf)
     free(buf)
     term: int64 = status & 127
@@ -53,10 +42,28 @@ export func run(cmd: string) -> int64 {
 // str_eq rather than a null check. The result is a fresh heap string owned by the
 // caller.
 export func env(name: string) -> string {
-    buf: *raw char = to_cbuf(name)
+    buf: *raw char = cbuf(name)
     v: string = cstr(cool_env(buf))
     free(buf)
     return v
+}
+
+// The C library's errno, read right after a foreign call that may have set
+// it. dusk itself never sets errno; a value here is always whatever the most
+// recent foreign call left behind, so read it immediately after the call in
+// question, before anything else crosses the C boundary and overwrites it.
+export func errno() -> int64 {
+    return cool_errno()
+}
+
+// The message strerror reports for an errno value, for instance the result
+// of errno() or a literal like 2 for ENOENT. strerror hands back a pointer
+// into its own static buffer, good only until the next strerror call on this
+// thread, so the bytes are copied into a fresh heap string, owned by the
+// caller, before returning.
+export func errstr(code: int64) -> string {
+    v: string = cstr(strerror(int32(code)))
+    return substring(v, 0, str_len(v))
 }
 
 // Wraps arg in single quotes so a POSIX shell reads it as one literal word. Every

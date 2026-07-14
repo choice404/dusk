@@ -13,6 +13,7 @@
 
 @import std.io
 @import std.string
+@import std.vector
 @import std.os
 @import home
 @import source
@@ -113,12 +114,53 @@ func push_source(cmd: *StringBuilder, rt: string, name: string) -> void {
     free(full)
 }
 
+// Whether a @link value names a file to hand clang verbatim rather than a library
+// to resolve through -l. A value with a path separator, or one ending in .a, .o,
+// or .so, is a file; a bare name like "m" or "curl" becomes -lm or -lcurl.
+func str_has_suffix(s: string, suf: string) -> bool {
+    sl: int64 = str_len(s)
+    fl: int64 = str_len(suf)
+    if fl > sl { return false }
+    mut i: int64 = 0
+    while i < fl {
+        if s[sl - fl + i] != suf[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+func link_is_file(v: string) -> bool {
+    if str_contains(v, "/") { return true }
+    if str_has_suffix(v, ".a") { return true }
+    if str_has_suffix(v, ".o") { return true }
+    if str_has_suffix(v, ".so") { return true }
+    return false
+}
+
+// Appends one @link value: a file value is passed verbatim as a quoted path, a
+// bare library name is passed as a quoted -lNAME flag. Both survive the shell as
+// one word, matching the runtime source quoting convention.
+func push_link(cmd: *StringBuilder, val: string) -> void {
+    if link_is_file(val) {
+        push_arg(cmd, val)
+        return
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "-l")
+    sb_push(b, val)
+    flag: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    push_arg(cmd, flag)
+    free(flag)
+}
+
 // Links the IR at ll against the C runtime under home, writing the executable to
 // bin, then runs it and returns its exit code. The clang line mirrors the stage0
 // linker: every runtime source, -pthread for toolchains where pthreads is not yet
 // in libc, and -lm for the math intrinsics. No optimization flag rides along, the
 // same as stage0. A clang failure reports a diagnostic and returns its code.
-func link_only(home: string, ll: string, bin: string) -> int64 {
+func link_only(home: string, ll: string, bin: string, links: *Vector<string>, csources: *Vector<string>) -> int64 {
     rt: string = path_join(home, "runtime")
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "clang")
@@ -130,6 +172,19 @@ func link_only(home: string, ll: string, bin: string) -> int64 {
     push_source(cmd, rt, "reactor.c")
     push_source(cmd, rt, "reactor_epoll.c")
     push_source(cmd, rt, "reactor_kqueue.c")
+    // A @csource file compiles alongside the runtime, resolved at load time
+    // against its declaring file; a @link value follows as either a file or a
+    // -l flag, all before the fixed -pthread -lm and the output binary.
+    mut ci: int64 = 0
+    while ci < vec_len(csources) {
+        push_arg(cmd, vec_get(csources, ci))
+        ci = ci + 1
+    }
+    mut li: int64 = 0
+    while li < vec_len(links) {
+        push_link(cmd, vec_get(links, li))
+        li = li + 1
+    }
     sb_push(cmd, " -pthread -lm -o")
     push_arg(cmd, bin)
     line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
@@ -166,7 +221,9 @@ func run_linked(bin: string, argv: string[], start: int64) -> int64 {
 }
 
 func link_and_run(home: string, ll: string, bin: string) -> int64 {
-    code: int64 = link_only(home, ll, bin)
+    no_links: *Vector<string> = alloc(vec_new())
+    no_csources: *Vector<string> = alloc(vec_new())
+    code: int64 = link_only(home, ll, bin, no_links, no_csources)
     if code != 0 { return code }
     empty: string[] = []
     return run_linked(bin, empty, 0)
@@ -266,7 +323,7 @@ export func build_module_to(prog: string, path: string, run_it: bool, argv: stri
     }
     if !check_ir_written(ll) { return 1 }
     home: string = dusk_home(prog)
-    code: int64 = link_only(home, ll, bin)
+    code: int64 = link_only(home, ll, bin, ir.links, ir.csources)
     if code != 0 { return 1 }
     if run_it {
         // The child's exit code passes through untouched; a signal death or

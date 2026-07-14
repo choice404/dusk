@@ -35,6 +35,7 @@ export struct TypeSigs {
     iface_methods: *Map<MethodList>,
     impls: *Map<int64>,
     foreigns: *Map<int64>,
+    variadic_foreigns: *Map<int64>,
     variant_payloads: *Map<VariantSig>,
     variant_payloads_by_enum: *Map<VariantSig>,
     variant_owner: *Map<string>,
@@ -57,6 +58,7 @@ export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<int64>) -> *Type
     iface_methods: *Map<MethodList> = alloc(map_new())
     impls: *Map<int64> = alloc(map_new())
     foreigns: *Map<int64> = alloc(map_new())
+    variadic_foreigns: *Map<int64> = alloc(map_new())
     variant_payloads: *Map<VariantSig> = alloc(map_new())
     variant_payloads_by_enum: *Map<VariantSig> = alloc(map_new())
     variant_owner: *Map<string> = alloc(map_new())
@@ -80,6 +82,7 @@ export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<int64>) -> *Type
         iface_methods: iface_methods,
         impls: impls,
         foreigns: foreigns,
+        variadic_foreigns: variadic_foreigns,
         variant_payloads: variant_payloads,
         variant_payloads_by_enum: variant_payloads_by_enum,
         variant_owner: variant_owner,
@@ -331,8 +334,18 @@ func collect_foreign(s: *TypeSigs, id: int64) -> void {
         map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: false })
         map_put((*s).raw_sigs, name, raw_params)
         map_put((*s).foreigns, name, 1)
+        if ff.variadic {
+            map_put((*s).variadic_foreigns, name, 1)
+        }
         i = i + 1
     }
+}
+
+// Whether a top-level name binds a variadic foreign function, one whose C
+// signature ends in `...` and so accepts arguments beyond its fixed parameters.
+export func sig_is_variadic_foreign(s: *TypeSigs, name: string) -> bool {
+    vf: *Map<int64> = (*s).variadic_foreigns
+    return map_has(vf, name)
 }
 
 export func collect_sigs(s: *TypeSigs) -> void {

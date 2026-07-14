@@ -1,0 +1,33 @@
+@paradigm procedural
+
+@import std.string
+
+// A variadic foreign function: printf takes a fixed *raw char format and then any
+// number of promoted C varargs. The arguments beyond the format ride the C default
+// promotions, an int64 as a long and a float64 as a double, and a *raw char passes
+// through as a pointer.
+foreign "C" {
+    func printf(fmt: *raw char, ...) -> int32
+}
+
+// Copies a string into a fresh NUL terminated raw byte buffer for the C boundary.
+func to_cbuf(s: string) -> *raw char {
+    n: int64 = str_len(s)
+    buf: *raw char = alloc_bytes(n + 1)
+    mut i: int64 = 0
+    while i < n {
+        buf[i] = s[i]
+        i = i + 1
+    }
+    buf[n] = 0
+    return buf
+}
+
+func main() -> int64 {
+    fmt: *raw char = to_cbuf("i=%ld f=%.1f s=%s\n")
+    who: *raw char = to_cbuf("dusk")
+    printf(fmt, 42, 3.5, who)
+    free(fmt)
+    free(who)
+    return 0
+}

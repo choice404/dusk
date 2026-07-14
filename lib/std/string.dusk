@@ -1,10 +1,27 @@
 // std.string: helpers over NUL terminated strings. Length and comparison,
-// signed integer parsing and formatting, a growable StringBuilder, and the
-// float constant formatting the bootstrap compiler emits its IR through.
+// signed integer parsing and formatting, a growable StringBuilder, the raw
+// buffer bridge a foreign call reads, and the float constant formatting the
+// bootstrap compiler emits its IR through.
 
 foreign "C" {
     func cool_f64_bits(x: float64) -> int64
     func cool_f32_bits(x: float64) -> int64
+}
+
+// Copies a string into a fresh NUL terminated raw byte buffer the C boundary
+// can read, since a string view is typed apart from a raw pointer and a
+// foreign signature takes only a scalar, a *raw T, or a *void. The caller
+// owns the buffer and frees it once the call that reads it has returned.
+export func cbuf(s: string) -> *raw char {
+    n: int64 = str_len(s)
+    buf: *raw char = alloc_bytes(n + 1)
+    mut i: int64 = 0
+    while i < n {
+        buf[i] = s[i]
+        i = i + 1
+    }
+    buf[n] = 0
+    return buf
 }
 
 export func str_len(s: string) -> int64 {

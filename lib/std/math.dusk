@@ -1,0 +1,58 @@
+// std.math: the libm scalar functions over float64, bound straight through
+// the foreign boundary with no C shim of its own, since libm already ships
+// beside libc and every dusk binary links `-lm`. `pi` and `e` are the two
+// constants libm keeps as macros rather than symbols, so they come back as
+// plain dusk literals. `is_nan` and `is_inf` are the two float64 predicates
+// glibc exposes as macros too, each reproduced here as a pure dusk expression
+// over IEEE 754's own algebra rather than a foreign call.
+
+export foreign "C" {
+    func sin(x: float64) -> float64
+    func cos(x: float64) -> float64
+    func tan(x: float64) -> float64
+    func asin(x: float64) -> float64
+    func acos(x: float64) -> float64
+    func atan(x: float64) -> float64
+    func atan2(y: float64, x: float64) -> float64
+    func exp(x: float64) -> float64
+    func log(x: float64) -> float64
+    func log2(x: float64) -> float64
+    func log10(x: float64) -> float64
+    func sqrt(x: float64) -> float64
+    func cbrt(x: float64) -> float64
+    func floor(x: float64) -> float64
+    func ceil(x: float64) -> float64
+    func round(x: float64) -> float64
+    func trunc(x: float64) -> float64
+    func fmod(x: float64, y: float64) -> float64
+    func fabs(x: float64) -> float64
+    func hypot(x: float64, y: float64) -> float64
+    func fmin(a: float64, b: float64) -> float64
+    func fmax(a: float64, b: float64) -> float64
+}
+
+// Archimedes' constant, to float64 precision.
+export func pi() -> float64 {
+    return 3.14159265358979323846
+}
+
+// Euler's number, to float64 precision.
+export func e() -> float64 {
+    return 2.71828182845904523536
+}
+
+// Whether x is NaN. NaN is IEEE 754's only float64 value that compares
+// unequal to itself, so this needs no foreign call. Built from `==` and a
+// bool negation rather than float64 `!=` directly, since `!=` on a float
+// only differs from `!(==)` at a NaN operand, exactly the case this checks.
+export func is_nan(x: float64) -> bool {
+    return !(x == x)
+}
+
+// Whether x is positive or negative infinity. A finite value only ever
+// satisfies x + x == x at 0.0, which the last clause excludes by name, so
+// what remains is exactly the two infinities; x == x rules out NaN, which
+// this function reports false rather than true.
+export func is_inf(x: float64) -> bool {
+    return x == x && (x + x == x) && x != 0.0
+}

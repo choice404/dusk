@@ -17,12 +17,15 @@
 @import privatize
 @import loadfold
 @import paradigm
+@import prescan
 
 export struct Program {
     module: *Ast,
     has_module: bool,
     errors: *Vector<string>,
     files: *Vector<FileSrc>,
+    links: *Vector<string>,
+    csources: *Vector<string>,
 }
 
 struct ParsedFile {
@@ -412,13 +415,64 @@ func push_work(work: *Vector<WorkItem>, imports: *Vector<string>, dir: string, i
     vec_push(work, WorkItem { imports: imports, dir: dir, importer: importer })
 }
 
-func empty_program(errors: *Vector<string>, files: *Vector<FileSrc>) -> Program {
-    return Program { module: ast_new(), has_module: false, errors: errors, files: files }
+func empty_program(errors: *Vector<string>, files: *Vector<FileSrc>, links: *Vector<string>, csources: *Vector<string>) -> Program {
+    return Program { module: ast_new(), has_module: false, errors: errors, files: files, links: links, csources: csources }
+}
+
+// Runs the pre scan over one loaded file and folds its @link and @csource
+// directives into the module wide ordered dedup tables. A link value is carried
+// verbatim, since the driver decides between a -l flag and a file argument; a
+// csource path is resolved against the declaring file's directory here, at load
+// time, so the linker receives a path relative to the invocation root. First
+// appearance wins, and a value already seen in an earlier file is skipped, which
+// keeps the tables in the loader's deterministic module walk order.
+func collect_directives(src: string, len: int64, file: string, errors: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<int64>, seen_csources: *Map<int64>) -> void {
+    p: Prescan = prescan(src, len)
+    // Prescan validates each directive as it reads it, a bad link or csource
+    // value among them; those faults reach the build here, not only the scan
+    // dump, so an illegal directive fails a check the same as a parse error.
+    pe: *Vector<Located> = p.errors
+    mut d: int64 = 0
+    while d < vec_len(pe) {
+        vec_push(errors, render_located_string(file, src, len, vec_get(pe, d)))
+        d = d + 1
+    }
+    lv: *Vector<string> = p.links
+    mut i: int64 = 0
+    while i < vec_len(lv) {
+        v: string = vec_get(lv, i)
+        if !map_has(seen_links, v) {
+            map_put(seen_links, v, 1)
+            vec_push(links, v)
+        }
+        i = i + 1
+    }
+    cv: *Vector<string> = p.csources
+    dir: string = dir_of(file)
+    mut j: int64 = 0
+    while j < vec_len(cv) {
+        raw: string = vec_get(cv, j)
+        mut resolved: string = ""
+        if str_len(raw) > 0 && raw[0] == 47 {
+            resolved = copy_string(raw)
+        } else {
+            resolved = path_join(dir, raw)
+        }
+        if !map_has(seen_csources, resolved) {
+            map_put(seen_csources, resolved, 1)
+            vec_push(csources, resolved)
+        }
+        j = j + 1
+    }
 }
 
 export func load(root_path: string, prog: string) -> Program {
     errors: *Vector<string> = alloc(vec_new())
     files: *Vector<FileSrc> = alloc(vec_new())
+    links: *Vector<string> = alloc(vec_new())
+    csources: *Vector<string> = alloc(vec_new())
+    seen_links: *Map<int64> = new_set()
+    seen_csources: *Map<int64> = new_set()
     stdlib: string = path_join(dusk_home_for(prog, "lib"), "lib")
     visited: *Map<int64> = new_set()
     exports: *Map<*Map<int64>> = alloc(map_new())
@@ -428,10 +482,11 @@ export func load(root_path: string, prog: string) -> Program {
 
     root: ParsedFile = parse_file(root_path, errors)
     if !root.ok {
-        return empty_program(errors, files)
+        return empty_program(errors, files, links, csources)
     }
     map_put(visited, canon(root_path), 1)
     base = register_file(files, base, root_path, root.src, root.ast)
+    collect_directives(root.src.text, root.src.len, root_path, errors, links, csources, seen_links, seen_csources)
 
     work: *Vector<WorkItem> = alloc(vec_new())
     push_work(work, ast_import_strings(root.ast), dir_of(root_path), root_path)
@@ -465,6 +520,7 @@ export func load(root_path: string, prog: string) -> Program {
                         privatize(parsed.ast, suffix)
                         push_work(work, ast_import_strings(parsed.ast), dir_of(r.file), r.file)
                         base = register_file(files, base, r.file, parsed.src, parsed.ast)
+                        collect_directives(parsed.src.text, parsed.src.len, r.file, errors, links, csources, seen_links, seen_csources)
                         load_append_items(root.ast, parsed.ast)
                     }
                 }
@@ -491,5 +547,5 @@ export func load(root_path: string, prog: string) -> Program {
     }
 
     load_fold_qualified_calls(root.ast, namespaces, ns_exports, files, errors)
-    return Program { module: root.ast, has_module: true, errors: errors, files: files }
+    return Program { module: root.ast, has_module: true, errors: errors, files: files, links: links, csources: csources }
 }

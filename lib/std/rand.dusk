@@ -1,0 +1,204 @@
+// std.rand: xoshiro256** over a heap allocated generator state, seeded through
+// splitmix64 so every seed, zero included, lands the state away from the all
+// zero fixed point. rng_next draws a raw 64 bit word; rng_range and rng_float
+// narrow it to a bounded integer and a [0, 1) float. rng_seed_os folds eight
+// bytes of kernel entropy from getrandom into a seed for a caller that wants
+// one, without wiring true randomness into the deterministic generator itself.
+//
+// dusk's `>>` is an arithmetic shift, sign extending a negative operand, but
+// xoshiro's rotation needs a zero filling shift instead: lshr64 recovers it by
+// masking off the bits an arithmetic shift sign fills. Every magic constant
+// below is written as its int64 two's complement decimal, since dusk has no
+// hex literal syntax and a constant at or above 2**63 does not fit a plain
+// positive literal.
+
+@import std.string
+
+foreign "C" {
+    func getrandom(buf: *void, n: int64, flags: int32) -> int64
+}
+
+// The state xoshiro256** advances each draw. Build one with rng_new, which
+// owns the returned pointer; free it with `free` like any other heap value.
+export struct Rng {
+    s0: int64,
+    s1: int64,
+    s2: int64,
+    s3: int64,
+}
+
+// Zero fills the top n bits of x >> n rather than sign filling them, 0 <= n
+// <= 63. An arithmetic shift already carries the right bits in its low
+// (64 - n) positions; masking off the top n, which the arithmetic shift may
+// have filled with the sign bit, recovers the logical shift. n == 0 returns x
+// unchanged, since a mask width of 64 is a shift amount dusk rejects outright.
+func lshr64(x: int64, n: int64) -> int64 {
+    if n == 0 {
+        return x
+    }
+    a: int64 = x >> n
+    mask: int64 = (1 << (64 - n)) - 1
+    return a & mask
+}
+
+// Bits of x rotated left by k, 0 < k < 64: the top k bits move to the bottom
+// and every other bit shifts up by k. The low part is a plain shl; the high
+// part needs lshr64's zero fill, not dusk's sign filling `>>`, since a sign
+// filled high part would corrupt the shl's own high bits on a negative x.
+func rotl64(x: int64, k: int64) -> int64 {
+    return (x << k) | lshr64(x, 64 - k)
+}
+
+// Advances splitmix64 state by the golden gamma, 0x9E3779B97F4A7C15 as its
+// int64 two's complement decimal.
+func splitmix64_advance(state: int64) -> int64 {
+    gamma: int64 = -7046029254386353131
+    return state + gamma
+}
+
+// Scrambles an advanced splitmix64 state into its output word. The two
+// multiplicative constants are 0xBF58476D1CE4E5B9 and 0x94D049BB133111EB, as
+// their int64 two's complement decimals.
+func splitmix64_mix(ns: int64) -> int64 {
+    mix1: int64 = -4658895280553007687
+    mix2: int64 = -7723592293110705685
+    mut z: int64 = ns
+    z = (z ^ lshr64(z, 30)) * mix1
+    z = (z ^ lshr64(z, 27)) * mix2
+    z = z ^ lshr64(z, 31)
+    return z
+}
+
+// One splitmix64 step: advances state by the golden gamma and returns the
+// advanced state paired with the scrambled output. Called in a row from the
+// seed to expand it into xoshiro256**'s four state words, which keeps a thin
+// seed like 0 or 1 from handing xoshiro a near zero state it would take many
+// draws to mix away.
+func splitmix64_step(state: int64) -> (int64, int64) {
+    ns: int64 = splitmix64_advance(state)
+    return (ns, splitmix64_mix(ns))
+}
+
+// One xoshiro256** step, D. Blackman and S. Vigna's generator: the `**`
+// scrambler is rotl(s1 * 5, 7) * 9, and the state update xors s2 and s3 with
+// s0 and s1, folds the pre update s1 << 17 into the new s2, and rotates the
+// new s3 by 45. Returns the draw paired with the four advanced state words.
+func xoshiro_step(s0: int64, s1: int64, s2: int64, s3: int64) -> (int64, int64, int64, int64, int64) {
+    result: int64 = rotl64(s1 * 5, 7) * 9
+    t: int64 = s1 << 17
+    ss2: int64 = s2 ^ s0
+    ss3: int64 = s3 ^ s1
+    ns0: int64 = s0 ^ ss3
+    ns1: int64 = s1 ^ ss2
+    ns2: int64 = ss2 ^ t
+    ns3: int64 = rotl64(ss3, 45)
+    return (result, ns0, ns1, ns2, ns3)
+}
+
+// A fresh generator seeded from seed. The seed is expanded into four state
+// words through splitmix64 rather than dropped straight into the state, so
+// seed 0 and every other thin seed still lands xoshiro away from a state it
+// would need many draws to mix away. The caller owns the returned pointer and
+// frees it with `free`.
+export func rng_new(seed: int64) -> *Rng {
+    st0, w0 := splitmix64_step(seed)
+    st1, w1 := splitmix64_step(st0)
+    st2, w2 := splitmix64_step(st1)
+    w3 := splitmix64_mix(splitmix64_advance(st2))
+    return alloc(Rng { s0: w0, s1: w1, s2: w2, s3: w3 })
+}
+
+// The next raw 64 bit word, advancing r's state in place.
+export func rng_next(r: *Rng) -> int64 {
+    result, ns0, ns1, ns2, ns3 := xoshiro_step((*r).s0, (*r).s1, (*r).s2, (*r).s3)
+    (*r).s0 = ns0
+    (*r).s1 = ns1
+    (*r).s2 = ns2
+    (*r).s3 = ns3
+    return result
+}
+
+// An integer drawn uniformly from [lo, hi). lo >= hi has no value to draw, and
+// a stdlib helper faulting on a bad range is out of step with the rest of
+// this module, so it returns lo, the same value an empty range's own lower
+// bound already names. The raw draw is halved with lshr64 first, folding off
+// the sign bit, since a plain % on a negative int64 draw would carry the
+// wrong sign into the result. A draw at or past the largest multiple of span
+// below 2**63 is rejected and redrawn, so the modulo cannot favor the low
+// residues; the redraw loop clears in under two draws on average at any span.
+export func rng_range(r: *Rng, lo: int64, hi: int64) -> int64 {
+    if lo >= hi {
+        return lo
+    }
+    span: int64 = hi - lo
+    // The rejection cutoff is span * floor(2**63 / span), assembled from
+    // halves because 2**63 itself does not fit an int64. A cutoff of 0 marks
+    // the exact case, span dividing 2**63, where every draw is accepted.
+    mut limit: int64 = 0
+    two62: int64 = 4611686018427387904
+    if span > two62 {
+        limit = span
+    } else {
+        q: int64 = ((two62 / span) * 2) + (((two62 % span) * 2) / span)
+        rem: int64 = ((two62 % span) * 2) % span
+        if rem > 0 {
+            limit = span * q
+        }
+    }
+    mut u: int64 = lshr64(rng_next(r), 1)
+    if limit > 0 {
+        while u >= limit {
+            u = lshr64(rng_next(r), 1)
+        }
+    }
+    return lo + (u % span)
+}
+
+// n's value as a float64, going through its base 10 text and the parse_float
+// builtin. dusk has no integer to float conversion of its own to build on
+// instead; every value rng_float feeds this is at most 2**53, so the round
+// trip through a decimal string is exact, integers that size being exactly
+// representable in a float64's 53 bit mantissa.
+func int_to_float(n: int64) -> float64 {
+    v, e := parse_float(int_to_string(n))
+    e.ignore()
+    return v
+}
+
+// A float64 drawn uniformly from [0, 1), built from the top 53 bits of a raw
+// draw, the standard construction that spends every mantissa bit evenly.
+// lshr64 drops the low 11 bits with a zero fill; a plain >> would sign extend
+// the top surviving bit instead of just discarding the bits below it.
+export func rng_float(r: *Rng) -> float64 {
+    v: int64 = rng_next(r)
+    top53: int64 = lshr64(v, 11)
+    return int_to_float(top53) / 9007199254740992.0 // 2**53
+}
+
+// Fisher-Yates, in place: walks i down from the last index to 1, swapping
+// element i with a uniformly drawn element from [0, i]. xs takes no `mut`;
+// dusk has no `mut` on a parameter, and needs none here, since an element
+// store through a slice writes the buffer the slice views rather than the
+// slice binding itself.
+export func shuffle(r: *Rng, xs: int64[]) -> void {
+    mut i: int64 = xs.len - 1
+    while i > 0 {
+        j: int64 = rng_range(r, 0, i + 1)
+        t: int64 = xs[i]
+        xs[i] = xs[j]
+        xs[j] = t
+        i = i - 1
+    }
+}
+
+// A seed folded from eight bytes of kernel entropy through getrandom, for a
+// caller that wants rng_new seeded off the OS rather than a fixed value. A
+// short read is vanishingly unlikely for a request this small and is not
+// retried here; a caller after a hardened seed can call this again.
+export func rng_seed_os() -> int64 {
+    buf: *raw int64 = alloc_bytes(sizeof(int64))
+    getrandom(buf, sizeof(int64), 0)
+    v: int64 = buf[0]
+    free(buf)
+    return v
+}

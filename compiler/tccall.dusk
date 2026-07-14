@@ -570,6 +570,123 @@ func pump_msg(name: string) -> string {
     return out
 }
 
+func variadic_count_msg(want: int64, got: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "expected at least ")
+    sb_push_int(b, want)
+    sb_push(b, " argument(s), found ")
+    sb_push_int(b, got)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func variadic_reject_msg(argno: int64, what: string, advice: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, " to a variadic foreign function is ")
+    sb_push(b, what)
+    sb_push(b, "; ")
+    sb_push(b, advice)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The rejection message for a value passed beyond a variadic foreign function's
+// fixed parameters, or the empty string when the value promotes cleanly across
+// the C boundary. Only scalars (integer families, float, char, bool, rune) and
+// raw pointers (*raw T, *void) may ride a C vararg; every managed or aggregate
+// value is named and refused, since C reads a vararg positionally with no type
+// information and a fat or generation carrying value would corrupt the read.
+func variadic_arg_msg(tc: *TypeChecker, tyid: int64, argno: int64) -> string {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    k: int64 = n.kind
+    if k == tyk_int() || k == tyk_float() || k == tyk_char() || k == tyk_bool() || k == tyk_rune() {
+        return ""
+    }
+    if k == tyk_rawptr() || k == tyk_unknown() {
+        return ""
+    }
+    if k == tyk_ptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        if inner.kind == tyk_unit() {
+            return ""
+        }
+        return variadic_reject_msg(argno, "a managed pointer", "pass a *raw T or *void, since a managed *T carries a generation C cannot read")
+    }
+    if k == tyk_str() {
+        return variadic_reject_msg(argno, "a string", "pass a *raw char, a string view cannot cross a C vararg directly")
+    }
+    if k == tyk_slice() {
+        return variadic_reject_msg(argno, "a slice", "pass its backing as a *raw T")
+    }
+    if k == tyk_array() {
+        return variadic_reject_msg(argno, "an array", "pass its backing as a *raw T")
+    }
+    if k == tyk_func() {
+        return variadic_reject_msg(argno, "a closure", "a variadic foreign function takes only scalars and raw pointers")
+    }
+    if k == tyk_collector() {
+        return variadic_reject_msg(argno, "a collected value", "a variadic foreign function takes only scalars and raw pointers")
+    }
+    if k == tyk_future() {
+        return variadic_reject_msg(argno, "a future", "a variadic foreign function takes only scalars and raw pointers")
+    }
+    if k == tyk_error() {
+        return variadic_reject_msg(argno, "an error value", "handle it before the call and pass a scalar")
+    }
+    if k == tyk_tuple() {
+        return variadic_reject_msg(argno, "a tuple", "pass its elements individually")
+    }
+    if k == tyk_named() {
+        nm: string = ty_name((*tc).ty, tyid)
+        ifaces: *Map<int64> = (*tc).ifaces
+        if map_has(ifaces, nm) {
+            return variadic_reject_msg(argno, "an interface value", "a variadic foreign function takes only scalars and raw pointers")
+        }
+        return variadic_reject_msg(argno, "a struct value", "pass a pointer to it")
+    }
+    return variadic_reject_msg(argno, "an unsupported type", "a variadic foreign function takes only scalars and raw pointers")
+}
+
+// Checks a call to a variadic foreign function: the arity must reach the fixed
+// parameter count, the fixed arguments are checked against their declared types,
+// and each argument beyond them must be a value the C boundary can carry.
+func check_variadic_call(tc: *TypeChecker, cn: TyNode, arg_off: int64, arg_len: int64, arg_tys: *Vector<int64>, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    if arg_len < cn.len {
+        tc_emit(tc, variadic_count_msg(cn.len, arg_len), lo, hi)
+        return
+    }
+    mut i: int64 = 0
+    while i < cn.len {
+        p: int64 = vec_get((*(*tc).ty).kids, cn.off + i)
+        av: int64 = vec_get(arg_tys, i)
+        arg_id: int64 = vec_get((*a).kids, arg_off + i)
+        arg: ExprNode = vec_get((*a).exprs, arg_id)
+        if !compat((*tc).ty, p, av) {
+            tc_emit(tc, arg_wrong_msg(i), arg.lo, arg.hi)
+        }
+        check_int_fits(tc, arg_id, p)
+        check_slice_covariance(tc, p, av, arg_id, arg.lo, arg.hi)
+        i = i + 1
+    }
+    while i < arg_len {
+        av2: int64 = vec_get(arg_tys, i)
+        arg_id2: int64 = vec_get((*a).kids, arg_off + i)
+        arg2: ExprNode = vec_get((*a).exprs, arg_id2)
+        msg: string = variadic_arg_msg(tc, av2, i)
+        if str_len(msg) > 0 {
+            tc_emit(tc, msg, arg2.lo, arg2.hi)
+        }
+        i = i + 1
+    }
+}
+
 export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> int64 {
     a: *Ast = (*tc).ast
     f: ExprNode = vec_get((*a).exprs, callee_id)
@@ -841,6 +958,18 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
     }
     arg_tys_generic: *Vector<int64> = infer_call_args(tc, arg_off, arg_len)
     if cn.kind == tyk_func() {
+        mut is_variadic: bool = false
+        if f.kind == xk_ident() {
+            // A local binding shadowing a variadic foreign name is an ordinary
+            // closure call; without the is_local guard the shadow would ride
+            // the variadic path and skip the closure's own arity check.
+            vname: string = ast_name(a, f.a)
+            is_variadic = sig_is_variadic_foreign((*tc).sigtab, vname) && !is_local(tc, vname)
+        }
+        if is_variadic {
+            check_variadic_call(tc, cn, arg_off, arg_len, arg_tys_generic, f.lo, f.hi)
+            return cn.a
+        }
         if cn.len != arg_len {
             tc_emit(tc, call_msg_count(cn.len, arg_len), f.lo, f.hi)
         } else {

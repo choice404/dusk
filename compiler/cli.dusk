@@ -31,7 +31,7 @@
 @import mono
 @import gen
 
-export struct CliIrResult { ok: bool, text: string }
+export struct CliIrResult { ok: bool, text: string, links: *Vector<string>, csources: *Vector<string> }
 
 func emit_errors(errs: *Vector<string>) -> void {
     mut i: int64 = 0
@@ -359,10 +359,10 @@ export func compile_ir_text(path: string, prog: string) -> CliIrResult {
     errs: *Vector<string> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
-        return CliIrResult { ok: false, text: "" }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
     }
     if !p.has_module {
-        return CliIrResult { ok: false, text: "" }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
     }
     desugar(p.module)
     info: EscapeInfo = compute_escape_info(p.module)
@@ -372,27 +372,27 @@ export func compile_ir_text(path: string, prog: string) -> CliIrResult {
     type_errs: *Vector<SpanDiagnostic> = (*tc).errors
     emit_span_errors(p.files, type_errs)
     if vec_len(resolve_errs) > 0 {
-        return CliIrResult { ok: false, text: "" }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
     }
     if vec_len(type_errs) > 0 {
-        return CliIrResult { ok: false, text: "" }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
     }
     m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
     mono_errs: *Vector<SpanDiagnostic> = (*m).diags
     emit_span_errors(p.files, mono_errs)
     ground_new: int64 = emit_ground_pass(p.files, m, mono_errs)
     if vec_len(mono_errs) > 0 {
-        return CliIrResult { ok: false, text: "" }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
     }
     if ground_new > 0 {
-        return CliIrResult { ok: false, text: "" }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
     }
     ground: *Ast = mono_ground(m)
     res: GenResult = gen_compile(ground, p.files)
     if !res.ok {
-        return CliIrResult { ok: false, text: res.text }
+        return CliIrResult { ok: false, text: res.text, links: p.links, csources: p.csources }
     }
-    return CliIrResult { ok: true, text: res.text }
+    return CliIrResult { ok: true, text: res.text, links: p.links, csources: p.csources }
 }
 
 // Emits the shared IR text to stdout, preserving the oracle-facing ir command.

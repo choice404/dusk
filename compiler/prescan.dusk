@@ -13,11 +13,15 @@
 @import diag
 
 // The directives collected from the top of a file. paradigms holds the paradigm
-// tags in source order; imports holds the import paths as fresh strings; errors
-// holds any faults for the exit status. The pre scan owns all three vectors.
+// tags in source order; imports holds the import paths as fresh strings; links
+// holds the @link values and csources the @csource paths, both as fresh strings
+// in source order; errors holds any faults for the exit status. The pre scan owns
+// all five vectors.
 export struct Prescan {
     paradigms: *Vector<int64>,
     imports: *Vector<string>,
+    links: *Vector<string>,
+    csources: *Vector<string>,
     errors: *Vector<Located>,
 }
 
@@ -231,6 +235,30 @@ func process_line(src: string, n: int64, ls: int64, le: int64, p: Prescan) -> bo
         } else {
             vec_push(p.imports, imp)
         }
+    } else if str_eq(head, "@link") {
+        lv: string = trim_quotes(rest)
+        if str_len(lv) == 0 {
+            vec_push(p.errors, located(ls, le, "empty link value"))
+            free(lv)
+        } else if lv[0] == 45 {
+            // A value opening with '-' would reach clang as an option, not a
+            // library or a path, an option injection through source text.
+            vec_push(p.errors, located(ls, le, "a link value names a library or a path; it cannot begin with '-'"))
+            free(lv)
+        } else {
+            vec_push(p.links, lv)
+        }
+    } else if str_eq(head, "@csource") {
+        cv: string = trim_quotes(rest)
+        if str_len(cv) == 0 {
+            vec_push(p.errors, located(ls, le, "empty csource path"))
+            free(cv)
+        } else if cv[0] == 45 {
+            vec_push(p.errors, located(ls, le, "a csource value names a C source path; it cannot begin with '-'"))
+            free(cv)
+        } else {
+            vec_push(p.csources, cv)
+        }
     } else if bytes.byte_at(src, n, ts) == 64 {
         vec_push(p.errors, located(ls, le, quoted_msg("unknown directive '", head)))
     } else {
@@ -246,10 +274,14 @@ func process_line(src: string, n: int64, ls: int64, le: int64, p: Prescan) -> bo
 export func prescan(src: string, n: int64) -> Prescan {
     pv: *Vector<int64> = alloc(vec_new())
     iv: *Vector<string> = alloc(vec_new())
+    lv: *Vector<string> = alloc(vec_new())
+    cv: *Vector<string> = alloc(vec_new())
     ev: *Vector<Located> = alloc(vec_new())
     p: Prescan = Prescan {
         paradigms: pv,
         imports: iv,
+        links: lv,
+        csources: cv,
         errors: ev,
     }
     mut pos: int64 = 0

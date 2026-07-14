@@ -345,6 +345,20 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
                 tc_emit(tc, ident_variant_value_msg(en, name), e.lo, e.hi)
             }
         }
+        // A variadic foreign taken as a value would call through a thunk that
+        // cannot carry the vararg call type, so the indirect call would drop
+        // the C variadic ABI contract. Direct calls never reach this arm; the
+        // call path resolves a top level callee through lookup instead.
+        if !is_local(tc, name) && sig_is_variadic_foreign((*tc).sigtab, name) {
+            vbmsg: *StringBuilder = alloc(sb_new())
+            sb_push_char(vbmsg, 39)
+            sb_push(vbmsg, name)
+            sb_push(vbmsg, "' is a variadic foreign function; call it directly, it cannot be taken as a value")
+            voutmsg: string = substring(sb_cstr(vbmsg), 0, sb_size(vbmsg))
+            sb_free(vbmsg)
+            free(vbmsg)
+            tc_emit(tc, voutmsg, e.lo, e.hi)
+        }
         return lookup(tc, name)
     }
     if e.kind == xk_unary() {

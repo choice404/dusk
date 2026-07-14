@@ -10,6 +10,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -587,6 +588,15 @@ char *cool_env(const char *name) {
     }
     memcpy(out, v, len + 1);
     return out;
+}
+
+/* The C library's errno, read right after the foreign call that may have set
+   it. errno is thread local in a pthreads build, so this reads the calling
+   thread's own value with no lock and no race against another thread's call.
+   dusk itself never sets errno; it only ever reads back what the most recent
+   foreign call, strerror among them, left there. */
+int64_t cool_errno(void) {
+    return (int64_t)errno;
 }
 
 /* The IEEE 754 bit pattern of a double, reinterpreted as a signed 64 bit

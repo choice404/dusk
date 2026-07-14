@@ -153,6 +153,7 @@ Helpers over NUL terminated strings: length and comparison, signed integer parsi
 | `parse_int_radix(s: string, base: int64) -> (int64, error)` | Parse a signed integer in a base from 2 to 36. |
 | `parse_float(s: string) -> (float64, error)`          | Parse a base 10 float.                      |
 | `str_from_chars(cs: char[]) -> string`                | Copy a char slice into a fresh heap string the caller owns. |
+| `cbuf(s: string) -> *raw char`                        | Copy `s` into a fresh NUL terminated raw buffer for a foreign call to read. |
 
 ```text
 @import std.string
@@ -171,6 +172,8 @@ free(s)
 ```
 
 `str_from_chars` is the bridge back to the dynamic string world: a `char[N]` slices down to a `char[]` and `str_from_chars` copies its bytes into a fresh heap allocated `string`, the same ownership `substring` hands back.
+
+`cbuf` is the bridge the other way, out to a foreign call. A `string` is a fat view typed apart from a raw pointer, so a foreign signature, which takes only a scalar, a `*raw T`, or a `*void`, cannot read one directly; `cbuf` copies the bytes into a fresh, NUL terminated, heap allocated buffer the caller owns and frees once the call that reads it has returned. `std.os`'s `run` and `env` both cross this way.
 
 `parse_int` takes a base 10 string, so a `0x`, `0o`, or `0b` prefix fails on the prefix letter. `parse_int_radix` takes the base and accepts the matching prefix, `0x` for 16, `0o` for 8, `0b` for 2, but never infers the base from the prefix. Each parser returns the value with an error you must handle.
 
@@ -281,12 +284,14 @@ free(m)
 
 ## std.os
 
-A thin wrapper over the process environment and the command shell. Every string argument is copied into a NUL terminated raw buffer for the C boundary, since a string is typed apart from a raw pointer.
+A thin wrapper over the process environment, the command shell, and the C library's errno. Every string argument crosses the C boundary through `std.string`'s `cbuf`, since a string is typed apart from a raw pointer.
 
 | Function                        | Description                                                       |
 | ------------------------------- | ----------------------------------------------------------------- |
 | `run(cmd: string) -> int64`     | Run `cmd` through the C library `system` and return the exit code.|
 | `env(name: string) -> string`   | The value of an environment variable, or the empty string when unset. |
+| `errno() -> int64`              | The C library's errno, read right after a foreign call that may have set it. |
+| `errstr(code: int64) -> string` | The message `strerror` reports for an errno value.                |
 | `quote(arg: string) -> string`  | Wrap `arg` in single quotes so a POSIX shell reads it as one word. |
 
 ```text
@@ -296,9 +301,75 @@ A thin wrapper over the process environment and the command shell. Every string 
 code := run("exit 7")            // 7
 home := env("HOME")             // "" when unset, never a fault
 safe := quote("it's a test")    // 'it'\''s a test'
+
+msg := errstr(2)                // "No such file or directory" (wording varies by platform)
+free(msg)
 ```
 
 `run` returns the child's exit code, decoded from the wait status `system` reports. A normally terminated child reports its exit code. A child the OS kills reports 128 plus the signal, the shell convention, so a process killed by, say, the out of memory killer is never mistaken for a clean exit. `env` reads back the empty string for an unset variable, never a null, so test the result with `str_len` or `str_eq`. `quote` writes every embedded single quote as the four byte close quote, escaped quote, reopen quote sequence, so the quoted result is safe to splice into a command line passed to `run`.
+
+Added in 1.4.0, `errno` and `errstr` are the read side of the C library's own error channel. dusk never sets errno itself; a call to `errno()` always reports whatever the most recent foreign call, a libc function or a third party one, left behind, so read it immediately after the call whose failure it names, before anything else crosses the C boundary and overwrites it. `errstr` hands back `strerror`'s message for a code, `errno()`'s own result or a literal like `2` for `ENOENT`, copied off `strerror`'s static buffer into a fresh heap string the caller owns and frees, since that buffer is only good until the thread's next `strerror` call.
+
+## std.math
+
+Added in 1.4.0. libm's scalar functions over `float64`, bound straight through the foreign boundary with no C shim of its own, since libm already ships beside libc and every dusk binary already links `-lm`. `pi` and `e` are the two constants libm keeps as macros rather than symbols, so they come back as plain dusk literals. `is_nan` and `is_inf` are the two `float64` predicates glibc exposes as macros too, each reproduced here as a pure dusk expression over IEEE 754's own algebra rather than a foreign call.
+
+| Function                                     | Description                                  |
+| --------------------------------------------- | --------------------------------------------- |
+| `sin(x)`, `cos(x)`, `tan(x) -> float64`      | The trigonometric functions, `x` in radians. |
+| `asin(x)`, `acos(x)`, `atan(x) -> float64`   | Their inverses.                              |
+| `atan2(y, x) -> float64`                     | The angle of the point `(x, y)`.             |
+| `exp(x) -> float64`                          | `e` raised to `x`.                           |
+| `log(x)`, `log2(x)`, `log10(x) -> float64`   | Natural, base 2, and base 10 logarithm.      |
+| `sqrt(x)`, `cbrt(x) -> float64`              | Square root and cube root.                   |
+| `floor(x)`, `ceil(x)`, `round(x)`, `trunc(x) -> float64` | Round down, up, to nearest, and toward zero. |
+| `fmod(x, y) -> float64`                      | The floating point remainder of `x / y`.     |
+| `fabs(x) -> float64`                         | The absolute value.                          |
+| `hypot(x, y) -> float64`                     | `sqrt(x*x + y*y)`, without the intermediate overflow. |
+| `fmin(a, b)`, `fmax(a, b) -> float64`        | The lesser and the greater of two values.    |
+| `pi() -> float64`                            | Archimedes' constant, to `float64` precision. |
+| `e() -> float64`                             | Euler's number, to `float64` precision.      |
+| `is_nan(x: float64) -> bool`                 | Whether `x` is NaN.                          |
+| `is_inf(x: float64) -> bool`                 | Whether `x` is positive or negative infinity. |
+
+```text
+@import std.math
+
+println(sqrt(9.0) == 3.0)          // true
+println(hypot(3.0, 4.0) == 5.0)    // true
+println(is_nan(sqrt(-1.0)))        // true
+println(is_inf(1.0 / 0.0))         // true
+```
+
+`is_nan` is built from `!(x == x)` rather than dusk's own `!=`, since NaN is IEEE 754's only `float64` value that compares unequal to itself; `x != x` answers the same thing today, but the definition here does not lean on it. `is_inf` reads `x == x && x + x == x && x != 0.0`: a finite value only ever satisfies `x + x == x` at `0.0`, which the last clause excludes by name, so what remains is exactly the two infinities, and `x == x` rules out NaN up front.
+
+## std.rand
+
+Added in 1.4.0. xoshiro256**, D. Blackman and S. Vigna's generator, over a heap allocated `Rng` seeded through splitmix64 so every seed, zero included, lands the state away from the all zero fixed point a thin seed would otherwise take many draws to mix away.
+
+| Function                                        | Description                                    |
+| ------------------------------------------------ | ----------------------------------------------- |
+| `rng_new(seed: int64) -> *Rng`                  | A fresh generator seeded from `seed`.          |
+| `rng_next(r: *Rng) -> int64`                    | The next raw 64 bit word, advancing `r`'s state. |
+| `rng_range(r: *Rng, lo: int64, hi: int64) -> int64` | An integer drawn uniformly from `[lo, hi)`.   |
+| `rng_float(r: *Rng) -> float64`                 | A float drawn uniformly from `[0, 1)`.         |
+| `shuffle(r: *Rng, xs: int64[]) -> void`         | Fisher-Yates shuffle, in place.                |
+| `rng_seed_os() -> int64`                        | A seed folded from eight bytes of kernel entropy through `getrandom`. |
+
+```text
+@import std.rand
+
+r: *Rng = rng_new(42)
+println(rng_next(r))
+println(rng_range(r, 0, 100))
+println(rng_float(r))
+
+xs: int64[5] = [1, 2, 3, 4, 5]
+shuffle(r, xs[0..5])
+free(r)
+```
+
+`rng_new` owns the returned pointer; free it with `free` like any other heap value. `rng_range` halves the raw draw before reducing it, which costs one bit of entropy and is not itself uniform at spans near `2**63`, but keeps a plain `%` from carrying the wrong sign out of a negative draw. `rng_seed_os` is not itself a source of randomness wired into the generator; it is a seed for a caller that wants `rng_new` started from the OS rather than a fixed value, and a short read from `getrandom` is not retried, so a caller after a hardened seed can call it again.
 
 ## std.memory.allocator
 

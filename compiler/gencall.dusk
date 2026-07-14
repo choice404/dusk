@@ -149,6 +149,105 @@ func gen_cast(s: *GenFuncState, name: string, args_off: int64, args_len: int64) 
     return Val { ty: target, op: out }
 }
 
+// Applies the C default argument promotions to a value passed beyond a variadic
+// foreign function's fixed parameters: an integer narrower than 32 bits widens to
+// i32 (sign extended, or zero extended for char and bool through coerce), a
+// float widens to double, and every already wide scalar or pointer passes
+// unchanged. The target width is what C promises a C varargs callee reads.
+func variadic_promote(s: *GenFuncState, v: Val) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    mut target: int64 = v.ty
+    if n.kind == ctyk_int() {
+        if cty_int_bits(c, v.ty) < 32 { target = cty_int(c, 32) }
+    } else if n.kind == ctyk_char() {
+        target = cty_int(c, 32)
+    } else if n.kind == ctyk_bool() {
+        target = cty_int(c, 32)
+    } else if n.kind == ctyk_f32() {
+        target = cty_f64(c)
+    }
+    if target == v.ty { return v }
+    out: string = coerce(s, v.ty, v.op, target)
+    return Val { ty: target, op: out }
+}
+
+// Lowers a call to a variadic foreign function. The call instruction carries the
+// callee's full function type, the fixed parameter types then a trailing ...,
+// which LLVM requires for a varargs target. A fixed argument adapts to its
+// declared parameter type; an argument beyond them takes the C default promotion.
+func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFnSig, args_off: int64, args_len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    params: *Vector<int64> = sig.params
+    call_ret: string = cty_ll(c, sig.ret)
+    fixed: int64 = vec_len(params)
+    args: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < args_len {
+        if i > 0 { sb_push(args, ", ") }
+        aeid: int64 = vec_get((*a).kids, args_off + i)
+        v0: Val = gen_expr(s, aeid)
+        mut vll: string = gs_copy("")
+        mut vop: string = gs_copy("")
+        if i < fixed {
+            aty: int64 = vec_get(params, i)
+            vop = adapt(s, v0, aty).op
+            vll = cty_ll(c, aty)
+        } else {
+            pv: Val = variadic_promote(s, v0)
+            vop = pv.op
+            vll = cty_ll(c, pv.ty)
+        }
+        sb_push(args, vll)
+        sb_push_char(args, 32)
+        sb_push(args, vop)
+        free(vll)
+        i = i + 1
+    }
+    arg_text: string = gs_built(args)
+    sb_free(args)
+    free(args)
+    sigb: *StringBuilder = alloc(sb_new())
+    sb_push_char(sigb, 40)
+    mut p: int64 = 0
+    while p < fixed {
+        if p > 0 { sb_push(sigb, ", ") }
+        pll: string = cty_ll(c, vec_get(params, p))
+        sb_push(sigb, pll)
+        free(pll)
+        p = p + 1
+    }
+    if fixed > 0 { sb_push(sigb, ", ...") } else { sb_push(sigb, "...") }
+    sb_push_char(sigb, 41)
+    sigtxt: string = gs_built(sigb)
+    sb_free(sigb)
+    free(sigb)
+    b: *StringBuilder = alloc(sb_new())
+    mut dest: string = ""
+    if !str_eq(call_ret, "void") {
+        dest = next_tmp((*s).fb)
+        sb_push(b, dest)
+        sb_push(b, " = ")
+    }
+    sb_push(b, "call ")
+    sb_push(b, call_ret)
+    sb_push_char(b, 32)
+    sb_push(b, sigtxt)
+    sb_push(b, " @")
+    sb_push(b, name)
+    sb_push_char(b, 40)
+    sb_push(b, arg_text)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    if str_eq(call_ret, "void") { return Val { ty: sig.ret, op: gs_copy("") } }
+    return Val { ty: sig.ret, op: dest }
+}
+
 export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_len: int64) -> Val {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -221,6 +320,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     }
     if genctx_has_fn((*s).ctx, name) {
         sig: GenFnSig = genctx_fn((*s).ctx, name)
+        if sig.variadic { return gen_variadic_foreign_call(s, name, sig, args_off, args_len) }
         if sig.is_async { return gen_async_call(s, name, args_off, args_len) }
         mut call_ret: string = cty_ll(c, sig.ret)
         args: *StringBuilder = alloc(sb_new())
