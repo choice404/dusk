@@ -1,0 +1,294 @@
+// cabi: System V x86_64 struct-by-value classification for the C boundary.
+//
+// A C plain struct passed to or returned from a foreign function follows the
+// same rules clang applies to a struct value: split into eightbytes, classify
+// each as SSE (all floating point) or INTEGER, and coerce each to the register
+// type clang's GetINTEGERTypeAtOffset would pick. A struct larger than two
+// eightbytes rides in memory (byval on the way in, sret on the way out). The
+// coercion is byte exact against clang -O0, so the call and declare dusk emits
+// link cleanly against a clang-compiled object.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import cty
+
+// One scalar leaf of a flattened C plain struct: its byte offset from the start
+// of the aggregate, its byte width, and whether it is a floating point or a
+// pointer, the two facts eightbyte classification and integer coercion need.
+struct CAbiLeaf { off: int64, size: int64, isfloat: bool, isptr: bool }
+
+// The classification of a struct at the C boundary. When memory is true the
+// struct passes by pointer (byval param, sret return) and the ll fields are
+// empty. Otherwise n is 1 or 2 and ll0 (and ll1 when n is 2) are the coerced
+// register types clang would use.
+export struct CAbiClass {
+    ok: bool,
+    memory: bool,
+    n: int64,
+    ll0: string,
+    ll1: string,
+    size: int64,
+    align: int64,
+}
+
+func cabi_copy(s: string) -> string { return substring(s, 0, str_len(s)) }
+func cabi_built(b: *StringBuilder) -> string { return substring(sb_cstr(b), 0, sb_size(b)) }
+
+func cabi_align_up(n: int64, align: int64) -> int64 {
+    if align <= 1 { return n }
+    return ((n + align - 1) / align) * align
+}
+
+// The textual integer type "i<bits>", covering the odd widths clang emits for a
+// partial eightbyte (i24, i40, i48, i56) as well as i8/i16/i32/i64.
+func cabi_int_str(bits: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 105)
+    sb_push_int(b, bits)
+    out: string = cabi_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Flattens a C plain type into its scalar leaves with absolute byte offsets,
+// recursing through nested plain structs and fixed arrays. Field offsets follow
+// cty_size_align's layout, the same layout LLVM gives the named struct type.
+func cabi_flatten(c: *CTyArena, ty: int64, base: int64, out: *Vector<CAbiLeaf>) -> void {
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    if n.kind == ctyk_int() {
+        mut bytes: int64 = n.a / 8
+        if bytes < 1 { bytes = 1 }
+        vec_push(out, CAbiLeaf { off: base, size: bytes, isfloat: false, isptr: false })
+        return
+    }
+    if n.kind == ctyk_char() {
+        vec_push(out, CAbiLeaf { off: base, size: 1, isfloat: false, isptr: false })
+        return
+    }
+    if n.kind == ctyk_bool() {
+        // Rejected in a field by sema; treated as a 1 byte integer for safety.
+        vec_push(out, CAbiLeaf { off: base, size: 1, isfloat: false, isptr: false })
+        return
+    }
+    if n.kind == ctyk_f64() {
+        vec_push(out, CAbiLeaf { off: base, size: 8, isfloat: true, isptr: false })
+        return
+    }
+    if n.kind == ctyk_f32() {
+        // Rejected in a field by sema; treated as a 4 byte float for safety.
+        vec_push(out, CAbiLeaf { off: base, size: 4, isfloat: true, isptr: false })
+        return
+    }
+    if n.kind == ctyk_rawptr() || n.kind == ctyk_error() {
+        vec_push(out, CAbiLeaf { off: base, size: 8, isfloat: false, isptr: true })
+        return
+    }
+    if n.kind == ctyk_array() {
+        elem: int64 = n.a
+        sa: SizeAlign = cty_size_align(c, elem)
+        stride: int64 = cabi_align_up(sa.size, sa.align)
+        mut i: int64 = 0
+        while i < n.b {
+            cabi_flatten(c, elem, base + i * stride, out)
+            i = i + 1
+        }
+        return
+    }
+    if n.kind == ctyk_struct() {
+        count: int64 = cty_struct_field_count(c, ty)
+        mut off: int64 = 0
+        mut fi: int64 = 0
+        while fi < count {
+            fty: int64 = cty_struct_field_ty(c, ty, fi)
+            fsa: SizeAlign = cty_size_align(c, fty)
+            off = cabi_align_up(off, fsa.align)
+            cabi_flatten(c, fty, base + off, out)
+            off = off + fsa.size
+            fi = fi + 1
+        }
+        return
+    }
+    // Any other kind is rejected at the boundary by sema; a defensive 8 byte
+    // integer leaf keeps classification total.
+    vec_push(out, CAbiLeaf { off: base, size: 8, isfloat: false, isptr: false })
+}
+
+// True when the eightbyte at byte offset off holds only floating point data, the
+// System V SSE class. A single overlapping integer or pointer leaf makes the
+// whole eightbyte INTEGER.
+func cabi_eightbyte_sse(leaves: *Vector<CAbiLeaf>, off: int64) -> bool {
+    mut has: bool = false
+    mut allfloat: bool = true
+    mut i: int64 = 0
+    while i < vec_len(leaves) {
+        lf: CAbiLeaf = vec_get(leaves, i)
+        if lf.off < off + 8 && lf.off + lf.size > off {
+            has = true
+            if !lf.isfloat { allfloat = false }
+        }
+        i = i + 1
+    }
+    return has && allfloat
+}
+
+// True when the bit range [startbit, endbit) holds no leaf data, only padding or
+// space beyond the struct. This is clang's BitsContainNoUserData, the test that
+// lets a 1/2/4 byte leaf coerce narrow instead of widening to i64.
+func cabi_bits_no_user_data(leaves: *Vector<CAbiLeaf>, startbit: int64, endbit: int64) -> bool {
+    mut i: int64 = 0
+    while i < vec_len(leaves) {
+        lf: CAbiLeaf = vec_get(leaves, i)
+        ls: int64 = lf.off * 8
+        le: int64 = (lf.off + lf.size) * 8
+        if ls < endbit && le > startbit { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// The coerced integer type for the INTEGER eightbyte at byte offset off, clang's
+// GetINTEGERTypeAtOffset. The leaf starting the eightbyte keeps its own width
+// when the rest of the eightbyte is padding, a pointer stays ptr and an i64
+// stays i64; otherwise the eightbyte widens to an integer covering the data that
+// remains, capped at 8 bytes.
+func cabi_int_ll(leaves: *Vector<CAbiLeaf>, off: int64, total: int64) -> string {
+    mut i: int64 = 0
+    while i < vec_len(leaves) {
+        lf: CAbiLeaf = vec_get(leaves, i)
+        if lf.off <= off && off < lf.off + lf.size {
+            rel: int64 = off - lf.off
+            if rel == 0 {
+                if lf.isptr { return cabi_copy("ptr") }
+                if lf.size == 8 { return cabi_copy("i64") }
+                if lf.size == 1 || lf.size == 2 || lf.size == 4 {
+                    bits: int64 = lf.size * 8
+                    if cabi_bits_no_user_data(leaves, off * 8 + bits, off * 8 + 64) {
+                        return cabi_int_str(bits)
+                    }
+                }
+            }
+            i = vec_len(leaves)
+        } else {
+            i = i + 1
+        }
+    }
+    mut rem: int64 = total - off
+    if rem > 8 { rem = 8 }
+    if rem < 1 { rem = 1 }
+    return cabi_int_str(rem * 8)
+}
+
+func cabi_eightbyte_ll(leaves: *Vector<CAbiLeaf>, off: int64, total: int64) -> string {
+    if cabi_eightbyte_sse(leaves, off) { return cabi_copy("double") }
+    return cabi_int_ll(leaves, off, total)
+}
+
+// The alignment clang stamps on a byval parameter: a memory argument sits in an
+// eightbyte-aligned stack slot, so the byval alignment is the struct alignment
+// raised to at least 8. An sret return keeps the struct's natural alignment.
+export func cabi_byval_align(align: int64) -> int64 {
+    if align < 8 { return 8 }
+    return align
+}
+
+export func cabi_is_struct(c: *CTyArena, ty: int64) -> bool {
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    return n.kind == ctyk_struct()
+}
+
+// Classifies a struct type for the C boundary. Non-struct types return ok false
+// so a caller falls back to the ordinary scalar path.
+export func cabi_classify(c: *CTyArena, ty: int64) -> CAbiClass {
+    node: CTyNode = vec_get(cty_nodes(c), ty)
+    if node.kind != ctyk_struct() {
+        return CAbiClass { ok: false, memory: false, n: 0, ll0: cabi_copy(""), ll1: cabi_copy(""), size: 0, align: 0 }
+    }
+    sa: SizeAlign = cty_size_align(c, ty)
+    if sa.size > 16 {
+        return CAbiClass { ok: true, memory: true, n: 0, ll0: cabi_copy(""), ll1: cabi_copy(""), size: sa.size, align: sa.align }
+    }
+    leaves: *Vector<CAbiLeaf> = alloc(vec_new())
+    cabi_flatten(c, ty, 0, leaves)
+    mut nb: int64 = (sa.size + 7) / 8
+    if nb < 1 { nb = 1 }
+    if nb > 2 { nb = 2 }
+    ll0: string = cabi_eightbyte_ll(leaves, 0, sa.size)
+    mut ll1: string = cabi_copy("")
+    if nb == 2 { ll1 = cabi_eightbyte_ll(leaves, 8, sa.size) }
+    vec_free(leaves)
+    free(leaves)
+    return CAbiClass { ok: true, memory: false, n: nb, ll0: ll0, ll1: ll1, size: sa.size, align: sa.align }
+}
+
+// The number of INTEGER and SSE registers a register-class struct classification
+// occupies: an eightbyte coerced to double takes one SSE register, and any other
+// eightbyte (i64, a narrow integer, or a pointer) takes one INTEGER register.
+func cabi_class_int_regs(pc: CAbiClass) -> int64 {
+    mut n: int64 = 0
+    if !str_eq(pc.ll0, "double") { n = n + 1 }
+    if pc.n == 2 && !str_eq(pc.ll1, "double") { n = n + 1 }
+    return n
+}
+
+func cabi_class_sse_regs(pc: CAbiClass) -> int64 {
+    mut n: int64 = 0
+    if str_eq(pc.ll0, "double") { n = n + 1 }
+    if pc.n == 2 && str_eq(pc.ll1, "double") { n = n + 1 }
+    return n
+}
+
+// True when a foreign scalar parameter rides an SSE register: a float32 or a
+// float64. Every integer, char, bool, raw pointer, or error value takes an
+// INTEGER register instead.
+func cabi_scalar_is_sse(c: *CTyArena, ty: int64) -> bool {
+    n: CTyNode = vec_get(cty_nodes(c), ty)
+    return n.kind == ctyk_f64() || n.kind == ctyk_f32()
+}
+
+// True when the parameter at index idx of a foreign signature, a register-class
+// struct, must instead pass in memory (byval) because the System V integer or
+// SSE register file is exhausted at that parameter's position. The walk mirrors
+// clang's computeInfo: a memory return pre-consumes the hidden sret INTEGER
+// register, each scalar consumes one INTEGER or SSE register, and each register
+// class struct consumes its classified eightbytes, but only when every register
+// it needs is free; otherwise the whole struct falls to the stack and consumes
+// nothing, leaving the remaining registers for later parameters. A memory struct
+// over sixteen bytes is already byval and consumes no registers. Both the
+// declare and the call side consult this one helper so their byval and register
+// decisions can never disagree.
+export func cabi_param_in_memory(c: *CTyArena, ret: int64, params: *Vector<int64>, idx: int64) -> bool {
+    mut free_int: int64 = 6
+    mut free_sse: int64 = 8
+    if cabi_is_struct(c, ret) {
+        rc: CAbiClass = cabi_classify(c, ret)
+        if rc.memory { free_int = free_int - 1 }
+    }
+    mut i: int64 = 0
+    while i <= idx {
+        pty: int64 = vec_get(params, i)
+        if cabi_is_struct(c, pty) {
+            pc: CAbiClass = cabi_classify(c, pty)
+            if pc.memory {
+                if i == idx { return true }
+            } else {
+                ni: int64 = cabi_class_int_regs(pc)
+                ns: int64 = cabi_class_sse_regs(pc)
+                if ni <= free_int && ns <= free_sse {
+                    free_int = free_int - ni
+                    free_sse = free_sse - ns
+                    if i == idx { return false }
+                } else {
+                    if i == idx { return true }
+                }
+            }
+        } else {
+            if cabi_scalar_is_sse(c, pty) { free_sse = free_sse - 1 } else { free_int = free_int - 1 }
+            if i == idx { return false }
+        }
+        i = i + 1
+    }
+    return false
+}

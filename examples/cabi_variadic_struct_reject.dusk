@@ -1,0 +1,25 @@
+@paradigm procedural
+
+@import std.string
+
+// A struct value cannot ride a C vararg. C reads a vararg positionally with no
+// type information, so a by-value struct in the variadic tail is refused; pass a
+// pointer to it instead.
+foreign "C" {
+    func snprintf(buf: *raw char, size: int64, fmt: *raw char, ...) -> int32
+}
+
+struct P { a: int64, b: int64 }
+
+func main() -> int64 {
+    fmt: *raw char = alloc_bytes(4)
+    fmt[0] = 37
+    fmt[1] = 100
+    fmt[2] = 0
+    out: *raw char = alloc_bytes(64)
+    p: P = P { a: 1, b: 2 }
+    snprintf(out, 64, fmt, p)
+    free(fmt)
+    free(out)
+    return 0
+}

@@ -1,0 +1,21 @@
+@paradigm procedural
+
+// A struct of float64 fields is all SSE eightbytes: {f64, f64} passes as a
+// (double, double) pair in xmm registers, and a lone {f64} passes as a single
+// double. With float32 barred from a boundary struct, each SSE eightbyte is
+// exactly one double.
+@csource "cabi_small_sse.c"
+
+struct FF { a: float64, b: float64 }
+struct F1 { a: float64 }
+
+foreign "C" {
+    func take_ff(x: FF) -> int64
+    func take_f1(x: F1) -> int64
+}
+
+func main() -> int64 {
+    println(take_ff(FF { a: 1.5, b: 2.5 }))
+    println(take_f1(F1 { a: 6.25 }))
+    return 0
+}

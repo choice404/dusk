@@ -371,6 +371,79 @@ free(r)
 
 `rng_new` owns the returned pointer; free it with `free` like any other heap value. `rng_range` halves the raw draw before reducing it, which costs one bit of entropy and is not itself uniform at spans near `2**63`, but keeps a plain `%` from carrying the wrong sign out of a negative draw. `rng_seed_os` is not itself a source of randomness wired into the generator; it is a seed for a caller that wants `rng_new` started from the OS rather than a fixed value, and a short read from `getrandom` is not retried, so a caller after a hardened seed can call it again.
 
+## std.fs
+
+Added in 1.4.1. Files, directories, and paths. The low level `foreign` block binds `open`, `close`, `read`, `write`, `lseek`, `mkdir`, `rmdir`, `unlink`, and `rename` straight from libc; every wrapper below that can fail returns its value alongside an `error` built from `std.os`'s `errno()`/`errstr`, read immediately after the call that may have set it.
+
+| Function                                                    | Description                                                       |
+| ------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `open_file(path: string, flags: int32, mode: int32) -> (int32, error)` | Opens `path`; `mode` applies only when `flags` includes `o_creat()`. |
+| `close_file(fd: int32) -> error`                            | Closes a descriptor.                                               |
+| `read_bytes(fd: int32, buf: *void, cap: int64) -> (int64, error)` | Reads up to `cap` bytes into `buf`; 0 with no error is end of file. |
+| `write_bytes(fd: int32, buf: *void, n: int64) -> (int64, error)` | Writes `n` bytes from `buf`; the count returned can be less than `n` on a short write. |
+| `seek(fd: int32, offset: int64, whence: int32) -> (int64, error)` | Repositions `fd`'s offset and returns the resulting absolute offset. |
+| `make_dir(path: string, mode: int32) -> error`              | Creates a directory.                                                |
+| `remove_dir(path: string) -> error`                         | Removes an empty directory.                                        |
+| `remove_file(path: string) -> error`                        | Removes a file, or a symlink itself, never its target.             |
+| `move_file(old_path: string, new_path: string) -> error`    | Renames or moves `old_path` to `new_path`.                         |
+| `file_stat(path: string) -> (FileStat, error)`              | `size`, `mode`, and `mtime` (seconds since the epoch, UTC).         |
+| `dir_open(path: string) -> (Dir, error)`                    | Opens `path` for directory iteration.                              |
+| `dir_next(d: Dir) -> (string, bool)`                        | The next entry's bare name, skipping `.` and `..`; `false` once the stream is exhausted. |
+| `dir_close(d: Dir) -> error`                                | Closes a directory stream.                                         |
+| `path_join(dir: string, name: string) -> string`            | Joins with a single `/`, collapsing any trailing separators on `dir`. |
+| `path_dirname(p: string) -> string`                         | Everything up to the last `/`, or `"."` when there is none.        |
+| `path_basename(p: string) -> string`                        | Everything after the last `/`, or the whole string.                |
+| `path_extension(p: string) -> string`                       | The final component's extension, without its leading `.`, or `""`. |
+
+`o_rdonly()`, `o_wronly()`, `o_rdwr()`, `o_creat()`, `o_excl()`, `o_trunc()`, and `o_append()` are `open`'s Linux/glibc flag values, bitwise ORed together; `seek_set()`, `seek_cur()`, and `seek_end()` are `lseek`'s whence values; `mode_0644()` and `mode_0755()` are the common create permission modes, spelled out so a caller never hand converts octal to decimal.
+
+```text
+@import std.fs
+
+fd, err := open_file("out.txt", o_wronly() | o_creat() | o_trunc(), mode_0644())
+buf: *raw char = cbuf("hello")
+write_bytes(fd, buf, 5)
+free(buf)
+close_file(fd)
+
+d, derr := dir_open(".")
+mut going: bool = true
+while going {
+    name, found := dir_next(d)
+    if !found { going = false } else { println(name) }
+}
+dir_close(d)
+```
+
+`file_stat` and directory iteration are C runtime shims rather than a direct binding, since `struct stat` and `DIR` are C layouts dusk never reads; `FileStat` carries `size`, `mode`, and `mtime` as plain `int64` fields, never the raw `struct stat` layout. `Dir.h` is an opaque token, the directory stream's own pointer as a bit pattern `int64`, meaningful only to `dir_next` and `dir_close`; it is an `int64` rather than a `*void` because `==` on any pointer type is rejected outright, so a wrapper holding a `*void` would have no way to test a failed open against NULL the way a C caller tests `opendir`'s own return, and every call here that can fail reports it through a separate status value instead. `path_dirname`, `path_basename`, and `file_stat` carry the `path_`/`file_` prefix, unlike the rest of this module's wrappers, because dusk links every exported top level function under its bare, unmangled name, and libc already owns `stat(2)`, `dirname(3)`, and `basename(3)`; a bare `stat` export would resolve a call meant for libc's own `stat` to this module's definition instead.
+
+## std.time
+
+Added in 1.4.1. Wall clock reads paired with a pure dusk proleptic Gregorian civil calendar, UTC only; there is no time zone support, and a caller wanting local time converts outside this module.
+
+| Function                                       | Description                                                  |
+| ----------------------------------------------- | -------------------------------------------------------------- |
+| `now_ns() -> int64`                            | Nanoseconds since the Unix epoch, UTC.                        |
+| `now_ms() -> int64`                            | Milliseconds since the Unix epoch, UTC.                       |
+| `now_unix() -> int64`                          | Seconds since the Unix epoch, UTC.                            |
+| `civil_from_unix(secs: int64) -> Civil`        | The UTC calendar reading of a Unix timestamp.                 |
+| `unix_from_civil(c: Civil) -> int64`           | The Unix timestamp of a UTC calendar reading.                 |
+| `format_iso8601(c: Civil) -> string`           | Renders `c` as `"YYYY-MM-DDTHH:MM:SSZ"`.                       |
+
+`Civil` is a plain struct, one `int64` field per component: `year` (proleptic Gregorian, so a year before 1 is zero or negative), `month` in `[1, 12]`, `day` in `[1, the month's length]`, and `hour`, `minute`, `second` in their ordinary ranges. There is no sub-second field; `now_ns` and `now_ms` carry finer precision on their own.
+
+```text
+@import std.time
+
+secs := now_unix()
+c: Civil = civil_from_unix(secs)
+text: string = format_iso8601(c)
+println(text)                              // an ISO 8601 string, e.g. "2024-03-02T15:04:05Z"
+println(unix_from_civil(c) == secs)        // true
+```
+
+`now_ns` is the only foreign call in the module, a shim over `clock_gettime(CLOCK_REALTIME)`; `now_ms` and `now_unix` are ordinary arithmetic on top of it. `civil_from_unix` and `unix_from_civil` are Howard Hinnant's `days_from_civil`/`civil_from_days` calendar arithmetic ported to dusk, correct proleptically over the whole `int64` range with no lookup table. `unix_from_civil` does not reject an out of range field, a month past 12 or a day past its month's length; it rolls forward the same way the day count arithmetic always does, the way most civil calendar libraries treat an out of range field as a relative offset rather than a fault.
+
 ## std.memory.allocator
 
 The `Allocator` interface and two allocators that implement it. A function that allocates takes an allocator marked `using`, and the builtins `alloc` and `free` dispatch to it. Choosing the allocator type chooses the implementation. A stateful allocator advances in place across calls, since a method takes its receiver by pointer.

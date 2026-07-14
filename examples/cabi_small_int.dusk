@@ -1,0 +1,27 @@
+@paradigm procedural
+
+// Passing a small all-integer struct by value across the C boundary. Each struct
+// classifies into one or two INTEGER eightbytes, so dusk coerces it to i64, an
+// {i64, i64} register pair, or an odd width like i24, exactly as clang does. The
+// C side asserts every field and returns a position-weighted checksum.
+@csource "cabi_small_int.c"
+
+struct II { a: int32, b: int32 }
+struct LL { a: int64, b: int64 }
+struct I3 { a: int32, b: int32, c: int32 }
+struct BB { a: int8, b: int8, c: int8 }
+
+foreign "C" {
+    func take_ii(x: II) -> int64
+    func take_ll(x: LL) -> int64
+    func take_i3(x: I3) -> int64
+    func take_bb(x: BB) -> int64
+}
+
+func main() -> int64 {
+    println(take_ii(II { a: 10, b: 20 }))
+    println(take_ll(LL { a: 100, b: 200 }))
+    println(take_i3(I3 { a: 1, b: 2, c: 3 }))
+    println(take_bb(BB { a: 4, b: 5, c: 6 }))
+    return 0
+}

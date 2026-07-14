@@ -33,6 +33,31 @@ func ident_variant_value_msg(en: string, name: string) -> string {
     return out
 }
 
+func ty_is_named_struct(tc: *TypeChecker, id: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, id)
+    if n.kind != tyk_named() { return false }
+    structs: *Map<StructSig> = (*tc).structs
+    return map_has(structs, ty_name((*tc).ty, id))
+}
+
+// Whether a foreign function's signature carries a struct by value in a
+// parameter or the return: a call to such a function is lowered through the C
+// ABI, splitting the struct into register pieces or a byval slot. Taken as a
+// value it would instead flow through a funcval thunk that calls with the plain
+// struct type and drops the ABI, so the type layer refuses it as a value.
+func foreign_takes_struct(tc: *TypeChecker, name: string) -> bool {
+    if !sig_is_foreign((*tc).sigtab, name) { return false }
+    fs: FnSig = sig_fn((*tc).sigtab, name)
+    if ty_is_named_struct(tc, fs.raw_ret) { return true }
+    p: TyList = fs.raw_params
+    mut i: int64 = 0
+    while i < p.len {
+        if ty_is_named_struct(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
 func field_dup_msg(fname: string, sname: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "field '")
@@ -358,6 +383,21 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
             sb_free(vbmsg)
             free(vbmsg)
             tc_emit(tc, voutmsg, e.lo, e.hi)
+        }
+        // A foreign function that passes a struct by value taken as a value would
+        // call through a funcval thunk that uses the plain struct type and drops
+        // the System V register or byval coercion, silently miscompiling the
+        // call. Direct calls resolve the callee through lookup and never reach
+        // this arm.
+        if !is_local(tc, name) && foreign_takes_struct(tc, name) {
+            sbmsg: *StringBuilder = alloc(sb_new())
+            sb_push_char(sbmsg, 39)
+            sb_push(sbmsg, name)
+            sb_push(sbmsg, "' is a foreign function that passes a struct by value; call it directly, it cannot be taken as a value")
+            soutmsg: string = substring(sb_cstr(sbmsg), 0, sb_size(sbmsg))
+            sb_free(sbmsg)
+            free(sbmsg)
+            tc_emit(tc, soutmsg, e.lo, e.hi)
         }
         return lookup(tc, name)
     }

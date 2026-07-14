@@ -1,0 +1,98 @@
+// std.fs end to end: create a scratch directory under target/dusk-out, write
+// two files into it, stat one for its size, walk the directory and print its
+// entries in sorted order (readdir's own order is not guaranteed, so the
+// sort here is what makes the output deterministic, not dir_next itself),
+// then unwind everything the test created. The scratch path is fixed and
+// self-cleaning, so a repeated run starts from the same state each time.
+@paradigm procedural
+
+@import std.fs
+@import std.string
+
+// A manual byte-by-byte less-than, since string carries no ordering (== and
+// != compare content, but <, <=, >, and >= reject on a string); char, one
+// byte of that content, does have an ordering, so the walk below compares
+// through it directly.
+func str_lt(a: string, b: string) -> bool {
+    la: int64 = str_len(a)
+    lb: int64 = str_len(b)
+    mut n: int64 = la
+    if lb < n {
+        n = lb
+    }
+    mut i: int64 = 0
+    mut done: bool = false
+    mut result: bool = la < lb
+    while i < n && !done {
+        if a[i] < b[i] {
+            result = true
+            done = true
+        } else {
+            if a[i] > b[i] {
+                result = false
+                done = true
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+func main() -> int32 {
+    root: string = "target/dusk-out/fs_roundtrip_scratch"
+    merr := make_dir(root, mode_0755())
+    merr.ignore()
+
+    p1: string = path_join(root, "alpha.txt")
+    p2: string = path_join(root, "beta.txt")
+
+    werr1 := write_file(p1, "abc")
+    werr1.ignore()
+    werr2 := write_file(p2, "abcdefgh")
+    werr2.ignore()
+
+    st, se := file_stat(p2)
+    se.ignore()
+    println(st.size)
+
+    d, de := dir_open(root)
+    de.ignore()
+    mut first: string = ""
+    mut second: string = ""
+    mut count: int64 = 0
+    mut more: bool = true
+    while more {
+        name, ok := dir_next(d)
+        if ok {
+            if count == 0 {
+                first = name
+            } else {
+                second = name
+            }
+            count = count + 1
+        } else {
+            more = false
+        }
+    }
+    dce := dir_close(d)
+    dce.ignore()
+
+    if str_lt(second, first) {
+        tmp: string = first
+        first = second
+        second = tmp
+    }
+    println(first)
+    println(second)
+
+    ue1 := remove_file(p1)
+    ue1.ignore()
+    ue2 := remove_file(p2)
+    ue2.ignore()
+    rde := remove_dir(root)
+    rde.ignore()
+
+    free(p1)
+    free(p2)
+    return 0
+}

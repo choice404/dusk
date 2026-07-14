@@ -3051,7 +3051,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.4.0\n
+out dusk 1.4.1\n
 argv version
 code 0
 ---
@@ -3213,4 +3213,111 @@ test variadic_foreign_is_not_a_value
 mode check_fail
 file examples/varargs_value_reject.dusk
 err_has cannot be taken as a value
+---
+# Golden fragment for struct-by-value across the C boundary, added in 1.4.1. Same
+# format and contract as tests/goldens.manifest itself; see docs/testing.md. Run:
+#   DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest.frag-cabi
+---
+test cabi_small_int_struct_passes_in_integer_registers
+mode run
+file examples/cabi_small_int.dusk
+out 20010\n200100\n321\n654\n
+---
+test cabi_small_mixed_struct_splits_integer_and_sse_eightbytes
+mode run
+file examples/cabi_small_mixed.dusk
+out 5035\n7025\n
+---
+test cabi_small_sse_struct_passes_in_xmm_registers
+mode run
+file examples/cabi_small_sse.dusk
+out 25015\n625\n
+---
+test cabi_memory_struct_over_sixteen_bytes_passes_byval
+mode run
+file examples/cabi_memory_16plus.dusk
+out 321\n54321\n
+---
+test cabi_return_small_struct_comes_back_in_registers
+mode run
+file examples/cabi_return_pair.dusk
+out 22011\n25015\n7035\n
+---
+test cabi_return_memory_struct_uses_sret
+mode run
+file examples/cabi_return_sret.dusk
+out 987\n987\n
+---
+test cabi_float32_field_rejected_at_the_boundary
+mode check_fail
+file examples/cabi_float32_reject.dusk
+err_has field 'x' is float32; use float64 or pass by pointer
+---
+test cabi_bool_field_rejected_at_the_boundary
+mode check_fail
+file examples/cabi_bool_reject.dusk
+err_has field 'flag' is bool; use char or int8 at the boundary
+---
+test cabi_slice_field_rejected_at_the_boundary
+mode check_fail
+file examples/cabi_slice_field_reject.dusk
+err_has field 'data' is a slice
+---
+test cabi_struct_by_value_rejected_in_variadic_position
+mode check_fail
+file examples/cabi_variadic_struct_reject.dusk
+err_has is a struct value; pass a pointer to it
+---
+# Golden fragment for std.fs and std.time, added in 1.4.1. Same format and
+# contract as tests/goldens.manifest itself; see docs/testing.md. Run with:
+#   DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest.frag-fs
+---
+test fs_roundtrip_mkdir_stat_dir_iteration_unlink
+mode run
+file examples/fs_roundtrip.dusk
+out 8\nalpha.txt\nbeta.txt\n
+---
+test fs_open_missing_file_reports_error
+mode run
+file examples/fs_open_missing.dusk
+out 1\n-1\n1\n
+---
+test time_civil_calendar_round_trips_through_iso8601
+mode run
+file examples/time_civil.dusk
+out 1970-01-01T00:00:00Z\n1709209845\n2024-02-29T12:30:45Z\n1969-12-31T23:59:59Z\n
+---
+test fs_stat_path_argument_must_be_a_string
+mode check_fail
+file examples/fs_stat_arg_fail.dusk
+err_has argument 1 has the wrong type
+---
+test time_civil_from_unix_argument_must_be_an_int64
+mode check_fail
+file examples/time_civil_arg_fail.dusk
+err_has argument 1 has the wrong type
+---
+# Golden fragment for the C boundary register exhaustion, empty struct, foreign
+# struct function value, and variadic struct return fixes, added in 1.4.1. Same
+# format and contract as tests/goldens.manifest itself; see docs/testing.md.
+---
+test cabi_reg_exhaust
+mode run
+file examples/cabi_reg_exhaust.dusk
+out 84\n86\n713\n
+---
+test cabi_variadic_struct_return
+mode run
+file examples/cabi_variadic_struct_return.dusk
+out 15\n25\n100\n7\n107\n
+---
+test cabi_struct_fn_value_reject
+mode check_fail
+file examples/cabi_struct_fn_value_reject.dusk
+err_has is a foreign function that passes a struct by value; call it directly, it cannot be taken as a value
+---
+test cabi_empty_struct_reject
+mode check_fail
+file examples/cabi_empty_struct_reject.dusk
+err_has struct 'E' has no fields; C cannot size it at the boundary
 ---

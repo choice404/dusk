@@ -1,0 +1,27 @@
+@paradigm procedural
+
+// A variadic foreign function may still return a struct by value. The variadic
+// tail constrains only the arguments, never the return classification, so a
+// small struct comes back in the rax:rdx register pair and a larger one through
+// an sret slot, exactly as a non-variadic struct return does. The call carries
+// the same coerced return form the declare does, matching the clang receivers.
+@csource "cabi_variadic_struct_return.c"
+
+struct P { x: int64, y: int64 }
+struct Big { a: int64, b: int64, c: int64 }
+
+foreign "C" {
+    func mkp(base: int64, ...) -> P
+    func mkbig(base: int64, ...) -> Big
+}
+
+func main() -> int64 {
+    p: P = mkp(5, 10, 20)
+    println(p.x)
+    println(p.y)
+    r: Big = mkbig(100, 7)
+    println(r.a)
+    println(r.b)
+    println(r.c)
+    return 0
+}

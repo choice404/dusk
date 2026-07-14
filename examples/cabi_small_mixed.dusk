@@ -1,0 +1,21 @@
+@paradigm procedural
+
+// A struct that mixes an int64 and a float64 splits into one INTEGER eightbyte
+// and one SSE eightbyte: dusk passes it as an (i64, double) or (double, i64)
+// register pair, the integer in a general purpose register and the double in an
+// xmm register, matching clang's classification.
+@csource "cabi_small_mixed.c"
+
+struct LF { a: int64, b: float64 }
+struct FL { a: float64, b: int64 }
+
+foreign "C" {
+    func take_lf(x: LF) -> int64
+    func take_fl(x: FL) -> int64
+}
+
+func main() -> int64 {
+    println(take_lf(LF { a: 5, b: 3.5 }))
+    println(take_fl(FL { a: 2.5, b: 7 }))
+    return 0
+}

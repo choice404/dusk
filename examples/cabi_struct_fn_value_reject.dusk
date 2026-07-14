@@ -1,0 +1,17 @@
+@paradigm procedural
+
+// A foreign function that passes a struct by value cannot be taken as a value.
+// An indirect call through a funcval thunk would use the plain struct type and
+// drop the System V register or byval coercion, silently miscompiling the call,
+// so the type layer refuses the binding. Call take_b directly instead.
+struct B { a: int32, b: int32, c: int32, d: int32, e: int32 }
+
+foreign "C" {
+    func take_b(x: B) -> int64
+}
+
+func main() -> int64 {
+    f: (B) -> int64 = take_b
+    println(f(B { a: 1, b: 2, c: 3, d: 4, e: 5 }))
+    return 0
+}

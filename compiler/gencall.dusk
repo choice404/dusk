@@ -11,6 +11,7 @@
 @import std.functional.maybe
 @import ast
 @import cty
+@import cabi
 @import emit
 @import emitfb
 @import genctx
@@ -180,12 +181,42 @@ func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFnSig, ar
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     params: *Vector<int64> = sig.params
-    call_ret: string = cty_ll(c, sig.ret)
     fixed: int64 = vec_len(params)
-    args: *StringBuilder = alloc(sb_new())
+    // A struct return rides the same System V form the declare emits: a memory
+    // struct (over sixteen bytes) through a caller allocated sret slot, and a
+    // small struct through its coerced register type reassembled after the call.
+    // A variadic fixed parameter is never a struct (sema rejects it), so only
+    // the return needs the ABI here.
+    ret_is_struct: bool = cabi_is_struct(c, sig.ret)
+    mut ret_mem: bool = false
+    mut ret_n: int64 = 0
+    mut ret_align: int64 = 8
+    mut ret_ll0: string = gs_copy("")
+    mut ret_ll1: string = gs_copy("")
+    mut sret_slot: string = gs_copy("")
+    if ret_is_struct {
+        rc: CAbiClass = cabi_classify(c, sig.ret)
+        ret_align = rc.align
+        if rc.memory {
+            ret_mem = true
+            free(sret_slot)
+            sret_slot = gen_alloca(s, sig.ret)
+        } else {
+            ret_n = rc.n
+            free(ret_ll0)
+            ret_ll0 = gs_copy(rc.ll0)
+            if rc.n == 2 {
+                free(ret_ll1)
+                ret_ll1 = gs_copy(rc.ll1)
+            }
+        }
+    }
+    argfrags: *Vector<string> = alloc(vec_new())
+    if ret_mem {
+        vec_push(argfrags, fscall_ptr_attr_arg(c, "sret", sig.ret, ret_align, sret_slot))
+    }
     mut i: int64 = 0
     while i < args_len {
-        if i > 0 { sb_push(args, ", ") }
         aeid: int64 = vec_get((*a).kids, args_off + i)
         v0: Val = gen_expr(s, aeid)
         mut vll: string = gs_copy("")
@@ -199,33 +230,62 @@ func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFnSig, ar
             vop = pv.op
             vll = cty_ll(c, pv.ty)
         }
-        sb_push(args, vll)
-        sb_push_char(args, 32)
-        sb_push(args, vop)
+        vec_push(argfrags, fscall_arg(vll, vop))
         free(vll)
         i = i + 1
     }
-    arg_text: string = gs_built(args)
-    sb_free(args)
-    free(args)
+    argb: *StringBuilder = alloc(sb_new())
+    mut ai: int64 = 0
+    while ai < vec_len(argfrags) {
+        if ai > 0 { sb_push(argb, ", ") }
+        frag: string = vec_get(argfrags, ai)
+        sb_push(argb, frag)
+        ai = ai + 1
+    }
+    arg_text: string = gs_built(argb)
+    sb_free(argb)
+    free(argb)
     sigb: *StringBuilder = alloc(sb_new())
     sb_push_char(sigb, 40)
+    mut wrote: int64 = 0
+    if ret_mem {
+        sb_push(sigb, "ptr")
+        wrote = 1
+    }
     mut p: int64 = 0
     while p < fixed {
-        if p > 0 { sb_push(sigb, ", ") }
+        if wrote > 0 { sb_push(sigb, ", ") }
         pll: string = cty_ll(c, vec_get(params, p))
         sb_push(sigb, pll)
         free(pll)
+        wrote = wrote + 1
         p = p + 1
     }
-    if fixed > 0 { sb_push(sigb, ", ...") } else { sb_push(sigb, "...") }
+    if wrote > 0 { sb_push(sigb, ", ...") } else { sb_push(sigb, "...") }
     sb_push_char(sigb, 41)
     sigtxt: string = gs_built(sigb)
     sb_free(sigb)
     free(sigb)
+    mut call_ret: string = gs_copy("")
+    if ret_mem {
+        free(call_ret)
+        call_ret = gs_copy("void")
+    } else if ret_is_struct {
+        if ret_n == 1 {
+            free(call_ret)
+            call_ret = gs_copy(ret_ll0)
+        } else {
+            free(call_ret)
+            call_ret = fscall_pair_ty(ret_ll0, ret_ll1)
+        }
+    } else {
+        free(call_ret)
+        call_ret = cty_ll(c, sig.ret)
+    }
     b: *StringBuilder = alloc(sb_new())
-    mut dest: string = ""
+    mut dest: string = gs_copy("")
     if !str_eq(call_ret, "void") {
+        free(dest)
         dest = next_tmp((*s).fb)
         sb_push(b, dest)
         sb_push(b, " = ")
@@ -244,8 +304,315 @@ func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFnSig, ar
     free(b)
     line((*s).fb, text)
     free(text)
+    if ret_mem {
+        memv: string = gen_load_slot(s, sig.ret, sret_slot)
+        return Val { ty: sig.ret, op: memv }
+    }
+    if ret_is_struct {
+        rslot: string = gen_alloca(s, sig.ret)
+        if ret_n == 1 {
+            fscall_store_al(s, ret_ll0, dest, rslot, ret_align)
+        } else {
+            pair: string = fscall_pair_ty(ret_ll0, ret_ll1)
+            g0: string = fscall_gep(s, pair, rslot, 0)
+            e0: string = fscall_extract(s, pair, dest, 0)
+            fscall_store_al(s, ret_ll0, e0, g0, ret_align)
+            g1: string = fscall_gep(s, pair, rslot, 1)
+            e1: string = fscall_extract(s, pair, dest, 1)
+            fscall_store_al(s, ret_ll1, e1, g1, ret_align)
+            free(pair)
+        }
+        rv: string = gen_load_slot(s, sig.ret, rslot)
+        return Val { ty: sig.ret, op: rv }
+    }
     if str_eq(call_ret, "void") { return Val { ty: sig.ret, op: gs_copy("") } }
     return Val { ty: sig.ret, op: dest }
+}
+
+// The coerced two element struct type "{ T0, T1 }" the getelementptr uses to
+// address each register piece of a struct in its slot.
+func fscall_pair_ty(ll0: string, ll1: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "{ ")
+    sb_push(b, ll0)
+    sb_push(b, ", ")
+    sb_push(b, ll1)
+    sb_push(b, " }")
+    out: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// %d = getelementptr <struct_ll>, ptr <ptr>, i32 0, i32 <index>
+func fscall_gep(s: *GenFuncState, struct_ll: string, ptr: string, index: int64) -> string {
+    d: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = getelementptr ")
+    sb_push(b, struct_ll)
+    sb_push(b, ", ptr ")
+    sb_push(b, ptr)
+    sb_push(b, ", i32 0, i32 ")
+    sb_push_int(b, index)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    return d
+}
+
+// %d = load <ll>, ptr <ptr>, align <align>. A coerced piece load carries the
+// struct's own alignment, which may be under the piece type's natural alignment.
+func fscall_load_al(s: *GenFuncState, ll: string, ptr: string, align: int64) -> string {
+    d: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = load ")
+    sb_push(b, ll)
+    sb_push(b, ", ptr ")
+    sb_push(b, ptr)
+    sb_push(b, ", align ")
+    sb_push_int(b, align)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    return d
+}
+
+// store <ll> <val>, ptr <ptr>, align <align>
+func fscall_store_al(s: *GenFuncState, ll: string, val: string, ptr: string, align: int64) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "store ")
+    sb_push(b, ll)
+    sb_push_char(b, 32)
+    sb_push(b, val)
+    sb_push(b, ", ptr ")
+    sb_push(b, ptr)
+    sb_push(b, ", align ")
+    sb_push_int(b, align)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+}
+
+// %d = extractvalue <struct_ll> <agg>, <index>
+func fscall_extract(s: *GenFuncState, struct_ll: string, agg: string, index: int64) -> string {
+    d: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, d)
+    sb_push(b, " = extractvalue ")
+    sb_push(b, struct_ll)
+    sb_push_char(b, 32)
+    sb_push(b, agg)
+    sb_push(b, ", ")
+    sb_push_int(b, index)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    return d
+}
+
+func fscall_arg(ll: string, op: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, ll)
+    sb_push_char(b, 32)
+    sb_push(b, op)
+    out: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func fscall_ptr_attr_arg(c: *CTyArena, kind: string, ty: int64, align: int64, slot: string) -> string {
+    tll: string = cty_ll(c, ty)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "ptr ")
+    sb_push(b, kind)
+    sb_push_char(b, 40)
+    sb_push(b, tll)
+    sb_push(b, ") align ")
+    sb_push_int(b, align)
+    sb_push_char(b, 32)
+    sb_push(b, slot)
+    out: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    free(tll)
+    return out
+}
+
+// Loads the register pieces of a struct argument out of its slot and pushes each
+// as a "<type> <value>" call argument fragment, GEP-ing the coerced struct type
+// exactly as clang does. Piece loads carry the struct's alignment.
+func fscall_push_pieces(s: *GenFuncState, pc: CAbiClass, slot: string, args: *Vector<string>) -> void {
+    if pc.n == 1 {
+        p0: string = fscall_load_al(s, pc.ll0, slot, pc.align)
+        vec_push(args, fscall_arg(pc.ll0, p0))
+        return
+    }
+    pair: string = fscall_pair_ty(pc.ll0, pc.ll1)
+    g0: string = fscall_gep(s, pair, slot, 0)
+    p0: string = fscall_load_al(s, pc.ll0, g0, pc.align)
+    vec_push(args, fscall_arg(pc.ll0, p0))
+    g1: string = fscall_gep(s, pair, slot, 1)
+    p1: string = fscall_load_al(s, pc.ll1, g1, pc.align)
+    vec_push(args, fscall_arg(pc.ll1, p1))
+    free(pair)
+}
+
+// Emits "[%dest = ]call <retll> @<name>(<args>)" and returns the destination, or
+// the empty string when the call has no result.
+func fscall_emit(s: *GenFuncState, retll: string, name: string, arg_text: string, has_result: bool) -> string {
+    mut dest: string = gs_copy("")
+    b: *StringBuilder = alloc(sb_new())
+    if has_result {
+        free(dest)
+        dest = next_tmp((*s).fb)
+        sb_push(b, dest)
+        sb_push(b, " = ")
+    }
+    sb_push(b, "call ")
+    sb_push(b, retll)
+    sb_push(b, " @")
+    sb_push(b, name)
+    sb_push_char(b, 40)
+    sb_push(b, arg_text)
+    sb_push_char(b, 41)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+    return dest
+}
+
+export func fscall_needs_abi(c: *CTyArena, sig: GenFnSig) -> bool {
+    if cabi_is_struct(c, sig.ret) { return true }
+    ps: *Vector<int64> = sig.params
+    mut i: int64 = 0
+    while i < vec_len(ps) {
+        if cabi_is_struct(c, vec_get(ps, i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// Lowers a call to a foreign function whose signature carries a struct by value.
+// Each struct argument is built into a slot and passed either byval (memory) or
+// as its coerced register pieces; a struct return is received through an sret
+// slot (memory) or reassembled from its coerced register form.
+func gen_foreign_struct_call(s: *GenFuncState, name: string, sig: GenFnSig, args_off: int64, args_len: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    args: *Vector<string> = alloc(vec_new())
+    ret_is_struct: bool = cabi_is_struct(c, sig.ret)
+    mut ret_mem: bool = false
+    mut ret_n: int64 = 0
+    mut ret_align: int64 = 8
+    mut ret_ll0: string = gs_copy("")
+    mut ret_ll1: string = gs_copy("")
+    mut sret_slot: string = gs_copy("")
+    if ret_is_struct {
+        rc: CAbiClass = cabi_classify(c, sig.ret)
+        ret_align = rc.align
+        if rc.memory {
+            ret_mem = true
+            free(sret_slot)
+            sret_slot = gen_alloca(s, sig.ret)
+            vec_push(args, fscall_ptr_attr_arg(c, "sret", sig.ret, rc.align, sret_slot))
+        } else {
+            ret_n = rc.n
+            free(ret_ll0)
+            ret_ll0 = gs_copy(rc.ll0)
+            if rc.n == 2 {
+                free(ret_ll1)
+                ret_ll1 = gs_copy(rc.ll1)
+            }
+        }
+    }
+    ps: *Vector<int64> = sig.params
+    mut i: int64 = 0
+    while i < args_len {
+        aeid: int64 = vec_get((*a).kids, args_off + i)
+        pty: int64 = vec_get(ps, i)
+        v: Val = gen_expr(s, aeid)
+        if cabi_is_struct(c, pty) {
+            pc: CAbiClass = cabi_classify(c, pty)
+            if cabi_param_in_memory(c, sig.ret, ps, i) {
+                bal: int64 = cabi_byval_align(pc.align)
+                slot: string = gen_alloca_align(s, pty, bal)
+                gen_store_slot(s, pty, v.op, slot)
+                vec_push(args, fscall_ptr_attr_arg(c, "byval", pty, bal, slot))
+            } else {
+                slot: string = gen_alloca(s, pty)
+                gen_store_slot(s, pty, v.op, slot)
+                fscall_push_pieces(s, pc, slot, args)
+            }
+        } else {
+            av: Val = adapt(s, v, pty)
+            ll: string = cty_ll(c, pty)
+            vec_push(args, fscall_arg(ll, av.op))
+            free(ll)
+        }
+        i = i + 1
+    }
+    argb: *StringBuilder = alloc(sb_new())
+    mut k: int64 = 0
+    while k < vec_len(args) {
+        if k > 0 { sb_push(argb, ", ") }
+        frag: string = vec_get(args, k)
+        sb_push(argb, frag)
+        k = k + 1
+    }
+    arg_text: string = gs_built(argb)
+    sb_free(argb)
+    free(argb)
+    if ret_mem {
+        fscall_emit(s, "void", name, arg_text, false)
+        memv: string = gen_load_slot(s, sig.ret, sret_slot)
+        return Val { ty: sig.ret, op: memv }
+    }
+    if ret_is_struct {
+        mut ret_ll: string = gs_copy(ret_ll0)
+        if ret_n == 2 {
+            free(ret_ll)
+            ret_ll = fscall_pair_ty(ret_ll0, ret_ll1)
+        }
+        r: string = fscall_emit(s, ret_ll, name, arg_text, true)
+        rslot: string = gen_alloca(s, sig.ret)
+        if ret_n == 1 {
+            fscall_store_al(s, ret_ll0, r, rslot, ret_align)
+        } else {
+            pair: string = fscall_pair_ty(ret_ll0, ret_ll1)
+            g0: string = fscall_gep(s, pair, rslot, 0)
+            e0: string = fscall_extract(s, pair, r, 0)
+            fscall_store_al(s, ret_ll0, e0, g0, ret_align)
+            g1: string = fscall_gep(s, pair, rslot, 1)
+            e1: string = fscall_extract(s, pair, r, 1)
+            fscall_store_al(s, ret_ll1, e1, g1, ret_align)
+            free(pair)
+        }
+        rv: string = gen_load_slot(s, sig.ret, rslot)
+        free(ret_ll)
+        return Val { ty: sig.ret, op: rv }
+    }
+    ret_ll2: string = cty_ll(c, sig.ret)
+    if str_eq(ret_ll2, "void") {
+        fscall_emit(s, "void", name, arg_text, false)
+        free(ret_ll2)
+        return Val { ty: sig.ret, op: gs_copy("") }
+    }
+    r2: string = fscall_emit(s, ret_ll2, name, arg_text, true)
+    free(ret_ll2)
+    return Val { ty: sig.ret, op: r2 }
 }
 
 export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_len: int64) -> Val {
@@ -322,6 +689,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
         sig: GenFnSig = genctx_fn((*s).ctx, name)
         if sig.variadic { return gen_variadic_foreign_call(s, name, sig, args_off, args_len) }
         if sig.is_async { return gen_async_call(s, name, args_off, args_len) }
+        if sig.is_foreign && fscall_needs_abi(c, sig) { return gen_foreign_struct_call(s, name, sig, args_off, args_len) }
         mut call_ret: string = cty_ll(c, sig.ret)
         args: *StringBuilder = alloc(sb_new())
         mut i: int64 = 0

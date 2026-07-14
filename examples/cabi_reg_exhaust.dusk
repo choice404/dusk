@@ -1,0 +1,25 @@
+@paradigm procedural
+
+// Register exhaustion at the System V boundary. When the integer or SSE register
+// file is already full at a struct parameter, that struct rides the stack whole
+// (byval) instead of splitting across a leftover register and memory, and later
+// parameters keep taking any registers it left behind. The declare and the call
+// consult one shared walk, so their decisions cannot disagree, and the coercion
+// links cleanly against the clang-compiled receivers in cabi_reg_exhaust.c.
+@csource "cabi_reg_exhaust.c"
+
+struct P { x: int64, y: int64 }
+struct Q { x: float64, y: float64 }
+
+foreign "C" {
+    func f6(a: int64, b: int64, c: int64, d: int64, e: int64, p: P) -> int64
+    func g8(a: float64, b: float64, c: float64, d: float64, e: float64, f: float64, g: float64, q: Q) -> int64
+    func f4(a: int64, b: int64, c: int64, d: int64, p: P) -> int64
+}
+
+func main() -> int64 {
+    println(f6(1, 1, 1, 1, 1, P { x: 7, y: 9 }))
+    println(g8(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, Q { x: 7.0, y: 9.0 }))
+    println(f4(1, 1, 1, 1, P { x: 7, y: 9 }))
+    return 0
+}

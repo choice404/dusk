@@ -1,0 +1,21 @@
+@paradigm procedural
+
+// Receiving a struct returned in memory. A 24-byte return uses the sret
+// convention: dusk allocates the result slot, passes its address as the hidden
+// first argument, and reads the struct out of the slot once the call returns.
+// The value also round trips back through take_m24 to cover byval on the way in.
+@csource "cabi_return_sret.c"
+
+struct M24 { a: int64, b: int64, c: int64 }
+
+foreign "C" {
+    func ret_m24() -> M24
+    func take_m24(x: M24) -> int64
+}
+
+func main() -> int64 {
+    r: M24 = ret_m24()
+    println(r.a + r.b * 10 + r.c * 100)
+    println(take_m24(ret_m24()))
+    return 0
+}

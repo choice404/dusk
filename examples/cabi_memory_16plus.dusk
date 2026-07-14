@@ -1,0 +1,20 @@
+@paradigm procedural
+
+// A struct larger than sixteen bytes rides in memory. dusk builds it into a
+// stack slot and passes a byval pointer, so the callee reads its own copy. Here
+// a 24-byte {i64,i64,i64} and a 20-byte five-int32 struct both cross by byval.
+@csource "cabi_memory_16plus.c"
+
+struct M24 { a: int64, b: int64, c: int64 }
+struct M20 { a: int32, b: int32, c: int32, d: int32, e: int32 }
+
+foreign "C" {
+    func take_m24(x: M24) -> int64
+    func take_m20(x: M20) -> int64
+}
+
+func main() -> int64 {
+    println(take_m24(M24 { a: 1, b: 2, c: 3 }))
+    println(take_m20(M20 { a: 1, b: 2, c: 3, d: 4, e: 5 }))
+    return 0
+}

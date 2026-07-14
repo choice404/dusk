@@ -1,0 +1,27 @@
+@paradigm procedural
+
+// Receiving a small struct returned in registers. An {i64,i64} return comes back
+// as a register pair that dusk stores into a slot and reads fields from; an
+// {f64,f64} and an {i64,f64} return round trip back through a taking function, so
+// the register-pair ABI is exercised on the way out and the way in.
+@csource "cabi_return_pair.c"
+
+struct LL { a: int64, b: int64 }
+struct FF { a: float64, b: float64 }
+struct LF { a: int64, b: float64 }
+
+foreign "C" {
+    func ret_ll() -> LL
+    func ret_ff() -> FF
+    func ret_lf() -> LF
+    func take_ff(x: FF) -> int64
+    func take_lf(x: LF) -> int64
+}
+
+func main() -> int64 {
+    r_ll: LL = ret_ll()
+    println(r_ll.a + r_ll.b * 1000)
+    println(take_ff(ret_ff()))
+    println(take_lf(ret_lf()))
+    return 0
+}

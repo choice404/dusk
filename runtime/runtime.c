@@ -11,6 +11,8 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <dirent.h>
+#include <time.h>
 
 static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -553,6 +555,98 @@ int64_t cool_is_file(const char *path) {
         return 0;
     }
     return S_ISREG(st.st_mode) ? 1 : 0;
+}
+
+/* std.fs shims. dusk never learns struct stat's, DIR's, or dirent's own
+   layout: every shim below hands back plain int64/char* scalars only, the
+   same discipline cool_file_size and cool_is_file already follow above.
+
+   A second, quieter rule shapes cool_dir_open and cool_dir_next in
+   particular: dusk's == rejects every pointer type outright, "pointers do
+   not compare; compare the values they point to" (see check_binary in the
+   sema layer), so a dusk wrapper has no way to test a returned *void or
+   *raw T against NULL the way C would. Any shim that can fail hands the
+   failure back through a separate int64 status instead of a nullable
+   pointer: cool_dir_open's DIR* rides home as the bit pattern in an int64
+   out-param, and cool_dir_next fills a caller-supplied buffer and returns a
+   byte length, rather than returning a possibly-NULL char*. */
+
+/* Fills out_size, out_mode, and out_mtime from one stat() call on path, each
+   a plain int64 word so the dusk side never reads struct stat's own layout.
+   st_mode carries the raw mode word, type bits and permission bits together
+   (POSIX S_IFREG/S_IFDIR/S_IRWXU and friends); st_mtime is seconds since the
+   epoch, UTC. Returns 0 on success or -1 on failure, leaving errno set for
+   cool_errno to report. */
+int64_t cool_stat(const char *path, int64_t *out_size, int64_t *out_mode, int64_t *out_mtime) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        return -1;
+    }
+    *out_size = (int64_t)st.st_size;
+    *out_mode = (int64_t)st.st_mode;
+    *out_mtime = (int64_t)st.st_mtime;
+    return 0;
+}
+
+/* Opens a directory stream and hands the DIR* back through out_handle as its
+   raw bit pattern, an opaque int64 token good only for cool_dir_next and
+   cool_dir_close to cast back; see the note above for why a nullable
+   pointer return will not do. Returns 0 on success or -1 on failure with
+   errno set, and out_handle is only meaningful on the success path. */
+int64_t cool_dir_open(const char *path, int64_t *out_handle) {
+    DIR *d = opendir(path);
+    if (!d) {
+        return -1;
+    }
+    *out_handle = (int64_t)(intptr_t)d;
+    return 0;
+}
+
+/* Reads the next entry of the stream named by handle_bits into buf, a
+   caller supplied buffer of at least cap bytes, and returns the NUL
+   excluded byte length written. A name longer than cap - 1 bytes is
+   truncated to fit; cap is expected sized well past NAME_MAX so this never
+   fires in practice. Returns -1 at a clean end of stream and -2 on a hard
+   read error (errno set): POSIX folds both cases into one NULL return from
+   readdir and tells them apart only through whether errno moved, so this
+   shim clears errno before the call and checks it after, same as
+   cool_dir_next's caller would have to if this were left to dusk itself. */
+int64_t cool_dir_next(int64_t handle_bits, char *buf, int64_t cap) {
+    DIR *d = (DIR *)(intptr_t)handle_bits;
+    errno = 0;
+    struct dirent *ent = readdir(d);
+    if (!ent) {
+        return errno != 0 ? -2 : -1;
+    }
+    if (cap <= 0) {
+        return -2;
+    }
+    size_t len = strlen(ent->d_name);
+    size_t room = (size_t)cap - 1;
+    size_t n = len < room ? len : room;
+    memcpy(buf, ent->d_name, n);
+    buf[n] = '\0';
+    return (int64_t)n;
+}
+
+/* Closes a directory stream opened by cool_dir_open. 0 on success, -1 on
+   failure with errno set. */
+int64_t cool_dir_close(int64_t handle_bits) {
+    DIR *d = (DIR *)(intptr_t)handle_bits;
+    if (closedir(d) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* Nanoseconds since the Unix epoch, UTC, off CLOCK_REALTIME: whole seconds
+   times one billion plus the nanosecond remainder. The one shim std.time's
+   now_unix/now_ms/now_ns and its pure dusk civil calendar all derive
+   from. */
+int64_t cool_unix_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }
 
 char *cool_realpath(const char *path) {

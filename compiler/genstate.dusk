@@ -108,6 +108,38 @@ export func gen_alloca(s: *GenFuncState, ty: int64) -> string {
     return dest
 }
 
+// Allocates storage through the entry funnel, stamped with an explicit alignment
+// at least align. A byval argument slot uses this so the alloca alignment covers
+// the byval align the call claims, since a byval struct that is naturally under
+// eight byte aligned rides an eightbyte aligned stack slot. On the async frame
+// path the slot's frame offset is aligned the same way.
+export func gen_alloca_align(s: *GenFuncState, ty: int64, align: int64) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    dest: string = next_tmp((*s).fb)
+    ll: string = cty_ll(c, ty)
+    if (*s).frame_on {
+        sa: SizeAlign = cty_size_align(c, ty)
+        mut al: int64 = sa.align
+        if align > al { al = align }
+        frame_add_slot((*s).frame, dest, ll, sa.size, al)
+        free(ll)
+        return dest
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dest)
+    sb_push(b, " = alloca ")
+    sb_push(b, ll)
+    sb_push(b, ", align ")
+    sb_push_int(b, align)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    push_entry_alloca((*s).fb, text)
+    free(text)
+    free(ll)
+    return dest
+}
+
 export func gen_alloca_raw(s: *GenFuncState, llty: string) -> string {
     dest: string = next_tmp((*s).fb)
     if (*s).frame_on {

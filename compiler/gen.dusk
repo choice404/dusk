@@ -7,6 +7,7 @@
 @import std.vector
 @import ast
 @import cty
+@import cabi
 @import diag
 @import emit
 @import genctx
@@ -268,6 +269,114 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
     }
 }
 
+// The "ptr sret(%T) align A" first parameter for a foreign function that returns
+// a struct in memory: the caller passes the address of a caller allocated slot.
+func abi_sret_param(c: *CTyArena, ty: int64, align: int64) -> string {
+    tll: string = cty_ll(c, ty)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "ptr sret(")
+    sb_push(b, tll)
+    sb_push(b, ") align ")
+    sb_push_int(b, align)
+    out: string = gen_built(b)
+    sb_free(b)
+    free(b)
+    free(tll)
+    return out
+}
+
+// The "ptr byval(%T) align A" parameter for a struct passed in memory.
+func abi_byval_param(c: *CTyArena, ty: int64, align: int64) -> string {
+    tll: string = cty_ll(c, ty)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "ptr byval(")
+    sb_push(b, tll)
+    sb_push(b, ") align ")
+    sb_push_int(b, align)
+    out: string = gen_built(b)
+    sb_free(b)
+    free(b)
+    free(tll)
+    return out
+}
+
+func abi_pair_ll(ll0: string, ll1: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "{ ")
+    sb_push(b, ll0)
+    sb_push(b, ", ")
+    sb_push(b, ll1)
+    sb_push(b, " }")
+    out: string = gen_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Emits the `declare` line for a foreign function, coercing any struct parameter
+// or return to its System V register or memory form so the declaration matches
+// the ABI clang gives the C definition it links against.
+func foreign_declare(m: *EmitModule, ctx: *GenCtx, ff: ForeignFuncNode) -> void {
+    a: *Ast = (*ctx).ast
+    c: *CTyArena = genctx_ctys(ctx)
+    sig: GenFnSig = genctx_fn(ctx, ast_name(a, ff.name))
+    parts: *Vector<string> = alloc(vec_new())
+    mut retll: string = gen_copy("void")
+    if cabi_is_struct(c, sig.ret) {
+        rc: CAbiClass = cabi_classify(c, sig.ret)
+        if rc.memory {
+            retll = gen_copy("void")
+            vec_push(parts, abi_sret_param(c, sig.ret, rc.align))
+        } else if rc.n == 1 {
+            retll = gen_copy(rc.ll0)
+        } else {
+            retll = abi_pair_ll(rc.ll0, rc.ll1)
+        }
+    } else {
+        free(retll)
+        retll = cty_ll(c, sig.ret)
+    }
+    ps: *Vector<int64> = sig.params
+    mut pi: int64 = 0
+    while pi < vec_len(ps) {
+        pty: int64 = vec_get(ps, pi)
+        if cabi_is_struct(c, pty) {
+            pc: CAbiClass = cabi_classify(c, pty)
+            if cabi_param_in_memory(c, sig.ret, ps, pi) {
+                vec_push(parts, abi_byval_param(c, pty, cabi_byval_align(pc.align)))
+            } else {
+                vec_push(parts, gen_copy(pc.ll0))
+                if pc.n == 2 { vec_push(parts, gen_copy(pc.ll1)) }
+            }
+        } else {
+            vec_push(parts, cty_ll(c, pty))
+        }
+        pi = pi + 1
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, retll)
+    sb_push(b, " @")
+    sb_push(b, ast_name(a, ff.name))
+    sb_push_char(b, 40)
+    mut k: int64 = 0
+    while k < vec_len(parts) {
+        if k > 0 { sb_push(b, ", ") }
+        pp: string = vec_get(parts, k)
+        sb_push(b, pp)
+        k = k + 1
+    }
+    if ff.variadic {
+        if vec_len(parts) > 0 { sb_push(b, ", ...") } else { sb_push(b, "...") }
+    }
+    sb_push_char(b, 41)
+    ds: string = gen_built(b)
+    sb_free(b)
+    free(b)
+    emit_declare(m, ds)
+    free(ds)
+    free(retll)
+}
+
 // Lowers a ground, monomorphized AST to textual LLVM IR. Unsupported Phase A
 // constructs record faults so callers never observe a malformed partial module.
 export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
@@ -319,32 +428,7 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
             mut fi: int64 = 0
             while fi < fb.funcs_len {
                 ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + fi))
-                sig: GenFnSig = genctx_fn(ctx, ast_name(a, ff.name))
-                b4: *StringBuilder = alloc(sb_new())
-                rll: string = cty_ll(genctx_ctys(ctx), sig.ret)
-                sb_push(b4, rll)
-                sb_push(b4, " @")
-                sb_push(b4, ast_name(a, ff.name))
-                sb_push_char(b4, 40)
-                ps: *Vector<int64> = sig.params
-                mut pi: int64 = 0
-                while pi < vec_len(ps) {
-                    if pi > 0 { sb_push(b4, ", ") }
-                    pll: string = cty_ll(genctx_ctys(ctx), vec_get(ps, pi))
-                    sb_push(b4, pll)
-                    free(pll)
-                    pi = pi + 1
-                }
-                if ff.variadic {
-                    if vec_len(ps) > 0 { sb_push(b4, ", ...") } else { sb_push(b4, "...") }
-                }
-                sb_push_char(b4, 41)
-                ds: string = gen_built(b4)
-                sb_free(b4)
-                free(b4)
-                emit_declare(m, ds)
-                free(ds)
-                free(rll)
+                foreign_declare(m, ctx, ff)
                 fi = fi + 1
             }
         } else if it.kind == ik_struct() {

@@ -228,6 +228,120 @@ func foreign_ty_ok(t: *TyArena, id: int64) -> bool {
     return false
 }
 
+func field_reject(name: string, what: string, advice: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "field '")
+    sb_push(s, name)
+    sb_push(s, "' is ")
+    sb_push(s, what)
+    sb_push(s, "; ")
+    sb_push(s, advice)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func boundary_advice() -> string {
+    return "the C boundary takes scalars, raw pointers, and nested plain structs"
+}
+
+// Walks a struct's fields, returning "" when every field is C plain (an integer,
+// char, rune, float64, raw pointer, nested plain struct, or a fixed array of
+// those) or the message that names the first field the C boundary cannot carry.
+func empty_struct_msg(name: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "struct '")
+    sb_push(s, name)
+    sb_push(s, "' has no fields; C cannot size it at the boundary")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func foreign_struct_cplain(tc: *TypeChecker, name: string) -> string {
+    st: StructSig = sig_struct((*tc).sigtab, name)
+    if st.is_gen {
+        return field_reject(name, "a generic struct", "instantiate it or pass a pointer to it")
+    }
+    if st.len == 0 {
+        return empty_struct_msg(name)
+    }
+    mut i: int64 = 0
+    while i < st.len {
+        f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
+        r: string = foreign_cplain_field(tc, f.ty, f.name)
+        if str_len(r) > 0 { return r }
+        i = i + 1
+    }
+    return ""
+}
+
+// Classifies one struct field or array element for the C boundary, returning ""
+// when it is C plain or a reject message naming the field. The float32 and bool
+// rejects are load bearing: without them an SSE eightbyte would have to pack two
+// floats and an i1 field would have no in-memory storage rule.
+func foreign_cplain_field(tc: *TypeChecker, tyid: int64, fname: string) -> string {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    k: int64 = n.kind
+    if k == tyk_int() || k == tyk_char() || k == tyk_rune() { return "" }
+    if k == tyk_float() {
+        if n.w == 32 { return field_reject(fname, "float32", "use float64 or pass by pointer") }
+        return ""
+    }
+    if k == tyk_bool() { return field_reject(fname, "bool", "use char or int8 at the boundary") }
+    if k == tyk_rawptr() { return "" }
+    if k == tyk_ptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        if inner.kind == tyk_unit() { return "" }
+        return field_reject(fname, "a managed pointer", "use *raw T or *void, since a managed *T carries a generation C cannot read")
+    }
+    if k == tyk_array() { return foreign_cplain_field(tc, n.a, fname) }
+    if k == tyk_str() { return field_reject(fname, "a string", boundary_advice()) }
+    if k == tyk_slice() { return field_reject(fname, "a slice", boundary_advice()) }
+    if k == tyk_tuple() { return field_reject(fname, "a tuple", boundary_advice()) }
+    if k == tyk_func() { return field_reject(fname, "a closure", boundary_advice()) }
+    if k == tyk_collector() { return field_reject(fname, "a collected value", boundary_advice()) }
+    if k == tyk_future() { return field_reject(fname, "a future", boundary_advice()) }
+    if k == tyk_error() { return field_reject(fname, "an error value", boundary_advice()) }
+    if k == tyk_thread() { return field_reject(fname, "a thread handle", boundary_advice()) }
+    if k == tyk_named() {
+        nm: string = ty_name((*tc).ty, tyid)
+        if tc_has_iface(tc, nm) { return field_reject(fname, "an interface", boundary_advice()) }
+        if tc_has_enum(tc, nm) { return field_reject(fname, "an enum", boundary_advice()) }
+        if tc_has_struct(tc, nm) { return foreign_struct_cplain(tc, nm) }
+    }
+    return field_reject(fname, "an unsupported type", boundary_advice())
+}
+
+func variadic_struct_decl_msg(fname: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "foreign function '")
+    sb_push(s, fname)
+    sb_push(s, "' is variadic and cannot take a struct by value; a variadic foreign function takes only scalars and raw pointers")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+// The reject message for a foreign parameter or return type, or "" when it is
+// carried cleanly. A struct is allowed when it is C plain, except across a
+// variadic boundary, where every value must be a scalar or raw pointer.
+func foreign_param_reject(tc: *TypeChecker, tyid: int64, fname: string, variadic: bool) -> string {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_named() {
+        nm: string = ty_name((*tc).ty, tyid)
+        if tc_has_struct(tc, nm) {
+            if variadic { return variadic_struct_decl_msg(fname) }
+            return foreign_struct_cplain(tc, nm)
+        }
+    }
+    if foreign_ty_ok((*tc).ty, tyid) { return "" }
+    return foreign_ty_msg(fname, ty_is_managed((*tc).ty, tyid))
+}
+
 export func reject_collector_iface_box(tc: *TypeChecker, expected: int64, actual: int64, lo: int64, hi: int64) -> void {
     en: TyNode = ty_get((*tc).ty, expected)
     an: TyNode = ty_get((*tc).ty, actual)
@@ -576,15 +690,20 @@ export func check_foreign(tc: *TypeChecker, fb: ForeignNode) -> void {
             p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + j))
             reject_reserved_uint(tc, p.ty, fb.lo, fb.hi)
             tyid: int64 = tc_type(tc, p.ty)
-            if !foreign_ty_ok((*tc).ty, tyid) {
-                tc_emit(tc, foreign_ty_msg(ast_name(a, ff.name), ty_is_managed((*tc).ty, tyid)), fb.lo, fb.hi)
+            preject: string = foreign_param_reject(tc, tyid, ast_name(a, ff.name), ff.variadic)
+            if str_len(preject) > 0 {
+                tc_emit(tc, preject, fb.lo, fb.hi)
             }
             j = j + 1
         }
         reject_reserved_uint(tc, ff.ret, fb.lo, fb.hi)
         rt: int64 = tc_type(tc, ff.ret)
-        if !foreign_ty_ok((*tc).ty, rt) {
-            tc_emit(tc, foreign_ty_msg(ast_name(a, ff.name), ty_is_managed((*tc).ty, rt)), fb.lo, fb.hi)
+        // A variadic boundary constrains only the arguments, never the return
+        // classification, so a variadic foreign function may still return a
+        // struct by value; check the return type as non-variadic.
+        rreject: string = foreign_param_reject(tc, rt, ast_name(a, ff.name), false)
+        if str_len(rreject) > 0 {
+            tc_emit(tc, rreject, fb.lo, fb.hi)
         }
         i = i + 1
     }

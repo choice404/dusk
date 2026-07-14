@@ -370,10 +370,32 @@ foreign "C" {
 }
 ```
 
-The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function. A `*raw T` passes anywhere `*void` is expected, both are the same bare word. The reverse binding is rejected, since a `*void` that could become a typed `*raw T` would let a managed pointer launder through `*void` into a dereferenceable alias the generation check cannot see. A managed `*T` that round trips through `*void` back to a managed annotation comes back untracked, with no generation for the check to read, so everything through it afterward is the raw layer's honor system. Keep managed pointers on the managed layer.
+The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function. A `*raw T` passes anywhere `*void` is expected, both are the same bare word. The reverse binding is rejected, since a `*void` that could become a typed `*raw T` would let a managed pointer launder through `*void` into a dereferenceable alias the generation check cannot see. A managed `*T` that round trips through `*void` back to a managed annotation comes back untracked, with no generation for the check to read, so everything through it afterward is the raw layer's honor system. Keep managed pointers on the managed layer. A named struct also crosses by value under a narrower rule; see [Struct by value](#struct-by-value) below.
 
 - Only the `"C"` calling convention is supported.
-- A struct passed by value across the boundary and a callback that hands a dusk function to C are deferred to a later interop release.
+- A struct passed by value now crosses on the import side, a `foreign` declaration's own parameter and return types. A struct returned by an exported dusk function to a C caller, and a callback that hands a dusk function to C, are both still deferred to a later interop release.
+
+#### Struct by value
+
+Added in 1.4.1. A named struct may be declared as a `foreign` function's fixed parameter type or return type when every one of its fields is C plain: an integer of any width, `char`, `rune`, `float64`, a `*raw T`, a `*void`, a nested struct that is itself C plain, or a fixed array of any of those. A field of any other type is rejected by name at the struct, `field '<name>' is <kind>; <advice>`:
+
+- `bool`, `field '<name>' is bool; use char or int8 at the boundary`, since an `i1` field has no settled one byte storage rule at the boundary.
+- `float32`, `field '<name>' is float32; use float64 or pass by pointer`, since coercing an eightbyte that packs two `float32` fields is not classified.
+- a managed pointer, `field '<name>' is a managed pointer; use *raw T or *void, since a managed *T carries a generation C cannot read`.
+- a string, a slice, a tuple, a closure, a collected value, a future, an error value, a thread handle, an interface, or an enum, each named outright, `field '<name>' is <kind>; the C boundary takes scalars, raw pointers, and nested plain structs`.
+- a generic struct, `field '<name>' is a generic struct; instantiate it or pass a pointer to it`.
+
+A variadic foreign function never takes a struct by value at all, fixed parameter or vararg tail, `foreign function '<name>' is variadic and cannot take a struct by value; a variadic foreign function takes only scalars and raw pointers`, since C reads a vararg positionally with no type information of its own to classify a struct against.
+
+A C plain struct crosses the way clang's own classification places it, not as a flat memory copy. The struct is split into eight byte pieces; a piece holding only floating point data is an SSE register, anything else is an INTEGER register, and each register is coerced to the narrowest type that covers the data inside it, the same coercion clang emits at `-O0`. A struct of two eight bytes or fewer rides in registers, up to a pair of them; a struct larger than sixteen bytes falls back to memory entirely, passed by a hidden pointer, `byval` on a parameter and `sret` on a return. This is byte exact against clang, so the `.ll` dusk emits for a call or a `declare` links cleanly against an object a C compiler produced, from either side of the boundary.
+
+The classification above is the System V x86_64 ABI, and `x86_64-pc-linux-gnu` is the only target triple dusk emits today. Struct by value across a different target's own calling convention is future work, on the same footing every other target already stands on.
+
+#### Opaque handles
+
+Added in 1.4.1. A C library commonly hands back an opaque pointer, a database handle or a stream, whose layout its own header does not expose. The convention at the boundary is to carry it as a `*void`: the library's own open call returns it, every later call the library exposes takes it back, and the boundary already keeps this safe end to end, since a `*void` can never be dereferenced and never launders into a typed pointer.
+
+`std.fs`'s `Dir` follows the same convention with one substitution: its `h` field is an `int64` carrying the directory stream's underlying pointer as a bit pattern, not a `*void`. The substitution is not a style choice; it follows from a rule the language itself enforces. `==` on any pointer type is rejected outright, `pointers do not compare; compare the values they point to`, so a wrapper holding a `*void` would have no way to test a failed open against NULL the way a C caller tests `opendir`'s own return. Every call that can fail on such a handle reports failure through a separate status value instead, and the handle itself is read only by the same library's own next call. Read the `*void` form above as the convention proper and the `int64` form here as its equivalent under a constraint the pointer comparison rule imposes; neither exposes an unsafe read, since a bit pattern `int64` is exactly as opaque to dusk as the `*void` it stands in for.
 
 #### Variadic foreign functions
 
