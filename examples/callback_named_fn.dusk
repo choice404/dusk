@@ -1,0 +1,32 @@
+@paradigm procedural
+
+// A named top-level dusk function passed to libc's qsort as a C callback. The
+// function's LLVM signature, i32 (ptr, ptr), is already a valid comparator, so
+// the argument lowers to the bare code pointer @cmp with no forwarding thunk and
+// no environment. This comparator orders descending, so the print counts down.
+foreign "C" {
+    func qsort(base: *raw int64, n: int64, w: int64, cmp: (*raw int64, *raw int64) -> int32) -> void
+}
+
+func cmp(a: *raw int64, b: *raw int64) -> int32 {
+    if a[0] < b[0] { return int32(1) }
+    if a[0] > b[0] { return int32(-1) }
+    return int32(0)
+}
+
+func main() -> int32 {
+    buf: *raw int64 = alloc_bytes(40)
+    buf[0] = 5
+    buf[1] = 2
+    buf[2] = 8
+    buf[3] = 1
+    buf[4] = 9
+    qsort(buf, 5, 8, cmp)
+    mut i: int64 = 0
+    while i < 5 {
+        println(buf[i])
+        i = i + 1
+    }
+    free(buf)
+    return 0
+}

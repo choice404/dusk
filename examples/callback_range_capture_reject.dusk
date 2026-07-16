@@ -1,0 +1,24 @@
+@paradigm procedural
+
+// A callback lambda that captures an outer local through the lower bound of a
+// range is refused naming that local. The range's endpoints live in the a and
+// b slots of the node, with c holding only the inclusive flag; the capture
+// walk reads both endpoints, so a lower bound that names an outer local, lo, is
+// counted as a capture. Reading the wrong slots once missed the lower bound
+// entirely and this program was wrongly accepted.
+foreign "C" {
+    func call0(cb: () -> int64) -> int64
+}
+
+func main() -> int64 {
+    lo := 3
+    r: int64 = call0(lambda () -> int64 {
+        mut s: int64 = 0
+        for i in lo..6 {
+            s = s + i
+        }
+        return s
+    })
+    println(r)
+    return 0
+}

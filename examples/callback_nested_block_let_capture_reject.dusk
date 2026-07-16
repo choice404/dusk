@@ -1,0 +1,25 @@
+@paradigm procedural
+
+// A callback lambda that captures an outer local is refused even when a nested
+// block inside it binds a local of the same name with let. The inner x is
+// scoped to that block alone, so it must not mask the outer x the callback body
+// reads after the block: the capture analysis unbinds a block's own let names
+// on the way out, and the callback is rejected naming x. A block whose let
+// leaked its name once hid the capture and this program was wrongly accepted,
+// dropping x from the lifted environment.
+foreign "C" {
+    func call0(cb: () -> int64) -> int64
+}
+
+func main() -> int64 {
+    x := 7
+    r: int64 = call0(lambda () -> int64 {
+        if true {
+            x := 100
+            println(x)
+        }
+        return x + 1
+    })
+    println(r)
+    return 0
+}

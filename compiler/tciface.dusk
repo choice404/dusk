@@ -225,7 +225,51 @@ func foreign_ty_ok(t: *TyArena, id: int64) -> bool {
         inner: TyNode = ty_get(t, n.a)
         return inner.kind == tyk_unit()
     }
+    // A function type is a bare C function pointer at the boundary, legal when
+    // every parameter and the return is itself a scalar or raw pointer. A struct
+    // by value in a callback signature is refused, since a struct is not one of
+    // the scalar or raw pointer shapes this accepts. A nested function type is
+    // refused too: the callback goes one level deep, since C carries a callback
+    // as a bare function pointer with no room for a further closure word.
+    if n.kind == tyk_func() {
+        mut i: int64 = 0
+        while i < n.len {
+            k: int64 = vec_get((*t).kids, n.off + i)
+            if ty_get(t, k).kind == tyk_func() { return false }
+            if !foreign_ty_ok(t, k) { return false }
+            i = i + 1
+        }
+        if ty_get(t, n.a).kind == tyk_func() { return false }
+        return foreign_ty_ok(t, n.a)
+    }
     return false
+}
+
+// Whether a callback (a top-level function type in a foreign signature) has any
+// parameter or return that is itself a function type. C carries a callback as a
+// bare function pointer one word wide; a nested function would need a second
+// closure word C cannot read, so the type layer refuses the whole signature.
+func callback_has_nested_fn(tc: *TypeChecker, tyid: int64) -> bool {
+    t: *TyArena = (*tc).ty
+    n: TyNode = ty_get(t, tyid)
+    if n.kind != tyk_func() { return false }
+    mut i: int64 = 0
+    while i < n.len {
+        if ty_get(t, vec_get((*t).kids, n.off + i)).kind == tyk_func() { return true }
+        i = i + 1
+    }
+    return ty_get(t, n.a).kind == tyk_func()
+}
+
+func callback_nested_fn_msg(fname: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "foreign function '")
+    sb_push(s, fname)
+    sb_push(s, "': a C callback's own parameters and return must be scalars or raw pointers; a nested function type cannot cross")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
 }
 
 func field_reject(name: string, what: string, advice: string) -> string {
@@ -329,8 +373,42 @@ func variadic_struct_decl_msg(fname: string) -> string {
 // The reject message for a foreign parameter or return type, or "" when it is
 // carried cleanly. A struct is allowed when it is C plain, except across a
 // variadic boundary, where every value must be a scalar or raw pointer.
+func foreign_ret_fn_msg(fname: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "foreign function '")
+    sb_push(s, fname)
+    sb_push(s, "' cannot return a function pointer; a returned C function pointer has no dusk value to call, only an argument callback is supported")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func variadic_callback_msg(fname: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "foreign function '")
+    sb_push(s, fname)
+    sb_push(s, "' is variadic and cannot take a function pointer parameter; a C callback and a varargs tail cannot be combined")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
 func foreign_param_reject(tc: *TypeChecker, tyid: int64, fname: string, variadic: bool) -> string {
     n: TyNode = ty_get((*tc).ty, tyid)
+    // A callback rides the direct call path, whose exact-signature and
+    // capture-free checks the variadic path never runs; refuse the combination
+    // rather than let a callback slip past those guards into a varargs call.
+    if n.kind == tyk_func() && variadic {
+        return variadic_callback_msg(fname)
+    }
+    // A callback goes one level deep: its own parameters and return must be
+    // scalars or raw pointers. A nested function type would lower to a `{ptr, fn}`
+    // closure where C expects a single function pointer word, so it is refused.
+    if n.kind == tyk_func() && callback_has_nested_fn(tc, tyid) {
+        return callback_nested_fn_msg(fname)
+    }
     if n.kind == tyk_named() {
         nm: string = ty_name((*tc).ty, tyid)
         if tc_has_struct(tc, nm) {
@@ -698,12 +776,20 @@ export func check_foreign(tc: *TypeChecker, fb: ForeignNode) -> void {
         }
         reject_reserved_uint(tc, ff.ret, fb.lo, fb.hi)
         rt: int64 = tc_type(tc, ff.ret)
-        // A variadic boundary constrains only the arguments, never the return
-        // classification, so a variadic foreign function may still return a
-        // struct by value; check the return type as non-variadic.
-        rreject: string = foreign_param_reject(tc, rt, ast_name(a, ff.name), false)
-        if str_len(rreject) > 0 {
-            tc_emit(tc, rreject, fb.lo, fb.hi)
+        rtn: TyNode = ty_get((*tc).ty, rt)
+        // A function type is legal at the C boundary only in an argument
+        // position, where it is a callback dusk can supply. A returned C
+        // function pointer has no dusk value to call, so it is refused here.
+        if rtn.kind == tyk_func() {
+            tc_emit(tc, foreign_ret_fn_msg(ast_name(a, ff.name)), fb.lo, fb.hi)
+        } else {
+            // A variadic boundary constrains only the arguments, never the return
+            // classification, so a variadic foreign function may still return a
+            // struct by value; check the return type as non-variadic.
+            rreject: string = foreign_param_reject(tc, rt, ast_name(a, ff.name), false)
+            if str_len(rreject) > 0 {
+                tc_emit(tc, rreject, fb.lo, fb.hi)
+            }
         }
         i = i + 1
     }

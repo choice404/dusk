@@ -72,15 +72,15 @@ timeout 400 bash -c '
 # --- Offline surface --------------------------------------------------------
 echo "offline surface:"
 
-expect_eq "version" "dawn 1.4.1
+expect_eq "version" "dawn 1.4.2
 " "$("$dawn_dusk" version)
 "
 
-expect_eq "--version" "dawn 1.4.1
+expect_eq "--version" "dawn 1.4.2
 " "$("$dawn_dusk" --version)
 "
 
-help_text="dawn 1.4.1 - package tool for the dusk language
+help_text="dawn 1.4.2 - package tool for the dusk language
 
 usage:
   dawn get <file.dusk>     clone the git packages a file imports

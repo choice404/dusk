@@ -543,24 +543,32 @@ func gen_foreign_struct_call(s: *GenFuncState, name: string, sig: GenFnSig, args
     while i < args_len {
         aeid: int64 = vec_get((*a).kids, args_off + i)
         pty: int64 = vec_get(ps, i)
-        v: Val = gen_expr(s, aeid)
-        if cabi_is_struct(c, pty) {
-            pc: CAbiClass = cabi_classify(c, pty)
-            if cabi_param_in_memory(c, sig.ret, ps, i) {
-                bal: int64 = cabi_byval_align(pc.align)
-                slot: string = gen_alloca_align(s, pty, bal)
-                gen_store_slot(s, pty, v.op, slot)
-                vec_push(args, fscall_ptr_attr_arg(c, "byval", pty, bal, slot))
-            } else {
-                slot: string = gen_alloca(s, pty)
-                gen_store_slot(s, pty, v.op, slot)
-                fscall_push_pieces(s, pc, slot, args)
-            }
+        ptn: CTyNode = vec_get(cty_nodes(c), pty)
+        if ptn.kind == ctyk_cfnptr() {
+            ae: ExprNode = vec_get((*a).exprs, aeid)
+            cbop: string = gc_callback_operand(s, ae)
+            vec_push(args, fscall_arg("ptr", cbop))
+            free(cbop)
         } else {
-            av: Val = adapt(s, v, pty)
-            ll: string = cty_ll(c, pty)
-            vec_push(args, fscall_arg(ll, av.op))
-            free(ll)
+            v: Val = gen_expr(s, aeid)
+            if cabi_is_struct(c, pty) {
+                pc: CAbiClass = cabi_classify(c, pty)
+                if cabi_param_in_memory(c, sig.ret, ps, i) {
+                    bal: int64 = cabi_byval_align(pc.align)
+                    slot: string = gen_alloca_align(s, pty, bal)
+                    gen_store_slot(s, pty, v.op, slot)
+                    vec_push(args, fscall_ptr_attr_arg(c, "byval", pty, bal, slot))
+                } else {
+                    slot: string = gen_alloca(s, pty)
+                    gen_store_slot(s, pty, v.op, slot)
+                    fscall_push_pieces(s, pc, slot, args)
+                }
+            } else {
+                av: Val = adapt(s, v, pty)
+                ll: string = cty_ll(c, pty)
+                vec_push(args, fscall_arg(ll, av.op))
+                free(ll)
+            }
         }
         i = i + 1
     }
@@ -613,6 +621,36 @@ func gen_foreign_struct_call(s: *GenFuncState, name: string, sig: GenFnSig, args
     r2: string = fscall_emit(s, ret_ll2, name, arg_text, true)
     free(ret_ll2)
     return Val { ty: sig.ret, op: r2 }
+}
+
+// The operand for a foreign callback argument: a bare code pointer, `@<name>`.
+// A capture-free lambda literal is lifted to an env-free top-level function; a
+// bare identifier names a top-level function whose privatized symbol the AST
+// already carries. The checker has restricted this position to those two forms.
+func gc_callback_operand(s: *GenFuncState, ae: ExprNode) -> string {
+    a: *Ast = (*(*s).ctx).ast
+    if ae.kind == xk_lambda() {
+        lname: string = gen_cb_lambda(s, ae)
+        b: *StringBuilder = alloc(sb_new())
+        sb_push_char(b, 64)
+        sb_push(b, lname)
+        out: string = gs_built(b)
+        sb_free(b)
+        free(b)
+        free(lname)
+        return out
+    }
+    if ae.kind == xk_ident() {
+        b2: *StringBuilder = alloc(sb_new())
+        sb_push_char(b2, 64)
+        sb_push(b2, ast_name(a, ae.a))
+        out2: string = gs_built(b2)
+        sb_free(b2)
+        free(b2)
+        return out2
+    }
+    emit_error((*s).module, "unsupported callback argument")
+    return gs_copy("null")
 }
 
 export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_len: int64) -> Val {
@@ -699,18 +737,25 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
             aeid: int64 = vec_get((*a).kids, args_off + i)
             ae: ExprNode = vec_get((*a).exprs, aeid)
             an: CTyNode = vec_get(cty_nodes(c), aty)
-            mut v: Val = Val { ty: cty_void(c), op: gs_copy("") }
-            if ae.kind == xk_array() {
-                if an.kind == ctyk_array() { v = gen_array_lit(s, ae, an.a) }
-                else if an.kind == ctyk_slice() { v = slice_from_array(s, gen_array_lit(s, ae, an.a), ae.b) }
-                else { v = gen_expr(s, aeid) }
-            } else { v = gen_expr(s, aeid) }
-            out: string = adapt(s, v, aty).op
-            ll: string = cty_ll(c, aty)
-            sb_push(args, ll)
-            sb_push_char(args, 32)
-            sb_push(args, out)
-            free(ll)
+            if an.kind == ctyk_cfnptr() {
+                cbop: string = gc_callback_operand(s, ae)
+                sb_push(args, "ptr ")
+                sb_push(args, cbop)
+                free(cbop)
+            } else {
+                mut v: Val = Val { ty: cty_void(c), op: gs_copy("") }
+                if ae.kind == xk_array() {
+                    if an.kind == ctyk_array() { v = gen_array_lit(s, ae, an.a) }
+                    else if an.kind == ctyk_slice() { v = slice_from_array(s, gen_array_lit(s, ae, an.a), ae.b) }
+                    else { v = gen_expr(s, aeid) }
+                } else { v = gen_expr(s, aeid) }
+                out: string = adapt(s, v, aty).op
+                ll: string = cty_ll(c, aty)
+                sb_push(args, ll)
+                sb_push_char(args, 32)
+                sb_push(args, out)
+                free(ll)
+            }
             i = i + 1
         }
         arg_text: string = gs_built(args)

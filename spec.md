@@ -370,10 +370,10 @@ foreign "C" {
 }
 ```
 
-The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function. A `*raw T` passes anywhere `*void` is expected, both are the same bare word. The reverse binding is rejected, since a `*void` that could become a typed `*raw T` would let a managed pointer launder through `*void` into a dereferenceable alias the generation check cannot see. A managed `*T` that round trips through `*void` back to a managed annotation comes back untracked, with no generation for the check to read, so everything through it afterward is the raw layer's honor system. Keep managed pointers on the managed layer. A named struct also crosses by value under a narrower rule; see [Struct by value](#struct-by-value) below.
+The boundary is the raw pointer layer only. A parameter or return type is a scalar, a `*raw T`, or a `*void`. A managed `*T` is rejected, since it is a fat value carrying a generation that C cannot read, so a buffer crosses as `*raw T` and an opaque pointer as `*void`. Once declared, a foreign function is called like any other function. A `*raw T` passes anywhere `*void` is expected, both are the same bare word. The reverse binding is rejected, since a `*void` that could become a typed `*raw T` would let a managed pointer launder through `*void` into a dereferenceable alias the generation check cannot see. A managed `*T` that round trips through `*void` back to a managed annotation comes back untracked, with no generation for the check to read, so everything through it afterward is the raw layer's honor system. Keep managed pointers on the managed layer. A named struct also crosses by value under a narrower rule; see [Struct by value](#struct-by-value) below. A function type crosses too, as a callback under a narrower rule of its own; see [Callbacks](#callbacks) below.
 
 - Only the `"C"` calling convention is supported.
-- A struct passed by value now crosses on the import side, a `foreign` declaration's own parameter and return types. A struct returned by an exported dusk function to a C caller, and a callback that hands a dusk function to C, are both still deferred to a later interop release.
+- A struct passed by value, and a dusk function handed to C as a callback, now both cross on the import side, a `foreign` declaration's own parameter and return types. A struct returned by an exported dusk function to a C caller, and exporting a dusk function so arbitrary C code outside the boundary can call it directly rather than through a callback pointer handed across, are both still deferred to a later interop release.
 
 #### Struct by value
 
@@ -390,6 +390,38 @@ A variadic foreign function never takes a struct by value at all, fixed paramete
 A C plain struct crosses the way clang's own classification places it, not as a flat memory copy. The struct is split into eight byte pieces; a piece holding only floating point data is an SSE register, anything else is an INTEGER register, and each register is coerced to the narrowest type that covers the data inside it, the same coercion clang emits at `-O0`. A struct of two eight bytes or fewer rides in registers, up to a pair of them; a struct larger than sixteen bytes falls back to memory entirely, passed by a hidden pointer, `byval` on a parameter and `sret` on a return. This is byte exact against clang, so the `.ll` dusk emits for a call or a `declare` links cleanly against an object a C compiler produced, from either side of the boundary.
 
 The classification above is the System V x86_64 ABI, and `x86_64-pc-linux-gnu` is the only target triple dusk emits today. Struct by value across a different target's own calling convention is future work, on the same footing every other target already stands on.
+
+#### Callbacks
+
+Added in 1.4.2. A `foreign` function's parameter may be declared with a function type, meaning a bare C function pointer, one LLVM word carrying no environment, the shape a C API's own callback parameter, `qsort`'s comparator among them, already expects. This is narrower than a dusk closure, which carries a code pointer and an environment pointer together as a two word `{ ptr, ptr }` value; a callback drops the second word entirely, since C has nowhere to put it.
+
+```text
+foreign "C" {
+    func qsort(base: *raw int64, n: int64, w: int64, cmp: (*raw int64, *raw int64) -> int32) -> void
+}
+```
+
+A callback's own parameters and return type must themselves be C legal, the boundary's ordinary scalar, `*raw T`, or `*void` set. A struct by value inside a callback signature is refused the same as everywhere else the boundary classifies a type, since a struct is not one of the accepted shapes; a function type nested inside a callback's own signature is refused outright, `foreign function '<name>': a C callback's own parameters and return must be scalars or raw pointers; a nested function type cannot cross`, since C carries a callback as one function pointer word with no room underneath it for a second, nested closure word. A foreign function cannot itself return a function pointer, `foreign function '<name>' cannot return a function pointer; a returned C function pointer has no dusk value to call, only an argument callback is supported`; a callback only ever crosses as an argument, the one direction dusk can actually supply a code pointer for. A variadic foreign function cannot take a callback parameter either, `foreign function '<name>' is variadic and cannot take a function pointer parameter; a C callback and a varargs tail cannot be combined`, since a callback rides the direct call's exact signature check, a path the variadic call never runs.
+
+At the call site a callback argument takes exactly one of two forms: a capture-free lambda literal, or the bare name of a top level, non-generic, non-foreign dusk function, each checked against the callback's declared parameter type by strict equality, no integer width widening and no wildcarding, since C reads the two mismatched widths as different registers. A lambda that captures a local is refused, naming the capture, `this callback captures '<var>'; C has no environment for it, pass state through the *void user data argument the API carries`. A signature mismatch names both sides, `callback argument N: expected <sig>, found <sig>`. A generic function name is refused before it has one concrete symbol to point a bare code pointer at, `callback argument N cannot be the generic function '<name>'; a C callback needs one concrete function, and a generic function has none until it is instantiated`. Anything else in that position, a closure value, a local, an arbitrary expression, is refused as the wrong shape entirely, `callback argument N must be a capture-free lambda literal or the name of a top-level function; a closure value has no bare C function pointer`.
+
+A foreign function that takes a callback parameter cannot itself be taken as a value; it can only be called directly, `'<name>' is a foreign function that takes a C callback; call it directly, it cannot be taken as a value`, the same rule a variadic foreign function and a struct passing foreign function already carry. Taken as a value the call would route through a funcval thunk shaped for an ordinary closure, dropping the bare function pointer ABI a direct call preserves and silently miscompiling the call.
+
+Codegen lowers both accepted forms with no trampoline. A capture-free lambda literal is lifted to a fresh top level function with no environment parameter at all, its LLVM signature exactly the callback's own, and the argument becomes that function's bare address. A named top level function already has that signature, so it crosses as its own bare address with no intermediate thunk either. Since C carries no closure environment, the sanctioned way to thread state through a callback is the same `*void` user data argument a C API's own callback registration typically carries alongside it, passed through untouched from the call site to every invocation:
+
+```text
+@csource "callback_fixture.c"
+
+foreign "C" {
+    func call_n(n: int64, user: *void, fn: (int64, *raw int64) -> int64) -> int64
+}
+
+func scale(i: int64, user: *raw int64) -> int64 {
+    return i * user[0]
+}
+```
+
+**Safety posture.** A callback body is ordinary dusk, checked and compiled exactly like any other function, and every runtime guarantee inside it, the generational dereference check, bounds checking, a named fault on abort, holds exactly as it does anywhere else. What changes is the thread: a callback runs on whichever thread the C code holding its pointer calls it on, and for a library that keeps its own worker threads that is not necessarily the thread that made the foreign call at all. Off the anchor thread a callback is governed by the same rules as a spawned thread's body: the generational heap stays thread safe, but the collector does not, and a `collector<T>` mint or a forced collection reached from a callback running off the anchor thread aborts by name, `fatal: the collector runs on the main thread only`, the identical fault a spawned thread hits. A callback body is never itself an async func, so it may call the loop's blocking primitives, `await`, `await_timeout`, and `try_poll`, directly; the rule that refuses them inside an async func body governs an async func specifically, not a plain synchronous callback the foreign boundary calls back into. The mechanism reaches a third party C library; it is not a way to install a dusk function into dusk's own reactor, which is C machinery the async substrate alone drives and exposes no callback shaped foreign entry point of its own.
 
 #### Opaque handles
 

@@ -1,0 +1,24 @@
+@paradigm procedural
+
+// A foreign function that takes a C callback cannot be taken as a value. Bound
+// to a local it would call through a funcval thunk that passes the callback as a
+// {ptr, fn} closure, dropping the bare C function pointer ABI, so the checker
+// refuses it and tells the caller to invoke qsort directly.
+foreign "C" {
+    func qsort(base: *raw int64, n: int64, w: int64, cmp: (*raw int64, *raw int64) -> int32) -> void
+}
+
+func cmp(a: *raw int64, b: *raw int64) -> int32 {
+    if a[0] < b[0] { return int32(-1) }
+    return int32(1)
+}
+
+func main() -> int32 {
+    h := qsort
+    buf: *raw int64 = alloc_bytes(16)
+    buf[0] = 2
+    buf[1] = 1
+    h(buf, 2, 8, cmp)
+    free(buf)
+    return 0
+}

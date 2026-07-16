@@ -1,0 +1,19 @@
+@paradigm procedural
+
+// A capturing lambda cannot be a C callback: C has no environment to carry the
+// captured local, so the checker refuses it and points at the user data channel.
+foreign "C" {
+    func qsort(base: *raw int64, n: int64, w: int64, cmp: (*raw int64, *raw int64) -> int32) -> void
+}
+
+func main() -> int32 {
+    buf: *raw int64 = alloc_bytes(16)
+    buf[0] = 1
+    buf[1] = 2
+    mut bias: int64 = 3
+    qsort(buf, 2, 8, lambda (a: *raw int64, b: *raw int64) -> int32 {
+        return int32(a[0] + bias - b[0])
+    })
+    free(buf)
+    return 0
+}

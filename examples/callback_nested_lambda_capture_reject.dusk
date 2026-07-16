@@ -1,0 +1,24 @@
+@paradigm procedural
+
+// A callback lambda that captures an outer local is refused, even when a
+// lambda nested inside it binds a parameter of the very same name. The inner
+// lambda's parameter x is scoped to that inner lambda alone, so it must not
+// mask the outer x the callback body still reads: the capture analysis unbinds
+// a nested scope's own bindings on the way out, and the callback is rejected
+// naming x. Before the scope was popped, the leftover inner binding hid the
+// capture and this program was wrongly accepted, dropping x from the lifted
+// environment.
+foreign "C" {
+    func call0(cb: () -> int64) -> int64
+}
+
+func main() -> int64 {
+    x := 7
+    r: int64 = call0(lambda () -> int64 {
+        f := lambda (x: int64) -> int64 { return x + 1 }
+        a: int64 = f(10)
+        return x + a
+    })
+    println(r)
+    return 0
+}

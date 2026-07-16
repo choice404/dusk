@@ -234,6 +234,9 @@ A growable array, generic over its element type. The buffer lives on the heap an
 | `vec_pop<T>(v: *Vector<T>) -> void`        | Drop the last element. A no op on an empty vector. |
 | `vec_len<T>(v: *Vector<T>) -> int64`       | The element count.                     |
 | `vec_free<T>(v: *Vector<T>) -> void`       | Free the backing buffer.               |
+| `vec_sort<T>(v: *Vector<T>, cmp: (T, T) -> int32) -> void` | Sort `v` in place, stable, by `cmp`. |
+| `vec_contains<T>(v: *Vector<T>, x: T) -> bool` | Whether `x` appears anywhere in `v`, by `==`. |
+| `vec_index_of<T>(v: *Vector<T>, x: T) -> int64` | The index of the first `x` in `v` by `==`, or `-1`. |
 
 ```text
 @import std.vector
@@ -251,6 +254,33 @@ free(v)
 ```
 
 Capacity starts at 4 on the first push and doubles from there.
+
+Added in 1.4.2, `vec_sort` takes an ordering closure, negative when its first argument sorts before its second, zero when the two are equal, positive when the first sorts after, and reorders `v`'s backing data in place. It runs a bottom up, iterative merge sort: passes double a merged run width from 1 up past `v`'s length, each pass merging adjacent runs into one scratch buffer sized to `v` and copying the whole buffer back before the next pass starts, so a pass always merges from data untouched by itself. The sort is stable, a tie always favors the earlier run, and deterministic, two calls over the same data and comparator always produce the same output order; a vector of fewer than two elements returns immediately with `cmp` uncalled.
+
+```text
+@import std.vector
+
+struct Pair {
+    key: int32,
+    idx: int64,
+}
+
+func cmp_pair(a: Pair, b: Pair) -> int32 {
+    return a.key - b.key
+}
+
+v: *Vector<Pair> = alloc(vec_new())
+vec_push(v, Pair { key: 3, idx: 0 })
+vec_push(v, Pair { key: 1, idx: 1 })
+vec_push(v, Pair { key: 3, idx: 2 })
+vec_sort(v, cmp_pair)
+// v now reads key 1, key 3 idx 0, key 3 idx 2: the two key 3 pairs keep their
+// original relative order.
+vec_free(v)
+free(v)
+```
+
+`vec_contains` and `vec_index_of`, also added in 1.4.2, are a linear scan by `==`, legal only for a `T` that `==` itself accepts, a scalar or a string, never a pointer, dusk's own comparison rule; a `Vector<T>` of a pointer typed `T` rejects both at the ground types the same way any other illegal `==` does.
 
 ## std.map
 
@@ -309,6 +339,28 @@ free(msg)
 `run` returns the child's exit code, decoded from the wait status `system` reports. A normally terminated child reports its exit code. A child the OS kills reports 128 plus the signal, the shell convention, so a process killed by, say, the out of memory killer is never mistaken for a clean exit. `env` reads back the empty string for an unset variable, never a null, so test the result with `str_len` or `str_eq`. `quote` writes every embedded single quote as the four byte close quote, escaped quote, reopen quote sequence, so the quoted result is safe to splice into a command line passed to `run`.
 
 Added in 1.4.0, `errno` and `errstr` are the read side of the C library's own error channel. dusk never sets errno itself; a call to `errno()` always reports whatever the most recent foreign call, a libc function or a third party one, left behind, so read it immediately after the call whose failure it names, before anything else crosses the C boundary and overwrites it. `errstr` hands back `strerror`'s message for a code, `errno()`'s own result or a literal like `2` for `ENOENT`, copied off `strerror`'s static buffer into a fresh heap string the caller owns and frees, since that buffer is only good until the thread's next `strerror` call.
+
+## std.process
+
+Added in 1.4.2. Runs a shell command as a child process and reads its output back. The low level `foreign` block binds three C runtime shims, `cool_popen`, `cool_fgets`, and `cool_pclose`, rather than `popen`/`fgets`/`pclose` directly, since a `FILE*` stream cannot ride home as a `*void` a dusk wrapper could NULL test the way a C caller tests `popen`'s own return: `==` on any pointer type is rejected outright, the same constraint `std.fs`'s `Dir` carries for `DIR*`. `Proc` wraps its stream the identical way, one `int64` field holding the pointer's bit pattern, meaningful only to this module's own calls.
+
+| Function                                        | Description                                                       |
+| ------------------------------------------------ | ------------------------------------------------------------------- |
+| `proc_open(cmd: string) -> (Proc, error)`       | Runs `cmd` through the platform shell and opens a readable pipe to its combined stdout. |
+| `proc_read_line(p: Proc) -> (string, bool)`     | The next line without its trailing newline; `false` once the stream is exhausted. |
+| `proc_close(p: Proc) -> (int64, error)`         | Closes the stream, reaps the child, and decodes its exit status.  |
+| `run_capture(cmd: string) -> (string, int64, error)` | Runs `cmd` to completion and returns its whole output, its exit code, and any error. |
+
+```text
+@import std.process
+
+out, code, e := run_capture("echo hello")
+e.ignore()
+println(out)   // "hello"
+println(code)  // 0
+```
+
+`proc_open` opens `cmd` through `popen(cmd, "r")`, POSIX shell semantics (`/bin/sh -c`); a failure to open reports `strerror`'s text through the returned `error` and hands back a zeroed `Proc` that is never valid to read from or close. `proc_read_line` reassembles a line across as many internal reads as it takes when a line outruns the 4096 byte read chunk, so no line length silently truncates; a hard read error reports the same `false` as a clean end of stream, since the function carries no error channel of its own. `proc_close` decodes `pclose`'s wait status the way `std.os`'s `run` decodes `system`'s: the low 7 bits name a terminating signal, reported as 128 plus the signal number, and a normal exit reports the shifted down exit code; `pclose` failing outright, a bad handle or a wait failure, reports through the returned `error` instead of a decoded status. `run_capture` is the convenience wrapper over all three: it opens, reads every line into one newline joined string, closes, and hands back the output alongside the decoded exit code, reporting an open failure immediately with a `-1` exit code and no output.
 
 ## std.math
 

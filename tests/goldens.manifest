@@ -3051,7 +3051,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.4.1\n
+out dusk 1.4.2\n
 argv version
 code 0
 ---
@@ -3320,4 +3320,112 @@ test cabi_empty_struct_reject
 mode check_fail
 file examples/cabi_empty_struct_reject.dusk
 err_has struct 'E' has no fields; C cannot size it at the boundary
+---
+# Golden fragment for dusk functions as C callbacks (bare C function pointers,
+# no trampoline, no environment), added in 1.4.2. Same format and contract as
+# tests/goldens.manifest itself; see docs/testing.md. Run with:
+#   DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest.frag-cb
+---
+test callback_qsort_capture_free_lambda_sorts_ascending
+mode run
+file examples/callback_qsort.dusk
+out 1\n2\n5\n8\n9\n
+---
+test callback_named_fn_sorts_descending
+mode run
+file examples/callback_named_fn.dusk
+out 9\n8\n5\n2\n1\n
+---
+test callback_fixture_repeat_user_data_through_void
+mode run
+file examples/callback_fixture_repeat.dusk
+out 100\n
+---
+test callback_capture_reject
+mode check_fail
+file examples/callback_capture_reject.dusk
+err_has this callback captures 'bias'; C has no environment for it, pass state through the *void user data argument the API carries
+---
+test callback_sig_reject
+mode check_fail
+file examples/callback_sig_reject.dusk
+err_has callback argument 4: expected (*raw int64, *raw int64) -> int32, found (*raw int64, *raw int64) -> int64
+---
+test callback_generic_fn_reject
+mode check_fail
+file examples/callback_generic_fn_reject.dusk
+err_has cannot be the generic function 'cmpg'; a C callback needs one concrete function
+---
+# Golden fragment for std.process and std.vector's vec_sort/vec_contains/
+# vec_index_of, added in 1.4.2. Same format and contract as
+# tests/goldens.manifest itself; see docs/testing.md. Run with:
+#   DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest.frag-proc
+---
+test proc_capture_run_capture_echo_and_exit_code
+mode run
+file examples/proc_capture.dusk
+out hello\n0\nworld\n7\n
+---
+test vec_sort_stable_preserves_orig_index_within_equal_keys
+mode run
+file examples/vec_sort_stable.dusk
+out 1 1\n1 4\n1 7\n2 2\n2 5\n3 0\n3 3\n3 6\n
+---
+test vec_sort_arity_reject
+mode check_fail
+file examples/vec_sort_arity_reject.dusk
+err_has expected 2 argument(s), found 3
+---
+test process_run_capture_type_reject
+mode check_fail
+file examples/process_run_capture_type_reject.dusk
+err_has argument 1 has the wrong type
+---
+# Golden fragment for the C callback reject fixes: a callback taking foreign
+# function cannot be taken as a value, and a C callback's own parameters and
+# return cannot themselves be function types. Same format and contract as
+# tests/goldens.manifest itself; see docs/testing.md. Run with:
+#   DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest.frag-cbfix
+---
+test callback_foreign_as_value_reject
+mode check_fail
+file examples/callback_foreign_as_value_reject.dusk
+err_has takes a C callback; call it directly, it cannot be taken as a value
+---
+test callback_nested_fn_param_reject
+mode check_fail
+file examples/callback_nested_fn_param_reject.dusk
+err_has a nested function type cannot cross
+---
+test callback_nested_fn_return_reject
+mode check_fail
+file examples/callback_nested_fn_return_reject.dusk
+err_has a nested function type cannot cross
+---
+# Golden fragment for the second round of C callback and std.process fixes: a
+# nested lambda parameter or a range lower bound in a callback no longer leaks
+# out of its own scope to hide a genuine capture, and a Proc closes by pointer
+# so a second close is a named error, not a libc double close. Same format and
+# contract as tests/goldens.manifest itself; see docs/testing.md. Run with:
+#   DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/goldens.manifest.frag-cbfix2
+---
+test callback_nested_lambda_capture_reject
+mode check_fail
+file examples/callback_nested_lambda_capture_reject.dusk
+err_has this callback captures 'x'
+---
+test callback_range_capture_reject
+mode check_fail
+file examples/callback_range_capture_reject.dusk
+err_has this callback captures 'lo'
+---
+test callback_nested_block_let_capture_reject
+mode check_fail
+file examples/callback_nested_block_let_capture_reject.dusk
+err_has this callback captures 'x'
+---
+test proc_double_close_safe
+mode run
+file examples/proc_double_close_safe.dusk
+out hi\n0\n9\n
 ---

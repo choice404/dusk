@@ -230,20 +230,40 @@ export func clos_lambda_name(m: *EmitModule) -> string {
 }
 
 export func clos_emit_lambda(s: *GenFuncState, e: ExprNode, name: string, env_ty: string, caps: *Vector<LocalVal>) -> void {
+    clos_emit_lambda_ex(s, e, name, env_ty, caps, true)
+}
+
+// Lifts a capture-free lambda to a top-level function with no env parameter, a
+// bare C function pointer's shape: `<ret> @name(<params>)`. This is the form a
+// foreign callback argument takes, where C calls the pointer directly with no
+// environment. The caller has already checked the lambda captures nothing.
+export func gen_cb_lambda(s: *GenFuncState, e: ExprNode) -> string {
+    name: string = clos_lambda_name((*s).module)
+    empty: *Vector<LocalVal> = alloc(vec_new())
+    clos_emit_lambda_ex(s, e, name, gs_copy(""), empty, false)
+    return name
+}
+
+export func clos_emit_lambda_ex(s: *GenFuncState, e: ExprNode, name: string, env_ty: string, caps: *Vector<LocalVal>, with_env: bool) -> void {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     ret_ty: int64 = cty_lower_ast(c, a, e.c)
     sigb: *StringBuilder = alloc(sb_new())
-    sb_push(sigb, "ptr %env")
+    mut wrote: int64 = 0
+    if with_env {
+        sb_push(sigb, "ptr %env")
+        wrote = 1
+    }
     mut i: int64 = 0
     while i < e.b {
         pid: int64 = vec_get((*a).kids, e.a + i)
         p: ParamNode = vec_get((*a).params, pid)
         pll: string = cty_ll(c, cty_lower_ast(c, a, p.ty))
-        sb_push(sigb, ", ")
+        if wrote > 0 { sb_push(sigb, ", ") }
         sb_push(sigb, pll)
         sb_push(sigb, " %a")
         sb_push_int(sigb, i)
+        wrote = wrote + 1
         free(pll)
         i = i + 1
     }

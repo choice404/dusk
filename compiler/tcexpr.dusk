@@ -58,6 +58,31 @@ func foreign_takes_struct(tc: *TypeChecker, name: string) -> bool {
     return false
 }
 
+func ty_is_func(tc: *TypeChecker, id: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, id)
+    return n.kind == tyk_func()
+}
+
+// Whether a foreign function's signature carries a C callback (a function type)
+// in a parameter or the return. A direct call lowers such an argument to a bare
+// C function pointer, but taken as a value the function flows through a funcval
+// thunk that passes the callback as a `{ptr, fn}` closure, so C reads one word
+// where two were pushed and the call is silently miscompiled. The type layer
+// refuses these as values for the same reason it refuses variadic and struct
+// passing foreigns.
+func foreign_takes_callback(tc: *TypeChecker, name: string) -> bool {
+    if !sig_is_foreign((*tc).sigtab, name) { return false }
+    fs: FnSig = sig_fn((*tc).sigtab, name)
+    if ty_is_func(tc, fs.raw_ret) { return true }
+    p: TyList = fs.raw_params
+    mut i: int64 = 0
+    while i < p.len {
+        if ty_is_func(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
 func field_dup_msg(fname: string, sname: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "field '")
@@ -398,6 +423,20 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
             sb_free(sbmsg)
             free(sbmsg)
             tc_emit(tc, soutmsg, e.lo, e.hi)
+        }
+        // A foreign function that takes a C callback taken as a value would call
+        // through a funcval thunk that passes the callback as a `{ptr, fn}`
+        // closure, dropping the bare C function pointer ABI. Direct calls resolve
+        // the callee through lookup and never reach this arm.
+        if !is_local(tc, name) && foreign_takes_callback(tc, name) {
+            cbmsg: *StringBuilder = alloc(sb_new())
+            sb_push_char(cbmsg, 39)
+            sb_push(cbmsg, name)
+            sb_push(cbmsg, "' is a foreign function that takes a C callback; call it directly, it cannot be taken as a value")
+            coutmsg: string = substring(sb_cstr(cbmsg), 0, sb_size(cbmsg))
+            sb_free(cbmsg)
+            free(cbmsg)
+            tc_emit(tc, coutmsg, e.lo, e.hi)
         }
         return lookup(tc, name)
     }

@@ -1,0 +1,45 @@
+// std.vector's vec_sort proven stable: eight (key, orig_index) pairs are
+// pushed in a scrambled key order, sorted by key alone, and the sorted
+// output is printed as "key idx" pairs. Stability means every run of equal
+// keys keeps the idx values in the order they were pushed, never reordered
+// by the sort; the expected output below is exactly that: idx climbs inside
+// each key group even though the input scrambles idx across groups.
+@paradigm procedural
+
+@import std.vector
+
+struct Pair {
+    key: int32,
+    idx: int64,
+}
+
+func cmp_pair(a: Pair, b: Pair) -> int32 {
+    return a.key - b.key
+}
+
+func main() -> int32 {
+    v: *Vector<Pair> = alloc(vec_new())
+    vec_push(v, Pair { key: 3, idx: 0 })
+    vec_push(v, Pair { key: 1, idx: 1 })
+    vec_push(v, Pair { key: 2, idx: 2 })
+    vec_push(v, Pair { key: 3, idx: 3 })
+    vec_push(v, Pair { key: 1, idx: 4 })
+    vec_push(v, Pair { key: 2, idx: 5 })
+    vec_push(v, Pair { key: 3, idx: 6 })
+    vec_push(v, Pair { key: 1, idx: 7 })
+
+    vec_sort(v, cmp_pair)
+
+    mut i: int64 = 0
+    while i < vec_len(v) {
+        p: Pair = vec_get(v, i)
+        print(p.key)
+        print(" ")
+        println(p.idx)
+        i = i + 1
+    }
+
+    vec_free(v)
+    free(v)
+    return 0
+}

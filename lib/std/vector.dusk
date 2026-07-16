@@ -1,6 +1,9 @@
 // std.vector: a growable array, generic over its element type. Backed by a heap
 // buffer that doubles on demand. Pass the vector by pointer so growth persists.
-// Element access is bounds checked; the raw buffer never escapes.
+// Element access is bounds checked; the raw buffer never escapes. vec_sort takes
+// a closure comparator and sorts in place with a stable, deterministic merge;
+// vec_contains and vec_index_of search by ==, legal only for a T that == itself
+// accepts (a scalar or a string, never a pointer).
 
 foreign "C" {
     func abort() -> void
@@ -73,4 +76,115 @@ export func vec_len<T>(v: *Vector<T>) -> int64 {
 
 export func vec_free<T>(v: *Vector<T>) -> void {
     free((*v).data)
+}
+
+// Merges the two already sorted runs [lo, mid) and [mid, hi) of v's backing
+// data into buf, a caller supplied scratch buffer at least as long as v.
+// Ties favor the left run, cmp returning 0, which is what makes the bottom
+// up passes in vec_sort stable: an element from the earlier run only ever
+// yields to one from the later run on a strict cmp > 0, so two equal keys
+// never swap the order they entered a run in. Not exported; vec_sort's own
+// helper.
+func vec_sort_merge_run<T>(v: *Vector<T>, buf: *raw T, lo: int64, mid: int64, hi: int64, cmp: (T, T) -> int32) -> void {
+    mut a: int64 = lo
+    mut b: int64 = mid
+    mut k: int64 = lo
+    while a < mid && b < hi {
+        x: T = (*v).data[a]
+        y: T = (*v).data[b]
+        c: int32 = cmp(x, y)
+        if c <= 0 {
+            buf[k] = x
+            a = a + 1
+        } else {
+            buf[k] = y
+            b = b + 1
+        }
+        k = k + 1
+    }
+    while a < mid {
+        buf[k] = (*v).data[a]
+        a = a + 1
+        k = k + 1
+    }
+    while b < hi {
+        buf[k] = (*v).data[b]
+        b = b + 1
+        k = k + 1
+    }
+}
+
+// Sorts v in place with cmp, an ordering closure returning negative when its
+// first argument sorts before its second, zero when the two are equal, and
+// positive when the first sorts after. A bottom up (iterative) merge sort:
+// passes double a merged run width from 1 up past v's length, each pass
+// merging adjacent runs of the prior width out of v's backing data into one
+// scratch buffer sized to v and then copying the whole buffer back before
+// the next pass starts, so a pass always merges from data untouched by
+// itself. The sort is stable, equal elements keep the relative order they
+// started in, and deterministic: two calls over the same data and cmp always
+// produce the same output order. A vector of fewer than two elements returns
+// immediately, cmp uncalled.
+export func vec_sort<T>(v: *Vector<T>, cmp: (T, T) -> int32) -> void {
+    n: int64 = (*v).len
+    if n < 2 {
+        return
+    }
+    buf: *raw T = alloc_bytes(n * sizeof(T))
+    mut width: int64 = 1
+    while width < n {
+        mut i: int64 = 0
+        while i < n {
+            lo: int64 = i
+            mut mid: int64 = i + width
+            if mid > n {
+                mid = n
+            }
+            mut hi: int64 = i + 2 * width
+            if hi > n {
+                hi = n
+            }
+            vec_sort_merge_run(v, buf, lo, mid, hi, cmp)
+            i = i + 2 * width
+        }
+        mut k: int64 = 0
+        while k < n {
+            (*v).data[k] = buf[k]
+            k = k + 1
+        }
+        width = width * 2
+    }
+    free(buf)
+}
+
+// Whether x appears anywhere in v, by ==. Only legal for a T that == itself
+// accepts: a scalar or a string, per dusk's own rule that pointers do not
+// compare (compare the values they point to instead); a Vector<T> of a
+// pointer typed T rejects vec_contains at the ground, types only pass the
+// same way any other illegal == does.
+export func vec_contains<T>(v: *Vector<T>, x: T) -> bool {
+    mut i: int64 = 0
+    n: int64 = (*v).len
+    mut found: bool = false
+    while i < n {
+        if (*v).data[i] == x {
+            found = true
+        }
+        i = i + 1
+    }
+    return found
+}
+
+// The index of the first element of v equal to x by ==, or -1 when none is.
+// Carries the same == restriction on T as vec_contains.
+export func vec_index_of<T>(v: *Vector<T>, x: T) -> int64 {
+    mut i: int64 = 0
+    n: int64 = (*v).len
+    while i < n {
+        if (*v).data[i] == x {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
 }

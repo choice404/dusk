@@ -1,0 +1,171 @@
+// std.process: run a shell command as a child process and read its output.
+// The low level foreign block binds three C runtime shims, cool_popen,
+// cool_fgets, and cool_pclose, rather than the raw popen/fgets/pclose triplet
+// directly, since dusk never reads FILE*'s own layout: a stream rides home as
+// an opaque bit pattern int64 handle, the same discipline std.fs's Dir
+// carries for DIR*. The int64 handle is not a stylistic choice: dusk's ==
+// rejects every pointer type outright ("pointers do not compare; compare the
+// values they point to"), so a dusk wrapper has no way to test a *void
+// stream against NULL the way a C caller would test popen's own return.
+// Every shim here that can fail hands the failure back through a separate
+// int64 status instead of a nullable pointer, the same convention std.fs and
+// std.os follow: read errno() immediately after the call that may have set
+// it, before any other foreign call has a chance to overwrite it.
+
+@paradigm procedural
+
+@import std.string
+@import std.os
+
+foreign "C" {
+    func cool_popen(cmd: *raw char, mode: *raw char, out_handle: *raw int64) -> int64
+    func cool_fgets(handle: int64, buf: *raw char, cap: int64) -> int64
+    func cool_pclose(handle: int64) -> int64
+}
+
+// An open child process stream. h is an opaque token, the bit pattern of the
+// C FILE* cool_popen minted, meaningful only to proc_read_line and
+// proc_close; dusk code never reads or compares it directly.
+export struct Proc {
+    h: int64,
+}
+
+// Runs cmd through the platform shell (popen's own /bin/sh -c) and opens a
+// readable pipe to its combined stdout, POSIX "r" mode. Returns the open
+// stream alongside an error carrying strerror's text on failure; a zeroed
+// Proc accompanies that error and is never valid to read from or close.
+export func proc_open(cmd: string) -> (Proc, error) {
+    cmdbuf: *raw char = cbuf(cmd)
+    modebuf: *raw char = cbuf("r")
+    out_handle: *raw int64 = alloc_bytes(sizeof(int64))
+    rc: int64 = cool_popen(cmdbuf, modebuf, out_handle)
+    code: int64 = errno()
+    free(cmdbuf)
+    free(modebuf)
+    if rc != 0 {
+        free(out_handle)
+        return (Proc { h: 0 }, error { message: errstr(code) })
+    }
+    h: int64 = out_handle[0]
+    free(out_handle)
+    return (Proc { h: h }, error {})
+}
+
+// The next line of p's output, without its trailing newline, and whether one
+// was found. p is taken by pointer, not by value, so the stream cannot be
+// copied and read from two aliases: a Proc names a single OS stream that only
+// one owner may advance. A line longer than the internal read chunk is
+// reassembled across as many cool_fgets calls as it takes, so no line length is
+// silently truncated. The second value is false, with the empty string as the
+// first, once the stream is exhausted; a hard read error also reports false,
+// the same end of stream reading std.fs's dir_next gives a mid-walk failure,
+// since proc_read_line carries no error channel of its own. A read on an
+// already closed Proc, whose handle proc_close zeroed, reports the same clean
+// end of stream rather than dereferencing a stale FILE*.
+export func proc_read_line(p: *Proc) -> (string, bool) {
+    if (*p).h == 0 {
+        return ("", false)
+    }
+    cap: int64 = 4096
+    b: *StringBuilder = alloc(sb_new())
+    mut more: bool = true
+    mut any: bool = false
+    mut newline: bool = false
+    while more {
+        buf: *raw char = alloc_bytes(cap)
+        n: int64 = cool_fgets((*p).h, buf, cap)
+        if n <= 0 {
+            free(buf)
+            more = false
+        } else {
+            any = true
+            chunk: string = cstr(buf)
+            sb_push(b, chunk)
+            if chunk[n - 1] == 10 {
+                newline = true
+                more = false
+            } else if n < cap - 1 {
+                more = false
+            }
+            free(buf)
+        }
+    }
+    if !any {
+        sb_free(b)
+        free(b)
+        return ("", false)
+    }
+    raw_line: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    n2: int64 = str_len(raw_line)
+    if newline && n2 > 0 {
+        trimmed: string = substring(raw_line, 0, n2 - 1)
+        free(raw_line)
+        return (trimmed, true)
+    }
+    return (raw_line, true)
+}
+
+// Closes p and reaps the child, decoding its wait status the same way
+// std.os's run does: the low 7 bits name a terminating signal, reported as
+// 128 plus the signal number, and a normal exit reports the shifted down
+// exit code. pclose signals its own failure, a bad handle or a wait4
+// failure, by returning exactly -1, a value no real wait status equals, so
+// that one case reports the error instead of decoding a status. p is taken by
+// pointer so the close zeroes its handle in place: a second proc_close on the
+// same Proc sees the zeroed handle and reports an error rather than handing an
+// already reaped FILE* back to pclose, which would be a double close. The
+// caller still owns the Proc allocation and frees it once, after the last
+// close.
+export func proc_close(p: *Proc) -> (int64, error) {
+    if (*p).h == 0 {
+        return (-1, error { message: "process already closed" })
+    }
+    status: int64 = cool_pclose((*p).h)
+    code: int64 = errno()
+    (*p).h = 0
+    if status == -1 {
+        return (-1, error { message: errstr(code) })
+    }
+    term: int64 = status & 127
+    if term != 0 {
+        return (128 + term, error {})
+    }
+    return ((status & 65280) / 256, error {})
+}
+
+// Convenience wrapper over proc_open, proc_read_line, and proc_close: runs
+// cmd, reads every line of its output, closes the stream, and hands back the
+// whole output as one newline joined string alongside the decoded exit code.
+// A failure to open reports its error immediately with a -1 exit code and no
+// output; a failure to close reports its own error alongside whatever output
+// the read loop already captured.
+export func run_capture(cmd: string) -> (string, int64, error) {
+    pv, open_err := proc_open(cmd)
+    if open_err.exists() {
+        return ("", -1, open_err)
+    }
+    p: *Proc = alloc(pv)
+    b: *StringBuilder = alloc(sb_new())
+    mut more: bool = true
+    mut first: bool = true
+    while more {
+        line, found := proc_read_line(p)
+        if found {
+            if !first {
+                sb_push_char(b, 10)
+            }
+            sb_push(b, line)
+            first = false
+        } else {
+            more = false
+        }
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    code, close_err := proc_close(p)
+    free(p)
+    return (out, code, close_err)
+}

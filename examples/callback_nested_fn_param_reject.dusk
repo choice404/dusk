@@ -1,0 +1,19 @@
+@paradigm procedural
+
+// A C callback goes one level deep: its own parameters must be scalars or raw
+// pointers. Here the callback's first parameter is itself a function type, which
+// would lower to a {ptr, fn} closure where C expects a single function pointer
+// word, so the checker refuses the whole foreign signature.
+foreign "C" {
+    func reg(h: (int64) -> int64, x: int64, cb: ((int64) -> int64, int64) -> int64) -> int64
+}
+
+func inner(v: int64) -> int64 { return v + 1 }
+
+func outer(h: (int64) -> int64, x: int64) -> int64 { return h(x) * 2 }
+
+func main() -> int32 {
+    r := reg(inner, 20, outer)
+    println(r)
+    return 0
+}

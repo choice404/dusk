@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <string.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -637,6 +638,74 @@ int64_t cool_dir_close(int64_t handle_bits) {
         return -1;
     }
     return 0;
+}
+
+/* std.process shims. A popened stream rides an int64 handle the same way
+   cool_dir_open's DIR* does, the bit pattern of a FILE* returned through an
+   out-param: dusk's == rejects every pointer type outright, so a dusk
+   wrapper has no way to null-test popen's own possibly-NULL return the way a
+   C caller would; see the note above cool_dir_open for the full rule. */
+
+/* Runs cmd through popen(cmd, mode) and hands the FILE* back through
+   out_handle as its raw bit pattern. Returns 0 on success or -1 on failure
+   with errno set; out_handle is only meaningful on the success path. */
+int64_t cool_popen(const char *cmd, const char *mode, int64_t *out_handle) {
+    FILE *fp = popen(cmd, mode);
+    if (!fp) {
+        return -1;
+    }
+    *out_handle = (int64_t)(intptr_t)fp;
+    return 0;
+}
+
+/* Reads at most cap - 1 bytes, or up to and including the next newline,
+   whichever comes first, from the stream named by handle into buf, a caller
+   supplied buffer of at least cap bytes, NUL terminated same as fgets.
+   Returns the NUL excluded byte length written, 0 at a clean end of stream,
+   or -1 on a hard read error with errno set. A cap of 0 or less is reported
+   as an error rather than read as a valid zero length line, the same
+   defensive shape cool_dir_next's cap check follows. */
+int64_t cool_fgets(int64_t handle, char *buf, int64_t cap) {
+    /* A zero handle is the closed or never-opened sentinel the dusk Proc
+       carries; it is never a live FILE*, so refuse it rather than dereference a
+       null stream. The wrapper zeroes a Proc's handle on close, so this also
+       backstops a read after close that slips past the dusk side guard. */
+    if (handle == 0) {
+        return -1;
+    }
+    FILE *fp = (FILE *)(intptr_t)handle;
+    /* fgets takes an int size; a cap that is non-positive or wider than an int
+       would truncate to a negative or garbage size, so refuse it up front. */
+    if (cap <= 0 || cap > (int64_t)INT_MAX) {
+        return -1;
+    }
+    errno = 0;
+    if (!fgets(buf, (int)cap, fp)) {
+        if (ferror(fp)) {
+            return -1;
+        }
+        buf[0] = '\0';
+        return 0;
+    }
+    return (int64_t)strlen(buf);
+}
+
+/* Closes a stream opened by cool_popen and returns pclose's raw wait status
+   word, unmodified, the same status system() hands back to std.os's run: the
+   low 7 bits carry the terminating signal and bits 8..15 carry the exit
+   code, and the dusk side decodes both with run's own 128+signal convention.
+   pclose itself fails only by returning -1, which no real wait status can
+   equal, so the dusk wrapper tells the two apart by that exact value with
+   errno set on the failure path. */
+int64_t cool_pclose(int64_t handle) {
+    /* A zero handle names no open stream, so there is nothing to close and
+       nothing to reap: report the failure value rather than hand pclose a null
+       or an already reaped FILE*, which would be a double close. */
+    if (handle == 0) {
+        return -1;
+    }
+    FILE *fp = (FILE *)(intptr_t)handle;
+    return (int64_t)pclose(fp);
 }
 
 /* Nanoseconds since the Unix epoch, UTC, off CLOCK_REALTIME: whole seconds

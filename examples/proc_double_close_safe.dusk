@@ -1,0 +1,30 @@
+// A Proc names one OS stream, so proc_close takes it by pointer and zeroes its
+// handle as it closes. A second proc_close on the same Proc then sees the
+// zeroed handle and reports an error instead of handing an already reaped
+// FILE* back to pclose, which would be a libc double close. This proves the
+// second close is a named, safe error, not a crash: the first close decodes
+// the child's exit code, the second reports its error text.
+@paradigm procedural
+
+@import std.process
+
+func main() -> int32 {
+    pv, e := proc_open("echo hi")
+    e.ignore()
+    p: *Proc = alloc(pv)
+    line, found := proc_read_line(p)
+    if found {
+        println(line)
+    }
+    code1, e1 := proc_close(p)
+    e1.ignore()
+    println(code1)
+    code2, e2 := proc_close(p)
+    if e2.exists() {
+        println(9)
+    } else {
+        println(code2)
+    }
+    free(p)
+    return 0
+}

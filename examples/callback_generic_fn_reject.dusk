@@ -1,0 +1,21 @@
+@paradigm procedural
+
+// A generic function has no single concrete symbol to point a C callback at, so
+// naming one in a callback position is refused before monomorphization.
+foreign "C" {
+    func qsort(base: *raw int64, n: int64, w: int64, cmp: (*raw int64, *raw int64) -> int32) -> void
+}
+
+func cmpg<T>(a: *raw int64, b: *raw int64) -> int32 {
+    if a[0] < b[0] { return int32(-1) }
+    return int32(1)
+}
+
+func main() -> int32 {
+    buf: *raw int64 = alloc_bytes(16)
+    buf[0] = 2
+    buf[1] = 1
+    qsort(buf, 2, 8, cmpg)
+    free(buf)
+    return 0
+}

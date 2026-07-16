@@ -687,6 +687,110 @@ func check_variadic_call(tc: *TypeChecker, cn: TyNode, arg_off: int64, arg_len: 
     }
 }
 
+func callback_capture_msg(var: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "this callback captures '")
+    sb_push(b, var)
+    sb_push(b, "'; C has no environment for it, pass state through the *void user data argument the API carries")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func callback_sig_msg(tc: *TypeChecker, argno: int64, expected: int64, actual: int64) -> string {
+    esrc: string = ty_src((*tc).ty, expected)
+    asrc: string = ty_src((*tc).ty, actual)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "callback argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, ": expected ")
+    sb_push(b, esrc)
+    sb_push(b, ", found ")
+    sb_push(b, asrc)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(esrc)
+    free(asrc)
+    return out
+}
+
+func callback_form_msg(argno: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "callback argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, " must be a capture-free lambda literal or the name of a top-level function; a closure value has no bare C function pointer")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func callback_generic_msg(argno: int64, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "callback argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, " cannot be the generic function '")
+    sb_push(b, name)
+    sb_push(b, "'; a C callback needs one concrete function, and a generic function has none until it is instantiated")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func top_fn_is_generic(tc: *TypeChecker, name: string) -> bool {
+    a: *Ast = (*tc).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if str_eq(ast_name(a, f.name), name) { return f.generics_len > 0 }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Checks a C callback argument: a foreign function parameter of function type
+// is a bare code pointer, so the argument must be a capture-free lambda literal
+// or the name of a top-level, non-generic dusk function whose signature matches
+// the callback exactly. A capturing lambda, a closure value, a generic function
+// name, or a signature mismatch is refused with a message naming the cause.
+func check_callback_arg(tc: *TypeChecker, cbty: int64, av: int64, arg_id: int64, argno: int64) -> void {
+    a: *Ast = (*tc).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind == xk_lambda() {
+        caps: *Vector<string> = lambda_captures(tc, arg)
+        if vec_len(caps) > 0 {
+            tc_emit(tc, callback_capture_msg(vec_get(caps, 0)), arg.lo, arg.hi)
+        }
+        if !ty_strict_eq((*tc).ty, cbty, av) {
+            tc_emit(tc, callback_sig_msg(tc, argno, cbty, av), arg.lo, arg.hi)
+        }
+        return
+    }
+    if arg.kind == xk_ident() {
+        name: string = ast_name(a, arg.a)
+        if !is_local(tc, name) && sig_has_fn((*tc).sigtab, name) && !sig_is_foreign((*tc).sigtab, name) {
+            if top_fn_is_generic(tc, name) {
+                tc_emit(tc, callback_generic_msg(argno, name), arg.lo, arg.hi)
+                return
+            }
+            if !ty_strict_eq((*tc).ty, cbty, av) {
+                tc_emit(tc, callback_sig_msg(tc, argno, cbty, av), arg.lo, arg.hi)
+            }
+            return
+        }
+        tc_emit(tc, callback_form_msg(argno), arg.lo, arg.hi)
+        return
+    }
+    tc_emit(tc, callback_form_msg(argno), arg.lo, arg.hi)
+}
+
 export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> int64 {
     a: *Ast = (*tc).ast
     f: ExprNode = vec_get((*a).exprs, callee_id)
@@ -974,9 +1078,11 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
             tc_emit(tc, call_msg_count(cn.len, arg_len), f.lo, f.hi)
         } else {
             mut direct_toplevel: bool = false
+            mut foreign_callee: bool = false
             if f.kind == xk_ident() {
                 fname0: string = ast_name(a, f.a)
                 direct_toplevel = sig_has_fn((*tc).sigtab, fname0) && !is_local(tc, fname0)
+                foreign_callee = sig_is_foreign((*tc).sigtab, fname0) && !is_local(tc, fname0)
             }
             mut i: int64 = 0
             while i < cn.len {
@@ -989,8 +1095,13 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                 if pn.kind == tyk_error() && an.kind == tyk_error() && arg.kind == xk_ident() {
                     mark_err_handled(tc, ast_name(a, arg.a))
                 }
+                mut handled_cb: bool = false
+                if foreign_callee && pn.kind == tyk_func() {
+                    check_callback_arg(tc, p, av, arg_id, i)
+                    handled_cb = true
+                }
                 mut collector_lambda: bool = false
-                if pn.kind == tyk_collector() {
+                if !handled_cb && pn.kind == tyk_collector() {
                     inner: TyNode = ty_get((*tc).ty, pn.a)
                     if inner.kind == tyk_func() && arg.kind == xk_lambda() {
                         av.ignore()
@@ -1002,11 +1113,11 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                         }
                     }
                 }
-                if !collector_lambda && !compat((*tc).ty, p, av) && !self_value_in_ptr_position(tc, arg_id, p) {
+                if !handled_cb && !collector_lambda && !compat((*tc).ty, p, av) && !self_value_in_ptr_position(tc, arg_id, p) {
                     tc_emit(tc, arg_wrong_msg(i), arg.lo, arg.hi)
                 }
-                if !collector_lambda { check_int_fits(tc, arg_id, p) }
-                if !collector_lambda { check_slice_covariance(tc, p, av, arg_id, arg.lo, arg.hi) }
+                if !handled_cb && !collector_lambda { check_int_fits(tc, arg_id, p) }
+                if !handled_cb && !collector_lambda { check_slice_covariance(tc, p, av, arg_id, arg.lo, arg.hi) }
                 i = i + 1
             }
             if f.kind == xk_ident() {

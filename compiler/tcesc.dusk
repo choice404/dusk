@@ -342,6 +342,29 @@ func capture_add(tc: *TypeChecker, name: string, bound: *Map<int64>, seen: *Map<
     }
 }
 
+// Binds name into the capture scope map only if it is not already bound, and
+// records every name this scope newly introduced into added. A name already
+// bound by an enclosing scope is left alone, so unbinding never drops a binding
+// this scope did not own. This is what keeps a nested lambda parameter, a match
+// arm pattern, or a for loop variable from leaking out of its own construct and
+// masking a same named outer local the enclosing closure genuinely captures.
+func bind_scoped(bound: *Map<int64>, name: string, added: *Vector<string>) -> void {
+    if !map_has(bound, name) {
+        map_put(bound, name, 1)
+        vec_push(added, name)
+    }
+}
+
+// Removes exactly the names bind_scoped added for a scope, restoring the map to
+// what it was before the scope was entered.
+func unbind_scoped(bound: *Map<int64>, added: *Vector<string>) -> void {
+    mut i: int64 = 0
+    while i < vec_len(added) {
+        map_remove(bound, vec_get(added, i))
+        i = i + 1
+    }
+}
+
 func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
     if expr_id < 0 { return }
     a: *Ast = (*tc).ast
@@ -350,9 +373,12 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>, 
         capture_add(tc, ast_name(a, e.a), bound, seen, out)
     } else if e.kind == xk_unary() {
         collect_capture_expr(tc, e.b, bound, seen, out)
-    } else if e.kind == xk_binary() || e.kind == xk_range() {
+    } else if e.kind == xk_binary() {
         collect_capture_expr(tc, e.b, bound, seen, out)
         collect_capture_expr(tc, e.c, bound, seen, out)
+    } else if e.kind == xk_range() {
+        collect_capture_expr(tc, e.a, bound, seen, out)
+        collect_capture_expr(tc, e.b, bound, seen, out)
     } else if e.kind == xk_call() {
         collect_capture_expr(tc, e.a, bound, seen, out)
         mut i: int64 = 0
@@ -376,20 +402,24 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>, 
             k = k + 2
         }
     } else if e.kind == xk_lambda() {
+        added: *Vector<string> = alloc(vec_new())
         mut p: int64 = 0
         while p < e.b {
             pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
-            map_put(bound, ast_name(a, pn.name), 1)
+            bind_scoped(bound, ast_name(a, pn.name), added)
             p = p + 1
         }
         collect_capture_block(tc, e.d, bound, seen, out)
+        unbind_scoped(bound, added)
     } else if e.kind == xk_match() {
         collect_capture_expr(tc, e.a, bound, seen, out)
         mut m: int64 = 0
         while m < e.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + m))
-            collect_capture_pat(tc, arm.pat, bound)
+            marm: *Vector<string> = alloc(vec_new())
+            collect_capture_pat(tc, arm.pat, bound, marm)
             collect_capture_block(tc, arm.body, bound, seen, out)
+            unbind_scoped(bound, marm)
             m = m + 1
         }
     } else if e.kind == xk_await() {
@@ -399,21 +429,21 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>, 
     }
 }
 
-func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<int64>) -> void {
+func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<int64>, added: *Vector<string>) -> void {
     a: *Ast = (*tc).ast
     p: PatternNode = vec_get((*a).patterns, pat_id)
     if p.kind == pk_ident() {
-        map_put(bound, ast_name(a, p.a), 1)
+        bind_scoped(bound, ast_name(a, p.a), added)
     } else if p.kind == pk_variant() {
         mut i: int64 = 0
         while i < p.c {
-            map_put(bound, ast_name(a, vec_get((*a).kids, p.b + i)), 1)
+            bind_scoped(bound, ast_name(a, vec_get((*a).kids, p.b + i)), added)
             i = i + 1
         }
     }
 }
 
-func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>, added: *Vector<string>) -> void {
     a: *Ast = (*tc).ast
     s: StmtNode = vec_get((*a).stmts, stmt_id)
     if s.kind == sk_let() {
@@ -421,7 +451,7 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>, 
         mut i: int64 = 0
         while i < s.b {
             b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
-            map_put(bound, ast_name(a, b.name), 1)
+            bind_scoped(bound, ast_name(a, b.name), added)
             i = i + 1
         }
     } else if s.kind == sk_assign() {
@@ -441,28 +471,41 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>, 
         collect_capture_block(tc, s.b, bound, seen, out)
     } else if s.kind == sk_for() {
         collect_capture_expr(tc, s.b, bound, seen, out)
-        map_put(bound, ast_name(a, s.a), 1)
+        forv: *Vector<string> = alloc(vec_new())
+        bind_scoped(bound, ast_name(a, s.a), forv)
         collect_capture_block(tc, s.c, bound, seen, out)
+        unbind_scoped(bound, forv)
     } else if s.kind == sk_match() {
         collect_capture_expr(tc, s.a, bound, seen, out)
         mut m: int64 = 0
         while m < s.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + m))
-            collect_capture_pat(tc, arm.pat, bound)
+            marm: *Vector<string> = alloc(vec_new())
+            collect_capture_pat(tc, arm.pat, bound, marm)
             collect_capture_block(tc, arm.body, bound, seen, out)
+            unbind_scoped(bound, marm)
             m = m + 1
         }
     }
 }
 
+// A block is its own lexical scope: names its statements bind with let are in
+// scope for the rest of the block but not beyond it. The block collects every
+// name its lets newly introduce and unbinds exactly those on the way out, so a
+// let inside a nested block cannot mask a same named outer local that the
+// enclosing closure captures after the block. A for variable and a match arm
+// pattern are scoped tighter still, to their own statement, and manage their
+// own unbinding.
 func collect_capture_block(tc: *TypeChecker, block_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
     a: *Ast = (*tc).ast
     b: BlockNode = vec_get((*a).blocks, block_id)
+    added: *Vector<string> = alloc(vec_new())
     mut i: int64 = 0
     while i < b.len {
-        collect_capture_stmt(tc, vec_get((*a).kids, b.off + i), bound, seen, out)
+        collect_capture_stmt(tc, vec_get((*a).kids, b.off + i), bound, seen, out, added)
         i = i + 1
     }
+    unbind_scoped(bound, added)
 }
 
 export func lambda_captures(tc: *TypeChecker, e: ExprNode) -> *Vector<string> {

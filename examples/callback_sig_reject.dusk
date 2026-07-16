@@ -1,0 +1,21 @@
+@paradigm procedural
+
+// A named function whose return width does not match the callback's is refused.
+// The callback wants int32, cmp returns int64, so the two ABIs differ and the
+// checker names both signatures rather than accept a silent mismatch.
+foreign "C" {
+    func qsort(base: *raw int64, n: int64, w: int64, cmp: (*raw int64, *raw int64) -> int32) -> void
+}
+
+func cmp(a: *raw int64, b: *raw int64) -> int64 {
+    return a[0] - b[0]
+}
+
+func main() -> int32 {
+    buf: *raw int64 = alloc_bytes(16)
+    buf[0] = 2
+    buf[1] = 1
+    qsort(buf, 2, 8, cmp)
+    free(buf)
+    return 0
+}

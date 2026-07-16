@@ -1,0 +1,24 @@
+@paradigm procedural
+
+// A C fixture (callback_fixture.c) calls a dusk callback n times, threading a
+// *void user data pointer through each call. The callback reads a scale factor
+// out of the user data and returns i * factor, so the folded total is
+// factor * (0 + 1 + 2 + 3 + 4) = 10 * 10 = 100.
+@csource "callback_fixture.c"
+
+foreign "C" {
+    func call_n(n: int64, user: *void, fn: (int64, *raw int64) -> int64) -> int64
+}
+
+func scale(i: int64, user: *raw int64) -> int64 {
+    return i * user[0]
+}
+
+func main() -> int32 {
+    factor: *raw int64 = alloc_bytes(8)
+    factor[0] = 10
+    total := call_n(5, factor, scale)
+    println(total)
+    free(factor)
+    return 0
+}

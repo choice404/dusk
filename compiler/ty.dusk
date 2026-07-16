@@ -406,6 +406,121 @@ export func ty_render(t: *TyArena, id: int64) -> string {
     return "an unknown type"
 }
 
+// A strict structural equality, stronger than compat: no integer width
+// widening, no char and int mixing, no unknown wildcarding. Two callback
+// signatures are the same only when their parameter and return types match
+// exactly, so a C callback binds to a function whose ABI is identical.
+export func ty_strict_eq(t: *TyArena, a: int64, b: int64) -> bool {
+    if a == b { return true }
+    na: TyNode = ty_get(t, a)
+    nb: TyNode = ty_get(t, b)
+    if na.kind != nb.kind { return false }
+    if na.kind == tyk_int() || na.kind == tyk_float() { return na.w == nb.w }
+    if na.kind == tyk_named() { return str_eq(ty_name(t, a), ty_name(t, b)) }
+    if na.kind == tyk_ptr() || na.kind == tyk_rawptr() || na.kind == tyk_slice() || na.kind == tyk_collector() || na.kind == tyk_future() {
+        return ty_strict_eq(t, na.a, nb.a)
+    }
+    if na.kind == tyk_array() { return na.w == nb.w && ty_strict_eq(t, na.a, nb.a) }
+    if na.kind == tyk_tuple() || na.kind == tyk_func() {
+        if na.len != nb.len { return false }
+        mut i: int64 = 0
+        while i < na.len {
+            if !ty_strict_eq(t, vec_get((*t).kids, na.off + i), vec_get((*t).kids, nb.off + i)) { return false }
+            i = i + 1
+        }
+        if na.kind == tyk_func() { return ty_strict_eq(t, na.a, nb.a) }
+        return true
+    }
+    return true
+}
+
+// Renders a type in source syntax, the spelling a programmer wrote, for a
+// diagnostic that must show a callback signature like (*raw int64, *void) ->
+// int32. Unlike ty_render's prose ("a raw pointer"), this reads back as dusk.
+export func ty_src(t: *TyArena, id: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_ty_src(b, t, id)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func sb_push_ty_src(b: *StringBuilder, t: *TyArena, id: int64) -> void {
+    n: TyNode = ty_get(t, id)
+    if n.kind == tyk_int() {
+        sb_push(b, "int")
+        if n.w == 0 { sb_push_int(b, 64) } else { sb_push_int(b, n.w) }
+    } else if n.kind == tyk_float() {
+        sb_push(b, "float")
+        if n.w == 0 { sb_push_int(b, 64) } else { sb_push_int(b, n.w) }
+    } else if n.kind == tyk_bool() {
+        sb_push(b, "bool")
+    } else if n.kind == tyk_char() {
+        sb_push(b, "char")
+    } else if n.kind == tyk_rune() {
+        sb_push(b, "rune")
+    } else if n.kind == tyk_str() {
+        sb_push(b, "string")
+    } else if n.kind == tyk_unit() {
+        sb_push(b, "void")
+    } else if n.kind == tyk_error() {
+        sb_push(b, "error")
+    } else if n.kind == tyk_thread() {
+        sb_push(b, "thread")
+    } else if n.kind == tyk_ptr() {
+        inner: TyNode = ty_get(t, n.a)
+        if inner.kind == tyk_unit() {
+            sb_push(b, "*void")
+        } else {
+            sb_push_char(b, 42)
+            sb_push_ty_src(b, t, n.a)
+        }
+    } else if n.kind == tyk_rawptr() {
+        sb_push(b, "*raw ")
+        sb_push_ty_src(b, t, n.a)
+    } else if n.kind == tyk_slice() {
+        sb_push_ty_src(b, t, n.a)
+        sb_push(b, "[]")
+    } else if n.kind == tyk_array() {
+        sb_push_ty_src(b, t, n.a)
+        sb_push_char(b, 91)
+        sb_push_int(b, n.w)
+        sb_push_char(b, 93)
+    } else if n.kind == tyk_collector() {
+        sb_push(b, "collector<")
+        sb_push_ty_src(b, t, n.a)
+        sb_push_char(b, 62)
+    } else if n.kind == tyk_future() {
+        sb_push(b, "Future<")
+        sb_push_ty_src(b, t, n.a)
+        sb_push_char(b, 62)
+    } else if n.kind == tyk_named() {
+        sb_push(b, ty_name(t, id))
+    } else if n.kind == tyk_tuple() {
+        sb_push_char(b, 40)
+        mut i: int64 = 0
+        while i < n.len {
+            if i > 0 { sb_push(b, ", ") }
+            sb_push_ty_src(b, t, vec_get((*t).kids, n.off + i))
+            i = i + 1
+        }
+        sb_push_char(b, 41)
+    } else if n.kind == tyk_func() {
+        sb_push_char(b, 40)
+        mut j: int64 = 0
+        while j < n.len {
+            if j > 0 { sb_push(b, ", ") }
+            sb_push_ty_src(b, t, vec_get((*t).kids, n.off + j))
+            j = j + 1
+        }
+        sb_push(b, ") -> ")
+        sb_push_ty_src(b, t, n.a)
+    } else {
+        sb_push(b, "?")
+    }
+}
+
 export func harden(t: *TyArena, id: int64) -> int64 {
     n: TyNode = ty_get(t, id)
     if n.kind == tyk_int() && n.w == 0 { return ty_int(t, 64) }

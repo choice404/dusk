@@ -1,0 +1,22 @@
+// std.process end to end: run_capture drives a command through the platform
+// shell and hands back its captured stdout alongside the decoded exit code,
+// the same 128+signal / shifted exit code convention std.os's run uses. A
+// clean echo decodes to 0; a shell that echoes then exits non-zero decodes
+// to that code, proving the wait status decode runs on real output, not
+// only the common exit(0) case.
+@paradigm procedural
+
+@import std.process
+
+func main() -> int32 {
+    out, code, e := run_capture("echo hello")
+    e.ignore()
+    println(out)
+    println(code)
+
+    out2, code2, e2 := run_capture("sh -c 'echo world; exit 7'")
+    e2.ignore()
+    println(out2)
+    println(code2)
+    return 0
+}
