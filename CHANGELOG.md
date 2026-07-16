@@ -2,6 +2,22 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.5.1
+
+The hash builtin. This is the groundwork for a generic key-value map: a standard library `Map` is keyed only by strings today, and generalizing it over its key type needs one thing the language did not have, a way to hash an arbitrary key. `hash(v)` is that primitive, and it ships one release ahead of the map migration so the previous release's compiler can still build the standard library that will use it. It touches the resolver, the type checker, codegen, and the runtime; no standard library change yet.
+
+The hash builtin.
+
+- `hash(v)` returns a deterministic 64-bit hash of a hashable value: an integer of any width, a `char`, a `rune`, or a `string`. It is a value builtin dispatched by its operand's type the same way `int64(v)` is, added to the builtin sets in `compiler/resolveexpr.dusk`, `compiler/summary.dusk`, and `compiler/monosolve.dusk`, and checked in `compiler/tccall.dusk` through a new `hashable` predicate that mirrors the comparison rule's `comparable` minus float and bool. A float is refused, since a NaN breaks the coherence between a hash and equality; a struct, pointer, slice, and every other non scalar is refused too, `cannot hash <type>; a map key is an integer, char, rune, or string`. In a generic function `hash(k)` passes the surface pass and a non hashable instantiation is rejected on the ground pass, the same two pass shape a generic comparison takes.
+- `gen_hash` in `compiler/gencall.dusk` lowers it by the operand's ground type: an integer, char, or rune widens to `i64` through the ordinary coercion, its own value the hash; a string hashes its bytes through a new runtime shim `cool_hash_str` rather than its pointer, so equal content hashes equal and matches the content `==` compares strings by. The shim reproduces the previous pure dusk `map_hash` byte for byte, each byte read unsigned and the accumulator wrapping in `uint64_t`, so a string key will probe to the identical slot once the map goes generic.
+- `examples/hash_scalar.dusk` and `examples/hash_string_content.dusk` pin the properties, that equal values and equal string content hash equal and distinct values hash apart, including a multibyte string that exercises the unsigned byte read; the exact hash value is never asserted, since it is unspecified. `examples/mapkv_probe.dusk` builds a whole generic open addressing map on `hash` and generic `==`, exercising an integer key and a string key across a deliberate collision chain, so the map the next release ports into the standard library is proven a release early. `examples/hash_struct_reject.dusk`, `examples/hash_float_reject.dusk`, `examples/hash_generic_ground_reject.dusk`, and `examples/hash_arity_reject.dusk` pin the rejects, the last through a generic instantiation so the ground pass enforcement is covered.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 689 records, 7 new since 1.5.0 for the hash properties, the generic map probe, and the rejects.
+- The stage ladder re-fixed with the `v1.5.0` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (e6041182...) and one compiler IR sha256 (235d32c1...), the collapse, fixpoint, and determinism checks all green, 689/689 under stage1 and stage2 alike.
+- The ratchet holds: the `v1.5.0` release binary builds the 1.5.1 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+
 ## 1.5.0
 
 The numeric cast. 1.2.0 added an integer width cast, `int8(v)` through `int64(v)` and `char(v)`, but stopped at the integer family: a float could not cross to an integer or the reverse, and `rune` and the float widths were not cast targets at all. This release opens the whole scalar set. `rune(v)`, `float32(v)`, and `float64(v)` join the cast builtins, and a cast now converts across the integer and float boundary in both directions. This is the first release of the 1.5.x line, which continues into a standard library overhaul. It touches the resolver, the type checker, and codegen; no runtime or standard library change.

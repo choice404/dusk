@@ -73,6 +73,41 @@ func cast_target_ty(tc: *TypeChecker, name: string) -> int64 {
     return -1
 }
 
+// Whether a type may be a hash key: an integer of any width, a char, a rune, or a
+// string, the same set map keys are drawn from. This mirrors comparable() minus
+// float and bool: a float breaks hash and equality coherence, since NaN is never
+// equal to itself, and bool is left out of the key set for now. The named-type arm
+// is permissive the way comparable() is, so a generic parameter passes the surface
+// pass and the ground pass rejects a concrete non-hashable instantiation.
+func hashable(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_int() || n.kind == tyk_char() || n.kind == tyk_rune() || n.kind == tyk_str() || n.kind == tyk_unknown() {
+        return true
+    }
+    if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        structs: *Map<StructSig> = (*tc).structs
+        if map_has(structs, name) { return false }
+        enums: *Map<EnumSig> = (*tc).enums
+        if map_has(enums, name) { return false }
+        ifaces: *Map<int64> = (*tc).ifaces
+        if map_has(ifaces, name) { return false }
+        return true
+    }
+    return false
+}
+
+func hash_operand_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot hash ")
+    sb_push(b, rendered)
+    sb_push(b, "; a map key is an integer, char, rune, or string")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 func cast_arity_msg(name: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, name)
@@ -918,6 +953,20 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                     bri = bri + 1
                 }
                 return br
+            }
+            // hash(v): a deterministic 64-bit hash of a hashable scalar or string,
+            // the key hash a generic map builds on. The operand must be hashable;
+            // a non-hashable ground type is rejected here on the ground pass.
+            if str_eq(name, "hash") && !is_local(tc, name) {
+                mut hat: int64 = ty_unknown((*tc).ty)
+                if arg_len > 0 { hat = infer_expr(tc, vec_get((*a).kids, arg_off)) }
+                if arg_len != 1 {
+                    tc_emit(tc, "hash(v) takes exactly one value", f.lo, f.hi)
+                } else if !hashable(tc, hat) {
+                    harg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, arg_off))
+                    tc_emit(tc, hash_operand_msg(ty_render((*tc).ty, hat)), harg.lo, harg.hi)
+                }
+                return ty_int((*tc).ty, 64)
             }
             // A numeric cast: int8/int16/int32/int64/char/rune/float32/float64
             // applied like a call converts a scalar explicitly. An integer

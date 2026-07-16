@@ -1,0 +1,85 @@
+@paradigm procedural
+
+// A generic open addressing hash map built on the hash builtin and generic ==,
+// the shape the standard library map takes once it goes generic over its key. It
+// exercises the machinery at an integer key and a string key, including a probe
+// chain of keys that collide to one slot, so the generic hash, the generic key
+// equality, and the linear probe are all proven before the standard library
+// depends on them.
+@import std.io
+@import std.string
+
+struct HMap<K, V> {
+    used: *raw bool,
+    keys: *raw K,
+    vals: *raw V,
+    cap: int64,
+}
+
+func hm_new<K, V>() -> *HMap<K, V> {
+    cap: int64 = 16
+    u: *raw bool = alloc_bytes(cap * sizeof(bool))
+    k: *raw K = alloc_bytes(cap * sizeof(K))
+    v: *raw V = alloc_bytes(cap * sizeof(V))
+    mut i: int64 = 0
+    while i < cap {
+        u[i] = false
+        i = i + 1
+    }
+    return alloc(HMap { used: u, keys: k, vals: v, cap: cap })
+}
+
+func hm_slot<K, V>(m: *HMap<K, V>, key: K) -> int64 {
+    mut idx: int64 = hash(key) % (*m).cap
+    if idx < 0 {
+        idx = idx + (*m).cap
+    }
+    while (*m).used[idx] {
+        if (*m).keys[idx] == key {
+            return idx
+        }
+        idx = (idx + 1) % (*m).cap
+    }
+    return idx
+}
+
+func hm_put<K, V>(m: *HMap<K, V>, key: K, val: V) -> void {
+    idx: int64 = hm_slot(m, key)
+    (*m).used[idx] = true
+    (*m).keys[idx] = key
+    (*m).vals[idx] = val
+}
+
+func hm_get<K, V>(m: *HMap<K, V>, key: K) -> V {
+    idx: int64 = hm_slot(m, key)
+    return (*m).vals[idx]
+}
+
+func hm_has<K, V>(m: *HMap<K, V>, key: K) -> bool {
+    idx: int64 = hm_slot(m, key)
+    return (*m).used[idx]
+}
+
+func main() -> int32 {
+    // integer keys, with 0, 16, 32 colliding to slot 0 (mod 16) to force probing
+    mi: *HMap<int64, int64> = hm_new()
+    hm_put(mi, 0, 100)
+    hm_put(mi, 16, 116)
+    hm_put(mi, 32, 132)
+    hm_put(mi, 7, 107)
+    println(hm_get(mi, 0))     // 100
+    println(hm_get(mi, 16))    // 116, reached across the probe chain
+    println(hm_get(mi, 32))    // 132
+    println(hm_get(mi, 7))     // 107
+    if hm_has(mi, 16) { println("has_16") }
+    if !hm_has(mi, 99) { println("no_99") }
+
+    // string keys, content compared and content hashed
+    ms: *HMap<string, int64> = hm_new()
+    hm_put(ms, "alpha", 1)
+    hm_put(ms, "beta", 2)
+    key: string = substring("xbetay", 1, 5)   // "beta", fresh pointer
+    println(hm_get(ms, key))   // 2, found by content
+    if hm_has(ms, "alpha") { println("has_alpha") }
+    return 0
+}

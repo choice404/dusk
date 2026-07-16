@@ -153,6 +153,37 @@ func gen_cast(s: *GenFuncState, name: string, args_off: int64, args_len: int64) 
     return Val { ty: target, op: out }
 }
 
+// hash(v): a 64-bit hash of a hashable value, the key hash a generic map builds on.
+// A string hashes its bytes through the runtime shim rather than its pointer, so
+// equal content hashes equal and matches the content compare `==` does on strings;
+// the checker admits only a string, so a rawptr operand here is always a string,
+// never a bare *raw T. An integer, char, or rune is its own value widened to i64,
+// through the same coerce a widening assignment uses, so equal values hash equal.
+func gen_hash(s: *GenFuncState, args_off: int64, args_len: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    a: *Ast = (*(*s).ctx).ast
+    mut v: Val = Val { ty: cty_int(c, 64), op: gs_copy("0") }
+    if args_len > 0 { v = gen_expr(s, vec_get((*a).kids, args_off)) }
+    vn: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if vn.kind == ctyk_rawptr() {
+        emit_declare((*s).module, "i64 @cool_hash_str(ptr)")
+        dest: string = next_tmp((*s).fb)
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, dest)
+        sb_push(b, " = call i64 @cool_hash_str(ptr ")
+        sb_push(b, v.op)
+        sb_push_char(b, 41)
+        text: string = gs_built(b)
+        sb_free(b)
+        free(b)
+        line((*s).fb, text)
+        free(text)
+        return Val { ty: cty_int(c, 64), op: dest }
+    }
+    out: string = coerce(s, v.ty, v.op, cty_int(c, 64))
+    return Val { ty: cty_int(c, 64), op: out }
+}
+
 // Applies the C default argument promotions to a value passed beyond a variadic
 // foreign function's fixed parameters: an integer narrower than 32 bits widens to
 // i32 (sign extended, or zero extended for char and bool through coerce), a
@@ -696,6 +727,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
     if str_eq(name, "alloc") { return gen_alloc(s, args_off, args_len) }
     if str_eq(name, "free") { return gen_free(s, args_off, args_len) }
     if str_eq(name, "sizeof") { return gen_sizeof(s, args_off, args_len) }
+    if str_eq(name, "hash") { return gen_hash(s, args_off, args_len) }
     if str_eq(name, "int8") || str_eq(name, "int16") || str_eq(name, "int32") || str_eq(name, "int64") || str_eq(name, "char") || str_eq(name, "rune") || str_eq(name, "float32") || str_eq(name, "float64") { return gen_cast(s, name, args_off, args_len) }
     if str_eq(name, "alloc_bytes") { return gen_alloc_bytes(s, args_off, args_len) }
     if str_eq(name, "ptr_add") { return gen_ptr_add(s, args_off, args_len) }

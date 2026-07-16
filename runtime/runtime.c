@@ -783,6 +783,21 @@ void cool_lib_init(void) {
    A cap of zero or one, or a formatting failure, writes nothing meaningful and
    returns zero; a value that would overflow buf is truncated and the written
    length is reported. This backs json number emission. */
+/* A polynomial rolling hash over a NUL terminated string's bytes, the key hash the
+   generic map builds on. It reproduces the dusk hash `h = h*31 + c` exactly: each
+   byte reads unsigned, the accumulator wraps in uint64_t the same way dusk's int64
+   wraps in two's complement, and the final bit pattern reinterprets as int64_t, so a
+   string key probes to the identical slot the old pure dusk hash reached. */
+int64_t cool_hash_str(const char *s) {
+    uint64_t h = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p != 0) {
+        h = h * 31u + (uint64_t)(*p);
+        p++;
+    }
+    return (int64_t)h;
+}
+
 int64_t cool_f64_str(double v, char *buf, int64_t cap) {
     if (cap <= 0 || cap > INT_MAX) {
         return 0;
