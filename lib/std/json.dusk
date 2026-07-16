@@ -18,6 +18,7 @@
 @import std.vector
 @import std.map
 @import std.unicode
+@import std.math
 @import std.functional.maybe
 
 // The number formatting shim: writes v as %.17g into buf, whose capacity cap
@@ -49,6 +50,15 @@ struct JParser {
     pos: int64,
     n: int64,
     err: string,
+    depth: int64,
+}
+
+// The deepest array and object nesting json_parse follows before it refuses. The
+// parser recurses once per level, so an unbounded input would overflow the stack;
+// this bound turns a pathologically deep document into a clean error instead of a
+// crash. It is far above any nesting a real document carries.
+func json_max_depth() -> int64 {
+    return 1000
 }
 
 // Whether any fault has been recorded yet.
@@ -338,6 +348,14 @@ func jp_number(p: *JParser) -> *Json {
         jp_fail(p, "invalid number")
         return alloc(Json.JNull)
     }
+    // A grammatically valid but overflowing magnitude, 1e400 among them, parses to
+    // an infinity, and a NaN can arrive the same way; neither is JSON, and emitting
+    // one would print "inf" or "nan" that the parser then rejects, so refuse it here
+    // and keep the accepted set inside real, round-trippable JSON.
+    if is_nan(v) || is_inf(v) {
+        jp_fail(p, "number out of range")
+        return alloc(Json.JNull)
+    }
     return alloc(Json.JNum(v))
 }
 
@@ -438,7 +456,24 @@ func jp_object(p: *JParser) -> *Json {
 
 // Parse one JSON value at the cursor, dispatching on its first byte. Records a
 // fault and returns a placeholder JNull on end of input or an unexpected byte.
+// The recursion choke point: every value, and so every level of array or object
+// nesting, passes through here, so counting depth once here bounds the whole
+// descent. Depth rises on entry and falls on exit, so sibling values at the same
+// level share a budget rather than accumulating, and only true nesting counts
+// toward the limit. Past the limit the parser records a fault and stops descending.
 func jp_value(p: *JParser) -> *Json {
+    (*p).depth = (*p).depth + 1
+    if (*p).depth > json_max_depth() {
+        jp_fail(p, "nesting is too deep")
+        (*p).depth = (*p).depth - 1
+        return alloc(Json.JNull)
+    }
+    r: *Json = jp_value_inner(p)
+    (*p).depth = (*p).depth - 1
+    return r
+}
+
+func jp_value_inner(p: *JParser) -> *Json {
     c: int64 = jp_peek(p)
     if c == 0 {
         jp_fail(p, "unexpected end of input")
@@ -486,7 +521,7 @@ func jp_value(p: *JParser) -> *Json {
 // pointer is a throwaway JNull the caller must not read. On success the error
 // does not exist and the pointer roots a fully built tree the caller owns.
 export func json_parse(s: string) -> (*Json, error) {
-    p: *JParser = alloc(JParser { s: s, pos: 0, n: str_len(s), err: "" })
+    p: *JParser = alloc(JParser { s: s, pos: 0, n: str_len(s), err: "", depth: 0 })
     jp_skip_ws(p)
     val: *Json = jp_value(p)
     jp_skip_ws(p)

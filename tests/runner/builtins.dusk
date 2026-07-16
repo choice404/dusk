@@ -176,6 +176,59 @@ func embed_c_lib(bin: string) -> string {
     return ""
 }
 
+// Runs one faulting export and checks that it aborted with the expected message on
+// stderr. A dusk fault kills the process by signal, so the captured exit code is
+// non-zero; the empty string means the fault behaved as required.
+func expect_fault(cmd: string, want_err: string, tag: string) -> string {
+    line: string = cmd + " > target/testrun/efault_out.txt 2> target/testrun/efault_err.txt; echo $? > target/testrun/efault_code.txt"
+    rc: int64 = run(line)
+    free(line)
+    if rc != 0 {
+        return "the harness could not run the " + tag + " host"
+    }
+    code: int64 = slurp_int("target/testrun/efault_code.txt")
+    if code == 0 {
+        return "the " + tag + " export returned instead of faulting"
+    }
+    err: string = slurp("target/testrun/efault_err.txt")
+    if !str_contains(err, want_err) {
+        return "the " + tag + " fault printed '" + err + "', want a line containing '" + want_err + "'"
+    }
+    return ""
+}
+
+// Builds examples/embed_fault_lib.dusk as a C library, links the fault host against
+// it, and drives each faulting export from C: an out of bounds index and a
+// collector mint in library mode. Each must abort the process by name, proving a
+// dusk fault crosses the export boundary as a clean abort rather than corruption.
+func embed_c_fault(bin: string) -> string {
+    md: int64 = run("mkdir -p target/testrun")
+    if md != 0 {
+        return "could not make target/testrun"
+    }
+    qbin: string = quote(bin)
+    bcmd: string = qbin + " build --lib examples/embed_fault_lib.dusk > target/testrun/efault_build.txt 2>&1"
+    bc: int64 = run(bcmd)
+    free(bcmd)
+    free(qbin)
+    if bc != 0 {
+        return "dusk build --lib failed: " + slurp("target/testrun/efault_build.txt")
+    }
+    cc: int64 = run("clang examples/embed_fault_host.c -Itarget/dusk-out -Ltarget/dusk-out -lembed_fault_lib -pthread -lm -o target/testrun/efault_host > target/testrun/efault_cc.txt 2>&1")
+    if cc != 0 {
+        return "clang could not link the fault host against libembed_fault_lib.a: " + slurp("target/testrun/efault_cc.txt")
+    }
+    r1: string = expect_fault("target/testrun/efault_host boom", "index out of bounds", "bounds")
+    if str_len(r1) > 0 {
+        return r1
+    }
+    r2: string = expect_fault("target/testrun/efault_host collect", "the collector runs on the main thread only", "collector")
+    if str_len(r2) > 0 {
+        return r2
+    }
+    return ""
+}
+
 // Dispatches a special record to its handler. A dawn special is named but not
 // implemented and fails loudly, and an unrecognized special name fails the same
 // way rather than silently passing.
@@ -186,6 +239,9 @@ export func run_special(rec: Record, bin: string) -> string {
     }
     if str_eq(name, "embed_c_lib") {
         return embed_c_lib(bin)
+    }
+    if str_eq(name, "embed_c_fault") {
+        return embed_c_fault(bin)
     }
     if starts_with(name, "dawn_") {
         return "special '" + name + "' not implemented"

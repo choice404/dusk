@@ -2,6 +2,37 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.4.4
+
+The boundary hardened. The four releases before this one built the C boundary in both directions; this one closes the line by testing the whole of it against adversarial input and fixing what that surfaced. No new language surface: the changes are fault goldens across every boundary feature, four defect fixes in library packaging and the JSON parser, and the interop chapter consolidated in the spec. This release touches the driver, the loader, the standard library, and the test runner; the compiler's front end and codegen are unchanged.
+
+Fault goldens across the boundary.
+
+- `examples/callback_fault_inside.dusk` drives libc's `qsort` with a comparator that indexes out of bounds on its first call: a fault inside a callback body aborts the whole process by name, `fatal: index out of bounds`, the same as anywhere else, proving a callback body carries every runtime guarantee.
+- A new `embed_c_fault` test runner builtin builds `examples/embed_fault_lib.dusk` as a C library and drives two faulting exports from a C host: an out of bounds index aborts with the bounds fault, and a `collector<T>` minted inside an export in library mode aborts with `fatal: the collector runs on the main thread only`, since a library has no dusk main to anchor the collected heap. Both prove a dusk fault crosses the export boundary as a clean abort, never corruption.
+- The System V x86_64 struct classification was re-checked against `clang`'s own lowering over the shapes most likely to expose an eightbyte error, a twelve byte struct with trailing padding, a nested fixed array crossing an eightbyte, an exactly sixteen byte struct, an integer and SSE mix, and a memory class struct returned and passed by value; dusk's emitted parameter, return, and `byval`/`sret` coercions match `clang -O0` on every one. The variadic default argument promotions were re-verified end to end, an `int8`, a `char`, and a `float32` on the vararg tail read back correctly through libc `printf`.
+
+Library packaging.
+
+- A library's private symbols could interpose the host's own libc at the static link. A private dusk helper, or a `@csource`'s own function, named for a libc entry such as `read` or `rand` was emitted as a global symbol in the archive, so a host that linked the archive and called that libc function was silently redirected into dusk. The module object and every `@csource` object now merge into one relocatable object with `ld -r`, and `llvm-objcopy` then keeps only the exports global and makes every other symbol local, so nothing but an export is visible to the host. A build with no exports at all localizes every symbol through a sentinel keep list, rather than leaving them global. A `@csource`'s functions are the library's implementation, not its interface, so a host can no longer call one directly; that is intended, and it fails at link with an undefined reference rather than silently.
+- Two archive objects that shared a basename collided on disk before `llvm-ar` ran, dropping the runtime or the module from the archive; every object now carries a class prefix and an index. A `@csource` referenced by two files under different spellings, `"impl.c"` and `"./impl.c"`, compiled the same file twice into duplicate symbols; the loader now cleans a resolved `@csource` path lexically, dropping `.` and resolving `..` segments, before it deduplicates, so one file compiles once however it is spelled.
+
+std.json hardening.
+
+- A deeply nested document overflowed the stack: `json_parse` recurses once per nesting level, and a pathological input of many thousand open brackets crashed the process. The parser now bounds nesting at a fixed depth well above any real document and returns a `nesting is too deep` error past it, so a malicious input is a clean error rather than a crash.
+- A grammatically valid but overflowing number, `1e400` among them, parsed to an infinity that `json_emit` then wrote as `inf`, text that is not JSON and does not reparse. `json_parse` now refuses a number whose magnitude overflows a `float64` with a `number out of range` error, keeping the accepted set inside real, round-trippable JSON.
+
+Known limitations, recorded.
+
+- A parsed `Json` tree is a set of managed heap allocations with no `json_free` in this release: a value read out of a `match` arm is a borrow, so a recursive walk cannot free a tree it does not own, and a tree is reclaimed at process exit rather than by an explicit call. A long running program that parses many documents holds them until it exits.
+- The library archive is static only. Its objects are not position independent and the runtime's thread local storage takes the local exec model, so the archive does not link into a shared object a `dlopen` based FFI like Python's `ctypes` loads directly; a position independent shared object build is left to a later release.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 679 records, 4 new since 1.4.3: the callback fault, the embedding fault, the deep nesting reject, and the number overflow reject.
+- The stage ladder re-fixed with the `v1.4.3` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (9792ddf0...) and one compiler IR sha256 (5b8456c9...), the collapse, fixpoint, and determinism checks all green, 679/679 under stage1 and stage2 alike.
+- The ratchet holds: the `v1.4.3` release binary builds the 1.4.4 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+
 ## 1.4.3
 
 Dusk as a library. The four releases before this one carried C into dusk, a variadic call, a linked library, a struct by value, a callback. This one carries dusk out. An `export "C"` function is a dusk function a C caller reaches directly, by its own bare symbol, and `dusk build --lib` compiles a whole module into a static archive and a generated C header any language with a C FFI links against. One standard library module lands on top, `std.json`, a parser and emitter over a recursive enum, pure dusk but for a single number formatting shim. This release touches the parser, sema, codegen, the driver, the CLI, and the C runtime; every stage from parse to link gains a small piece of the export path.

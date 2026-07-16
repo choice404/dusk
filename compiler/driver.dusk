@@ -559,61 +559,113 @@ func export_symbol_name(proto: string) -> string {
     return substring(proto, sp + 1, lp)
 }
 
-// Rewrites the module object so only the exported symbols keep global linkage and
-// every other defined symbol, a private helper, a lifted lambda, an async poll
-// function, is made local. Without this a lib's private function named for a libc
-// entry, random or read among them, would interpose the host's own libc call at the
-// static link, silently redirecting it into dusk. Undefined references to the
-// runtime's cool_ symbols are untouched, since llvm-objcopy's keep-global rule acts
-// on defined symbols only. A build with no exports skips it, having nothing to keep.
-func localize_module_object(stem_obj: string, exports: *Vector<string>) -> int64 {
-    if vec_len(exports) == 0 {
-        return 0
-    }
+// The single relocatable object the module and its @csource files merge into
+// before localization.
+func merged_obj_path(out: string) -> string {
+    return path_join(out, "duskmerged.o")
+}
+
+// Merges the module object and every @csource object into one relocatable object
+// with ld -r, then localizes every symbol in it except the exports. The merge is
+// what lets the localization reach a @csource's own functions: a @csource is the
+// library's implementation, not its public interface, so a @csource entry named for
+// a libc function must not interpose the host's call any more than a private dusk
+// helper does. After the merge the module's references to those @csource functions
+// resolve inside the one object, while its references to the runtime's cool_ symbols
+// stay external, resolved from the separate runtime objects at the host's own link.
+// A build with no exports still merges but keeps nothing global, which is a library
+// with no entry points. Writes out/duskmerged.o; returns 0 or a tool's exit code.
+func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, exports: *Vector<string>) -> int64 {
+    merged: string = merged_obj_path(out)
     cmd: *StringBuilder = alloc(sb_new())
-    sb_push(cmd, "llvm-objcopy")
+    sb_push(cmd, "ld -r")
+    push_arg(cmd, mod_obj)
     mut i: int64 = 0
-    while i < vec_len(exports) {
-        sym: string = export_symbol_name(vec_get(exports, i))
-        if str_len(sym) > 0 {
-            sb_push(cmd, " -G ")
-            sb_push(cmd, sym)
-        }
-        free(sym)
+    while i < vec_len(cs_objs) {
+        push_arg(cmd, vec_get(cs_objs, i))
         i = i + 1
     }
-    push_arg(cmd, stem_obj)
+    sb_push(cmd, " -o")
+    push_arg(cmd, merged)
     line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
     sb_free(cmd)
     free(cmd)
-    code: int64 = run(line)
+    lcode: int64 = run(line)
     free(line)
-    return code
+    if lcode != 0 {
+        free(merged)
+        return lcode
+    }
+    oc: *StringBuilder = alloc(sb_new())
+    sb_push(oc, "llvm-objcopy")
+    mut kept: int64 = 0
+    mut j: int64 = 0
+    while j < vec_len(exports) {
+        sym: string = export_symbol_name(vec_get(exports, j))
+        if str_len(sym) > 0 {
+            sb_push(oc, " -G ")
+            sb_push(oc, sym)
+            kept = kept + 1
+        }
+        free(sym)
+        j = j + 1
+    }
+    // With no exports, llvm-objcopy given no keep-global flag would leave every
+    // symbol global, the interposition hole this whole step exists to close. A
+    // sentinel that names no real symbol forces full localization: everything
+    // except a symbol that does not exist becomes local, which is everything.
+    if kept == 0 {
+        sb_push(oc, " -G __dusk_no_export__")
+    }
+    push_arg(oc, merged)
+    oline: string = substring(sb_cstr(oc), 0, sb_size(oc))
+    sb_free(oc)
+    free(oc)
+    free(merged)
+    return run(oline)
 }
 
 // Compiles the emitted IR, the runtime, and every @csource to objects and bundles
-// them into a deterministic static archive with llvm-ar. The module object is first
-// localized so only the exports stay global. @link libraries are not archived: they
-// stay external dependencies the host links, named in the header. Returns 0 on
-// success, non-zero on the first tool failure.
+// them into a deterministic static archive with llvm-ar. The module object and the
+// @csource objects merge into one relocatable object whose only global symbols are
+// the exports, so neither a private dusk helper nor a @csource entry can interpose
+// the host's own symbols. @link libraries are not archived: they stay external
+// dependencies the host links, named in the header. Returns 0 on success, non-zero
+// on the first tool failure.
 func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, exports: *Vector<string>) -> int64 {
     rt: string = path_join(home, "runtime")
     objs: *Vector<string> = alloc(vec_new())
 
-    stem_obj: string = prefixed_obj_path(out, "duskmod_", 0, ll)
-    oc: int64 = compile_object(ll, stem_obj)
+    mod_obj: string = prefixed_obj_path(out, "duskmod_", 0, ll)
+    oc: int64 = compile_object(ll, mod_obj)
     if oc != 0 {
         d: Diagnostic = diag_new(stem, 0, 0, "clang failed to compile the module to an object")
         diag_emit(d)
         return oc
     }
-    lc: int64 = localize_module_object(stem_obj, exports)
-    if lc != 0 {
-        d: Diagnostic = diag_new(stem, 0, 0, "llvm-objcopy failed to localize the module's private symbols")
-        diag_emit(d)
-        return lc
+
+    cs_objs: *Vector<string> = alloc(vec_new())
+    mut ci: int64 = 0
+    while ci < vec_len(csources) {
+        src2: string = vec_get(csources, ci)
+        obj2: string = prefixed_obj_path(out, "duskcs_", ci, src2)
+        cc: int64 = compile_object(src2, obj2)
+        if cc != 0 {
+            d: Diagnostic = diag_new(src2, 0, 0, "clang failed to compile a @csource file")
+            diag_emit(d)
+            return cc
+        }
+        vec_push(cs_objs, obj2)
+        ci = ci + 1
     }
-    vec_push(objs, stem_obj)
+
+    mc: int64 = merge_and_localize(out, mod_obj, cs_objs, exports)
+    if mc != 0 {
+        d: Diagnostic = diag_new(stem, 0, 0, "ld or llvm-objcopy failed to merge and localize the library object")
+        diag_emit(d)
+        return mc
+    }
+    vec_push(objs, merged_obj_path(out))
 
     rts: *Vector<string> = runtime_sources()
     mut ri: int64 = 0
@@ -629,20 +681,6 @@ func archive_lib(home: string, ll: string, stem: string, out: string, csources: 
         }
         vec_push(objs, obj)
         ri = ri + 1
-    }
-
-    mut ci: int64 = 0
-    while ci < vec_len(csources) {
-        src2: string = vec_get(csources, ci)
-        obj2: string = prefixed_obj_path(out, "duskcs_", ci, src2)
-        cc: int64 = compile_object(src2, obj2)
-        if cc != 0 {
-            d: Diagnostic = diag_new(src2, 0, 0, "clang failed to compile a @csource file")
-            diag_emit(d)
-            return cc
-        }
-        vec_push(objs, obj2)
-        ci = ci + 1
     }
 
     ar: string = path_join(out, archive_name(stem))

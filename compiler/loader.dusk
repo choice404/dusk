@@ -127,6 +127,71 @@ func dir_of(path: string) -> string {
     return substring(path, 0, end)
 }
 
+// A lexically cleaned path: empty and "." segments drop, ".." pops the previous
+// real segment, and a run of separators collapses, so two spellings of one file,
+// "a/b.c" and "a/./b.c" and "a/x/../b.c", reduce to the one string that dedups them
+// as the same @csource rather than compiling the file twice into duplicate symbols.
+// This is lexical only and follows no symlink, which is all the dedup needs.
+func normalize_path(p: string) -> string {
+    n: int64 = str_len(p)
+    absolute: bool = n > 0 && p[0] == 47
+    segs: *Vector<string> = alloc(vec_new())
+    mut start: int64 = 0
+    mut i: int64 = 0
+    while i <= n {
+        mut cut: bool = i == n
+        if !cut {
+            cut = p[i] == 47
+        }
+        if cut {
+            if i > start {
+                seg: string = substring(p, start, i)
+                if str_eq(seg, ".") {
+                    free(seg)
+                } else if str_eq(seg, "..") {
+                    mut popped: bool = false
+                    if vec_len(segs) > 0 {
+                        top: string = vec_get(segs, vec_len(segs) - 1)
+                        if !str_eq(top, "..") {
+                            (*segs).len = (*segs).len - 1
+                            popped = true
+                        }
+                    }
+                    if popped || absolute {
+                        free(seg)
+                    } else {
+                        vec_push(segs, seg)
+                    }
+                } else {
+                    vec_push(segs, seg)
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    b: *StringBuilder = alloc(sb_new())
+    if absolute {
+        sb_push_char(b, 47)
+    }
+    mut k: int64 = 0
+    while k < vec_len(segs) {
+        if k > 0 {
+            sb_push_char(b, 47)
+        }
+        sb_push(b, vec_get(segs, k))
+        k = k + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    if str_len(out) == 0 {
+        free(out)
+        return copy_string(".")
+    }
+    return out
+}
+
 func last_slash(s: string) -> int64 {
     mut last: int64 = -1
     mut i: int64 = 0
@@ -452,15 +517,19 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<s
     mut j: int64 = 0
     while j < vec_len(cv) {
         raw: string = vec_get(cv, j)
-        mut resolved: string = ""
+        mut joined: string = ""
         if str_len(raw) > 0 && raw[0] == 47 {
-            resolved = copy_string(raw)
+            joined = copy_string(raw)
         } else {
-            resolved = path_join(dir, raw)
+            joined = path_join(dir, raw)
         }
+        resolved: string = normalize_path(joined)
+        free(joined)
         if !map_has(seen_csources, resolved) {
             map_put(seen_csources, resolved, 1)
             vec_push(csources, resolved)
+        } else {
+            free(resolved)
         }
         j = j + 1
     }

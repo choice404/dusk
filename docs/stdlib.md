@@ -646,6 +646,10 @@ match *j {
 }
 ```
 
+`json_parse` is safe on adversarial input. It bounds array and object nesting at a fixed depth, well above any real document, and returns a `nesting is too deep` error past it rather than recursing until the stack overflows. It refuses a number whose magnitude overflows a `float64`, `1e400` among them, with a `number out of range` error rather than parsing it to an infinity that would emit as `inf`, which is not JSON and would not reparse.
+
+A parsed tree is a set of managed heap allocations. This release has no `json_free`: a value read out of a `match` arm is a borrow, so a recursive walk cannot free a tree it does not own, and a tree is reclaimed when the process exits rather than by an explicit call. A program that parses many documents across one long run holds them until it exits.
+
 ## std.functional.maybe
 
 An optional value. It is `Some` with a payload or `None`.

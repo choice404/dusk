@@ -1,0 +1,27 @@
+@paradigm procedural
+
+// A generational or bounds fault inside a callback body is an ordinary dusk fault:
+// it aborts the whole process by name, the same as anywhere else. Here the
+// comparator libc's qsort calls indexes a local array out of bounds on its first
+// invocation, so the run prints its line, then qsort's call into the callback
+// faults and never returns.
+@import std.io
+
+foreign "C" {
+    func qsort(base: *raw int64, n: int64, w: int64, cmp: (*raw int64, *raw int64) -> int32) -> void
+}
+
+func main() -> int32 {
+    buf: *raw int64 = alloc_bytes(24)
+    buf[0] = 3
+    buf[1] = 1
+    buf[2] = 2
+    println("sorting")
+    qsort(buf, 3, 8, lambda (a: *raw int64, b: *raw int64) -> int32 {
+        xs: int64[] = [10, 20, 30]
+        return int32(xs[99])
+    })
+    println("done")
+    free(buf)
+    return 0
+}

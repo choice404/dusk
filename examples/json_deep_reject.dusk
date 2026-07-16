@@ -1,0 +1,25 @@
+@paradigm procedural
+
+// A pathologically deep document must not overflow the stack. json_parse bounds
+// its nesting and returns a clean error past the limit, so 2000 nested arrays
+// report "nesting is too deep" instead of crashing.
+@import std.io
+@import std.string
+@import std.json
+
+func main() -> int32 {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < 2000 {
+        sb_push(b, "[")
+        i = i + 1
+    }
+    doc: string = substring(sb_cstr(b), 0, sb_size(b))
+    j, pe := json_parse(doc)
+    if pe.exists() {
+        println(pe.message)
+        return 0
+    }
+    println(json_emit(j))
+    return 0
+}

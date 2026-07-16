@@ -1,0 +1,17 @@
+@paradigm procedural
+
+// A library whose exports fault on purpose, to prove a dusk fault aborts cleanly by
+// name across the C boundary. lib_boom indexes a local array out of bounds; a host
+// calling it aborts with the bounds fault. lib_collect mints a collector value,
+// which in library mode has no dusk main anchor, so the collector's own guard
+// aborts by name rather than corrupting the collected heap.
+
+export "C" func lib_boom(n: int64) -> int64 {
+    xs: int64[] = [1, 2, 3]
+    return xs[n]
+}
+
+export "C" func lib_collect(x: int64) -> int64 {
+    c := collector<int64>(x)
+    return *c
+}
