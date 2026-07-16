@@ -67,6 +67,9 @@ func cast_target_ty(tc: *TypeChecker, name: string) -> int64 {
     if str_eq(name, "int32") { return ty_int(t, 32) }
     if str_eq(name, "int64") { return ty_int(t, 64) }
     if str_eq(name, "char") { return ty_char(t) }
+    if str_eq(name, "rune") { return ty_rune(t) }
+    if str_eq(name, "float32") { return ty_float(t, 32) }
+    if str_eq(name, "float64") { return ty_float(t, 64) }
     return -1
 }
 
@@ -82,7 +85,7 @@ func cast_arity_msg(name: string) -> string {
 
 func cast_operand_msg(rendered: string) -> string {
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, "a width cast takes an integer value; ")
+    sb_push(b, "a numeric cast takes an integer, char, rune, or float value; ")
     sb_push(b, rendered)
     sb_push(b, " does not cast")
     out: string = substring(sb_cstr(b), 0, sb_size(b))
@@ -916,10 +919,11 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                 }
                 return br
             }
-            // A width cast: int8/int16/int32/int64/char applied like a call
-            // converts an integer explicitly, two's complement truncation on
-            // the way down and the ordinary extension on the way up. Only
-            // integer-family values cast; a float or a pointer keeps its
+            // A numeric cast: int8/int16/int32/int64/char/rune/float32/float64
+            // applied like a call converts a scalar explicitly. An integer
+            // family source truncates or extends across widths, an integer and a
+            // float convert through sitofp/fptosi, and two floats fpext or
+            // fptrunc. A pointer, string, struct, or other non-scalar keeps its
             // reject.
             ct: int64 = cast_target_ty(tc, name)
             if ct >= 0 && !is_local(tc, name) {
@@ -929,7 +933,7 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                     tc_emit(tc, cast_arity_msg(name), f.lo, f.hi)
                 } else {
                     an0: TyNode = ty_get((*tc).ty, at0)
-                    if !(an0.kind == tyk_int() || an0.kind == tyk_char() || an0.kind == tyk_rune() || an0.kind == tyk_bool() || an0.kind == tyk_unknown()) {
+                    if !(an0.kind == tyk_int() || an0.kind == tyk_char() || an0.kind == tyk_rune() || an0.kind == tyk_bool() || an0.kind == tyk_float() || an0.kind == tyk_unknown()) {
                         arg0: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, arg_off))
                         tc_emit(tc, cast_operand_msg(ty_render((*tc).ty, at0)), arg0.lo, arg0.hi)
                     }

@@ -2,13 +2,13 @@
 
 ## Status, the 1.4.0 surface
 
-This is the language reference for dusk. It describes the language as of 1.4.4: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, Unicode strings with the `rune` primitive, and a foreign boundary that now crosses in both directions, reaching variadic C functions, third party libraries, and structs by value, taking a dusk function as a C callback, and compiling a dusk module into a C library any C ABI language can link. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
+This is the language reference for dusk. It describes the language as of 1.5.0: the paradigm system and the type system, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, Unicode strings with the `rune` primitive, and a foreign boundary that now crosses in both directions, reaching variadic C functions, third party libraries, and structs by value, taking a dusk function as a C callback, and compiling a dusk module into a C library any C ABI language can link. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
 
 ### The bootstrap freeze
 
 The surface described in this spec was frozen as of 0.5.4 for the bootstrap. The releases from 0.6.x through 0.9.4 changed the compiler, not the language, as dusk was rewritten in itself, so a program that compiled against this spec at 0.5.4 kept compiling across that whole line without a source change. Three kinds of work stayed live during the freeze: diagnostics could improve, the standard library could grow, and a soundness fix could land, since none of those change the surface a correct program relies on.
 
-The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface 1.0.0 carried forward is unchanged start to finish across the whole line that held the freeze. 1.1.0 is the first release to add to the surface since: a `char`, a `char[N]`, and a `char[]` are now printable text, a string literal initializes a `char[N]` directly, and a `for` loop and a range slice both treat a string's bytes with the same discipline described in [Strings](#strings), [Arrays and Slices](#arrays-and-slices), and the [Builtins](#builtins) chapter. 1.2.0 keeps adding to it: `&&` and `||` now short circuit instead of evaluating both operands unconditionally, `==` and `!=` on a string compare content instead of pointer identity while comparison closes on a named list of comparable types, `+` concatenates two strings, a width cast converts an integer explicitly, `break` and `continue` are new statement keywords, and a runtime fault now names the source line that raised it. Each is a genuine change to what a program can write and what it means, recorded in full in [Expressions and Operators](#expressions-and-operators), [Strings](#strings), the [Builtins](#builtins) chapter, and [Memory Management](#memory-management). 1.4.0 opens the foreign boundary further: a `foreign` block may declare a variadic C function, a `@link` directive names a library for the linker and a `@csource` directive compiles a C file in alongside the runtime, and `!=` between two floats is corrected to the unordered comparison IEEE 754 defines. 1.4.1 through 1.4.3 open it the rest of the way: a C plain struct crosses by value as a `foreign` parameter or return, a capture free lambda or a named function crosses as a C callback, and `export "C"` with `dusk build --lib` compiles a dusk module into a static archive and a generated header any C ABI language links. Recorded in full in [Foreign Functions](#foreign-functions), [Linking and C Sources](#linking-and-c-sources), and [Comparison](#comparison).
+The freeze closed with the bootstrap itself: 0.9.4 reached the fixpoint, the compiler written in dusk building itself to a byte identical result three stages deep, and 1.0.0 declares that compiler canonical with no language surface change of its own. The 0.5.4 surface 1.0.0 carried forward is unchanged start to finish across the whole line that held the freeze. 1.1.0 is the first release to add to the surface since: a `char`, a `char[N]`, and a `char[]` are now printable text, a string literal initializes a `char[N]` directly, and a `for` loop and a range slice both treat a string's bytes with the same discipline described in [Strings](#strings), [Arrays and Slices](#arrays-and-slices), and the [Builtins](#builtins) chapter. 1.2.0 keeps adding to it: `&&` and `||` now short circuit instead of evaluating both operands unconditionally, `==` and `!=` on a string compare content instead of pointer identity while comparison closes on a named list of comparable types, `+` concatenates two strings, a width cast converts an integer explicitly, `break` and `continue` are new statement keywords, and a runtime fault now names the source line that raised it. Each is a genuine change to what a program can write and what it means, recorded in full in [Expressions and Operators](#expressions-and-operators), [Strings](#strings), the [Builtins](#builtins) chapter, and [Memory Management](#memory-management). 1.4.0 opens the foreign boundary further: a `foreign` block may declare a variadic C function, a `@link` directive names a library for the linker and a `@csource` directive compiles a C file in alongside the runtime, and `!=` between two floats is corrected to the unordered comparison IEEE 754 defines. 1.4.1 through 1.4.3 open it the rest of the way: a C plain struct crosses by value as a `foreign` parameter or return, a capture free lambda or a named function crosses as a C callback, and `export "C"` with `dusk build --lib` compiles a dusk module into a static archive and a generated header any C ABI language links. Recorded in full in [Foreign Functions](#foreign-functions), [Linking and C Sources](#linking-and-c-sources), and [Comparison](#comparison). 1.5.0 widens the cast: `rune`, `float32`, and `float64` join the cast builtins and a cast now crosses between the integer and float families, a float to an integer saturating rather than leaving an out of range input undefined, recorded in [Numeric Casts](#numeric-casts).
 
 The one exception the freeze carried was a soundness hole. A hole found during the bootstrap could force a surface change to close it, and when that happened the change was named in the changelog of the release that made it.
 
@@ -1538,11 +1538,14 @@ Builtins are always available regardless of paradigm directives unless noted.
 | println   | println(...) -> void                    | print to stdout with a newline                                    |
 | printerr  | printerr(...) -> void                   | println to stderr                                                 |
 | sizeof    | sizeof(T) -> int64                      | size of a type in bytes at compile time                           |
-| int8      | int8(v) -> int8                         | width cast, truncating or extending to int8                       |
-| int16     | int16(v) -> int16                       | width cast, truncating or extending to int16                      |
-| int32     | int32(v) -> int32                       | width cast, truncating or extending to int32                      |
-| int64     | int64(v) -> int64                       | width cast, truncating or extending to int64                      |
-| char      | char(v) -> char                         | width cast, truncating or extending to char                       |
+| int8      | int8(v) -> int8                         | numeric cast to int8                                              |
+| int16     | int16(v) -> int16                       | numeric cast to int16                                             |
+| int32     | int32(v) -> int32                       | numeric cast to int32                                             |
+| int64     | int64(v) -> int64                       | numeric cast to int64                                             |
+| char      | char(v) -> char                         | numeric cast to char                                              |
+| rune      | rune(v) -> rune                         | numeric cast to rune                                              |
+| float32   | float32(v) -> float32                   | numeric cast to float32                                           |
+| float64   | float64(v) -> float64                   | numeric cast to float64                                           |
 | spawn     | spawn(f: () -> void) -> (thread, error) | start an OS thread running a lambda literal                       |
 | join      | join(t: thread) -> error                | wait for a thread; retires the handle                             |
 | submit    | submit(f: () -> void) -> error          | queue a lambda literal on the global thread pool                  |
@@ -1552,20 +1555,29 @@ Builtins are always available regardless of paradigm directives unless noted.
 
 `async func` and `await` are keywords, not builtins, added in 0.4.2 and gated behind no paradigm, the same as `spawn` and `submit`. `async func` marks a function's task frame and state machine transform; `await` suspends inside one, in exactly the four statement positions [the async chapter](#threads-and-the-memory-model) names. `async_run` is a builtin like `alloc`, callable from any file regardless of paradigm, but only outside an async body; see the async chapter for its rules and the whole keyword layer.
 
-### Width Casts
+### Numeric Casts
 
-Added in 1.2.0. `int8(v)`, `int16(v)`, `int32(v)`, `int64(v)`, and `char(v)` convert an integer family value, an `int` of any width, a `char`, a `rune`, or a `bool`, to the named width explicitly, through the same coercion an annotated widening or narrowing assignment already uses: two's complement truncation going down, sign or zero extension going up.
+Added in 1.2.0 as integer width casts, widened in 1.5.0 to the whole numeric set. `int8(v)`, `int16(v)`, `int32(v)`, `int64(v)`, `char(v)`, `rune(v)`, `float32(v)`, and `float64(v)` convert a scalar value explicitly to the named type. The source may be any integer family value, an `int` of any width, a `char`, a `rune`, or a `bool`, or a `float32` or `float64`. The conversion follows the operand and target kinds:
+
+- integer to integer: two's complement truncation going down, sign or zero extension going up, `char` and `bool` extending by magnitude rather than sign, the same coercion an annotated widening or narrowing assignment uses.
+- integer to float: the integer's value as a float, exactly when it fits the significand, `char` and `bool` read as a magnitude.
+- float to integer: truncation toward zero, so `3.9` casts to `3` and `-2.9` to `-2`. A magnitude beyond the target integer's range saturates to its nearest bound rather than wrapping or leaving the result undefined, and a NaN casts to zero, so a misused cast stays deterministic instead of undefined the way C's own conversion is.
+- float to float: `float32` widens to `float64` exactly, `float64` narrows to `float32` with rounding.
 
 ```text
-int32(300)   // 300, fits
-int8(300)    // 44, truncated: 300 mod 256 read as signed
-char(101)    // 'e'
-int64(x)     // widens an int8 x, sign extending if x is negative
+int32(300)      // 300, fits
+int8(300)       // 44, truncated: 300 mod 256 read as signed
+char(101)       // 'e'
+int64(x)        // widens an int8 x, sign extending if x is negative
+float64(7)      // 7.0
+int64(3.9)      // 3, truncated toward zero
+rune(65)        // the rune U+0041, the codepoint 65
+float32(2.5)    // the double 2.5 as a single
 ```
 
-A float operand rejects rather than truncating toward zero the way a C style cast would, `a width cast takes an integer value; float64 does not cast`, and a pointer keeps the same reject. Each takes exactly one argument; any other count is `<name>(v) takes exactly one value`.
+A pointer, a string, a struct, or any other non scalar keeps its reject, `a numeric cast takes an integer, char, rune, or float value; <type> does not cast`. Each cast takes exactly one argument; any other count is `<name>(v) takes exactly one value`.
 
-The five names are reserved as builtin call forms: a function cannot be declared with one of them, `'int32' is a primitive type name; a function cannot take it`, since a call to the name would otherwise be ambiguous between the cast and the function. A variable, a struct field, or any other binding may still use one of the names; only a function declaration collides.
+The eight names are reserved as builtin call forms: a function cannot be declared with one of them, `'int32' is a primitive type name; a function cannot take it`, since a call to the name would otherwise be ambiguous between the cast and the function. A variable, a struct field, or any other binding may still use one of the names; only a function declaration collides.
 
 ### Functional Builtins (require `@paradigm functional`)
 

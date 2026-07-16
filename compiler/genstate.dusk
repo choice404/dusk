@@ -200,6 +200,91 @@ export func gen_store_slot(s: *GenFuncState, ty: int64, val: string, ptr: string
 
 // Coerces scalar integer values with the signedness convention already pinned by
 // Phase A: bool and char widen with zext, all other integer widening uses sext.
+// Emits one LLVM conversion instruction, `<dest> = <opcode> <fromll> <op> to
+// <toll>`, into the current block and returns the fresh destination temporary. The
+// fromll and toll strings are owned and freed here. Used for the integer and float
+// conversions coerce lowers a numeric cast through.
+func emit_conv(s: *GenFuncState, opcode: string, fromll: string, op: string, toll: string) -> string {
+    dest: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dest)
+    sb_push(b, " = ")
+    sb_push(b, opcode)
+    sb_push_char(b, 32)
+    sb_push(b, fromll)
+    sb_push_char(b, 32)
+    sb_push(b, op)
+    sb_push(b, " to ")
+    sb_push(b, toll)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    free(fromll)
+    free(toll)
+    return dest
+}
+
+// Lowers a float to integer cast through the saturating LLVM intrinsic rather than
+// a bare fptosi or fptoui. A magnitude out of the target's range, a NaN, or an
+// infinity clamps into range (NaN to zero) instead of yielding the LLVM poison a
+// plain fptosi leaves for exactly those inputs, the same undefined result C's own
+// conversion gives. This keeps a misused cast deterministic, dusk's safety posture
+// over C's undefined behavior. signed selects fptosi.sat for a signed target and
+// fptoui.sat for a char or bool. The intrinsic is declared on demand and the
+// declare set deduplicates, so a module carries it only when a cast needs it.
+func emit_fp_to_int(s: *GenFuncState, from: int64, op: string, to: int64, signed: bool) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    toll: string = cty_ll(c, to)
+    fromll: string = cty_ll(c, from)
+    mut fbits: string = "f64"
+    if str_eq(fromll, "float") { fbits = "f32" }
+    mut opname: string = "llvm.fptoui.sat."
+    if signed { opname = "llvm.fptosi.sat." }
+    nameb: *StringBuilder = alloc(sb_new())
+    sb_push(nameb, opname)
+    sb_push(nameb, toll)
+    sb_push_char(nameb, 46)
+    sb_push(nameb, fbits)
+    iname: string = gs_built(nameb)
+    sb_free(nameb)
+    free(nameb)
+    declb: *StringBuilder = alloc(sb_new())
+    sb_push(declb, toll)
+    sb_push(declb, " @")
+    sb_push(declb, iname)
+    sb_push_char(declb, 40)
+    sb_push(declb, fromll)
+    sb_push_char(declb, 41)
+    decl: string = gs_built(declb)
+    sb_free(declb)
+    free(declb)
+    emit_declare((*s).module, decl)
+    free(decl)
+    dest: string = next_tmp((*s).fb)
+    callb: *StringBuilder = alloc(sb_new())
+    sb_push(callb, dest)
+    sb_push(callb, " = call ")
+    sb_push(callb, toll)
+    sb_push(callb, " @")
+    sb_push(callb, iname)
+    sb_push_char(callb, 40)
+    sb_push(callb, fromll)
+    sb_push_char(callb, 32)
+    sb_push(callb, op)
+    sb_push_char(callb, 41)
+    callt: string = gs_built(callb)
+    sb_free(callb)
+    free(callb)
+    line((*s).fb, callt)
+    free(callt)
+    free(iname)
+    free(toll)
+    free(fromll)
+    return dest
+}
+
 export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> string {
     if from == to { return gs_copy(op) }
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -241,8 +326,25 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
             free(toll)
             return dest
         }
+        if cty_is_float(c, to) {
+            // An integer to a float: signed by default, unsigned for the two
+            // integer-family sources coerce widens with zext rather than sext, so
+            // a char or a bool crosses by its magnitude, not sign extended.
+            fk: CTyNode = vec_get(cty_nodes(c), from)
+            mut fop: string = "sitofp"
+            if fk.kind == ctyk_char() || fk.kind == ctyk_bool() { fop = "uitofp" }
+            return emit_conv(s, fop, cty_ll(c, from), op, cty_ll(c, to))
+        }
     }
     if cty_is_float(c, from) {
+        if tb > 0 {
+            // A float to an integer: truncates toward zero, signed by default,
+            // unsigned for a char or a bool target so a magnitude round trips.
+            // Saturating so an out of range or NaN input clamps rather than poisons.
+            tk: CTyNode = vec_get(cty_nodes(c), to)
+            signed: bool = !(tk.kind == ctyk_char() || tk.kind == ctyk_bool())
+            return emit_fp_to_int(s, from, op, to, signed)
+        }
         if cty_is_float(c, to) {
             fromll2: string = cty_ll(c, from)
             toll2: string = cty_ll(c, to)

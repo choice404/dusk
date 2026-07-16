@@ -2,6 +2,22 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.5.0
+
+The numeric cast. 1.2.0 added an integer width cast, `int8(v)` through `int64(v)` and `char(v)`, but stopped at the integer family: a float could not cross to an integer or the reverse, and `rune` and the float widths were not cast targets at all. This release opens the whole scalar set. `rune(v)`, `float32(v)`, and `float64(v)` join the cast builtins, and a cast now converts across the integer and float boundary in both directions. This is the first release of the 1.5.x line, which continues into a standard library overhaul. It touches the resolver, the type checker, and codegen; no runtime or standard library change.
+
+The numeric cast.
+
+- `cast_target_ty` in `compiler/tccall.dusk` gains `rune`, `float32`, and `float64` as targets, and the operand rule now admits a float source alongside the integer family, so every one of the eight names casts a scalar to its type. A non scalar keeps its reject, reworded for the wider set, `a numeric cast takes an integer, char, rune, or float value; <type> does not cast`. `compiler/resolve.dusk` and `compiler/resolveexpr.dusk` add the three new names to the builtin call set and to the list a user function may not take, since a call to a cast name would otherwise be ambiguous.
+- `coerce` in `compiler/genstate.dusk` gains the two conversions it lacked. An integer to a float lowers through `sitofp`, or `uitofp` for a `char` or `bool` source so a magnitude crosses unsigned the same way the integer widening already zero extends those two. A float to an integer lowers through the saturating intrinsic `@llvm.fptosi.sat` or `@llvm.fptoui.sat`, declared on demand: an in range value truncates toward zero exactly as C does, and a magnitude beyond the target's range clamps to its nearest bound while a NaN casts to zero, rather than the poison a bare `fptosi` leaves for those inputs. A misused float to integer cast is therefore deterministic, dusk's safety posture over C's undefined behavior. A float to a float keeps the existing `fpext` and `fptrunc`.
+- `examples/cast_numeric.dusk` exercises the matrix, an integer through a float and back, a negative float truncating toward zero, a `float32` widening, an integer to a `rune`, and a `char` crossing unsigned. `examples/cast_saturate.dusk` pins the saturation, an infinity clamping to a bound and a NaN casting to zero. `examples/cast_string_reject.dusk` and `examples/cast_pointer_reject.dusk` pin the non scalar rejects.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 682 records, 4 new since 1.4.4 for the cast matrix, the saturation, and the two rejects; the old integer-only float-reject golden was retired, since a float now casts.
+- The stage ladder re-fixed with the `v1.4.4` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (5d090a25...) and one compiler IR sha256 (6fca0b7c...), the collapse, fixpoint, and determinism checks all green, 682/682 under stage1 and stage2 alike.
+- The ratchet holds: the `v1.4.4` release binary builds the 1.5.0 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+
 ## 1.4.4
 
 The boundary hardened. The four releases before this one built the C boundary in both directions; this one closes the line by testing the whole of it against adversarial input and fixing what that surfaced. No new language surface: the changes are fault goldens across every boundary feature, four defect fixes in library packaging and the JSON parser, and the interop chapter consolidated in the spec. This release touches the driver, the loader, the standard library, and the test runner; the compiler's front end and codegen are unchanged.
