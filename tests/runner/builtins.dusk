@@ -137,6 +137,45 @@ func run_installed(prefix: string, qp: string) -> string {
     return ""
 }
 
+// Builds examples/embed_lib.dusk as a C library with the compiler under test,
+// links the C host examples/embed_host.c against the archive with clang, runs it,
+// and checks its output byte for byte. This proves the end to end embedding story:
+// a dusk module compiled with build --lib is callable from a C program through the
+// generated header. Every stage failure returns a named message; a clean run
+// returns the empty string. Artifacts land under target for inspection.
+func embed_c_lib(bin: string) -> string {
+    md: int64 = run("mkdir -p target/testrun")
+    if md != 0 {
+        return "could not make target/testrun"
+    }
+    qbin: string = quote(bin)
+    bcmd: string = qbin + " build --lib examples/embed_lib.dusk > target/testrun/embed_build.txt 2>&1"
+    bc: int64 = run(bcmd)
+    free(bcmd)
+    if bc != 0 {
+        return "dusk build --lib failed: " + slurp("target/testrun/embed_build.txt")
+    }
+    cc: int64 = run("clang examples/embed_host.c -Itarget/dusk-out -Ltarget/dusk-out -lembed_lib -pthread -lm -o target/testrun/embed_host > target/testrun/embed_cc.txt 2>&1")
+    if cc != 0 {
+        return "clang could not link the C host against libembed_lib.a: " + slurp("target/testrun/embed_cc.txt")
+    }
+    rc: int64 = run("target/testrun/embed_host > target/testrun/embed_out.txt 2>&1; echo $? > target/testrun/embed_code.txt")
+    if rc != 0 {
+        return "the harness could not run the embedded host"
+    }
+    code: int64 = slurp_int("target/testrun/embed_code.txt")
+    if code != 0 {
+        return "the embedded host exited with code " + int_to_string(code)
+    }
+    out: string = slurp("target/testrun/embed_out.txt")
+    want: string = "add=42\nscale=4.50\nsum=10\n"
+    if !str_eq(out, want) {
+        return "embedded host printed '" + out + "', want '" + want + "'"
+    }
+    free(qbin)
+    return ""
+}
+
 // Dispatches a special record to its handler. A dawn special is named but not
 // implemented and fails loudly, and an unrecognized special name fails the same
 // way rather than silently passing.
@@ -144,6 +183,9 @@ export func run_special(rec: Record, bin: string) -> string {
     name: string = rec.special
     if str_eq(name, "installed_layout") {
         return installed_layout(bin)
+    }
+    if str_eq(name, "embed_c_lib") {
+        return embed_c_lib(bin)
     }
     if starts_with(name, "dawn_") {
         return "special '" + name + "' not implemented"

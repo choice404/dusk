@@ -184,6 +184,98 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
     }
 }
 
+// Whether a type crosses an `export "C"` boundary: a C scalar, a `*raw T`, or a
+// `*void`. A struct by value on an export is deferred within this line, so a named
+// struct is refused here even though the call side accepts one; a function type,
+// managed pointer, string, slice, tuple, error, thread, and collector never cross.
+func export_scalar_ok(tc: *TypeChecker, id: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, id)
+    if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_char() || n.kind == tyk_rune() { return true }
+    if n.kind == tyk_rawptr() { return true }
+    if n.kind == tyk_ptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        return inner.kind == tyk_unit()
+    }
+    return false
+}
+
+// bool is excluded from the export scalar set on purpose. A dusk bool lowers to an
+// LLVM i1, which the generated header cannot spell as a C type without disagreeing
+// with the emitted symbol: as uint8_t the caller may pass a byte the callee reads
+// as bit 0 only. char or int8 crosses as a full byte with no such gap.
+func export_ty_is_bool(tc: *TypeChecker, id: int64) -> bool {
+    return ty_get((*tc).ty, id).kind == tyk_bool()
+}
+
+func export_ty_msg(what: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "an exported C function ")
+    sb_push(b, what)
+    sb_push(b, " must be a scalar, a *raw T, or a *void")
+    if str_len(name) > 0 {
+        sb_push(b, "; '")
+        sb_push(b, name)
+        sb_push(b, "' is not")
+    }
+    sb_push(b, "; a struct by value on an export is not supported yet, and a string, slice, managed pointer, closure, interface, or error never crosses")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func export_bool_msg(what: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "an exported C function ")
+    sb_push(b, what)
+    if str_len(name) > 0 {
+        sb_push(b, " '")
+        sb_push(b, name)
+        sb_push(b, "'")
+    }
+    sb_push(b, " cannot be bool; use char or int8 at the boundary, which cross as a full byte a C caller reads whole")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Validates the signature and name of an `export "C"` function: non-generic, not
+// named main, no cool_ runtime prefix, and every parameter and the return a C-legal
+// scalar or raw pointer (void return allowed). Runs on the surface pass; a reject
+// here stops the pipeline before mono, so the ground pass never re-emits it.
+func check_export_sig(tc: *TypeChecker, f: FuncNode) -> void {
+    a: *Ast = (*tc).ast
+    name: string = ast_name(a, f.name)
+    if f.generics_len != 0 {
+        tc_emit(tc, "an exported C function cannot be generic", f.lo, f.hi)
+    }
+    if str_eq(name, "main") || str_eq(name, "dusk__main") {
+        tc_emit(tc, "an exported C function cannot be named 'main'", f.lo, f.hi)
+    }
+    if str_find(name, "cool_") == 0 {
+        tc_emit(tc, "an exported C function name cannot start with 'cool_', which is reserved for the runtime", f.lo, f.hi)
+    }
+    mut i: int64 = 0
+    while i < f.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+        tyid: int64 = tc_type(tc, p.ty)
+        if export_ty_is_bool(tc, tyid) {
+            tc_emit(tc, export_bool_msg("parameter", ast_name(a, p.name)), f.lo, f.hi)
+        } else if !export_scalar_ok(tc, tyid) {
+            tc_emit(tc, export_ty_msg("parameter", ast_name(a, p.name)), f.lo, f.hi)
+        }
+        i = i + 1
+    }
+    rid: int64 = tc_type(tc, f.ret)
+    rn: TyNode = ty_get((*tc).ty, rid)
+    if export_ty_is_bool(tc, rid) {
+        tc_emit(tc, export_bool_msg("return", ""), f.lo, f.hi)
+    } else if rn.kind != tyk_unit() && !export_scalar_ok(tc, rid) {
+        tc_emit(tc, export_ty_msg("return", ""), f.lo, f.hi)
+    }
+}
+
 export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
     (*tc).resolvable_fn_binds = sum_resolvable_fn_binds((*tc).sum_tables, f.body)
     set_cur_generics(tc, f.generics_off, f.generics_len)
@@ -203,6 +295,7 @@ export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
     if str_len(ast_name((*tc).ast, f.name)) > 0 {
         if str_eq(ast_name((*tc).ast, f.name), "main") { check_main_sig(tc, f) }
     }
+    if f.abi_export { check_export_sig(tc, f) }
     if f.is_async {
         check_async_sig(tc, f)
     } else {

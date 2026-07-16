@@ -1,0 +1,663 @@
+// std.json: a JSON parser and emitter over a recursive Json value. json_parse
+// reads the full grammar (null, booleans, numbers, strings with escapes,
+// arrays, objects, and arbitrary nesting) into a heap Json tree, returning an
+// error value on any malformed input rather than a partial or invalid tree.
+// json_emit writes a Json tree back out in compact form, re-escaping strings
+// and formatting numbers through the runtime's %.17g shim so a parsed number
+// round-trips through emit and back to the same double.
+//
+// The value is a tagged union: JNull, JBool, JNum (float64), JStr, JArr over a
+// vector of child pointers, and JObj over a string keyed map of child
+// pointers. Build a leaf with alloc(Json.JNum(3.5)) and a branch with
+// alloc(Json.JArr(items)); the tree is heap allocated throughout, so a Json a
+// function builds outlives the frame and the caller owns it.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.unicode
+@import std.functional.maybe
+
+// The number formatting shim: writes v as %.17g into buf, whose capacity cap
+// counts the terminating NUL, and returns the byte length written without the
+// NUL. %.17g round-trips a double through decimal, so a parsed number emits to
+// text that parses back to the identical value.
+foreign "C" {
+    func cool_f64_str(v: float64, buf: *raw char, cap: int64) -> int64
+}
+
+// A JSON value. JArr owns its element vector and JObj owns its field map; both
+// hold child pointers, so a nested document is a tree of alloc'd Json nodes.
+export enum Json {
+    JNull,
+    JBool(b: bool),
+    JNum(n: float64),
+    JStr(s: string),
+    JArr(items: *Vector<*Json>),
+    JObj(fields: *Map<*Json>),
+}
+
+// The parser's cursor over the source: s is the input, pos the current byte
+// offset, n the length (the NUL sits at n), and err the first error message, or
+// the empty string while parsing is still clean. A single JParser threads
+// through the recursive descent by pointer so every helper advances the one
+// shared position and records the first fault.
+struct JParser {
+    s: string,
+    pos: int64,
+    n: int64,
+    err: string,
+}
+
+// Whether any fault has been recorded yet.
+func jp_has_err(p: *JParser) -> bool {
+    return str_len((*p).err) > 0
+}
+
+// Record msg as the fault, keeping only the first so the earliest, most
+// specific message survives to the caller.
+func jp_fail(p: *JParser, msg: string) -> void {
+    if str_len((*p).err) == 0 {
+        (*p).err = msg
+    }
+}
+
+// The current byte, or 0 at end of input. pos never runs past n, so this reads
+// the NUL terminator at worst and never wanders past it.
+func jp_peek(p: *JParser) -> int64 {
+    return (*p).s[(*p).pos]
+}
+
+func is_ws(c: int64) -> bool {
+    if c == 32 {
+        return true
+    }
+    if c == 9 {
+        return true
+    }
+    if c == 10 {
+        return true
+    }
+    if c == 13 {
+        return true
+    }
+    return false
+}
+
+func is_digit(c: int64) -> bool {
+    if c < 48 {
+        return false
+    }
+    if c > 57 {
+        return false
+    }
+    return true
+}
+
+// The value of one hex digit, or -1 when the byte is not a hex digit.
+func hex_val(c: int64) -> int64 {
+    if c >= 48 {
+        if c <= 57 {
+            return c - 48
+        }
+    }
+    if c >= 65 {
+        if c <= 70 {
+            return c - 55
+        }
+    }
+    if c >= 97 {
+        if c <= 102 {
+            return c - 87
+        }
+    }
+    return -1
+}
+
+// Advance past any run of insignificant whitespace.
+func jp_skip_ws(p: *JParser) -> void {
+    while is_ws(jp_peek(p)) {
+        (*p).pos = (*p).pos + 1
+    }
+}
+
+// Match the literal word w at the cursor and advance past it, or record a fault
+// and leave the cursor put. A word never contains a NUL, so a NUL in s stops
+// the match before the read walks past the terminator.
+func jp_expect_word(p: *JParser, w: string) -> bool {
+    m: int64 = str_len(w)
+    mut i: int64 = 0
+    while i < m {
+        if (*p).s[(*p).pos + i] != w[i] {
+            jp_fail(p, "invalid literal")
+            return false
+        }
+        i = i + 1
+    }
+    (*p).pos = (*p).pos + m
+    return true
+}
+
+// Read four hex digits at the cursor into a code unit, advancing past them, or
+// return -1 and leave the cursor where the first bad digit was found.
+func jp_hex4(p: *JParser) -> int64 {
+    mut v: int64 = 0
+    mut i: int64 = 0
+    while i < 4 {
+        d: int64 = hex_val(jp_peek(p))
+        if d < 0 {
+            return -1
+        }
+        v = v * 16 + d
+        (*p).pos = (*p).pos + 1
+        i = i + 1
+    }
+    return v
+}
+
+// Decode a \uXXXX escape (the cursor sits on the 'u') and append the scalar as
+// UTF-8. A high surrogate D800..DBFF pairs with a following \uDC00..DFFF into
+// one scalar above the BMP; a lone or ill-formed surrogate appends U+FFFD, the
+// same replacement std.unicode's encoder writes for an unencodable scalar.
+func jp_unicode(p: *JParser, sb: *StringBuilder) -> void {
+    (*p).pos = (*p).pos + 1
+    hi: int64 = jp_hex4(p)
+    if hi < 0 {
+        jp_fail(p, "invalid \\u escape: expected four hex digits")
+        return
+    }
+    if hi >= 55296 {
+        if hi <= 56319 {
+            jp_surrogate(p, sb, hi)
+            return
+        }
+    }
+    r: rune = hi
+    sb_push_rune(sb, r)
+}
+
+// Complete a surrogate pair whose high half hi is already read. A following
+// \uDC00..DFFF combines into the astral scalar; anything else appends U+FFFD.
+func jp_surrogate(p: *JParser, sb: *StringBuilder, hi: int64) -> void {
+    if jp_peek(p) == 92 {
+        if (*p).s[(*p).pos + 1] == 117 {
+            (*p).pos = (*p).pos + 2
+            lo: int64 = jp_hex4(p)
+            if lo < 0 {
+                jp_fail(p, "invalid \\u escape in surrogate pair")
+                return
+            }
+            if lo >= 56320 {
+                if lo <= 57343 {
+                    cp: rune = 65536 + (hi - 55296) * 1024 + (lo - 56320)
+                    sb_push_rune(sb, cp)
+                    return
+                }
+            }
+        }
+    }
+    sb_push_rune(sb, 65533)
+}
+
+// The byte a simple (non \u) escape letter denotes, or -1 when the letter is
+// not a valid escape. Covers \" \\ \/ \b \f \n \r \t.
+func escape_byte(e: int64) -> int64 {
+    if e == 34 {
+        return 34
+    }
+    if e == 92 {
+        return 92
+    }
+    if e == 47 {
+        return 47
+    }
+    if e == 98 {
+        return 8
+    }
+    if e == 102 {
+        return 12
+    }
+    if e == 110 {
+        return 10
+    }
+    if e == 114 {
+        return 13
+    }
+    if e == 116 {
+        return 9
+    }
+    return -1
+}
+
+// Decode one backslash escape (the cursor sits on the backslash) into sb. \u
+// routes to jp_unicode, a simple escape maps to its byte, and anything else is
+// a fault.
+func jp_escape(p: *JParser, sb: *StringBuilder) -> void {
+    (*p).pos = (*p).pos + 1
+    e: int64 = jp_peek(p)
+    if e == 117 {
+        jp_unicode(p, sb)
+        return
+    }
+    c: int64 = escape_byte(e)
+    if c < 0 {
+        jp_fail(p, "invalid escape sequence")
+        return
+    }
+    sb_push_char(sb, c)
+    (*p).pos = (*p).pos + 1
+}
+
+// Read a JSON string token (the cursor sits on the opening quote) and return
+// its decoded contents as a fresh heap string the caller owns. A missing close
+// quote records "unterminated string" and returns what was read so far.
+func jp_string_raw(p: *JParser) -> string {
+    (*p).pos = (*p).pos + 1
+    sb: *StringBuilder = alloc(sb_new())
+    mut done: bool = false
+    while !done {
+        c: int64 = jp_peek(p)
+        if c == 0 {
+            jp_fail(p, "unterminated string")
+            done = true
+        } else {
+            if c == 34 {
+                (*p).pos = (*p).pos + 1
+                done = true
+            } else {
+                if c == 92 {
+                    jp_escape(p, sb)
+                    if jp_has_err(p) {
+                        done = true
+                    }
+                } else {
+                    sb_push_char(sb, c)
+                    (*p).pos = (*p).pos + 1
+                }
+            }
+        }
+    }
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// Parse a number token (the cursor sits on '-' or a digit) into a JNum. The
+// scan enforces the JSON number grammar, an optional sign, an integer part with
+// no leading zero, an optional fraction, and an optional exponent, then hands
+// the exact token to parse_float.
+func jp_number(p: *JParser) -> *Json {
+    start: int64 = (*p).pos
+    if jp_peek(p) == 45 {
+        (*p).pos = (*p).pos + 1
+    }
+    c0: int64 = jp_peek(p)
+    if c0 == 48 {
+        (*p).pos = (*p).pos + 1
+    } else {
+        if !is_digit(c0) {
+            jp_fail(p, "invalid number")
+            return alloc(Json.JNull)
+        }
+        while is_digit(jp_peek(p)) {
+            (*p).pos = (*p).pos + 1
+        }
+    }
+    if jp_peek(p) == 46 {
+        (*p).pos = (*p).pos + 1
+        if !is_digit(jp_peek(p)) {
+            jp_fail(p, "invalid number: expected a digit after the decimal point")
+            return alloc(Json.JNull)
+        }
+        while is_digit(jp_peek(p)) {
+            (*p).pos = (*p).pos + 1
+        }
+    }
+    ec: int64 = jp_peek(p)
+    if ec == 101 || ec == 69 {
+        (*p).pos = (*p).pos + 1
+        sc: int64 = jp_peek(p)
+        if sc == 43 || sc == 45 {
+            (*p).pos = (*p).pos + 1
+        }
+        if !is_digit(jp_peek(p)) {
+            jp_fail(p, "invalid number: expected a digit in the exponent")
+            return alloc(Json.JNull)
+        }
+        while is_digit(jp_peek(p)) {
+            (*p).pos = (*p).pos + 1
+        }
+    }
+    tok: string = substring((*p).s, start, (*p).pos)
+    v, e := parse_float(tok)
+    free(tok)
+    if e.exists() {
+        jp_fail(p, "invalid number")
+        return alloc(Json.JNull)
+    }
+    return alloc(Json.JNum(v))
+}
+
+// Parse an array (the cursor sits on '['): a possibly empty, comma separated
+// list of values closed by ']'.
+func jp_array(p: *JParser) -> *Json {
+    (*p).pos = (*p).pos + 1
+    items: *Vector<*Json> = alloc(vec_new())
+    jp_skip_ws(p)
+    if jp_peek(p) == 93 {
+        (*p).pos = (*p).pos + 1
+        return alloc(Json.JArr(items))
+    }
+    mut done: bool = false
+    while !done {
+        v: *Json = jp_value(p)
+        if jp_has_err(p) {
+            return alloc(Json.JArr(items))
+        }
+        vec_push(items, v)
+        jp_skip_ws(p)
+        c: int64 = jp_peek(p)
+        if c == 44 {
+            (*p).pos = (*p).pos + 1
+            jp_skip_ws(p)
+        } else {
+            if c == 93 {
+                (*p).pos = (*p).pos + 1
+                done = true
+            } else {
+                jp_fail(p, "expected ',' or ']' in array")
+                done = true
+            }
+        }
+    }
+    return alloc(Json.JArr(items))
+}
+
+// Parse one "key": value member into fields, advancing past the pair. Records a
+// fault when a key is not a string or the colon is missing.
+func jp_member(p: *JParser, fields: *Map<*Json>) -> void {
+    if jp_peek(p) != 34 {
+        jp_fail(p, "expected a string key in object")
+        return
+    }
+    key: string = jp_string_raw(p)
+    if jp_has_err(p) {
+        return
+    }
+    jp_skip_ws(p)
+    if jp_peek(p) != 58 {
+        jp_fail(p, "expected ':' after object key")
+        return
+    }
+    (*p).pos = (*p).pos + 1
+    jp_skip_ws(p)
+    v: *Json = jp_value(p)
+    if jp_has_err(p) {
+        return
+    }
+    map_put(fields, key, v)
+}
+
+// Parse an object (the cursor sits on '{'): a possibly empty, comma separated
+// list of "key": value members closed by '}'. Keys land in the field map in
+// source order, which is the order json_emit writes them back out.
+func jp_object(p: *JParser) -> *Json {
+    (*p).pos = (*p).pos + 1
+    fields: *Map<*Json> = alloc(map_new())
+    jp_skip_ws(p)
+    if jp_peek(p) == 125 {
+        (*p).pos = (*p).pos + 1
+        return alloc(Json.JObj(fields))
+    }
+    mut done: bool = false
+    while !done {
+        jp_member(p, fields)
+        if jp_has_err(p) {
+            return alloc(Json.JObj(fields))
+        }
+        jp_skip_ws(p)
+        c: int64 = jp_peek(p)
+        if c == 44 {
+            (*p).pos = (*p).pos + 1
+            jp_skip_ws(p)
+        } else {
+            if c == 125 {
+                (*p).pos = (*p).pos + 1
+                done = true
+            } else {
+                jp_fail(p, "expected ',' or '}' in object")
+                done = true
+            }
+        }
+    }
+    return alloc(Json.JObj(fields))
+}
+
+// Parse one JSON value at the cursor, dispatching on its first byte. Records a
+// fault and returns a placeholder JNull on end of input or an unexpected byte.
+func jp_value(p: *JParser) -> *Json {
+    c: int64 = jp_peek(p)
+    if c == 0 {
+        jp_fail(p, "unexpected end of input")
+        return alloc(Json.JNull)
+    }
+    if c == 123 {
+        return jp_object(p)
+    }
+    if c == 91 {
+        return jp_array(p)
+    }
+    if c == 34 {
+        s: string = jp_string_raw(p)
+        return alloc(Json.JStr(s))
+    }
+    if c == 116 {
+        if jp_expect_word(p, "true") {
+            return alloc(Json.JBool(true))
+        }
+        return alloc(Json.JNull)
+    }
+    if c == 102 {
+        if jp_expect_word(p, "false") {
+            return alloc(Json.JBool(false))
+        }
+        return alloc(Json.JNull)
+    }
+    if c == 110 {
+        if jp_expect_word(p, "null") {
+            return alloc(Json.JNull)
+        }
+        return alloc(Json.JNull)
+    }
+    if c == 45 || is_digit(c) {
+        return jp_number(p)
+    }
+    jp_fail(p, "unexpected character")
+    return alloc(Json.JNull)
+}
+
+// Parse s as a single JSON document, returning the root value and an error. On
+// any malformed input, an unexpected byte, a bad escape, an unterminated
+// string, an out of grammar number, an unbalanced bracket, or trailing content
+// after the value, the error carries a descriptive message and the returned
+// pointer is a throwaway JNull the caller must not read. On success the error
+// does not exist and the pointer roots a fully built tree the caller owns.
+export func json_parse(s: string) -> (*Json, error) {
+    p: *JParser = alloc(JParser { s: s, pos: 0, n: str_len(s), err: "" })
+    jp_skip_ws(p)
+    val: *Json = jp_value(p)
+    jp_skip_ws(p)
+    if jp_has_err(p) {
+        return (val, error { message: (*p).err })
+    }
+    if (*p).pos != (*p).n {
+        return (val, error { message: "trailing characters after JSON value" })
+    }
+    return (val, error {})
+}
+
+// Append s to sb as a quoted JSON string, escaping the characters JSON
+// requires: the quote, the backslash, and the C0 control bytes. \b \f \n \r \t
+// take their short forms and every other control byte below 0x20 takes the
+// \u00XX long form. Bytes at or above 0x20 pass through unchanged, so a
+// multibyte UTF-8 sequence in s survives the round trip intact.
+func emit_string(sb: *StringBuilder, s: string) -> void {
+    sb_push_char(sb, 34)
+    mut i: int64 = 0
+    while s[i] != 0 {
+        emit_string_byte(sb, s[i])
+        i = i + 1
+    }
+    sb_push_char(sb, 34)
+}
+
+// The escape letter for a control byte with a short form (\b \f \n \r \t), or
+// -1 when the byte has no short form.
+func short_escape(c: int64) -> int64 {
+    if c == 8 {
+        return 98
+    }
+    if c == 12 {
+        return 102
+    }
+    if c == 10 {
+        return 110
+    }
+    if c == 13 {
+        return 114
+    }
+    if c == 9 {
+        return 116
+    }
+    return -1
+}
+
+// Append one byte c inside a quoted string, escaping the quote, the backslash,
+// the short form control bytes, and any other control byte below 0x20 as a
+// \u00XX long form. A byte at or above 0x20 passes through verbatim, so a
+// UTF-8 continuation byte is never mangled.
+func emit_string_byte(sb: *StringBuilder, c: int64) -> void {
+    if c == 34 {
+        sb_push_char(sb, 92)
+        sb_push_char(sb, 34)
+        return
+    }
+    if c == 92 {
+        sb_push_char(sb, 92)
+        sb_push_char(sb, 92)
+        return
+    }
+    esc: int64 = short_escape(c)
+    if esc >= 0 {
+        sb_push_char(sb, 92)
+        sb_push_char(sb, esc)
+        return
+    }
+    if c < 32 {
+        sb_push_char(sb, 92)
+        sb_push_char(sb, 117)
+        sb_push_char(sb, 48)
+        sb_push_char(sb, 48)
+        sb_push_char(sb, hex_digit((c / 16) & 15))
+        sb_push_char(sb, hex_digit(c & 15))
+        return
+    }
+    sb_push_char(sb, c)
+}
+
+// The lowercase hex digit for a nibble 0..15.
+func hex_digit(v: int64) -> int64 {
+    if v < 10 {
+        return 48 + v
+    }
+    return 87 + v
+}
+
+// Append v's %.17g text to sb through the runtime shim. A 32 byte buffer holds
+// every double the format produces.
+func emit_number(sb: *StringBuilder, v: float64) -> void {
+    buf: *raw char = alloc_bytes(32)
+    n: int64 = cool_f64_str(v, buf, 32)
+    mut i: int64 = 0
+    while i < n {
+        sb_push_char(sb, buf[i])
+        i = i + 1
+    }
+    free(buf)
+}
+
+// Append j's compact JSON text to sb, recursing into arrays and objects. An
+// array writes its elements comma separated inside brackets; an object writes
+// its members comma separated inside braces, keys in the map's insertion order.
+func emit_value(sb: *StringBuilder, j: *Json) -> void {
+    match *j {
+        JNull => sb_push(sb, "null"),
+        JBool(b) => {
+            if b {
+                sb_push(sb, "true")
+            } else {
+                sb_push(sb, "false")
+            }
+        }
+        JNum(n) => emit_number(sb, n),
+        JStr(s) => emit_string(sb, s),
+        JArr(items) => {
+            xs: *Vector<*Json> = items
+            sb_push_char(sb, 91)
+            mut i: int64 = 0
+            while i < vec_len(xs) {
+                if i > 0 {
+                    sb_push_char(sb, 44)
+                }
+                emit_value(sb, vec_get(xs, i))
+                i = i + 1
+            }
+            sb_push_char(sb, 93)
+        }
+        JObj(fields) => {
+            fs: *Map<*Json> = fields
+            emit_object(sb, fs)
+        }
+    }
+}
+
+// Append an object's members to sb, keys in insertion order. Split out of
+// emit_value so the match arm stays shallow.
+func emit_object(sb: *StringBuilder, fs: *Map<*Json>) -> void {
+    keys: *Vector<string> = map_keys(fs)
+    sb_push_char(sb, 123)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        if i > 0 {
+            sb_push_char(sb, 44)
+        }
+        k: string = vec_get(keys, i)
+        emit_string(sb, k)
+        sb_push_char(sb, 58)
+        mv: Maybe<*Json> = map_get(fs, k)
+        match mv {
+            Some(v) => emit_value(sb, v),
+            None => {}
+        }
+        i = i + 1
+    }
+    sb_push_char(sb, 125)
+    vec_free(keys)
+    free(keys)
+}
+
+// Emit j as a compact JSON string with no insignificant whitespace. Strings are
+// re-escaped, numbers are formatted through %.17g so a parsed number
+// round-trips, and object keys emit in the order they were inserted. The result
+// is a fresh heap string the caller owns.
+export func json_emit(j: *Json) -> string {
+    sb: *StringBuilder = alloc(sb_new())
+    emit_value(sb, j)
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}

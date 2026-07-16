@@ -31,7 +31,7 @@
 @import mono
 @import gen
 
-export struct CliIrResult { ok: bool, text: string, links: *Vector<string>, csources: *Vector<string> }
+export struct CliIrResult { ok: bool, text: string, links: *Vector<string>, csources: *Vector<string>, exports: *Vector<string> }
 
 func emit_errors(errs: *Vector<string>) -> void {
     mut i: int64 = 0
@@ -355,14 +355,15 @@ export func cmd_mono(path: string, prog: string) -> int32 {
 // ground module to LLVM IR. The build commands share this path so every front-end
 // gate observes the same diagnostics before codegen runs.
 export func compile_ir_text(path: string, prog: string) -> CliIrResult {
+    no_exp: *Vector<string> = alloc(vec_new())
     p: Program = load(path, prog)
     errs: *Vector<string> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
     if !p.has_module {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
     desugar(p.module)
     info: EscapeInfo = compute_escape_info(p.module)
@@ -372,27 +373,27 @@ export func compile_ir_text(path: string, prog: string) -> CliIrResult {
     type_errs: *Vector<SpanDiagnostic> = (*tc).errors
     emit_span_errors(p.files, type_errs)
     if vec_len(resolve_errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
     if vec_len(type_errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
     m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
     mono_errs: *Vector<SpanDiagnostic> = (*m).diags
     emit_span_errors(p.files, mono_errs)
     ground_new: int64 = emit_ground_pass(p.files, m, mono_errs)
     if vec_len(mono_errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
     if ground_new > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
     ground: *Ast = mono_ground(m)
     res: GenResult = gen_compile(ground, p.files)
     if !res.ok {
-        return CliIrResult { ok: false, text: res.text, links: p.links, csources: p.csources }
+        return CliIrResult { ok: false, text: res.text, links: p.links, csources: p.csources, exports: no_exp }
     }
-    return CliIrResult { ok: true, text: res.text, links: p.links, csources: p.csources }
+    return CliIrResult { ok: true, text: res.text, links: p.links, csources: p.csources, exports: res.exports }
 }
 
 // Emits the shared IR text to stdout, preserving the oracle-facing ir command.

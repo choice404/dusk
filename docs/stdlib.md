@@ -590,6 +590,62 @@ while s[i] != 0 {
 
 `decode_rune`'s only precondition is that `i` lies in `[0, str_len(s)]`; a normal decode walk that steps by the width it gets back never leaves that range. Every rejection is strict: an overlong encoding, a surrogate, and a scalar above `0x10FFFF` are all invalid, the same as a truncated or malformed sequence, and `utf8_valid` runs the identical decode loop `decode_rune` does so the two can never disagree.
 
+## std.json
+
+A JSON parser and emitter over a recursive `Json` value, pure dusk but for the one runtime shim that formats a number as `%.17g`. `json_parse` reads the full grammar into a heap tree and returns an error value on any malformed input; `json_emit` writes a tree back to compact text with no insignificant whitespace. A parsed number round-trips through emit and back to the same `float64`, since `%.17g` is a faithful decimal form for a double.
+
+The value is a tagged union. `JArr` owns its element vector and `JObj` owns its field map, and both hold child pointers, so a nested document is a tree of `alloc`'d nodes.
+
+```text
+enum Json {
+    JNull,
+    JBool(b: bool),
+    JNum(n: float64),
+    JStr(s: string),
+    JArr(items: *Vector<*Json>),
+    JObj(fields: *Map<*Json>),
+}
+```
+
+| Function                                      | Description                                              |
+| --------------------------------------------- | -------------------------------------------------------- |
+| `json_parse(s: string) -> (*Json, error)`     | Parse one JSON document into a heap tree, or an error.   |
+| `json_emit(j: *Json) -> string`               | Emit a tree as compact JSON, a fresh owned string.       |
+
+```text
+@import std.json
+@import std.string
+
+v, e := json_parse("{\"xs\":[1,2,3],\"ok\":true}")
+if e.exists() {
+    println(e.message)
+} else {
+    out := json_emit(v)    // {"xs":[1,2,3],"ok":true}
+    println(out)
+    free(out)
+}
+```
+
+`json_parse` reads the whole grammar: `null`, `true`, `false`; a number with an optional sign, an integer part, an optional fraction, and an optional exponent; a string with the escapes `\" \\ \/ \b \f \n \r \t` and `\uXXXX`, where a `\uD800..\uDBFF` high surrogate pairs with a following `\uDC00..\uDFFF` low surrogate into one scalar above the basic plane; arrays; objects; arbitrary nesting; and insignificant whitespace between tokens. On any malformed input, an unterminated string, a number out of grammar, an unbalanced bracket, a bad literal, or trailing content after the value, it returns an error whose message names the fault, and the returned pointer is a throwaway the caller must not read, so test the error first. On success the error does not exist and the pointer roots a tree the caller owns.
+
+`json_emit` re-escapes the quote, the backslash, and the control bytes below `0x20`, formats numbers through `%.17g`, and writes object keys in the field map's insertion order, so the same tree always emits the same bytes. A byte at or above `0x20` passes through unchanged, so a multibyte UTF-8 scalar survives a parse and emit round trip intact.
+
+Build a tree by hand with `alloc` and the qualified constructors, `alloc(Json.JNum(3.5))` for a leaf and `alloc(Json.JArr(items))` for a branch. One inference note when you walk a parsed tree: a `match` arm that binds a `JArr` or `JObj` payload must rebind it to a locally annotated variable before calling any `vec_*` or `map_*`, since the generic pointer payload does not on its own pin the element type.
+
+```text
+match *j {
+    JArr(items) => {
+        xs: *Vector<*Json> = items      // rebind so vec_len/vec_get infer the element type
+        mut i: int64 = 0
+        while i < vec_len(xs) {
+            emit_value(sb, vec_get(xs, i))
+            i = i + 1
+        }
+    }
+    // ...
+}
+```
+
 ## std.functional.maybe
 
 An optional value. It is `Some` with a payload or `None`.

@@ -130,7 +130,7 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     ret_ll: string = cty_ll(c, ret_ty)
     sig: string = param_sig(ctx, a, f)
     fb: *FuncBuilder = func_new(ret_ll, name, sig)
-    if str_eq(name, "main") || str_eq(name, "dusk__main") {
+    if (str_eq(name, "main") || str_eq(name, "dusk__main")) && !f.abi_export {
         slot: string = next_tmp(fb)
         b: *StringBuilder = alloc(sb_new())
         sb_push(b, slot)
@@ -150,6 +150,12 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
         call_void(fb, call)
         free(call)
         free(slot)
+    }
+    // An exported C entry point runs cool_lib_init first: idempotent under
+    // pthread_once, it exists so future load-time setup never changes the ABI.
+    // A library has no dusk main, so this is the only guaranteed prologue there.
+    if f.abi_export {
+        call_void(fb, "@cool_lib_init()")
     }
     locals: *Map<LocalVal> = alloc(map_new())
     defers: *Vector<int64> = alloc(vec_new())

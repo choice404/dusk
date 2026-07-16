@@ -762,6 +762,42 @@ int64_t cool_errno(void) {
     return (int64_t)errno;
 }
 
+/* Idempotent library initialization for an exported C entry point. Every
+   export's prologue calls this; pthread_once runs the body exactly once no
+   matter how many entry points a C host calls or from how many threads. Today
+   the body has nothing to do, since the reactor's SIGPIPE-ignore constructor
+   already fires at load, but the hook exists so future load-time setup never
+   changes the exported ABI. */
+static pthread_once_t cool_lib_once = PTHREAD_ONCE_INIT;
+
+static void cool_lib_init_impl(void) {
+}
+
+void cool_lib_init(void) {
+    pthread_once(&cool_lib_once, cool_lib_init_impl);
+}
+
+/* Formats v as %.17g into buf, whose capacity cap includes the terminating NUL,
+   and returns the byte count written without the NUL. %.17g round-trips a double
+   through decimal on glibc, so the text is faithful but not the shortest form.
+   A cap of zero or one, or a formatting failure, writes nothing meaningful and
+   returns zero; a value that would overflow buf is truncated and the written
+   length is reported. This backs json number emission. */
+int64_t cool_f64_str(double v, char *buf, int64_t cap) {
+    if (cap <= 0 || cap > INT_MAX) {
+        return 0;
+    }
+    int n = snprintf(buf, (size_t)cap, "%.17g", v);
+    if (n < 0) {
+        buf[0] = '\0';
+        return 0;
+    }
+    if (n >= cap) {
+        return cap - 1;
+    }
+    return (int64_t)n;
+}
+
 /* The IEEE 754 bit pattern of a double, reinterpreted as a signed 64 bit
    integer. The bootstrap compiler emits a float constant as the hex of these
    bits, matching the host compiler which lowers a float literal as 0x{:016X} of

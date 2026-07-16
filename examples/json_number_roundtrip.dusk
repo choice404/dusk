@@ -1,0 +1,62 @@
+// std.json number round trip: for a table of float64 values, emit each as a
+// JNum, parse the text back, and check the recovered value equals the original.
+// The emitter writes numbers as %.17g, which round-trips a double through
+// decimal, so every finite value comes back bit for bit and prints PASS. Each
+// line shows the verdict and the exact text the number emitted to.
+@paradigm procedural
+
+@import std.json
+@import std.string
+
+// The number carried by a JNum, or 0.0 for any other value. The match is
+// exhaustive over the value kinds; only the JNum arm can be reached here.
+func num_of(j: *Json) -> float64 {
+    match *j {
+        JNum(n) => return n,
+        JNull => return 0.0,
+        JBool(b) => return 0.0,
+        JStr(s) => return 0.0,
+        JArr(items) => return 0.0,
+        JObj(fields) => return 0.0,
+    }
+}
+
+func check(x: float64) -> void {
+    j: *Json = alloc(Json.JNum(x))
+    s: string = json_emit(j)
+    v, e := json_parse(s)
+    if e.exists() {
+        print("FAIL ")
+        println(s)
+    } else {
+        got: float64 = num_of(v)
+        if got == x {
+            print("PASS ")
+            println(s)
+        } else {
+            print("FAIL ")
+            println(s)
+        }
+    }
+}
+
+func main() -> int32 {
+    check(0.0)
+    check(1.0)
+    check(-1.0)
+    check(2.5)
+    check(3.5)
+    check(0.1)
+    check(0.2)
+    check(100.25)
+    check(-12.25)
+    check(3.141592653589793)
+    check(2.718281828459045)
+    check(1000000.0)
+    check(0.0009765625)
+    check(-0.0009765625)
+    check(123456789.5)
+    third: float64 = 1.0 / 3.0
+    check(third)
+    return 0
+}

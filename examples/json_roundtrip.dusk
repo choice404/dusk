@@ -1,0 +1,29 @@
+// std.json round trip: parse a document that exercises every value kind, deep
+// nesting, and the string escapes (including a \u sequence that decodes to a
+// multibyte scalar), then emit it back to compact text. The emitter re-escapes
+// the control characters, formats the numbers through %.17g, and writes object
+// keys in insertion order, so the output is fixed and this program checks it
+// against the expected string.
+@paradigm procedural
+
+@import std.json
+@import std.string
+
+func main() -> int32 {
+    doc: string = "{ \"nul\": null, \"yes\": true, \"no\": false, \"num\": 3.5, \"neg\": -12.25, \"str\": \"tab\\tend\", \"uni\": \"\\u4e2d\\u6587\", \"arr\": [1, 2, [3, 4], { \"k\": \"v\" }], \"empty_arr\": [], \"empty_obj\": {} }"
+    v, e := json_parse(doc)
+    if e.exists() {
+        println("parse error:")
+        println(e.message)
+        return 1
+    }
+    out: string = json_emit(v)
+    println(out)
+    expected: string = "{\"nul\":null,\"yes\":true,\"no\":false,\"num\":3.5,\"neg\":-12.25,\"str\":\"tab\\tend\",\"uni\":\"中文\",\"arr\":[1,2,[3,4],{\"k\":\"v\"}],\"empty_arr\":[],\"empty_obj\":{}}"
+    if str_eq(out, expected) {
+        println("PASS")
+    } else {
+        println("FAIL")
+    }
+    return 0
+}

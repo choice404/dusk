@@ -155,6 +155,21 @@ func push_link(cmd: *StringBuilder, val: string) -> void {
     free(flag)
 }
 
+// The runtime source basenames the compiler links into every binary. The
+// executable link and the library archive bundle the identical set from this one
+// place, so a library carries exactly the runtime a binary does.
+func runtime_sources() -> *Vector<string> {
+    v: *Vector<string> = alloc(vec_new())
+    vec_push(v, "runtime.c")
+    vec_push(v, "collect.c")
+    vec_push(v, "thread.c")
+    vec_push(v, "async.c")
+    vec_push(v, "reactor.c")
+    vec_push(v, "reactor_epoll.c")
+    vec_push(v, "reactor_kqueue.c")
+    return v
+}
+
 // Links the IR at ll against the C runtime under home, writing the executable to
 // bin, then runs it and returns its exit code. The clang line mirrors the stage0
 // linker: every runtime source, -pthread for toolchains where pthreads is not yet
@@ -165,13 +180,12 @@ func link_only(home: string, ll: string, bin: string, links: *Vector<string>, cs
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "clang")
     push_arg(cmd, ll)
-    push_source(cmd, rt, "runtime.c")
-    push_source(cmd, rt, "collect.c")
-    push_source(cmd, rt, "thread.c")
-    push_source(cmd, rt, "async.c")
-    push_source(cmd, rt, "reactor.c")
-    push_source(cmd, rt, "reactor_epoll.c")
-    push_source(cmd, rt, "reactor_kqueue.c")
+    rts: *Vector<string> = runtime_sources()
+    mut ri: int64 = 0
+    while ri < vec_len(rts) {
+        push_source(cmd, rt, vec_get(rts, ri))
+        ri = ri + 1
+    }
     // A @csource file compiles alongside the runtime, resolved at load time
     // against its declaring file; a @link value follows as either a file or a
     // -l flag, all before the fixed -pthread -lm and the output binary.
@@ -341,5 +355,383 @@ export func build_module_to(prog: string, path: string, run_it: bool, argv: stri
         }
         return out
     }
+    return 0
+}
+
+// The object file name for a C or IR source: its basename with the trailing
+// extension replaced by .o, so runtime/collect.c becomes collect.o and an
+// examples/adapter.c csource becomes adapter.o, both landing in the output dir.
+func c_object_name(path: string) -> string {
+    n: int64 = str_len(path)
+    mut last: int64 = -1
+    mut dot: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if path[i] == 47 { last = i }
+        if path[i] == 46 { dot = i }
+        i = i + 1
+    }
+    base_start: int64 = last + 1
+    mut base_end: int64 = n
+    if dot > last { base_end = dot }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, substring(path, base_start, base_end))
+    sb_push(b, ".o")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Compiles one source (a .ll or a .c) to an object file, passing -pthread so the
+// runtime's thread and reactor code sees _REENTRANT the same way the executable
+// link does. Returns clang's exit code.
+func compile_object(src: string, obj: string) -> int64 {
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "clang -c -pthread")
+    push_arg(cmd, src)
+    sb_push(cmd, " -o")
+    push_arg(cmd, obj)
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    sb_free(cmd)
+    free(cmd)
+    code: int64 = run(line)
+    free(line)
+    return code
+}
+
+// The upper-cased, non-alnum-scrubbed stem for the header include guard, e.g. a
+// stem "my-lib" yields MY_LIB for DUSK_MY_LIB_H.
+func header_guard_stem(stem: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while stem[i] != 0 {
+        c: int64 = stem[i]
+        if c >= 97 && c <= 122 {
+            sb_push_char(b, c - 32)
+        } else if (c >= 65 && c <= 90) || (c >= 48 && c <= 57) {
+            sb_push_char(b, c)
+        } else {
+            sb_push_char(b, 95)
+        }
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The extra host link tokens beyond the fixed -pthread -lm: each @link value as
+// the host would pass it, a file verbatim or a bare name as -lNAME. The archive
+// carries the runtime and any @csource objects, but an external library stays the
+// host's to link, so the header names it.
+func extra_link_note(links: *Vector<string>) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < vec_len(links) {
+        v: string = vec_get(links, i)
+        sb_push_char(b, 32)
+        if link_is_file(v) {
+            sb_push(b, v)
+        } else {
+            sb_push(b, "-l")
+            sb_push(b, v)
+        }
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Writes stem.h beside the archive: an include guard, stdint, an extern "C" block
+// for C++ hosts, the link-line note, the library-mode collector caveat, and one
+// prototype per export. The prototypes come from codegen, lowered from the same C
+// types as the emitted symbols, so the header can never drift from the archive.
+func write_lib_header(out: string, stem: string, exports: *Vector<string>, links: *Vector<string>) -> bool {
+    guard: string = header_guard_stem(stem)
+    note: string = extra_link_note(links)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "/* ")
+    sb_push(b, stem)
+    sb_push(b, ".h - generated by dusk build --lib.\n")
+    sb_push(b, "   Link a C host against lib")
+    sb_push(b, stem)
+    sb_push(b, ".a with: -pthread -lm")
+    sb_push(b, note)
+    sb_push(b, "\n")
+    sb_push(b, "   The archive bundles the dusk runtime; provide your own C main and call\n")
+    sb_push(b, "   these entry points. In library mode the collected heap has no dusk main\n")
+    sb_push(b, "   anchor, so an exported function that mints a collector value faults at\n")
+    sb_push(b, "   collection; keep exports over plain values and raw pointers. */\n")
+    sb_push(b, "#ifndef DUSK_")
+    sb_push(b, guard)
+    sb_push(b, "_H\n#define DUSK_")
+    sb_push(b, guard)
+    sb_push(b, "_H\n\n#include <stdint.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
+    mut i: int64 = 0
+    while i < vec_len(exports) {
+        sb_push(b, vec_get(exports, i))
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    sb_push(b, "\n#ifdef __cplusplus\n}\n#endif\n\n#endif\n")
+    text: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(guard)
+    free(note)
+    hpath: string = path_join(out, header_name(stem))
+    werr := write_file(hpath, text)
+    free(text)
+    free(hpath)
+    if werr.exists() {
+        d: Diagnostic = diag_new(stem, 0, 0, "could not write the library header")
+        diag_emit(d)
+        return false
+    }
+    return true
+}
+
+func header_name(stem: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, stem)
+    sb_push(b, ".h")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func archive_name(stem: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "lib")
+    sb_push(b, stem)
+    sb_push(b, ".a")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The object path for a source, class prefixed and index tagged so no two objects
+// in the archive ever share a name. Without this a lib source or a @csource named
+// runtime.c would overwrite the runtime's own runtime.o on disk before llvm-ar ran,
+// silently dropping the dusk core from the archive.
+func prefixed_obj_path(out: string, prefix: string, index: int64, srcpath: string) -> string {
+    base: string = c_object_name(srcpath)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push_int(b, index)
+    sb_push_char(b, 95)
+    sb_push(b, base)
+    name: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(base)
+    p: string = path_join(out, name)
+    free(name)
+    return p
+}
+
+// The exported symbol name inside a generated C prototype, the identifier between
+// the return type and the opening parenthesis. Every prototype has the shape
+// `<type> <name>(...)` with the type a single token, so the name is the run from
+// the first space to the first parenthesis.
+func export_symbol_name(proto: string) -> string {
+    n: int64 = str_len(proto)
+    mut sp: int64 = -1
+    mut lp: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if proto[i] == 32 && sp < 0 { sp = i }
+        if proto[i] == 40 {
+            lp = i
+            break
+        }
+        i = i + 1
+    }
+    if sp < 0 || lp < 0 || lp <= sp + 1 {
+        return substring(proto, 0, 0)
+    }
+    return substring(proto, sp + 1, lp)
+}
+
+// Rewrites the module object so only the exported symbols keep global linkage and
+// every other defined symbol, a private helper, a lifted lambda, an async poll
+// function, is made local. Without this a lib's private function named for a libc
+// entry, random or read among them, would interpose the host's own libc call at the
+// static link, silently redirecting it into dusk. Undefined references to the
+// runtime's cool_ symbols are untouched, since llvm-objcopy's keep-global rule acts
+// on defined symbols only. A build with no exports skips it, having nothing to keep.
+func localize_module_object(stem_obj: string, exports: *Vector<string>) -> int64 {
+    if vec_len(exports) == 0 {
+        return 0
+    }
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "llvm-objcopy")
+    mut i: int64 = 0
+    while i < vec_len(exports) {
+        sym: string = export_symbol_name(vec_get(exports, i))
+        if str_len(sym) > 0 {
+            sb_push(cmd, " -G ")
+            sb_push(cmd, sym)
+        }
+        free(sym)
+        i = i + 1
+    }
+    push_arg(cmd, stem_obj)
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    sb_free(cmd)
+    free(cmd)
+    code: int64 = run(line)
+    free(line)
+    return code
+}
+
+// Compiles the emitted IR, the runtime, and every @csource to objects and bundles
+// them into a deterministic static archive with llvm-ar. The module object is first
+// localized so only the exports stay global. @link libraries are not archived: they
+// stay external dependencies the host links, named in the header. Returns 0 on
+// success, non-zero on the first tool failure.
+func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, exports: *Vector<string>) -> int64 {
+    rt: string = path_join(home, "runtime")
+    objs: *Vector<string> = alloc(vec_new())
+
+    stem_obj: string = prefixed_obj_path(out, "duskmod_", 0, ll)
+    oc: int64 = compile_object(ll, stem_obj)
+    if oc != 0 {
+        d: Diagnostic = diag_new(stem, 0, 0, "clang failed to compile the module to an object")
+        diag_emit(d)
+        return oc
+    }
+    lc: int64 = localize_module_object(stem_obj, exports)
+    if lc != 0 {
+        d: Diagnostic = diag_new(stem, 0, 0, "llvm-objcopy failed to localize the module's private symbols")
+        diag_emit(d)
+        return lc
+    }
+    vec_push(objs, stem_obj)
+
+    rts: *Vector<string> = runtime_sources()
+    mut ri: int64 = 0
+    while ri < vec_len(rts) {
+        src: string = path_join(rt, vec_get(rts, ri))
+        obj: string = prefixed_obj_path(out, "duskrt_", ri, src)
+        rc: int64 = compile_object(src, obj)
+        free(src)
+        if rc != 0 {
+            d: Diagnostic = diag_new(stem, 0, 0, "clang failed to compile a runtime source")
+            diag_emit(d)
+            return rc
+        }
+        vec_push(objs, obj)
+        ri = ri + 1
+    }
+
+    mut ci: int64 = 0
+    while ci < vec_len(csources) {
+        src2: string = vec_get(csources, ci)
+        obj2: string = prefixed_obj_path(out, "duskcs_", ci, src2)
+        cc: int64 = compile_object(src2, obj2)
+        if cc != 0 {
+            d: Diagnostic = diag_new(src2, 0, 0, "clang failed to compile a @csource file")
+            diag_emit(d)
+            return cc
+        }
+        vec_push(objs, obj2)
+        ci = ci + 1
+    }
+
+    ar: string = path_join(out, archive_name(stem))
+    // rcsD replaces members and zeroes mtime/uid for a byte-deterministic archive;
+    // an old archive is removed first so a renamed-away export leaves no stale member.
+    rmcmd: *StringBuilder = alloc(sb_new())
+    sb_push(rmcmd, "rm -f")
+    push_arg(rmcmd, ar)
+    rmline: string = substring(sb_cstr(rmcmd), 0, sb_size(rmcmd))
+    sb_free(rmcmd)
+    free(rmcmd)
+    run(rmline)
+    free(rmline)
+
+    arcmd: *StringBuilder = alloc(sb_new())
+    sb_push(arcmd, "llvm-ar rcsD")
+    push_arg(arcmd, ar)
+    mut oi: int64 = 0
+    while oi < vec_len(objs) {
+        push_arg(arcmd, vec_get(objs, oi))
+        oi = oi + 1
+    }
+    arline: string = substring(sb_cstr(arcmd), 0, sb_size(arcmd))
+    sb_free(arcmd)
+    free(arcmd)
+    arc: int64 = run(arline)
+    free(arline)
+    free(ar)
+    free(rt)
+    if arc != 0 {
+        d: Diagnostic = diag_new(stem, 0, 0, "llvm-ar failed to build the archive")
+        diag_emit(d)
+        return arc
+    }
+    return 0
+}
+
+// Builds a source file as a linkable C library: it compiles through the shared IR
+// spine, writes stem.ll, archives the runtime and the module into libstem.a, and
+// generates stem.h from the export prototypes. The module may omit main, since
+// monomorphization roots every export and each export survives to the archive. A
+// build with no exports still produces an archive, empty of dusk entry points.
+export func build_lib(prog: string, path: string) -> int32 {
+    out: string = out_dir()
+    ir: CliIrResult = compile_ir_text(path, prog)
+    if !ir.ok {
+        if str_len(ir.text) > 0 { printerr(ir.text) }
+        return 1
+    }
+    if !make_out_dir(out) { return 1 }
+    stem: string = stem_of(path)
+    ll_name: *StringBuilder = alloc(sb_new())
+    sb_push(ll_name, stem)
+    sb_push(ll_name, ".ll")
+    ll_base: string = substring(sb_cstr(ll_name), 0, sb_size(ll_name))
+    sb_free(ll_name)
+    free(ll_name)
+    ll: string = path_join(out, ll_base)
+    werr := write_file(ll, ir.text)
+    if werr.exists() {
+        d: Diagnostic = diag_new(ll, 0, 0, "could not write the IR module")
+        diag_emit(d)
+        return 1
+    }
+    if !check_ir_written(ll) { return 1 }
+    home: string = dusk_home(prog)
+    code: int64 = archive_lib(home, ll, stem, out, ir.csources, ir.exports)
+    if code != 0 { return 1 }
+    if !write_lib_header(out, stem, ir.exports, ir.links) { return 1 }
+
+    ar: string = path_join(out, archive_name(stem))
+    say2: *StringBuilder = alloc(sb_new())
+    sb_push(say2, "[dusk] archive : ")
+    sb_push(say2, ar)
+    l1: string = substring(sb_cstr(say2), 0, sb_size(say2))
+    println(l1)
+    free(l1)
+    sb_free(say2)
+    free(say2)
+    hp: string = path_join(out, header_name(stem))
+    say3: *StringBuilder = alloc(sb_new())
+    sb_push(say3, "[dusk] header  : ")
+    sb_push(say3, hp)
+    l2: string = substring(sb_cstr(say3), 0, sb_size(say3))
+    println(l2)
+    free(l2)
+    sb_free(say3)
+    free(say3)
+    free(hp)
+    free(ar)
     return 0
 }

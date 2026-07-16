@@ -14,7 +14,62 @@
 @import genfn
 @import genasync
 
-export struct GenResult { ok: bool, text: string }
+export struct GenResult { ok: bool, text: string, exports: *Vector<string> }
+
+// The C header type for an exported parameter or return: a sized int lowers to
+// intN_t (rune arrives here as an i32, so it prints int32_t), char and bool to
+// uint8_t, float64 to double, float32 to float, a raw or void pointer to void*,
+// and unit to void. This maps the same C type codegen lowered the define from, so
+// the generated prototype always matches the emitted symbol.
+func c_header_type(c: *CTyArena, id: int64) -> string {
+    n: CTyNode = vec_get(cty_nodes(c), id)
+    if n.kind == ctyk_int() {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "int")
+        sb_push_int(b, n.a)
+        sb_push(b, "_t")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        return out
+    }
+    if n.kind == ctyk_char() || n.kind == ctyk_bool() { return "uint8_t" }
+    if n.kind == ctyk_f64() { return "double" }
+    if n.kind == ctyk_f32() { return "float" }
+    if n.kind == ctyk_ptr() || n.kind == ctyk_rawptr() { return "void*" }
+    return "void"
+}
+
+// Builds one C prototype for an `export "C"` function, e.g.
+// `int64_t mylib_add(int64_t a0, int64_t a1);`. A zero-parameter export prints
+// `(void)` so the header declares a genuine no-argument function.
+func export_prototype(c: *CTyArena, a: *Ast, f: FuncNode) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    ret_ty: int64 = cty_lower_ast(c, a, f.ret)
+    sb_push(b, c_header_type(c, ret_ty))
+    sb_push_char(b, 32)
+    sb_push(b, ast_name(a, f.name))
+    sb_push_char(b, 40)
+    if f.params_len == 0 {
+        sb_push(b, "void")
+    } else {
+        mut i: int64 = 0
+        while i < f.params_len {
+            if i > 0 { sb_push(b, ", ") }
+            p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+            pty: int64 = cty_lower_ast(c, a, p.ty)
+            sb_push(b, c_header_type(c, pty))
+            sb_push(b, " a")
+            sb_push_int(b, i)
+            i = i + 1
+        }
+    }
+    sb_push(b, ");")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
 
 func gen_copy(s: string) -> string {
     return substring(s, 0, str_len(s))
@@ -384,6 +439,7 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
     m: *EmitModule = emit_module_new("dusk", "x86_64-pc-linux-gnu")
     declare_prelude(m)
     emit_ground_types(m, ctx)
+    exports: *Vector<string> = alloc(vec_new())
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {
@@ -409,6 +465,9 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
                     free(body2)
                 }
             } else {
+                if f.abi_export {
+                    vec_push(exports, export_prototype(genctx_ctys(ctx), a, f))
+                }
                 body3: string = gen_func(m, ctx, f, name)
                 emit_push_function(m, body3)
                 free(body3)
@@ -437,10 +496,16 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
         }
         i = i + 1
     }
+    // cool_lib_init is declared only when the module has an export to call it, so a
+    // program with no `export "C"` carries no reference to it and its emitted IR
+    // stays a minimal function of what the program actually uses.
+    if vec_len(exports) > 0 {
+        emit_declare(m, "void @cool_lib_init()")
+    }
     emit_iface_vtables(m, ctx)
     errs: *Vector<string> = emit_errors(m)
     if vec_len(errs) > 0 {
-        return GenResult { ok: false, text: joined_faults(errs) }
+        return GenResult { ok: false, text: joined_faults(errs), exports: exports }
     }
-    return GenResult { ok: true, text: emit_render(m) }
+    return GenResult { ok: true, text: emit_render(m), exports: exports }
 }
