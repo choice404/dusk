@@ -45,12 +45,12 @@ func nfunc_param_ty(m: *Mono, fname: string, i: int64) -> int64 {
     return p.ty
 }
 
-export func rw_func(m: *Mono, fid: int64, subst: *Map<int64>, mangled: int64) -> int64 {
+export func rw_func(m: *Mono, fid: int64, subst: *Map<string, int64>, mangled: int64) -> int64 {
     a: *Ast = (*m).ast
     f: FuncNode = vec_get((*a).funcs, fid)
     mut name_id: int64 = f.name
     if mangled >= 0 { name_id = mangled }
-    env: *Map<int64> = alloc(map_new())
+    env: *Map<string, int64> = alloc(map_new())
     params_out: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
     while i < f.params_len {
@@ -85,7 +85,7 @@ export func rw_func(m: *Mono, fid: int64, subst: *Map<int64>, mangled: int64) ->
     return ast_func(a, nf)
 }
 
-export func rw_block(m: *Mono, bid: int64, subst: *Map<int64>, env: *Map<int64>, ret: int64) -> int64 {
+export func rw_block(m: *Mono, bid: int64, subst: *Map<string, int64>, env: *Map<string, int64>, ret: int64) -> int64 {
     a: *Ast = (*m).ast
     b: BlockNode = vec_get((*a).blocks, bid)
     stmts_out: *Vector<int64> = alloc(vec_new())
@@ -97,7 +97,7 @@ export func rw_block(m: *Mono, bid: int64, subst: *Map<int64>, env: *Map<int64>,
     return ast_block(a, stmts_out)
 }
 
-func rw_stmt(m: *Mono, sid: int64, subst: *Map<int64>, env: *Map<int64>, ret: int64) -> int64 {
+func rw_stmt(m: *Mono, sid: int64, subst: *Map<string, int64>, env: *Map<string, int64>, ret: int64) -> int64 {
     s0: StmtNode = vec_get((*(*m).ast).stmts, sid)
     if s0.kind == sk_break() || s0.kind == sk_continue() {
         return ast_stmt((*m).ast, s0.kind, s0.a, s0.b, 0, 0)
@@ -149,7 +149,7 @@ func rw_stmt(m: *Mono, sid: int64, subst: *Map<int64>, env: *Map<int64>, ret: in
     return ast_stmt(a, sk_expr(), rw_expr(m, s.a, subst, env, -1), 0, 0, 0)
 }
 
-func rw_let(m: *Mono, s: StmtNode, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+func rw_let(m: *Mono, s: StmtNode, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     val: ExprNode = vec_get((*a).exprs, s.c)
     // Expected type from the first bind's annotation.
@@ -223,7 +223,7 @@ func rw_let(m: *Mono, s: StmtNode, subst: *Map<int64>, env: *Map<int64>) -> int6
     return ast_stmt(a, sk_let(), boff, blen, value, s.d)
 }
 
-func rw_match(m: *Mono, scrut: int64, off: int64, len: int64, subst: *Map<int64>, env: *Map<int64>, ret: int64) -> (int64, int64, int64) {
+func rw_match(m: *Mono, scrut: int64, off: int64, len: int64, subst: *Map<string, int64>, env: *Map<string, int64>, ret: int64) -> (int64, int64, int64) {
     a: *Ast = (*m).ast
     new_scrut: int64 = rw_expr(m, scrut, subst, env, -1)
     scrut_ty: int64 = static_ty(m, scrut, subst, env)
@@ -231,7 +231,7 @@ func rw_match(m: *Mono, scrut: int64, off: int64, len: int64, subst: *Map<int64>
     mut i: int64 = 0
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
-        e2: *Map<int64> = map_clone_i64(env)
+        e2: *Map<string, int64> = map_clone_i64(env)
         bind_pattern(m, arm.pat, scrut_ty, subst, e2)
         body: int64 = rw_block(m, arm.body, subst, e2, ret)
         vec_push(arms_out, ast_arm(a, arm.pat, body))
@@ -241,7 +241,7 @@ func rw_match(m: *Mono, scrut: int64, off: int64, len: int64, subst: *Map<int64>
     return (new_scrut, aoff, alen)
 }
 
-func bind_pattern(m: *Mono, patid: int64, scrut_ty: int64, subst: *Map<int64>, env: *Map<int64>) -> void {
+func bind_pattern(m: *Mono, patid: int64, scrut_ty: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> void {
     a: *Ast = (*m).ast
     pat: PatternNode = vec_get((*a).patterns, patid)
     if pat.kind == pk_ident() {
@@ -259,7 +259,7 @@ func bind_pattern(m: *Mono, patid: int64, scrut_ty: int64, subst: *Map<int64>, e
         geid: int64 = unwrap_or(map_get(m_genums(m), g), -1)
         ge: EnumNode = vec_get((*a).enums, geid)
         eargs: *Vector<int64> = named_targs(a, scrut_ty)
-        vsubst: *Map<int64> = build_subst(m, ge.generics_off, ge.generics_len, eargs)
+        vsubst: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, eargs)
         variant: string = ast_name(a, pat.a)
         mut vi: int64 = 0
         while vi < ge.variants_len {
@@ -281,7 +281,7 @@ func bind_pattern(m: *Mono, patid: int64, scrut_ty: int64, subst: *Map<int64>, e
     }
 }
 
-export func rw_expr(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>, expected: int64) -> int64 {
+export func rw_expr(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<string, int64>, expected: int64) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, eid)
     if e.kind == xk_call() {
@@ -364,10 +364,10 @@ export func rw_expr(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>, 
     return ast_expr(a, e.kind, e.lo, e.hi, e.a, e.b, e.c, e.d)
 }
 
-func rw_lambda_plain(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+func rw_lambda_plain(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, eid)
-    e2: *Map<int64> = map_clone_i64(env)
+    e2: *Map<string, int64> = map_clone_i64(env)
     mut i: int64 = 0
     while i < e.b {
         lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
@@ -387,7 +387,7 @@ func rw_lambda_plain(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>)
     return ast_expr(a, xk_lambda(), e.lo, e.hi, poff, plen, emit_ty(m, ret, e.lo, e.hi), body)
 }
 
-func rw_expr_list(m: *Mono, off: int64, len: int64, subst: *Map<int64>, env: *Map<int64>) -> (int64, int64) {
+func rw_expr_list(m: *Mono, off: int64, len: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> (int64, int64) {
     a: *Ast = (*m).ast
     ids: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
@@ -398,7 +398,7 @@ func rw_expr_list(m: *Mono, off: int64, len: int64, subst: *Map<int64>, env: *Ma
     return ast_kids(a, ids)
 }
 
-func rw_call(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>, expected: int64) -> int64 {
+func rw_call(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<string, int64>, expected: int64) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, eid)
     callee: ExprNode = vec_get((*a).exprs, e.a)
@@ -486,13 +486,13 @@ func rw_call(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>, expecte
     return ast_expr(a, xk_call(), e.lo, e.hi, c, plain_off, plain_len, 0)
 }
 
-func rw_enum_ctor_call(m: *Mono, e: ExprNode, callee: ExprNode, base: ExprNode, g: string, v: string, args: *Vector<int64>, subst: *Map<int64>, env: *Map<int64>, expected: int64) -> int64 {
+func rw_enum_ctor_call(m: *Mono, e: ExprNode, callee: ExprNode, base: ExprNode, g: string, v: string, args: *Vector<int64>, subst: *Map<string, int64>, env: *Map<string, int64>, expected: int64) -> int64 {
     a: *Ast = (*m).ast
     r: ArgResult = enum_args(m, g, expected, args, subst, env, v)
     report_missing(m, r.missing, g, base.lo, base.hi)
     geid: int64 = unwrap_or(map_get(m_genums(m), g), -1)
     ge: EnumNode = vec_get((*a).enums, geid)
-    fsubst: *Map<int64> = build_subst(m, ge.generics_off, ge.generics_len, r.targs)
+    fsubst: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, r.targs)
     // Grounded variant field types, threaded as each payload's expected.
     field_tys: *Vector<int64> = alloc(vec_new())
     mut vi: int64 = 0
@@ -525,7 +525,7 @@ func rw_enum_ctor_call(m: *Mono, e: ExprNode, callee: ExprNode, base: ExprNode, 
     return ast_expr(a, xk_call(), e.lo, e.hi, nc, coff, clen, 0)
 }
 
-func rw_generic_call(m: *Mono, e: ExprNode, callee: ExprNode, f: string, args: *Vector<int64>, subst: *Map<int64>, env: *Map<int64>, expected: int64) -> int64 {
+func rw_generic_call(m: *Mono, e: ExprNode, callee: ExprNode, f: string, args: *Vector<int64>, subst: *Map<string, int64>, env: *Map<string, int64>, expected: int64) -> int64 {
     a: *Ast = (*m).ast
     gfid: int64 = unwrap_or(map_get(m_gfuncs(m), f), -1)
     gf: FuncNode = vec_get((*a).funcs, gfid)
@@ -535,7 +535,7 @@ func rw_generic_call(m: *Mono, e: ExprNode, callee: ExprNode, f: string, args: *
         report_missing(m, sr.missing, f, callee.lo, callee.hi)
     }
     check_chan_element(m, f, sr.targs, callee.lo, callee.hi)
-    inf_full: *Map<int64> = build_subst(m, gf.generics_off, gf.generics_len, sr.targs)
+    inf_full: *Map<string, int64> = build_subst(m, gf.generics_off, gf.generics_len, sr.targs)
     cargs: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
     while i < vec_len(args) {
@@ -553,7 +553,7 @@ func rw_generic_call(m: *Mono, e: ExprNode, callee: ExprNode, f: string, args: *
     return ast_expr(a, xk_call(), e.lo, e.hi, mg, coff, clen, 0)
 }
 
-func rw_arg(m: *Mono, argid: int64, decl: int64, inf_full: *Map<int64>, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+func rw_arg(m: *Mono, argid: int64, decl: int64, inf_full: *Map<string, int64>, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     if is_lambda(a, argid) && decl >= 0 {
         dn: TypeNode = vec_get((*a).types, decl)
@@ -574,7 +574,7 @@ func rw_arg(m: *Mono, argid: int64, decl: int64, inf_full: *Map<int64>, subst: *
     return rw_expr(m, argid, subst, env, exp)
 }
 
-func rw_lambda_pinned(m: *Mono, argid: int64, fty: int64, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+func rw_lambda_pinned(m: *Mono, argid: int64, fty: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     lam: ExprNode = vec_get((*a).exprs, argid)
     fn: TypeNode = vec_get((*a).types, fty)
@@ -595,7 +595,7 @@ func rw_lambda_pinned(m: *Mono, argid: int64, fty: int64, subst: *Map<int64>, en
     return rw_expr(m, patched, subst, env, -1)
 }
 
-func rw_collect_lambda(m: *Mono, argid: int64, fty: int64, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+func rw_collect_lambda(m: *Mono, argid: int64, fty: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     lam: int64 = rw_lambda_pinned(m, argid, fty, subst, env)
     arg: ExprNode = vec_get((*a).exprs, argid)
@@ -603,7 +603,7 @@ func rw_collect_lambda(m: *Mono, argid: int64, fty: int64, subst: *Map<int64>, e
     return ast_expr(a, xk_collect(), arg.lo, arg.hi, cty, lam, 0, 0)
 }
 
-func rw_struct_lit(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>, expected: int64) -> int64 {
+func rw_struct_lit(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<string, int64>, expected: int64) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, eid)
     name: string = ast_name(a, e.a)
@@ -612,7 +612,7 @@ func rw_struct_lit(m: *Mono, eid: int64, subst: *Map<int64>, env: *Map<int64>, e
         gs: StructNode = vec_get((*a).structs, gsid)
         r: ArgResult = infer_struct_args(m, gsid, e.b, e.c, expected, subst, env)
         report_missing(m, r.missing, name, e.lo, e.hi)
-        fsubst: *Map<int64> = build_subst(m, gs.generics_off, gs.generics_len, r.targs)
+        fsubst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, r.targs)
         new_pairs: *Vector<int64> = alloc(vec_new())
         mut i: int64 = 0
         while i < e.c {

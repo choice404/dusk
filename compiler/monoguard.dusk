@@ -17,7 +17,7 @@
 @import monoemit
 @import monosolve
 
-export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bool, path: *Map<int64>) -> bool {
+export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bool, path: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_slice() || n.kind == tk_func() { return false }
@@ -26,7 +26,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
         name: string = ast_name(a, n.a)
         if ban_future && str_eq(name, "Future") { return false }
         if map_has(path, name) { return true }
-        child: *Map<int64> = map_clone_i64(path)
+        child: *Map<string, int64> = map_clone_i64(path)
         map_put(child, name, 1)
         // Every type argument must cross on its own.
         mut i: int64 = 0
@@ -40,7 +40,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
             gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
             gs: StructNode = vec_get((*a).structs, gsid)
             targs: *Vector<int64> = named_targs(a, id)
-            subst: *Map<int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
+            subst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
             mut fi: int64 = 0
             while fi < gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
@@ -55,7 +55,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
             geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
             ge: EnumNode = vec_get((*a).enums, geid)
             targs2: *Vector<int64> = named_targs(a, id)
-            subst2: *Map<int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
+            subst2: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
             mut vi: int64 = 0
             while vi < ge.variants_len {
                 va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
@@ -98,7 +98,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
 
 // The non-generic named fallback: a struct or enum declared without generics is
 // judged by its declared fields, and an interface is refused outright.
-func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_collector: bool, child: *Map<int64>) -> bool {
+func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_collector: bool, child: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
@@ -146,14 +146,14 @@ func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_
     return true
 }
 
-export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<int64>) -> bool {
+export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_named() {
         name: string = ast_name(a, n.a)
         if str_eq(name, "Future") { return true }
         if map_has(path, name) { return false }
-        child: *Map<int64> = map_clone_i64(path)
+        child: *Map<string, int64> = map_clone_i64(path)
         map_put(child, name, 1)
         mut i: int64 = 0
         while i < n.c {
@@ -164,7 +164,7 @@ export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<int64>) -> bool {
             gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
             gs: StructNode = vec_get((*a).structs, gsid)
             targs: *Vector<int64> = named_targs(a, id)
-            subst: *Map<int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
+            subst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
             mut fi: int64 = 0
             while fi < gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
@@ -177,7 +177,7 @@ export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<int64>) -> bool {
             geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
             ge: EnumNode = vec_get((*a).enums, geid)
             targs2: *Vector<int64> = named_targs(a, id)
-            subst2: *Map<int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
+            subst2: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
             mut vi: int64 = 0
             while vi < ge.variants_len {
                 va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
@@ -207,14 +207,14 @@ export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<int64>) -> bool {
     return false
 }
 
-export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<int64>) -> bool {
+export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_collector() { return true }
     if n.kind == tk_named() {
         name: string = ast_name(a, n.a)
         if map_has(path, name) { return false }
-        child: *Map<int64> = map_clone_i64(path)
+        child: *Map<string, int64> = map_clone_i64(path)
         map_put(child, name, 1)
         mut i: int64 = 0
         while i < n.c {
@@ -225,7 +225,7 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<int64>) -> boo
             gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
             gs: StructNode = vec_get((*a).structs, gsid)
             targs: *Vector<int64> = named_targs(a, id)
-            subst: *Map<int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
+            subst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
             mut fi: int64 = 0
             while fi < gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
@@ -238,7 +238,7 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<int64>) -> boo
             geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
             ge: EnumNode = vec_get((*a).enums, geid)
             targs2: *Vector<int64> = named_targs(a, id)
-            subst2: *Map<int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
+            subst2: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
             mut vi: int64 = 0
             while vi < ge.variants_len {
                 va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
@@ -270,7 +270,7 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<int64>) -> boo
 
 // The non-generic named fallback for the two ptr_reaches walks: want_future picks
 // which sink the struct or enum fields are hunted for.
-func reaches_nongeneric(m: *Mono, name: string, child: *Map<int64>, want_future: bool) -> bool {
+func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, want_future: bool) -> bool {
     a: *Ast = (*m).ast
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
@@ -309,12 +309,12 @@ func reaches_nongeneric(m: *Mono, name: string, child: *Map<int64>, want_future:
     return false
 }
 
-func reaches_field(m: *Mono, id: int64, child: *Map<int64>, want_future: bool) -> bool {
+func reaches_field(m: *Mono, id: int64, child: *Map<string, int64>, want_future: bool) -> bool {
     if want_future { return ptr_reaches_future(m, id, child) }
     return ptr_reaches_collector(m, id, child)
 }
 
-export func chan_element_ok(m: *Mono, id: int64, path: *Map<int64>) -> bool {
+export func chan_element_ok(m: *Mono, id: int64, path: *Map<string, int64>) -> bool {
     return crossable(m, id, false, false, path)
 }
 
@@ -325,7 +325,7 @@ export func check_future_spell(m: *Mono, id: int64, lo: int64, hi: int64) -> voi
         name: string = ast_name(a, n.a)
         if str_eq(name, "Future") && n.c == 1 {
             inner: int64 = vec_get((*a).kids, n.b)
-            empty: *Map<int64> = alloc(map_new())
+            empty: *Map<string, int64> = alloc(map_new())
             if !crossable(m, inner, false, true, empty) {
                 mono_diag(m, "a future element cannot contain a slice, closure, or interface value; a view of the completing thread's frame would dangle in the awaiter; send heap owned data instead", lo, hi)
             }
@@ -384,17 +384,17 @@ export func check_chan_element(m: *Mono, name: string, targs: *Vector<int64>, lo
     if !chan && !future { return }
     if vec_len(targs) == 0 { return }
     t: int64 = vec_get(targs, 0)
-    empty: *Map<int64> = alloc(map_new())
+    empty: *Map<string, int64> = alloc(map_new())
     mut ok: bool = false
     if chan {
         ok = chan_element_ok(m, t, empty)
     } else {
-        e2: *Map<int64> = alloc(map_new())
+        e2: *Map<string, int64> = alloc(map_new())
         ok = crossable(m, t, false, true, e2)
     }
     if ok { return }
     if chan {
-        e3: *Map<int64> = alloc(map_new())
+        e3: *Map<string, int64> = alloc(map_new())
         if !crossable(m, t, false, true, e3) {
             mono_diag(m, "a channel element cannot contain a slice, closure, or interface value; a view of the sending thread's frame would dangle in the receiver; send heap owned data instead", lo, hi)
         } else {
@@ -407,11 +407,11 @@ export func check_chan_element(m: *Mono, name: string, targs: *Vector<int64>, lo
 
 // Rejects a spawn or submit lambda capture whose type views the spawning frame,
 // seeing through generic type arguments the checker's erased walk misses.
-export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: *Map<int64>, lo: int64, hi: int64) -> void {
+export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: *Map<string, int64>, lo: int64, hi: int64) -> void {
     a: *Ast = (*m).ast
     lam: ExprNode = vec_get((*a).exprs, lam_exprid)
     used: *Vector<string> = alloc(vec_new())
-    bound: *Map<int64> = alloc(map_new())
+    bound: *Map<string, int64> = alloc(map_new())
     mut p: int64 = 0
     while p < lam.b {
         lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, lam.a + p))
@@ -419,7 +419,7 @@ export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: 
         p = p + 1
     }
     collect_block(m, lam.d, used, bound)
-    done: *Map<int64> = alloc(map_new())
+    done: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < vec_len(used) {
         c: string = vec_get(used, i)
@@ -429,9 +429,9 @@ export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: 
             map_put(done, c, 1)
             if map_has(env, c) {
                 t: int64 = unwrap_or(map_get(env, c), -1)
-                e1: *Map<int64> = alloc(map_new())
+                e1: *Map<string, int64> = alloc(map_new())
                 if !crossable(m, t, true, false, e1) {
-                    e2: *Map<int64> = alloc(map_new())
+                    e2: *Map<string, int64> = alloc(map_new())
                     if crossable(m, t, true, true, e2) {
                         mono_diag(m, capture_collect_msg(name, c), lo, hi)
                     } else {
@@ -470,7 +470,7 @@ func capture_view_msg(name: string, c: string) -> string {
 
 // ---- free-variable collector, a port of stage0 ast::collect_block ----
 
-func collect_block(m: *Mono, bid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func collect_block(m: *Mono, bid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*m).ast
     b: BlockNode = vec_get((*a).blocks, bid)
     mut i: int64 = 0
@@ -480,7 +480,7 @@ func collect_block(m: *Mono, bid: int64, used: *Vector<string>, bound: *Map<int6
     }
 }
 
-func collect_stmt(m: *Mono, sid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func collect_stmt(m: *Mono, sid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*m).ast
     s: StmtNode = vec_get((*a).stmts, sid)
     if s.kind == sk_let() {
@@ -536,7 +536,7 @@ func collect_stmt(m: *Mono, sid: int64, used: *Vector<string>, bound: *Map<int64
     collect_expr(m, s.a, used, bound)
 }
 
-func collect_match(m: *Mono, scrut: int64, off: int64, len: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func collect_match(m: *Mono, scrut: int64, off: int64, len: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*m).ast
     collect_expr(m, scrut, used, bound)
     mut i: int64 = 0
@@ -557,7 +557,7 @@ func collect_match(m: *Mono, scrut: int64, off: int64, len: int64, used: *Vector
     }
 }
 
-func collect_expr(m: *Mono, eid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func collect_expr(m: *Mono, eid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, eid)
     if e.kind == xk_ident() {

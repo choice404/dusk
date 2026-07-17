@@ -10,40 +10,40 @@
 
 struct Renamer {
     ast: *Ast,
-    names: *Map<int64>,
+    names: *Map<string, int64>,
 }
 
-func new_set() -> *Map<int64> {
+func new_set() -> *Map<string, int64> {
     return alloc(map_new())
 }
 
-func set_add(s: *Map<int64>, name: string) -> void {
+func set_add(s: *Map<string, int64>, name: string) -> void {
     map_put(s, name, 1)
 }
 
-func set_has(s: *Map<int64>, name: string) -> bool {
+func set_has(s: *Map<string, int64>, name: string) -> bool {
     return map_has(s, name)
 }
 
-func push_scope(bound: *Vector<*Map<int64>>) -> *Map<int64> {
-    s: *Map<int64> = new_set()
+func push_scope(bound: *Vector<*Map<string, int64>>) -> *Map<string, int64> {
+    s: *Map<string, int64> = new_set()
     vec_push(bound, s)
     return s
 }
 
-func pop_scope(bound: *Vector<*Map<int64>>) -> void {
+func pop_scope(bound: *Vector<*Map<string, int64>>) -> void {
     (*bound).len = (*bound).len - 1
 }
 
-func last_scope(bound: *Vector<*Map<int64>>) -> *Map<int64> {
+func last_scope(bound: *Vector<*Map<string, int64>>) -> *Map<string, int64> {
     return vec_get(bound, vec_len(bound) - 1)
 }
 
-func add_bound(r: *Renamer, bound: *Vector<*Map<int64>>, name: int64) -> void {
+func add_bound(r: *Renamer, bound: *Vector<*Map<string, int64>>, name: int64) -> void {
     set_add(last_scope(bound), ast_name((*r).ast, name))
 }
 
-func is_bound(r: *Renamer, bound: *Vector<*Map<int64>>, name: int64) -> bool {
+func is_bound(r: *Renamer, bound: *Vector<*Map<string, int64>>, name: int64) -> bool {
     n: string = ast_name((*r).ast, name)
     mut i: int64 = 0
     while i < vec_len(bound) {
@@ -79,14 +79,14 @@ func name_with_suffix(name: string, suffix: string) -> string {
     return out
 }
 
-func add_private(rnames: *Map<int64>, a: *Ast, name: int64, suffix: string) -> void {
+func add_private(rnames: *Map<string, int64>, a: *Ast, name: int64, suffix: string) -> void {
     n: string = ast_name(a, name)
     nn: string = name_with_suffix(n, suffix)
     nid: int64 = intern_owned((*a).interner, nn)
     map_put(rnames, n, nid)
 }
 
-func add_name_kids(a: *Ast, s: *Map<int64>, off: int64, len: int64) -> void {
+func add_name_kids(a: *Ast, s: *Map<string, int64>, off: int64, len: int64) -> void {
     mut i: int64 = 0
     while i < len {
         set_add(s, ast_name(a, vec_get((*a).kids, off + i)))
@@ -94,7 +94,7 @@ func add_name_kids(a: *Ast, s: *Map<int64>, off: int64, len: int64) -> void {
     }
 }
 
-func ren_type_list(r: *Renamer, off: int64, len: int64, skip: *Map<int64>) -> void {
+func ren_type_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>) -> void {
     mut i: int64 = 0
     while i < len {
         ren_ty(r, vec_get((*(*r).ast).kids, off + i), skip)
@@ -102,7 +102,7 @@ func ren_type_list(r: *Renamer, off: int64, len: int64, skip: *Map<int64>) -> vo
     }
 }
 
-func ren_ty(r: *Renamer, id: int64, skip: *Map<int64>) -> void {
+func ren_ty(r: *Renamer, id: int64, skip: *Map<string, int64>) -> void {
     if id < 0 {
         return
     }
@@ -134,7 +134,7 @@ func ren_ty(r: *Renamer, id: int64, skip: *Map<int64>) -> void {
     vec_set(tys, id, t)
 }
 
-func ren_param(r: *Renamer, id: int64, skip: *Map<int64>) -> ParamNode {
+func ren_param(r: *Renamer, id: int64, skip: *Map<string, int64>) -> ParamNode {
     a: *Ast = (*r).ast
     params: *Vector<ParamNode> = (*a).params
     p: ParamNode = vec_get(params, id)
@@ -144,9 +144,9 @@ func ren_param(r: *Renamer, id: int64, skip: *Map<int64>) -> ParamNode {
 
 func ren_func(r: *Renamer, f: FuncNode) -> FuncNode {
     a: *Ast = (*r).ast
-    skip: *Map<int64> = new_set()
+    skip: *Map<string, int64> = new_set()
     add_name_kids(a, skip, f.generics_off, f.generics_len)
-    bound: *Vector<*Map<int64>> = alloc(vec_new())
+    bound: *Vector<*Map<string, int64>> = alloc(vec_new())
     push_scope(bound)
     mut i: int64 = 0
     while i < f.params_len {
@@ -160,7 +160,7 @@ func ren_func(r: *Renamer, f: FuncNode) -> FuncNode {
     return f
 }
 
-func ren_field_list(r: *Renamer, off: int64, len: int64, skip: *Map<int64>) -> void {
+func ren_field_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>) -> void {
     a: *Ast = (*r).ast
     mut i: int64 = 0
     while i < len {
@@ -171,7 +171,7 @@ func ren_field_list(r: *Renamer, off: int64, len: int64, skip: *Map<int64>) -> v
     }
 }
 
-func ren_method_sig_list(r: *Renamer, off: int64, len: int64, skip: *Map<int64>) -> void {
+func ren_method_sig_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>) -> void {
     a: *Ast = (*r).ast
     mut i: int64 = 0
     while i < len {
@@ -201,7 +201,7 @@ func ren_item(r: *Renamer, it: ItemNode) -> void {
         structs: *Vector<StructNode> = (*a).structs
         mut s: StructNode = vec_get(structs, it.id)
         s.name = maybe_rename_id(r, s.name)
-        skip: *Map<int64> = new_set()
+        skip: *Map<string, int64> = new_set()
         add_name_kids(a, skip, s.generics_off, s.generics_len)
         ren_field_list(r, s.fields_off, s.fields_len, skip)
         vec_set(structs, it.id, s)
@@ -209,7 +209,7 @@ func ren_item(r: *Renamer, it: ItemNode) -> void {
         enums: *Vector<EnumNode> = (*a).enums
         mut e: EnumNode = vec_get(enums, it.id)
         e.name = maybe_rename_id(r, e.name)
-        skip2: *Map<int64> = new_set()
+        skip2: *Map<string, int64> = new_set()
         add_name_kids(a, skip2, e.generics_off, e.generics_len)
         mut i: int64 = 0
         while i < e.variants_len {
@@ -223,7 +223,7 @@ func ren_item(r: *Renamer, it: ItemNode) -> void {
         interfaces: *Vector<InterfaceNode> = (*a).interfaces
         mut iface: InterfaceNode = vec_get(interfaces, it.id)
         iface.name = maybe_rename_id(r, iface.name)
-        skip3: *Map<int64> = new_set()
+        skip3: *Map<string, int64> = new_set()
         add_name_kids(a, skip3, iface.generics_off, iface.generics_len)
         ren_method_sig_list(r, iface.methods_off, iface.methods_len, skip3)
         vec_set(interfaces, it.id, iface)
@@ -246,7 +246,7 @@ func ren_item(r: *Renamer, it: ItemNode) -> void {
     }
 }
 
-func ren_block(r: *Renamer, id: int64, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_block(r: *Renamer, id: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     push_scope(bound)
     a: *Ast = (*r).ast
     b: BlockNode = vec_get((*a).blocks, id)
@@ -258,7 +258,7 @@ func ren_block(r: *Renamer, id: int64, skip: *Map<int64>, bound: *Vector<*Map<in
     pop_scope(bound)
 }
 
-func ren_bind_list_after_value(r: *Renamer, off: int64, len: int64, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_bind_list_after_value(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     mut i: int64 = 0
     while i < len {
@@ -272,7 +272,7 @@ func ren_bind_list_after_value(r: *Renamer, off: int64, len: int64, skip: *Map<i
     }
 }
 
-func ren_stmt(r: *Renamer, id: int64, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_stmt(r: *Renamer, id: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     s: StmtNode = vec_get((*a).stmts, id)
     if s.kind == sk_let() {
@@ -313,7 +313,7 @@ func ren_stmt(r: *Renamer, id: int64, skip: *Map<int64>, bound: *Vector<*Map<int
     }
 }
 
-func bind_pattern(r: *Renamer, id: int64, bound: *Vector<*Map<int64>>) -> void {
+func bind_pattern(r: *Renamer, id: int64, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     p: PatternNode = vec_get((*a).patterns, id)
     if p.kind == pk_ident() {
@@ -327,7 +327,7 @@ func bind_pattern(r: *Renamer, id: int64, bound: *Vector<*Map<int64>>) -> void {
     }
 }
 
-func ren_match_value(r: *Renamer, scrut: int64, off: int64, len: int64, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_match_value(r: *Renamer, scrut: int64, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     ren_expr(r, scrut, skip, bound)
     mut i: int64 = 0
@@ -342,7 +342,7 @@ func ren_match_value(r: *Renamer, scrut: int64, off: int64, len: int64, skip: *M
     }
 }
 
-func ren_expr_list(r: *Renamer, off: int64, len: int64, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_expr_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     mut i: int64 = 0
     while i < len {
@@ -351,7 +351,7 @@ func ren_expr_list(r: *Renamer, off: int64, len: int64, skip: *Map<int64>, bound
     }
 }
 
-func ren_field_expr_pairs(r: *Renamer, off: int64, len: int64, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_field_expr_pairs(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     mut i: int64 = 0
     while i < len {
@@ -360,7 +360,7 @@ func ren_field_expr_pairs(r: *Renamer, off: int64, len: int64, skip: *Map<int64>
     }
 }
 
-func ren_lambda(r: *Renamer, e: ExprNode, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_lambda(r: *Renamer, e: ExprNode, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     push_scope(bound)
     mut i: int64 = 0
@@ -376,7 +376,7 @@ func ren_lambda(r: *Renamer, e: ExprNode, skip: *Map<int64>, bound: *Vector<*Map
     pop_scope(bound)
 }
 
-func ren_do(r: *Renamer, e: ExprNode, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_do(r: *Renamer, e: ExprNode, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     push_scope(bound)
     mut i: int64 = 0
@@ -398,7 +398,7 @@ func ren_do(r: *Renamer, e: ExprNode, skip: *Map<int64>, bound: *Vector<*Map<int
     pop_scope(bound)
 }
 
-func ren_expr(r: *Renamer, id: int64, skip: *Map<int64>, bound: *Vector<*Map<int64>>) -> void {
+func ren_expr(r: *Renamer, id: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     exprs: *Vector<ExprNode> = (*a).exprs
     mut e: ExprNode = vec_get(exprs, id)
@@ -450,7 +450,7 @@ func ren_expr(r: *Renamer, id: int64, skip: *Map<int64>, bound: *Vector<*Map<int
 }
 
 export func privatize(a: *Ast, suffix: string) -> void {
-    rnames: *Map<int64> = new_set()
+    rnames: *Map<string, int64> = new_set()
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {

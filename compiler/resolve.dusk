@@ -12,19 +12,19 @@
 
 struct Resolver {
     ast: *Ast,
-    globals: *Map<int64>,
-    imports: *Map<int64>,
-    scopes: *Vector<*Map<Var>>,
-    cur_generics: *Map<int64>,
+    globals: *Map<string, int64>,
+    imports: *Map<string, int64>,
+    scopes: *Vector<*Map<string, Var>>,
+    cur_generics: *Map<string, int64>,
     depth: int64,
     errors: *Vector<SpanDiagnostic>,
 }
 
-func new_set() -> *Map<int64> {
+func new_set() -> *Map<string, int64> {
     return alloc(map_new())
 }
 
-func new_var_map() -> *Map<Var> {
+func new_var_map() -> *Map<string, Var> {
     return alloc(map_new())
 }
 
@@ -46,6 +46,13 @@ func collect_globals(r: *Resolver) -> void {
             // between the cast and the user function.
             if str_eq(fname, "int8") || str_eq(fname, "int16") || str_eq(fname, "int32") || str_eq(fname, "int64") || str_eq(fname, "char") || str_eq(fname, "rune") || str_eq(fname, "float32") || str_eq(fname, "float64") {
                 emit(r, quoted_msg("", fname, " is a primitive type name; a function cannot take it"), f.lo, f.hi)
+            }
+            // hash is a builtin call form the same way the cast names are, and a
+            // top-level function under the name would leave the checker and
+            // codegen resolving the same call differently, so it is refused at
+            // the declaration the same as a cast name.
+            if str_eq(fname, "hash") {
+                emit(r, quoted_msg("", fname, " is a builtin; a function cannot take its name"), f.lo, f.hi)
             }
             map_put((*r).globals, fname, 1)
         } else if it.kind == ik_struct() {
@@ -88,7 +95,7 @@ func collect_imports(r: *Resolver) -> void {
 }
 
 func resolver_new(a: *Ast) -> *Resolver {
-    scopes: *Vector<*Map<Var>> = alloc(vec_new())
+    scopes: *Vector<*Map<string, Var>> = alloc(vec_new())
     errors: *Vector<SpanDiagnostic> = alloc(vec_new())
     r: *Resolver = alloc(Resolver {
         ast: a,
@@ -105,14 +112,14 @@ func resolver_new(a: *Ast) -> *Resolver {
 }
 
 func push_scope(r: *Resolver) -> void {
-    scopes: *Vector<*Map<Var>> = (*r).scopes
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
     vec_push(scopes, new_var_map())
 }
 
 func pop_scope(r: *Resolver) -> void {
-    scopes: *Vector<*Map<Var>> = (*r).scopes
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
     idx: int64 = vec_len(scopes) - 1
-    scope: *Map<Var> = vec_get(scopes, idx)
+    scope: *Map<string, Var> = vec_get(scopes, idx)
     pending: *Vector<PendingUnused> = alloc(vec_new())
     keys: *Vector<string> = map_keys(scope)
     mut i: int64 = 0
@@ -140,8 +147,8 @@ func declare(r: *Resolver, name: string, mutable: bool, is_let: bool, lo: int64,
     if str_len(name) == 0 {
         return
     }
-    scopes: *Vector<*Map<Var>> = (*r).scopes
-    scope: *Map<Var> = vec_get(scopes, vec_len(scopes) - 1)
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
+    scope: *Map<string, Var> = vec_get(scopes, vec_len(scopes) - 1)
     if map_has(scope, name) {
         emit(r, quoted_msg("", name, " is already declared in this scope"), lo, hi)
     }
@@ -159,10 +166,10 @@ func use_name(r: *Resolver, name: string, lo: int64, hi: int64) -> void {
     if str_len(name) == 0 {
         return
     }
-    scopes: *Vector<*Map<Var>> = (*r).scopes
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
     mut i: int64 = vec_len(scopes) - 1
     while i >= 0 {
-        scope: *Map<Var> = vec_get(scopes, i)
+        scope: *Map<string, Var> = vec_get(scopes, i)
         if map_has(scope, name) {
             mut v: Var = unwrap_or(map_get(scope, name), zero_var())
             v.used = true
@@ -171,8 +178,8 @@ func use_name(r: *Resolver, name: string, lo: int64, hi: int64) -> void {
         }
         i = i - 1
     }
-    globals: *Map<int64> = (*r).globals
-    imports: *Map<int64> = (*r).imports
+    globals: *Map<string, int64> = (*r).globals
+    imports: *Map<string, int64> = (*r).imports
     if map_has(globals, name) { return }
     if map_has(imports, name) { return }
     if is_builtin_name(name) { return }
@@ -190,10 +197,10 @@ func assign_target(r: *Resolver, lhs: int64) -> void {
     mut found: bool = false
     mut mutable: bool = false
     mut depth: int64 = 0
-    scopes: *Vector<*Map<Var>> = (*r).scopes
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
     mut i: int64 = vec_len(scopes) - 1
     while i >= 0 {
-        scope: *Map<Var> = vec_get(scopes, i)
+        scope: *Map<string, Var> = vec_get(scopes, i)
         if map_has(scope, name) {
             v: Var = unwrap_or(map_get(scope, name), zero_var())
             found = true
@@ -243,7 +250,7 @@ func resolve_match(r: *Resolver, scrut: int64, off: int64, len: int64) -> void {
             }
         } else if p.kind == pk_ident() {
             pname: string = ast_name(a, p.a)
-            globals: *Map<int64> = (*r).globals
+            globals: *Map<string, int64> = (*r).globals
             if !map_has(globals, pname) {
                 declare(r, pname, false, false, 0, 0)
             }
@@ -305,8 +312,8 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
                 arg: ExprNode = vec_get((*a).exprs, arg_id)
                 if arg.kind == xk_ident() {
                     n: string = ast_name(a, arg.a)
-                    globals2: *Map<int64> = (*r).globals
-                    generics: *Map<int64> = (*r).cur_generics
+                    globals2: *Map<string, int64> = (*r).globals
+                    generics: *Map<string, int64> = (*r).cur_generics
                     if is_reserved_uint(n) {
                         emit(r, "unsigned integers are reserved; use the signed widths", arg.lo, arg.hi)
                         walk_arg = false
@@ -457,7 +464,7 @@ func item_name(a: *Ast, it: ItemNode) -> string {
 
 func resolver_run(r: *Resolver) -> void {
     a: *Ast = (*r).ast
-    seen: *Map<int64> = new_set()
+    seen: *Map<string, int64> = new_set()
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {

@@ -19,7 +19,7 @@
 
 // ---- substitution and structural predicates ----
 
-export func subst_apply(m: *Mono, id: int64, subst: *Map<int64>) -> int64 {
+export func subst_apply(m: *Mono, id: int64, subst: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_named() {
@@ -99,7 +99,7 @@ export func contains_infer(a: *Ast, id: int64) -> bool {
     return false
 }
 
-export func mentions(a: *Ast, id: int64, names: *Map<int64>) -> bool {
+export func mentions(a: *Ast, id: int64, names: *Map<string, int64>) -> bool {
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_named() {
         if n.c == 0 { return map_has(names, ast_name(a, n.a)) }
@@ -133,7 +133,7 @@ export func mentions(a: *Ast, id: int64, names: *Map<int64>) -> bool {
     return false
 }
 
-export func unify(m: *Mono, pat: int64, concrete: int64, params: *Map<int64>, out: *Map<int64>) -> void {
+export func unify(m: *Mono, pat: int64, concrete: int64, params: *Map<string, int64>, out: *Map<string, int64>) -> void {
     a: *Ast = (*m).ast
     pn: TypeNode = vec_get((*a).types, pat)
     if pn.kind == tk_named() {
@@ -192,7 +192,7 @@ export func unify(m: *Mono, pat: int64, concrete: int64, params: *Map<int64>, ou
 
 // Resolves each declared type parameter from the inference; a parameter no site
 // pinned defaults to int64 and its name is recorded so the caller can report it.
-export func solve(m: *Mono, off: int64, len: int64, inf: *Map<int64>) -> ArgResult {
+export func solve(m: *Mono, off: int64, len: int64, inf: *Map<string, int64>) -> ArgResult {
     a: *Ast = (*m).ast
     targs: *Vector<int64> = alloc(vec_new())
     missing: *Vector<string> = alloc(vec_new())
@@ -237,9 +237,9 @@ export func str_in_vec(v: *Vector<string>, s: string) -> bool {
     return false
 }
 
-export func build_subst(m: *Mono, off: int64, len: int64, args: *Vector<int64>) -> *Map<int64> {
+export func build_subst(m: *Mono, off: int64, len: int64, args: *Vector<int64>) -> *Map<string, int64> {
     a: *Ast = (*m).ast
-    s: *Map<int64> = alloc(map_new())
+    s: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < len && i < vec_len(args) {
         map_put(s, ast_name(a, vec_get((*a).kids, off + i)), vec_get(args, i))
@@ -248,9 +248,9 @@ export func build_subst(m: *Mono, off: int64, len: int64, args: *Vector<int64>) 
     return s
 }
 
-export func generics_set(m: *Mono, off: int64, len: int64) -> *Map<int64> {
+export func generics_set(m: *Mono, off: int64, len: int64) -> *Map<string, int64> {
     a: *Ast = (*m).ast
-    s: *Map<int64> = alloc(map_new())
+    s: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < len {
         map_put(s, ast_name(a, vec_get((*a).kids, off + i)), 1)
@@ -259,8 +259,8 @@ export func generics_set(m: *Mono, off: int64, len: int64) -> *Map<int64> {
     return s
 }
 
-export func map_clone_i64(src: *Map<int64>) -> *Map<int64> {
-    out: *Map<int64> = alloc(map_new())
+export func map_clone_i64(src: *Map<string, int64>) -> *Map<string, int64> {
+    out: *Map<string, int64> = alloc(map_new())
     ks: *Vector<string> = map_keys(src)
     mut i: int64 = 0
     while i < vec_len(ks) {
@@ -271,8 +271,8 @@ export func map_clone_i64(src: *Map<int64>) -> *Map<int64> {
     return out
 }
 
-export func union_subst(base: *Map<int64>, over: *Map<int64>) -> *Map<int64> {
-    out: *Map<int64> = map_clone_i64(base)
+export func union_subst(base: *Map<string, int64>, over: *Map<string, int64>) -> *Map<string, int64> {
+    out: *Map<string, int64> = map_clone_i64(base)
     ks: *Vector<string> = map_keys(over)
     mut i: int64 = 0
     while i < vec_len(ks) {
@@ -316,7 +316,7 @@ export func lambda_single_return(a: *Ast, exprid: int64) -> int64 {
 
 // ---- static typing ----
 
-export func static_ty(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+export func static_ty(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, exprid)
     if e.kind == xk_int() {
@@ -378,7 +378,7 @@ export func static_ty(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int
     return -1
 }
 
-func static_ty_call(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+func static_ty_call(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, exprid)
     callee: ExprNode = vec_get((*a).exprs, e.a)
@@ -389,9 +389,9 @@ func static_ty_call(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int64
             gfid: int64 = unwrap_or(map_get(m_gfuncs(m), f), -1)
             gf: FuncNode = vec_get((*a).funcs, gfid)
             sr: SolveResult = solve_call(m, gfid, args, subst, env, -1)
-            missset: *Map<int64> = str_vec_set(sr.missing)
+            missset: *Map<string, int64> = str_vec_set(sr.missing)
             if mentions(a, gf.ret, missset) { return -1 }
-            inf: *Map<int64> = build_subst(m, gf.generics_off, gf.generics_len, sr.targs)
+            inf: *Map<string, int64> = build_subst(m, gf.generics_off, gf.generics_len, sr.targs)
             return subst_apply(m, gf.ret, inf)
         }
         if map_has(m_nfuncs(m), f) {
@@ -425,7 +425,7 @@ func static_ty_call(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int64
     return -1
 }
 
-func static_ty_field(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+func static_ty_field(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, exprid)
     base: ExprNode = vec_get((*a).exprs, e.a)
@@ -450,7 +450,7 @@ func static_ty_field(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int6
             gsid: int64 = unwrap_or(map_get(m_gstructs(m), s), -1)
             gs: StructNode = vec_get((*a).structs, gsid)
             sargs: *Vector<int64> = named_targs(a, bt)
-            fsubst: *Map<int64> = build_subst(m, gs.generics_off, gs.generics_len, sargs)
+            fsubst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, sargs)
             mut fi: int64 = 0
             while fi < gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
@@ -466,11 +466,11 @@ func static_ty_field(m: *Mono, exprid: int64, subst: *Map<int64>, env: *Map<int6
 
 // ---- call / struct / enum inference ----
 
-export func solve_call(m: *Mono, gfid: int64, args: *Vector<int64>, subst: *Map<int64>, env: *Map<int64>, expected: int64) -> SolveResult {
+export func solve_call(m: *Mono, gfid: int64, args: *Vector<int64>, subst: *Map<string, int64>, env: *Map<string, int64>, expected: int64) -> SolveResult {
     a: *Ast = (*m).ast
     gf: FuncNode = vec_get((*a).funcs, gfid)
-    params: *Map<int64> = generics_set(m, gf.generics_off, gf.generics_len)
-    inf: *Map<int64> = alloc(map_new())
+    params: *Map<string, int64> = generics_set(m, gf.generics_off, gf.generics_len)
+    inf: *Map<string, int64> = alloc(map_new())
     // Non-lambda arguments first; their bindings are authoritative.
     mut i: int64 = 0
     while i < gf.params_len {
@@ -500,8 +500,8 @@ export func solve_call(m: *Mono, gfid: int64, args: *Vector<int64>, subst: *Map<
                 dty: int64 = unwrap_collector(a, p2.ty)
                 dn: TypeNode = vec_get((*a).types, dty)
                 if dn.kind == tk_func() {
-                    merged: *Map<int64> = union_subst(subst, inf)
-                    env2: *Map<int64> = map_clone_i64(env)
+                    merged: *Map<string, int64> = union_subst(subst, inf)
+                    env2: *Map<string, int64> = map_clone_i64(env)
                     lam: ExprNode = vec_get((*a).exprs, argid2)
                     mut lp: int64 = 0
                     while lp < lam.b {
@@ -536,7 +536,7 @@ func unwrap_collector(a: *Ast, id: int64) -> int64 {
     return id
 }
 
-export func infer_struct_args(m: *Mono, gsid: int64, off: int64, len: int64, expected: int64, subst: *Map<int64>, env: *Map<int64>) -> ArgResult {
+export func infer_struct_args(m: *Mono, gsid: int64, off: int64, len: int64, expected: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> ArgResult {
     a: *Ast = (*m).ast
     gs: StructNode = vec_get((*a).structs, gsid)
     if expected >= 0 {
@@ -552,8 +552,8 @@ export func infer_struct_args(m: *Mono, gsid: int64, off: int64, len: int64, exp
             return ArgResult { targs: targs, missing: nomiss }
         }
     }
-    params: *Map<int64> = generics_set(m, gs.generics_off, gs.generics_len)
-    inf: *Map<int64> = alloc(map_new())
+    params: *Map<string, int64> = generics_set(m, gs.generics_off, gs.generics_len)
+    inf: *Map<string, int64> = alloc(map_new())
     mut fi: int64 = 0
     while fi < len {
         fname: string = ast_name(a, vec_get((*a).kids, off + fi))
@@ -574,7 +574,7 @@ export func infer_struct_args(m: *Mono, gsid: int64, off: int64, len: int64, exp
     return solve(m, gs.generics_off, gs.generics_len, inf)
 }
 
-export func enum_args(m: *Mono, g: string, expected: int64, payload: *Vector<int64>, subst: *Map<int64>, env: *Map<int64>, variant: string) -> ArgResult {
+export func enum_args(m: *Mono, g: string, expected: int64, payload: *Vector<int64>, subst: *Map<string, int64>, env: *Map<string, int64>, variant: string) -> ArgResult {
     a: *Ast = (*m).ast
     geid: int64 = unwrap_or(map_get(m_genums(m), g), -1)
     ge: EnumNode = vec_get((*a).enums, geid)
@@ -591,8 +591,8 @@ export func enum_args(m: *Mono, g: string, expected: int64, payload: *Vector<int
             return ArgResult { targs: targs, missing: nomiss }
         }
     }
-    params: *Map<int64> = generics_set(m, ge.generics_off, ge.generics_len)
-    inf: *Map<int64> = alloc(map_new())
+    params: *Map<string, int64> = generics_set(m, ge.generics_off, ge.generics_len)
+    inf: *Map<string, int64> = alloc(map_new())
     mut vi: int64 = 0
     while vi < ge.variants_len {
         va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
@@ -630,7 +630,7 @@ export func enum_has_variant(m: *Mono, g: string, v: string) -> bool {
     return false
 }
 
-export func await_element_ty(m: *Mono, opid: int64, subst: *Map<int64>, env: *Map<int64>) -> int64 {
+export func await_element_ty(m: *Mono, opid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     t: int64 = static_ty(m, opid, subst, env)
     if t < 0 { return -1 }
@@ -673,8 +673,8 @@ func int_lit_ty(a: *Ast, suffix_id: int64) -> string {
     return "int64"
 }
 
-func str_vec_set(v: *Vector<string>) -> *Map<int64> {
-    s: *Map<int64> = alloc(map_new())
+func str_vec_set(v: *Vector<string>) -> *Map<string, int64> {
+    s: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < vec_len(v) {
         map_put(s, vec_get(v, i), 1)

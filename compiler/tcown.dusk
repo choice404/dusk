@@ -148,7 +148,7 @@ func chain_field_ty(tc: *TypeChecker, base_ty: int64, fname: string) -> int64 {
     n: TyNode = ty_get((*tc).ty, base_ty)
     if n.kind == tyk_named() {
         sname: string = ty_name((*tc).ty, base_ty)
-        structs: *Map<StructSig> = (*tc).structs
+        structs: *Map<string, StructSig> = (*tc).structs
         if !map_has(structs, sname) { return ty_unknown((*tc).ty) }
         st: StructSig = sig_struct((*tc).sigtab, sname)
         idx: int64 = struct_field_index(tc, st, fname)
@@ -243,7 +243,7 @@ export func declare_await_bind(tc: *TypeChecker, b: BindNode, mutable: bool, pt:
     set_esc(tc, name, false, false)
 }
 
-func scan_task_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>) -> void {
+func scan_task_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, int64>) -> void {
     if expr_id < 0 { return }
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
@@ -296,7 +296,7 @@ func scan_task_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>) -> voi
     }
 }
 
-func scan_task_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>) -> void {
+func scan_task_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, int64>) -> void {
     a: *Ast = (*tc).ast
     s: StmtNode = vec_get((*a).stmts, stmt_id)
     if s.kind == sk_let() {
@@ -337,7 +337,7 @@ func scan_task_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>) -> voi
     }
 }
 
-func scan_task_block(tc: *TypeChecker, block_id: int64, bound: *Map<int64>) -> void {
+func scan_task_block(tc: *TypeChecker, block_id: int64, bound: *Map<string, int64>) -> void {
     a: *Ast = (*tc).ast
     b: BlockNode = vec_get((*a).blocks, block_id)
     mut i: int64 = 0
@@ -352,7 +352,7 @@ export func check_task_lambda_ownership(tc: *TypeChecker, expr_id: int64) -> voi
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
     if e.kind != xk_lambda() { return }
-    bound: *Map<int64> = alloc(map_new())
+    bound: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < e.b {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))

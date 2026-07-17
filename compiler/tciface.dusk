@@ -34,27 +34,27 @@ func msg3(a: string, b: string, c: string) -> string {
 }
 
 func tc_has_iface(tc: *TypeChecker, name: string) -> bool {
-    m: *Map<int64> = (*tc).ifaces
+    m: *Map<string, int64> = (*tc).ifaces
     return map_has(m, name)
 }
 
 func tc_has_impl(tc: *TypeChecker, key: string) -> bool {
-    m: *Map<int64> = (*tc).impls
+    m: *Map<string, int64> = (*tc).impls
     return map_has(m, key)
 }
 
 func tc_has_struct(tc: *TypeChecker, name: string) -> bool {
-    m: *Map<StructSig> = (*tc).structs
+    m: *Map<string, StructSig> = (*tc).structs
     return map_has(m, name)
 }
 
 func tc_has_enum(tc: *TypeChecker, name: string) -> bool {
-    m: *Map<EnumSig> = (*tc).enums
+    m: *Map<string, EnumSig> = (*tc).enums
     return map_has(m, name)
 }
 
 func tc_has_embed(tc: *TypeChecker, name: string) -> bool {
-    m: *Map<TyList> = (*tc).embed_fields
+    m: *Map<string, TyList> = (*tc).embed_fields
     return map_has(m, name)
 }
 
@@ -449,8 +449,8 @@ export func reject_iface_targ_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi
             arg: TypeNode = vec_get((*a).types, arg_id)
             if arg.kind == tk_named() {
                 name: string = ast_name(a, arg.a)
-                ifaces: *Map<int64> = (*tc).ifaces
-                gens: *Map<int64> = (*tc).cur_generics
+                ifaces: *Map<string, int64> = (*tc).ifaces
+                gens: *Map<string, int64> = (*tc).cur_generics
                 if map_has(ifaces, name) && !map_has(gens, name) {
                     tc_emit(tc, "an interface cannot be a generic type argument; generics are monomorphized over concrete types", lo, hi)
                 }
@@ -711,7 +711,7 @@ export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
     if im.iface < 0 { return }
     a: *Ast = (*tc).ast
     iface: string = ast_name(a, im.iface)
-    iface_methods: *Map<MethodList> = (*tc).iface_methods
+    iface_methods: *Map<string, MethodList> = (*tc).iface_methods
     ml: MethodList = unwrap_or(map_get(iface_methods, iface), MethodList { off: 0, len: 0 })
     tyname: string = ast_name(a, im.ty)
     mut i: int64 = 0
@@ -732,7 +732,7 @@ export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
 
 export func check_duplicate_impls(tc: *TypeChecker) -> void {
     a: *Ast = (*tc).ast
-    seen: *Map<int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     items: *Vector<ItemNode> = (*a).items
     while i < vec_len(items) {
@@ -799,7 +799,7 @@ func cross_ok() -> int64 { return 0 }
 func cross_future() -> int64 { return 1 }
 func cross_view() -> int64 { return 2 }
 
-func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> int64 {
+func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> int64 {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_future() { return cross_future() }
     if n.kind == tyk_slice() || n.kind == tyk_func() { return cross_view() }
@@ -819,7 +819,7 @@ func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> int
         if map_has(seen, name) { return cross_ok() }
         map_put(seen, name, 1)
         if tc_has_embed(tc, name) {
-            embeds: *Map<TyList> = (*tc).embed_fields
+            embeds: *Map<string, TyList> = (*tc).embed_fields
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
             mut j: int64 = 0
             while j < list.len {
@@ -841,7 +841,7 @@ export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
     while i < f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         raw: int64 = tc_raw_type(tc, p.ty)
-        seen: *Map<int64> = alloc(map_new())
+        seen: *Map<string, int64> = alloc(map_new())
         reason: int64 = async_cross_reason(tc, raw, seen)
         if reason == cross_future() {
             tc_emit(tc, async_take_msg(ast_name(a, p.name), true), f.lo, f.hi)
@@ -851,7 +851,7 @@ export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
         i = i + 1
     }
     raw_ret: int64 = tc_raw_type(tc, f.ret)
-    seen_ret: *Map<int64> = alloc(map_new())
+    seen_ret: *Map<string, int64> = alloc(map_new())
     rr: int64 = async_cross_reason(tc, raw_ret, seen_ret)
     if rr == cross_future() {
         tc_emit(tc, "an async func cannot return a future; a future belongs to the event loop thread, so await it in the caller instead", f.lo, f.hi)

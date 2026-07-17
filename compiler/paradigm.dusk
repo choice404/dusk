@@ -13,7 +13,7 @@ struct Gate {
     functional: bool,
     procedural: bool,
     oop: bool,
-    user_fns: *Map<int64>,
+    user_fns: *Map<string, int64>,
     errors: *Vector<SpanDiagnostic>,
 }
 
@@ -29,8 +29,8 @@ func declares(a: *Ast, name: string) -> bool {
     return false
 }
 
-func collect_user_fns(a: *Ast) -> *Map<int64> {
-    fns: *Map<int64> = alloc(map_new())
+func collect_user_fns(a: *Ast) -> *Map<string, int64> {
+    fns: *Map<string, int64> = alloc(map_new())
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {
@@ -228,7 +228,7 @@ func gate_expr(g: *Gate, a: *Ast, id: int64) -> void {
         if callee.kind == xk_ident() {
             name: string = ast_name(a, callee.a)
             if is_functional_builtin(name) {
-                user_fns: *Map<int64> = (*g).user_fns
+                user_fns: *Map<string, int64> = (*g).user_fns
                 if !map_has(user_fns, name) {
                     what: string = named_what(name, "builtin")
                     need_functional(g, what, e.lo, e.hi)

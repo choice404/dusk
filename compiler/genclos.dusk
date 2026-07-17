@@ -14,7 +14,7 @@
 @import genstate
 @import frame
 
-func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*(*s).ctx).ast
     e: ExprNode = vec_get((*a).exprs, eid)
     if e.kind == xk_ident() {
@@ -87,7 +87,7 @@ func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, boun
     if e.kind == xk_collect() { clos_collect_expr(s, e.b, used, bound) }
 }
 
-func clos_collect_match(s: *GenFuncState, scrut: int64, off: int64, len: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func clos_collect_match(s: *GenFuncState, scrut: int64, off: int64, len: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*(*s).ctx).ast
     clos_collect_expr(s, scrut, used, bound)
     mut i: int64 = 0
@@ -108,7 +108,7 @@ func clos_collect_match(s: *GenFuncState, scrut: int64, off: int64, len: int64, 
     }
 }
 
-func clos_collect_stmt(s: *GenFuncState, sid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func clos_collect_stmt(s: *GenFuncState, sid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*(*s).ctx).ast
     st: StmtNode = vec_get((*a).stmts, sid)
     if st.kind == sk_let() {
@@ -159,7 +159,7 @@ func clos_collect_stmt(s: *GenFuncState, sid: int64, used: *Vector<string>, boun
     if st.kind == sk_match() { clos_collect_match(s, st.a, st.b, st.c, used, bound) }
 }
 
-func clos_collect_block(s: *GenFuncState, bid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func clos_collect_block(s: *GenFuncState, bid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*(*s).ctx).ast
     block: BlockNode = vec_get((*a).blocks, bid)
     mut i: int64 = 0
@@ -172,7 +172,7 @@ func clos_collect_block(s: *GenFuncState, bid: int64, used: *Vector<string>, bou
 export func clos_captures(s: *GenFuncState, e: ExprNode) -> *Vector<LocalVal> {
     a: *Ast = (*(*s).ctx).ast
     used: *Vector<string> = alloc(vec_new())
-    bound: *Map<int64> = alloc(map_new())
+    bound: *Map<string, int64> = alloc(map_new())
     mut p: int64 = 0
     while p < e.b {
         lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
@@ -181,8 +181,8 @@ export func clos_captures(s: *GenFuncState, e: ExprNode) -> *Vector<LocalVal> {
     }
     clos_collect_block(s, e.d, used, bound)
     caps: *Vector<LocalVal> = alloc(vec_new())
-    seen: *Map<int64> = alloc(map_new())
-    locals: *Map<LocalVal> = (*s).locals
+    seen: *Map<string, int64> = alloc(map_new())
+    locals: *Map<string, LocalVal> = (*s).locals
     mut i: int64 = 0
     while i < vec_len(used) {
         name: string = vec_get(used, i)
@@ -272,7 +272,7 @@ export func clos_emit_lambda_ex(s: *GenFuncState, e: ExprNode, name: string, env
     free(sigb)
     retll: string = cty_ll(c, ret_ty)
     fb: *FuncBuilder = func_new(retll, name, sig)
-    locals: *Map<LocalVal> = alloc(map_new())
+    locals: *Map<string, LocalVal> = alloc(map_new())
     defers: *Vector<int64> = alloc(vec_new())
     dummy: FramePrefix = frame_prefix(0, 1, alloc(vec_new()), alloc(vec_new()))
     lc: *Vector<string> = alloc(vec_new())
@@ -368,7 +368,8 @@ export func gen_lambda(s: *GenFuncState, e: ExprNode) -> Val {
         mut i: int64 = 0
         while i < vec_len(caps) {
             cap: LocalVal = vec_get(caps, i)
-            lv: LocalVal = unwrap_or(map_get((*s).locals, cap.op), LocalVal { ty: cty_void(c), op: gs_copy("") })
+            slocals: *Map<string, LocalVal> = (*s).locals
+            lv: LocalVal = unwrap_or(map_get(slocals, cap.op), LocalVal { ty: cty_void(c), op: gs_copy("") })
             v: string = gen_load_slot(s, lv.ty, lv.op)
             slot: string = next_tmp((*s).fb)
             gb: *StringBuilder = alloc(sb_new())

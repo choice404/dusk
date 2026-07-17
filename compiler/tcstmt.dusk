@@ -58,7 +58,7 @@ func infer_await_operand(tc: *TypeChecker, await_expr: ExprNode) -> int64 {
     // await still yields the right type instead of the permissive backstop.
     if fn.kind == tyk_named() {
         nm: string = ty_name((*tc).ty, ft)
-        fe: *Map<int64> = (*tc).future_elems
+        fe: *Map<string, int64> = (*tc).future_elems
         if map_has(fe, nm) {
             return unwrap_or(map_get(fe, nm), ty_unknown((*tc).ty))
         }
@@ -82,7 +82,7 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
         rn: TyNode = ty_get((*tc).ty, (*tc).cur_raw_ret)
         tn: TyNode = ty_get((*tc).ty, t)
         mut handled: bool = false
-        ifaces: *Map<int64> = (*tc).ifaces
+        ifaces: *Map<string, int64> = (*tc).ifaces
         if rn.kind == tyk_named() && map_has(ifaces, ty_name((*tc).ty, (*tc).cur_raw_ret)) && tn.kind == tyk_named() {
             check_conformance(tc, (*tc).cur_raw_ret, t, e.lo, e.hi)
             handled = true
@@ -118,7 +118,7 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
 }
 
 func branch_block(tc: *TypeChecker, block_id: int64) -> void {
-    saved: *Vector<*Map<int64>> = clone_owns(tc)
+    saved: *Vector<*Map<string, int64>> = clone_owns(tc)
     (*tc).branch_depth = (*tc).branch_depth + 1
     check_block(tc, block_id)
     (*tc).branch_depth = (*tc).branch_depth - 1
@@ -283,7 +283,7 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         itn: TyNode = ty_get((*tc).ty, it)
         mut ground: bool = itn.kind != tyk_unknown()
         if itn.kind == tyk_named() {
-            gmap: *Map<int64> = (*tc).cur_generics
+            gmap: *Map<string, int64> = (*tc).cur_generics
             if map_has(gmap, ty_name((*tc).ty, it)) { ground = false }
         }
         if ground {
@@ -320,7 +320,7 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
                 callee: ExprNode = vec_get((*a).exprs, e.a)
                 if callee.kind == xk_ident() {
                     aname: string = ast_name(a, callee.a)
-                    asyncs: *Map<int64> = (*tc).async_fns
+                    asyncs: *Map<string, int64> = (*tc).async_fns
                     if map_has(asyncs, aname) && !is_local(tc, aname) {
                         tc_emit(tc, future_never_awaited_msg(aname), e.lo, e.hi)
                     }

@@ -34,11 +34,11 @@ export struct CapFlow { idx: int64, name: string }
 // generic lists are read back out of the AST arenas through these indices.
 export struct SumTables {
     ast: *Ast,
-    ifaces: *Map<int64>,
-    struct_idx: *Map<int64>,
-    enum_idx: *Map<int64>,
-    variant_idx: *Map<int64>,
-    module_fns: *Map<int64>,
+    ifaces: *Map<string, int64>,
+    struct_idx: *Map<string, int64>,
+    enum_idx: *Map<string, int64>,
+    variant_idx: *Map<string, int64>,
+    module_fns: *Map<string, int64>,
     infer_ty: int64,
 }
 
@@ -48,15 +48,15 @@ export struct SumTables {
 // for deterministic rendering; frame_stores lists direct frame-view stores through
 // a parameter for outright diagnostics.
 export struct EscapeInfo {
-    summaries: *Map<SummaryHandle>,
-    method_summaries: *Map<SummaryHandle>,
-    lambda_returns: *Map<int64>,
-    lambda_sinks: *Map<int64>,
-    lambda_collect_sinks: *Map<int64>,
-    lambda_capture_flows: *Map<string>,
+    summaries: *Map<string, SummaryHandle>,
+    method_summaries: *Map<string, SummaryHandle>,
+    lambda_returns: *Map<string, int64>,
+    lambda_sinks: *Map<string, int64>,
+    lambda_collect_sinks: *Map<string, int64>,
+    lambda_capture_flows: *Map<string, string>,
     lambda_spans: *Vector<SpanKey>,
     frame_stores: *Vector<FlowProv>,
-    resolvable_fn_binds: *Map<string>,
+    resolvable_fn_binds: *Map<string, string>,
 }
 
 // A small set of parameter indices backed by an int64 bitmask. A function with
@@ -238,11 +238,11 @@ func is_neutral_builtin(name: string) -> bool {
 
 // Builds the immutable name and type tables from the merged, desugared module.
 export func sum_tables_new(a: *Ast) -> *SumTables {
-    ifaces: *Map<int64> = alloc(map_new())
-    struct_idx: *Map<int64> = alloc(map_new())
-    enum_idx: *Map<int64> = alloc(map_new())
-    variant_idx: *Map<int64> = alloc(map_new())
-    module_fns: *Map<int64> = alloc(map_new())
+    ifaces: *Map<string, int64> = alloc(map_new())
+    struct_idx: *Map<string, int64> = alloc(map_new())
+    enum_idx: *Map<string, int64> = alloc(map_new())
+    variant_idx: *Map<string, int64> = alloc(map_new())
+    module_fns: *Map<string, int64> = alloc(map_new())
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {
@@ -272,8 +272,8 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
     return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, enum_idx: enum_idx, variant_idx: variant_idx, module_fns: module_fns, infer_ty: infer_ty })
 }
 
-func gens_of(a: *Ast, off: int64, len: int64) -> *Map<int64> {
-    g: *Map<int64> = alloc(map_new())
+func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
+    g: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
@@ -286,11 +286,11 @@ func gens_of(a: *Ast, off: int64, len: int64) -> *Map<int64> {
 // slice, closure, interface, or an aggregate containing one, and a generic or
 // inference hole (conservative). A pointer, future, collector, and every scalar
 // or heap-backed primitive do not.
-export func sum_is_view(t: *SumTables, tyid: int64, gens: *Map<int64>) -> bool {
-    seen: *Map<int64> = alloc(map_new())
+export func sum_is_view(t: *SumTables, tyid: int64, gens: *Map<string, int64>) -> bool {
+    seen: *Map<string, int64> = alloc(map_new())
     return is_view_rec(t, tyid, gens, seen)
 }
-func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<int64>, seen: *Map<int64>) -> bool {
+func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *Map<string, int64>) -> bool {
     a: *Ast = (*t).ast
     kids: *Vector<int64> = (*a).kids
     n: TypeNode = vec_get((*a).types, tyid)
@@ -309,9 +309,9 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<int64>, seen: *Map<int64
     if n.kind == tk_unit() { return false }
     if n.kind == tk_infer() { return true }
     if n.kind == tk_named() {
-        ifaces: *Map<int64> = (*t).ifaces
-        sidx: *Map<int64> = (*t).struct_idx
-        eidx: *Map<int64> = (*t).enum_idx
+        ifaces: *Map<string, int64> = (*t).ifaces
+        sidx: *Map<string, int64> = (*t).struct_idx
+        eidx: *Map<string, int64> = (*t).enum_idx
         name: string = ast_name(a, n.a)
         if str_eq(name, "Future") { return false }
         if map_has(gens, name) { return true }
@@ -320,7 +320,7 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<int64>, seen: *Map<int64
             if map_has(seen, name) { return false }
             map_put(seen, name, 1)
             st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, name), 0))
-            sgen: *Map<int64> = gens_of(a, st.generics_off, st.generics_len)
+            sgen: *Map<string, int64> = gens_of(a, st.generics_off, st.generics_len)
             mut j: int64 = 0
             while j < st.fields_len {
                 fid: int64 = vec_get(kids, st.fields_off + j)
@@ -334,7 +334,7 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<int64>, seen: *Map<int64
             if map_has(seen, name) { return false }
             map_put(seen, name, 1)
             en: EnumNode = vec_get((*a).enums, unwrap_or(map_get(eidx, name), 0))
-            egen: *Map<int64> = gens_of(a, en.generics_off, en.generics_len)
+            egen: *Map<string, int64> = gens_of(a, en.generics_off, en.generics_len)
             mut k: int64 = 0
             while k < en.variants_len {
                 vid: int64 = vec_get(kids, en.variants_off + k)
@@ -360,10 +360,10 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<int64>, seen: *Map<int64
 // *raw T is the FFI boundary and does not; a generic type parameter does not,
 // since it already seeds origins as a view.
 export func sum_reaches_managed(t: *SumTables, tyid: int64) -> bool {
-    seen: *Map<int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
     return reaches_rec(t, tyid, seen)
 }
-func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<int64>) -> bool {
+func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<string, int64>) -> bool {
     a: *Ast = (*t).ast
     kids: *Vector<int64> = (*a).kids
     n: TypeNode = vec_get((*a).types, tyid)
@@ -383,8 +383,8 @@ func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<int64>) -> bool {
         return false
     }
     if n.kind == tk_named() {
-        sidx: *Map<int64> = (*t).struct_idx
-        eidx: *Map<int64> = (*t).enum_idx
+        sidx: *Map<string, int64> = (*t).struct_idx
+        eidx: *Map<string, int64> = (*t).enum_idx
         mut c: int64 = 0
         while c < n.c {
             arg: int64 = vec_get(kids, n.b + c)

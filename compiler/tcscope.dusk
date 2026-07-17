@@ -10,11 +10,11 @@
 @import tysigs
 @import tcstate
 
-func new_ty_map() -> *Map<int64> { return alloc(map_new()) }
-func new_err_map() -> *Map<ErrBind> { return alloc(map_new()) }
-func new_str_map() -> *Map<string> { return alloc(map_new()) }
-func new_sink_map() -> *Map<LambdaSinkBind> { return alloc(map_new()) }
-func new_alias_map() -> *Map<string> { return alloc(map_new()) }
+func new_ty_map() -> *Map<string, int64> { return alloc(map_new()) }
+func new_err_map() -> *Map<string, ErrBind> { return alloc(map_new()) }
+func new_str_map() -> *Map<string, string> { return alloc(map_new()) }
+func new_sink_map() -> *Map<string, LambdaSinkBind> { return alloc(map_new()) }
+func new_alias_map() -> *Map<string, string> { return alloc(map_new()) }
 
 export func push_scope(tc: *TypeChecker) -> void {
     vec_push((*tc).scopes, new_ty_map())
@@ -33,21 +33,21 @@ export func push_scope(tc: *TypeChecker) -> void {
 }
 
 export func pop_scope(tc: *TypeChecker) -> void {
-    scopes: *Vector<*Map<int64>> = (*tc).scopes
+    scopes: *Vector<*Map<string, int64>> = (*tc).scopes
     n: int64 = vec_len(scopes) - 1
     (*scopes).len = n
-    owns: *Vector<*Map<int64>> = (*tc).owns
-    muts: *Vector<*Map<int64>> = (*tc).muts
-    iface_binds: *Vector<*Map<string>> = (*tc).iface_binds
-    enum_binds: *Vector<*Map<string>> = (*tc).enum_binds
-    slice_iface_elem: *Vector<*Map<int64>> = (*tc).slice_iface_elem
-    esc_slices: *Vector<*Map<int64>> = (*tc).esc_slices
-    esc_closures: *Vector<*Map<int64>> = (*tc).esc_closures
-    alias_edges: *Vector<*Map<string>> = (*tc).alias_edges
-    ptr_param_borrows: *Vector<*Map<int64>> = (*tc).ptr_param_borrows
-    lambda_sink_binds: *Vector<*Map<LambdaSinkBind>> = (*tc).lambda_sink_binds
-    lambda_capture_binds: *Vector<*Map<string>> = (*tc).lambda_capture_binds
-    err_binds: *Vector<*Map<ErrBind>> = (*tc).err_binds
+    owns: *Vector<*Map<string, int64>> = (*tc).owns
+    muts: *Vector<*Map<string, int64>> = (*tc).muts
+    iface_binds: *Vector<*Map<string, string>> = (*tc).iface_binds
+    enum_binds: *Vector<*Map<string, string>> = (*tc).enum_binds
+    slice_iface_elem: *Vector<*Map<string, int64>> = (*tc).slice_iface_elem
+    esc_slices: *Vector<*Map<string, int64>> = (*tc).esc_slices
+    esc_closures: *Vector<*Map<string, int64>> = (*tc).esc_closures
+    alias_edges: *Vector<*Map<string, string>> = (*tc).alias_edges
+    ptr_param_borrows: *Vector<*Map<string, int64>> = (*tc).ptr_param_borrows
+    lambda_sink_binds: *Vector<*Map<string, LambdaSinkBind>> = (*tc).lambda_sink_binds
+    lambda_capture_binds: *Vector<*Map<string, string>> = (*tc).lambda_capture_binds
+    err_binds: *Vector<*Map<string, ErrBind>> = (*tc).err_binds
     (*owns).len = n
     (*muts).len = n
     (*iface_binds).len = n
@@ -115,7 +115,7 @@ func unhandled_msg(name: string) -> string {
     return out
 }
 
-func report_pending_errors(tc: *TypeChecker, m: *Map<ErrBind>) -> void {
+func report_pending_errors(tc: *TypeChecker, m: *Map<string, ErrBind>) -> void {
     keys: *Vector<string> = map_keys(m)
     pending: *Vector<PendingErr> = alloc(vec_new())
     mut i: int64 = 0
@@ -138,16 +138,16 @@ func report_pending_errors(tc: *TypeChecker, m: *Map<ErrBind>) -> void {
 
 export func declare(tc: *TypeChecker, name: string, tyid: int64) -> void {
     if str_len(name) == 0 { return }
-    scopes: *Vector<*Map<int64>> = (*tc).scopes
-    scope: *Map<int64> = vec_get(scopes, vec_len(scopes) - 1)
+    scopes: *Vector<*Map<string, int64>> = (*tc).scopes
+    scope: *Map<string, int64> = vec_get(scopes, vec_len(scopes) - 1)
     map_put(scope, name, tyid)
 }
 
 export func lookup(tc: *TypeChecker, name: string) -> int64 {
-    scopes: *Vector<*Map<int64>> = (*tc).scopes
+    scopes: *Vector<*Map<string, int64>> = (*tc).scopes
     mut i: int64 = vec_len(scopes) - 1
     while i >= 0 {
-        scope: *Map<int64> = vec_get(scopes, i)
+        scope: *Map<string, int64> = vec_get(scopes, i)
         if map_has(scope, name) {
             return unwrap_or(map_get(scope, name), ty_unknown((*tc).ty))
         }
@@ -167,7 +167,7 @@ export func lookup(tc: *TypeChecker, name: string) -> int64 {
 }
 
 export func is_local(tc: *TypeChecker, name: string) -> bool {
-    scopes: *Vector<*Map<int64>> = (*tc).scopes
+    scopes: *Vector<*Map<string, int64>> = (*tc).scopes
     mut i: int64 = vec_len(scopes) - 1
     while i >= 0 {
         if map_has(vec_get(scopes, i), name) { return true }
@@ -177,17 +177,17 @@ export func is_local(tc: *TypeChecker, name: string) -> bool {
 }
 
 export func declare_mut(tc: *TypeChecker, name: string) -> void {
-    muts: *Vector<*Map<int64>> = (*tc).muts
+    muts: *Vector<*Map<string, int64>> = (*tc).muts
     if vec_len(muts) == 0 { return }
-    m: *Map<int64> = vec_get(muts, vec_len(muts) - 1)
+    m: *Map<string, int64> = vec_get(muts, vec_len(muts) - 1)
     map_put(m, name, 1)
 }
 
 export func is_mutable(tc: *TypeChecker, name: string) -> bool {
-    muts: *Vector<*Map<int64>> = (*tc).muts
+    muts: *Vector<*Map<string, int64>> = (*tc).muts
     mut i: int64 = vec_len(muts) - 1
     while i >= 0 {
-        m: *Map<int64> = vec_get(muts, i)
+        m: *Map<string, int64> = vec_get(muts, i)
         if map_has(m, name) { return true }
         i = i - 1
     }
@@ -195,17 +195,17 @@ export func is_mutable(tc: *TypeChecker, name: string) -> bool {
 }
 
 export func declare_iface_bind(tc: *TypeChecker, name: string, iface: string) -> void {
-    iface_binds: *Vector<*Map<string>> = (*tc).iface_binds
+    iface_binds: *Vector<*Map<string, string>> = (*tc).iface_binds
     if vec_len(iface_binds) == 0 { return }
-    m: *Map<string> = vec_get(iface_binds, vec_len(iface_binds) - 1)
+    m: *Map<string, string> = vec_get(iface_binds, vec_len(iface_binds) - 1)
     map_put(m, name, iface)
 }
 
 export func iface_bind_name(tc: *TypeChecker, name: string) -> string {
-    iface_binds: *Vector<*Map<string>> = (*tc).iface_binds
+    iface_binds: *Vector<*Map<string, string>> = (*tc).iface_binds
     mut i: int64 = vec_len(iface_binds) - 1
     while i >= 0 {
-        m: *Map<string> = vec_get(iface_binds, i)
+        m: *Map<string, string> = vec_get(iface_binds, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), "") }
         i = i - 1
     }
@@ -213,17 +213,17 @@ export func iface_bind_name(tc: *TypeChecker, name: string) -> string {
 }
 
 export func declare_slice_iface(tc: *TypeChecker, name: string, raw: int64) -> void {
-    slice_iface_elem: *Vector<*Map<int64>> = (*tc).slice_iface_elem
+    slice_iface_elem: *Vector<*Map<string, int64>> = (*tc).slice_iface_elem
     if vec_len(slice_iface_elem) == 0 { return }
-    m: *Map<int64> = vec_get(slice_iface_elem, vec_len(slice_iface_elem) - 1)
+    m: *Map<string, int64> = vec_get(slice_iface_elem, vec_len(slice_iface_elem) - 1)
     map_put(m, name, raw)
 }
 
 export func slice_iface_of(tc: *TypeChecker, name: string) -> int64 {
-    slice_iface_elem: *Vector<*Map<int64>> = (*tc).slice_iface_elem
+    slice_iface_elem: *Vector<*Map<string, int64>> = (*tc).slice_iface_elem
     mut i: int64 = vec_len(slice_iface_elem) - 1
     while i >= 0 {
-        m: *Map<int64> = vec_get(slice_iface_elem, i)
+        m: *Map<string, int64> = vec_get(slice_iface_elem, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), ty_unknown((*tc).ty)) }
         i = i - 1
     }
@@ -231,17 +231,17 @@ export func slice_iface_of(tc: *TypeChecker, name: string) -> int64 {
 }
 
 export func declare_enum_bind(tc: *TypeChecker, name: string, en: string) -> void {
-    enum_binds: *Vector<*Map<string>> = (*tc).enum_binds
+    enum_binds: *Vector<*Map<string, string>> = (*tc).enum_binds
     if vec_len(enum_binds) == 0 { return }
-    m: *Map<string> = vec_get(enum_binds, vec_len(enum_binds) - 1)
+    m: *Map<string, string> = vec_get(enum_binds, vec_len(enum_binds) - 1)
     map_put(m, name, en)
 }
 
 export func enum_bind_name(tc: *TypeChecker, name: string) -> string {
-    enum_binds: *Vector<*Map<string>> = (*tc).enum_binds
+    enum_binds: *Vector<*Map<string, string>> = (*tc).enum_binds
     mut i: int64 = vec_len(enum_binds) - 1
     while i >= 0 {
-        m: *Map<string> = vec_get(enum_binds, i)
+        m: *Map<string, string> = vec_get(enum_binds, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), "") }
         i = i - 1
     }
@@ -250,18 +250,18 @@ export func enum_bind_name(tc: *TypeChecker, name: string) -> string {
 
 export func declare_err(tc: *TypeChecker, name: string, lo: int64, hi: int64) -> void {
     if (*tc).types_only { return }
-    err_binds: *Vector<*Map<ErrBind>> = (*tc).err_binds
+    err_binds: *Vector<*Map<string, ErrBind>> = (*tc).err_binds
     if vec_len(err_binds) == 0 { return }
-    m: *Map<ErrBind> = vec_get(err_binds, vec_len(err_binds) - 1)
+    m: *Map<string, ErrBind> = vec_get(err_binds, vec_len(err_binds) - 1)
     map_put(m, name, ErrBind { lo: lo, hi: hi, pending: true })
 }
 
 export func mark_err_handled(tc: *TypeChecker, name: string) -> void {
     if (*tc).types_only { return }
-    err_binds: *Vector<*Map<ErrBind>> = (*tc).err_binds
+    err_binds: *Vector<*Map<string, ErrBind>> = (*tc).err_binds
     mut i: int64 = vec_len(err_binds) - 1
     while i >= 0 {
-        m: *Map<ErrBind> = vec_get(err_binds, i)
+        m: *Map<string, ErrBind> = vec_get(err_binds, i)
         if map_has(m, name) {
             mut eb: ErrBind = unwrap_or(map_get(m, name), ErrBind { lo: 0, hi: 0, pending: false })
             eb.pending = false
@@ -274,22 +274,22 @@ export func mark_err_handled(tc: *TypeChecker, name: string) -> void {
 
 export func set_esc(tc: *TypeChecker, name: string, slice: bool, closure: bool) -> void {
     if (*tc).types_only { return }
-    esc_slices: *Vector<*Map<int64>> = (*tc).esc_slices
-    esc_closures: *Vector<*Map<int64>> = (*tc).esc_closures
+    esc_slices: *Vector<*Map<string, int64>> = (*tc).esc_slices
+    esc_closures: *Vector<*Map<string, int64>> = (*tc).esc_closures
     if vec_len(esc_slices) == 0 { return }
-    sm: *Map<int64> = vec_get(esc_slices, vec_len(esc_slices) - 1)
-    cm: *Map<int64> = vec_get(esc_closures, vec_len(esc_closures) - 1)
+    sm: *Map<string, int64> = vec_get(esc_slices, vec_len(esc_slices) - 1)
+    cm: *Map<string, int64> = vec_get(esc_closures, vec_len(esc_closures) - 1)
     if slice { map_put(sm, name, 1) } else { map_put(sm, name, 0) }
     if closure { map_put(cm, name, 1) } else { map_put(cm, name, 0) }
-    fp: *Map<FlowProv> = (*tc).flow_prov
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
     map_remove(fp, name)
 }
 
 export func is_esc_slice(tc: *TypeChecker, name: string) -> bool {
-    esc_slices: *Vector<*Map<int64>> = (*tc).esc_slices
+    esc_slices: *Vector<*Map<string, int64>> = (*tc).esc_slices
     mut i: int64 = vec_len(esc_slices) - 1
     while i >= 0 {
-        m: *Map<int64> = vec_get(esc_slices, i)
+        m: *Map<string, int64> = vec_get(esc_slices, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), 0) != 0 }
         i = i - 1
     }
@@ -297,10 +297,10 @@ export func is_esc_slice(tc: *TypeChecker, name: string) -> bool {
 }
 
 export func is_esc_closure(tc: *TypeChecker, name: string) -> bool {
-    esc_closures: *Vector<*Map<int64>> = (*tc).esc_closures
+    esc_closures: *Vector<*Map<string, int64>> = (*tc).esc_closures
     mut i: int64 = vec_len(esc_closures) - 1
     while i >= 0 {
-        m: *Map<int64> = vec_get(esc_closures, i)
+        m: *Map<string, int64> = vec_get(esc_closures, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), 0) != 0 }
         i = i - 1
     }
@@ -309,17 +309,17 @@ export func is_esc_closure(tc: *TypeChecker, name: string) -> bool {
 
 export func declare_own(tc: *TypeChecker, name: string, own: int64) -> void {
     if (*tc).types_only { return }
-    owns: *Vector<*Map<int64>> = (*tc).owns
+    owns: *Vector<*Map<string, int64>> = (*tc).owns
     if vec_len(owns) == 0 { return }
-    m: *Map<int64> = vec_get(owns, vec_len(owns) - 1)
+    m: *Map<string, int64> = vec_get(owns, vec_len(owns) - 1)
     map_put(m, name, own)
 }
 
 export func own_of(tc: *TypeChecker, name: string) -> int64 {
-    owns: *Vector<*Map<int64>> = (*tc).owns
+    owns: *Vector<*Map<string, int64>> = (*tc).owns
     mut i: int64 = vec_len(owns) - 1
     while i >= 0 {
-        m: *Map<int64> = vec_get(owns, i)
+        m: *Map<string, int64> = vec_get(owns, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), 0) }
         i = i - 1
     }
@@ -328,10 +328,10 @@ export func own_of(tc: *TypeChecker, name: string) -> int64 {
 
 export func set_moved(tc: *TypeChecker, name: string) -> void {
     if (*tc).types_only { return }
-    owns: *Vector<*Map<int64>> = (*tc).owns
+    owns: *Vector<*Map<string, int64>> = (*tc).owns
     mut i: int64 = vec_len(owns) - 1
     while i >= 0 {
-        m: *Map<int64> = vec_get(owns, i)
+        m: *Map<string, int64> = vec_get(owns, i)
         if map_has(m, name) {
             map_put(m, name, own_moved())
             return
@@ -340,13 +340,13 @@ export func set_moved(tc: *TypeChecker, name: string) -> void {
     }
 }
 
-export func clone_owns(tc: *TypeChecker) -> *Vector<*Map<int64>> {
-    out: *Vector<*Map<int64>> = alloc(vec_new())
-    owns: *Vector<*Map<int64>> = (*tc).owns
+export func clone_owns(tc: *TypeChecker) -> *Vector<*Map<string, int64>> {
+    out: *Vector<*Map<string, int64>> = alloc(vec_new())
+    owns: *Vector<*Map<string, int64>> = (*tc).owns
     mut i: int64 = 0
     while i < vec_len(owns) {
-        src: *Map<int64> = vec_get(owns, i)
-        dst: *Map<int64> = new_ty_map()
+        src: *Map<string, int64> = vec_get(owns, i)
+        dst: *Map<string, int64> = new_ty_map()
         keys: *Vector<string> = map_keys(src)
         mut j: int64 = 0
         while j < vec_len(keys) {
@@ -360,16 +360,16 @@ export func clone_owns(tc: *TypeChecker) -> *Vector<*Map<int64>> {
     return out
 }
 
-export func restore_owns(tc: *TypeChecker, saved: *Vector<*Map<int64>>) -> void {
+export func restore_owns(tc: *TypeChecker, saved: *Vector<*Map<string, int64>>) -> void {
     (*tc).owns = saved
 }
 
 export func alias_link(tc: *TypeChecker, a: string, b: string) -> void {
     if (*tc).types_only { return }
     if str_eq(a, b) { return }
-    alias_edges: *Vector<*Map<string>> = (*tc).alias_edges
+    alias_edges: *Vector<*Map<string, string>> = (*tc).alias_edges
     if vec_len(alias_edges) == 0 { return }
-    scope: *Map<string> = vec_get(alias_edges, vec_len(alias_edges) - 1)
+    scope: *Map<string, string> = vec_get(alias_edges, vec_len(alias_edges) - 1)
     map_put(scope, a, alias_list_add(unwrap_or(map_get(scope, a), ""), b))
     map_put(scope, b, alias_list_add(unwrap_or(map_get(scope, b), ""), a))
 }
@@ -420,7 +420,7 @@ func alias_list_remove(list: string, name: string) -> string {
     return out
 }
 
-func alias_enqueue(list: string, seen: *Map<int64>, queue: *Vector<string>, out: *Vector<string>) -> void {
+func alias_enqueue(list: string, seen: *Map<string, int64>, queue: *Vector<string>, out: *Vector<string>) -> void {
     mut start: int64 = 0
     mut i: int64 = 0
     while list[i] != 0 {
@@ -440,17 +440,17 @@ func alias_enqueue(list: string, seen: *Map<int64>, queue: *Vector<string>, out:
 export func alias_group(tc: *TypeChecker, name: string) -> *Vector<string> {
     out: *Vector<string> = alloc(vec_new())
     queue: *Vector<string> = alloc(vec_new())
-    seen: *Map<int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
     map_put(seen, name, 1)
     vec_push(queue, name)
     vec_push(out, name)
     mut qi: int64 = 0
     while qi < vec_len(queue) {
         cur: string = vec_get(queue, qi)
-        alias_edges: *Vector<*Map<string>> = (*tc).alias_edges
+        alias_edges: *Vector<*Map<string, string>> = (*tc).alias_edges
         mut i: int64 = 0
         while i < vec_len(alias_edges) {
-            scope: *Map<string> = vec_get(alias_edges, i)
+            scope: *Map<string, string> = vec_get(alias_edges, i)
             if map_has(scope, cur) {
                 alias_enqueue(unwrap_or(map_get(scope, cur), ""), seen, queue, out)
             }
@@ -463,10 +463,10 @@ export func alias_group(tc: *TypeChecker, name: string) -> *Vector<string> {
 
 export func alias_drop(tc: *TypeChecker, name: string) -> void {
     if (*tc).types_only { return }
-    alias_edges: *Vector<*Map<string>> = (*tc).alias_edges
+    alias_edges: *Vector<*Map<string, string>> = (*tc).alias_edges
     mut i: int64 = vec_len(alias_edges) - 1
     while i >= 0 {
-        scope: *Map<string> = vec_get(alias_edges, i)
+        scope: *Map<string, string> = vec_get(alias_edges, i)
         if map_has(scope, name) {
             list: string = unwrap_or(map_get(scope, name), "")
             mut start: int64 = 0
@@ -493,10 +493,10 @@ func esc_int(flag: bool) -> int64 {
     return 0
 }
 
-func update_esc_owner(stack: *Vector<*Map<int64>>, name: string, flag: bool, conditional: bool) -> void {
+func update_esc_owner(stack: *Vector<*Map<string, int64>>, name: string, flag: bool, conditional: bool) -> void {
     mut i: int64 = vec_len(stack) - 1
     while i >= 0 {
-        m: *Map<int64> = vec_get(stack, i)
+        m: *Map<string, int64> = vec_get(stack, i)
         if map_has(m, name) {
             old: bool = unwrap_or(map_get(m, name), 0) != 0
             if conditional { map_put(m, name, esc_int(old || flag)) } else { map_put(m, name, esc_int(flag)) }

@@ -18,8 +18,8 @@
 @import sumplace
 @import sumhof
 
-func build_gens(a: *Ast, off: int64, len: int64) -> *Map<int64> {
-    g: *Map<int64> = alloc(map_new())
+func build_gens(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
+    g: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
@@ -32,10 +32,10 @@ func build_gens(a: *Ast, off: int64, len: int64) -> *Map<int64> {
 // reads callee summaries and writes only local state. When lret/fs point at the
 // shared outputs the caller keeps the lambda tables and frame stores; the fixpoint
 // passes throwaway ones.
-func transfer_func(t: *SumTables, summaries: *Map<SummaryHandle>, f: FuncNode, self_ty: string, lret: *Map<int64>, lsink: *Map<int64>, lcoll: *Map<int64>, lcap: *Map<string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> SummaryHandle {
+func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string, lret: *Map<string, int64>, lsink: *Map<string, int64>, lcoll: *Map<string, int64>, lcap: *Map<string, string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> SummaryHandle {
     a: *Ast = (*t).ast
-    gens: *Map<int64> = build_gens(a, f.generics_off, f.generics_len)
-    fnb: *Map<string> = sum_resolvable_fn_binds(t, f.body)
+    gens: *Map<string, int64> = build_gens(a, f.generics_off, f.generics_len)
+    fnb: *Map<string, string> = sum_resolvable_fn_binds(t, f.body)
     c: *SumCtx = ctx_new(t, summaries, gens, fnb, lret, lsink, lcoll, lcap, lspans, fs)
     mut idx: int64 = 0
     if str_len(self_ty) > 0 {
@@ -53,11 +53,11 @@ func transfer_func(t: *SumTables, summaries: *Map<SummaryHandle>, f: FuncNode, s
     return ctx_summary(c)
 }
 
-func throwaway_transfer(t: *SumTables, summaries: *Map<SummaryHandle>, f: FuncNode, self_ty: string) -> SummaryHandle {
-    lret: *Map<int64> = alloc(map_new())
-    lsink: *Map<int64> = alloc(map_new())
-    lcoll: *Map<int64> = alloc(map_new())
-    lcap: *Map<string> = alloc(map_new())
+func throwaway_transfer(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string) -> SummaryHandle {
+    lret: *Map<string, int64> = alloc(map_new())
+    lsink: *Map<string, int64> = alloc(map_new())
+    lcoll: *Map<string, int64> = alloc(map_new())
+    lcap: *Map<string, string> = alloc(map_new())
     lspans: *Vector<SpanKey> = alloc(vec_new())
     fs: *Vector<FlowProv> = alloc(vec_new())
     return transfer_func(t, summaries, f, self_ty, lret, lsink, lcoll, lcap, lspans, fs)
@@ -75,9 +75,9 @@ func sum_eq(a: SummaryHandle, b: SummaryHandle) -> bool {
 // occurrence kept, paired with a funcs map from name to the last function of that
 // name (a duplicate name in an invalid program resolves to the latter definition,
 // matching stage0's HashMap of func references).
-func build_funcs_order(a: *Ast, funcs: *Map<int64>, order: *Vector<string>) -> void {
+func build_funcs_order(a: *Ast, funcs: *Map<string, int64>, order: *Vector<string>) -> void {
     items: *Vector<ItemNode> = (*a).items
-    seen: *Map<int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < vec_len(items) {
         it: ItemNode = vec_get(items, i)
@@ -97,15 +97,15 @@ func build_funcs_order(a: *Ast, funcs: *Map<int64>, order: *Vector<string>) -> v
 // The direct module-function callees of each summarized function, inverted so a
 // grown callee summary re-enqueues exactly its callers. Duplicate caller entries
 // are harmless: the queued set prevents a double enqueue.
-func build_callers(t: *SumTables, funcs: *Map<int64>, callers: *Map<string>) -> void {
+func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<string, string>) -> void {
     a: *Ast = (*t).ast
-    mfns: *Map<int64> = (*t).module_fns
+    mfns: *Map<string, int64> = (*t).module_fns
     keys: *Vector<string> = map_keys(funcs)
     mut i: int64 = 0
     while i < vec_len(keys) {
         fname: string = vec_get(keys, i)
         f: FuncNode = vec_get((*a).funcs, unwrap_or(map_get(funcs, fname), 0))
-        callees: *Map<int64> = alloc(map_new())
+        callees: *Map<string, int64> = alloc(map_new())
         collect_callees_block(t, mfns, f.body, callees)
         cks: *Vector<string> = map_keys(callees)
         mut j: int64 = 0
@@ -124,15 +124,15 @@ func build_callers(t: *SumTables, funcs: *Map<int64>, callers: *Map<string>) -> 
     }
 }
 
-func solve_fns(t: *SumTables, summaries: *Map<SummaryHandle>) -> void {
+func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
     a: *Ast = (*t).ast
-    funcs: *Map<int64> = alloc(map_new())
+    funcs: *Map<string, int64> = alloc(map_new())
     order: *Vector<string> = alloc(vec_new())
     build_funcs_order(a, funcs, order)
-    callers: *Map<string> = alloc(map_new())
+    callers: *Map<string, string> = alloc(map_new())
     build_callers(t, funcs, callers)
     queue: *Vector<string> = alloc(vec_new())
-    queued: *Map<int64> = alloc(map_new())
+    queued: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < vec_len(order) {
         name: string = vec_get(order, i)
@@ -164,7 +164,7 @@ func solve_fns(t: *SumTables, summaries: *Map<SummaryHandle>) -> void {
     }
 }
 
-func enqueue_callers(callers: *Map<string>, name: string, queue: *Vector<string>, queued: *Map<int64>) -> void {
+func enqueue_callers(callers: *Map<string, string>, name: string, queue: *Vector<string>, queued: *Map<string, int64>) -> void {
     if !map_has(callers, name) { return }
     list: string = unwrap_or(map_get(callers, name), "")
     mut start: int64 = 0
@@ -182,7 +182,7 @@ func enqueue_callers(callers: *Map<string>, name: string, queue: *Vector<string>
     }
 }
 
-func collect_callees_block(t: *SumTables, mfns: *Map<int64>, bid: int64, out: *Map<int64>) -> void {
+func collect_callees_block(t: *SumTables, mfns: *Map<string, int64>, bid: int64, out: *Map<string, int64>) -> void {
     if bid < 0 { return }
     a: *Ast = (*t).ast
     blocks: *Vector<BlockNode> = (*a).blocks
@@ -195,7 +195,7 @@ func collect_callees_block(t: *SumTables, mfns: *Map<int64>, bid: int64, out: *M
     }
 }
 
-func collect_callees_stmt(t: *SumTables, mfns: *Map<int64>, sid: int64, out: *Map<int64>) -> void {
+func collect_callees_stmt(t: *SumTables, mfns: *Map<string, int64>, sid: int64, out: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     s: StmtNode = vec_get((*a).stmts, sid)
     if s.kind == sk_let() {
@@ -223,7 +223,7 @@ func collect_callees_stmt(t: *SumTables, mfns: *Map<int64>, sid: int64, out: *Ma
     }
 }
 
-func collect_callees_match(t: *SumTables, mfns: *Map<int64>, scrut: int64, arms_off: int64, arms_len: int64, out: *Map<int64>) -> void {
+func collect_callees_match(t: *SumTables, mfns: *Map<string, int64>, scrut: int64, arms_off: int64, arms_len: int64, out: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     collect_callees_expr(t, mfns, scrut, out)
     mut i: int64 = 0
@@ -234,7 +234,7 @@ func collect_callees_match(t: *SumTables, mfns: *Map<int64>, scrut: int64, arms_
     }
 }
 
-func collect_callees_expr(t: *SumTables, mfns: *Map<int64>, id: int64, out: *Map<int64>) -> void {
+func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, out: *Map<string, int64>) -> void {
     if id < 0 { return }
     a: *Ast = (*t).ast
     e: ExprNode = vec_get((*a).exprs, id)
@@ -288,7 +288,7 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<int64>, id: int64, out: *Map
     }
 }
 
-func collect_methods(t: *SumTables, summaries: *Map<SummaryHandle>, method_summaries: *Map<SummaryHandle>) -> void {
+func collect_methods(t: *SumTables, summaries: *Map<string, SummaryHandle>, method_summaries: *Map<string, SummaryHandle>) -> void {
     a: *Ast = (*t).ast
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
@@ -311,7 +311,7 @@ func collect_methods(t: *SumTables, summaries: *Map<SummaryHandle>, method_summa
 
 // One walk of every function and impl method under the settled summary table,
 // keeping the per-lambda tables and the frame-store sites the checker enforces.
-func collect_pass(t: *SumTables, summaries: *Map<SummaryHandle>, info: EscapeInfo) -> void {
+func collect_pass(t: *SumTables, summaries: *Map<string, SummaryHandle>, info: EscapeInfo) -> void {
     a: *Ast = (*t).ast
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
@@ -333,7 +333,7 @@ func collect_pass(t: *SumTables, summaries: *Map<SummaryHandle>, info: EscapeInf
     sort_frame_stores(info.frame_stores)
 }
 
-func collect_one(t: *SumTables, summaries: *Map<SummaryHandle>, f: FuncNode, self_ty: string, info: EscapeInfo) -> void {
+func collect_one(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string, info: EscapeInfo) -> void {
     transfer_func(t, summaries, f, self_ty, info.lambda_returns, info.lambda_sinks, info.lambda_collect_sinks, info.lambda_capture_flows, info.lambda_spans, info.frame_stores)
 }
 
@@ -401,17 +401,17 @@ func fp_eq(x: FlowProv, y: FlowProv) -> bool {
 
 export func compute_escape_info(a: *Ast) -> EscapeInfo {
     t: *SumTables = sum_tables_new(a)
-    summaries: *Map<SummaryHandle> = alloc(map_new())
+    summaries: *Map<string, SummaryHandle> = alloc(map_new())
     solve_fns(t, summaries)
-    method_summaries: *Map<SummaryHandle> = alloc(map_new())
+    method_summaries: *Map<string, SummaryHandle> = alloc(map_new())
     collect_methods(t, summaries, method_summaries)
-    lret: *Map<int64> = alloc(map_new())
-    lsink: *Map<int64> = alloc(map_new())
-    lcoll: *Map<int64> = alloc(map_new())
-    lcap: *Map<string> = alloc(map_new())
+    lret: *Map<string, int64> = alloc(map_new())
+    lsink: *Map<string, int64> = alloc(map_new())
+    lcoll: *Map<string, int64> = alloc(map_new())
+    lcap: *Map<string, string> = alloc(map_new())
     lspans: *Vector<SpanKey> = alloc(vec_new())
     fs: *Vector<FlowProv> = alloc(vec_new())
-    rfb: *Map<string> = alloc(map_new())
+    rfb: *Map<string, string> = alloc(map_new())
     info: EscapeInfo = EscapeInfo {
         summaries: summaries, method_summaries: method_summaries,
         lambda_returns: lret, lambda_sinks: lsink, lambda_collect_sinks: lcoll,
@@ -554,12 +554,12 @@ func lambda_line(b: *StringBuilder, lo: int64, hi: int64, table: string, value: 
 // stage0's println of its joined lines.
 export func render_escape_info(info: EscapeInfo) -> string {
     b: *StringBuilder = alloc(sb_new())
-    sums: *Map<SummaryHandle> = info.summaries
-    msums: *Map<SummaryHandle> = info.method_summaries
-    lcap: *Map<string> = info.lambda_capture_flows
-    lcoll: *Map<int64> = info.lambda_collect_sinks
-    lret: *Map<int64> = info.lambda_returns
-    lsink: *Map<int64> = info.lambda_sinks
+    sums: *Map<string, SummaryHandle> = info.summaries
+    msums: *Map<string, SummaryHandle> = info.method_summaries
+    lcap: *Map<string, string> = info.lambda_capture_flows
+    lcoll: *Map<string, int64> = info.lambda_collect_sinks
+    lret: *Map<string, int64> = info.lambda_returns
+    lsink: *Map<string, int64> = info.lambda_sinks
     spans: *Vector<SpanKey> = info.lambda_spans
     fkeys: *Vector<string> = map_keys(sums)
     sort_strings(fkeys)

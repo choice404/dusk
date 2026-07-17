@@ -1,16 +1,21 @@
-// std.map: a hash map from string keys to values, generic over the value type V.
+// std.map: a hash map generic over both its key type K and its value type V.
 // Open addressing with linear probing over heap buffers that double and rehash
 // once the table is half full, which keeps an empty slot reachable so a probe
 // always terminates. Pass the map by pointer so inserts and growth persist.
-// Keys are compared by their NUL terminated bytes.
+// A key is any hashable type, an integer of any width, a char, a rune, or a
+// string; keys hash through the hash builtin and compare with ==, so a string
+// key hashes and compares by its content and a scalar key by its value. The map
+// stores keys by value: a string key is the caller's pointer and must outlive
+// the map, exactly the contract the string-keyed map always had, and a scalar
+// key carries no lifetime at all.
 
 @import std.string
 @import std.functional.maybe
 @import std.vector
 
-export struct Map<V> {
+export struct Map<K, V> {
     used: *raw bool,
-    keys: *raw string,
+    keys: *raw K,
     vals: *raw V,
     len: int64,
     cap: int64,
@@ -18,24 +23,17 @@ export struct Map<V> {
     // sequence rather than the hash layout. A key is recorded once, at its first
     // insertion; an overwrite does not touch this and a grow rehashes the table
     // without rebuilding it. The map owns this vector and map_free releases it.
-    order: *Vector<string>,
+    order: *Vector<K>,
 }
 
-// A polynomial rolling hash over the key bytes. Overflow wraps, so the result
-// may be negative; the callers take the modulo and fold a negative index back
-// into range.
+// The string hash the map used before the hash builtin existed, kept so an
+// external caller of the old name keeps working for one release. It is the same
+// polynomial rolling hash the builtin computes for a string.
 export func map_hash(s: string) -> int64 {
-    mut h: int64 = 0
-    mut i: int64 = 0
-    while s[i] != 0 {
-        c: int64 = s[i]
-        h = h * 31 + c
-        i = i + 1
-    }
-    return h
+    return hash(s)
 }
 
-export func map_new<V>() -> Map<V> {
+export func map_new<K, V>() -> Map<K, V> {
     cap: int64 = 8
     u: *raw bool = alloc_bytes(cap * sizeof(bool))
     mut i: int64 = 0
@@ -43,16 +41,16 @@ export func map_new<V>() -> Map<V> {
         u[i] = false
         i = i + 1
     }
-    k: *raw string = alloc_bytes(cap * sizeof(string))
+    k: *raw K = alloc_bytes(cap * sizeof(K))
     v: *raw V = alloc_bytes(cap * sizeof(V))
-    o: *Vector<string> = alloc(vec_new())
+    o: *Vector<K> = alloc(vec_new())
     return Map { used: u, keys: k, vals: v, len: 0, cap: cap, order: o }
 }
 
 // The slot a key probes to, folded into range. A negative hash, from overflow,
 // lands back in 0 to cap minus 1.
-func map_slot<V>(m: *Map<V>, k: string) -> int64 {
-    mut idx: int64 = map_hash(k) % (*m).cap
+func map_slot<K, V>(m: *Map<K, V>, k: K) -> int64 {
+    mut idx: int64 = hash(k) % (*m).cap
     if idx < 0 {
         idx = idx + (*m).cap
     }
@@ -62,9 +60,9 @@ func map_slot<V>(m: *Map<V>, k: string) -> int64 {
 // Doubles the table and reinserts every live entry. The old buffers are freed
 // after the move. len resets to zero and climbs again as the entries reinsert,
 // staying under the new half full threshold so no nested grow fires.
-func map_grow<V>(m: *Map<V>) -> void {
+func map_grow<K, V>(m: *Map<K, V>) -> void {
     old_used: *raw bool = (*m).used
-    old_keys: *raw string = (*m).keys
+    old_keys: *raw K = (*m).keys
     old_vals: *raw V = (*m).vals
     old_cap: int64 = (*m).cap
     ncap: int64 = old_cap * 2
@@ -75,7 +73,7 @@ func map_grow<V>(m: *Map<V>) -> void {
         i = i + 1
     }
     (*m).used = nu
-    (*m).keys = alloc_bytes(ncap * sizeof(string))
+    (*m).keys = alloc_bytes(ncap * sizeof(K))
     (*m).vals = alloc_bytes(ncap * sizeof(V))
     (*m).cap = ncap
     (*m).len = 0
@@ -98,10 +96,10 @@ func map_grow<V>(m: *Map<V>) -> void {
 // and false when an existing key was overwritten. This only touches the table:
 // the caller handles growth and the insertion order record, which keeps a grow's
 // rehash from ever re recording a key.
-func map_place<V>(m: *Map<V>, k: string, v: V) -> bool {
+func map_place<K, V>(m: *Map<K, V>, k: K, v: V) -> bool {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
-        if str_eq((*m).keys[idx], k) {
+        if (*m).keys[idx] == k {
             (*m).vals[idx] = v
             return false
         }
@@ -117,7 +115,7 @@ func map_place<V>(m: *Map<V>, k: string, v: V) -> bool {
     return true
 }
 
-export func map_put<V>(m: *Map<V>, k: string, v: V) -> void {
+export func map_put<K, V>(m: *Map<K, V>, k: K, v: V) -> void {
     if (*m).len * 2 >= (*m).cap {
         map_grow(m)
     }
@@ -126,13 +124,13 @@ export func map_put<V>(m: *Map<V>, k: string, v: V) -> void {
     }
 }
 
-func map_forget_order<V>(m: *Map<V>, k: string) -> void {
-    o: *Vector<string> = (*m).order
+func map_forget_order<K, V>(m: *Map<K, V>, k: K) -> void {
+    o: *Vector<K> = (*m).order
     mut write: int64 = 0
     mut read: int64 = 0
     while read < vec_len(o) {
-        cur: string = vec_get(o, read)
-        if !str_eq(cur, k) {
+        cur: K = vec_get(o, read)
+        if !(cur == k) {
             if write != read {
                 vec_set(o, write, cur)
             }
@@ -143,10 +141,10 @@ func map_forget_order<V>(m: *Map<V>, k: string) -> void {
     (*o).len = write
 }
 
-export func map_remove<V>(m: *Map<V>, k: string) -> bool {
+export func map_remove<K, V>(m: *Map<K, V>, k: K) -> bool {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
-        if str_eq((*m).keys[idx], k) {
+        if (*m).keys[idx] == k {
             (*m).used[idx] = false
             (*m).len = (*m).len - 1
             map_forget_order(m, k)
@@ -155,7 +153,7 @@ export func map_remove<V>(m: *Map<V>, k: string) -> bool {
                 idx = 0
             }
             while (*m).used[idx] {
-                rk: string = (*m).keys[idx]
+                rk: K = (*m).keys[idx]
                 rv: V = (*m).vals[idx]
                 (*m).used[idx] = false
                 (*m).len = (*m).len - 1
@@ -175,10 +173,10 @@ export func map_remove<V>(m: *Map<V>, k: string) -> bool {
     return false
 }
 
-export func map_get<V>(m: *Map<V>, k: string) -> Maybe<V> {
+export func map_get<K, V>(m: *Map<K, V>, k: K) -> Maybe<V> {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
-        if str_eq((*m).keys[idx], k) {
+        if (*m).keys[idx] == k {
             return Maybe.Some((*m).vals[idx])
         }
         idx = idx + 1
@@ -189,10 +187,10 @@ export func map_get<V>(m: *Map<V>, k: string) -> Maybe<V> {
     return Maybe.None
 }
 
-export func map_has<V>(m: *Map<V>, k: string) -> bool {
+export func map_has<K, V>(m: *Map<K, V>, k: K) -> bool {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
-        if str_eq((*m).keys[idx], k) {
+        if (*m).keys[idx] == k {
             return true
         }
         idx = idx + 1
@@ -203,7 +201,7 @@ export func map_has<V>(m: *Map<V>, k: string) -> bool {
     return false
 }
 
-export func map_len<V>(m: *Map<V>) -> int64 {
+export func map_len<K, V>(m: *Map<K, V>) -> int64 {
     return (*m).len
 }
 
@@ -211,13 +209,13 @@ export func map_len<V>(m: *Map<V>) -> int64 {
 // vec_free and free. Each key is copied out of the map's own order record, so the
 // returned vector is independent of the map: freeing it never touches the map,
 // and map_free never touches it, so there is no shared owner. The copied elements
-// are the key strings themselves, which the map still owns, so freeing the
-// returned vector releases its buffer only. A key appears once, at its first
-// insertion, so iterating the result visits every live entry exactly once in a
-// deterministic order.
-export func map_keys<V>(m: *Map<V>) -> *Vector<string> {
-    out: *Vector<string> = alloc(vec_new())
-    src: *Vector<string> = (*m).order
+// are the key values themselves; for a string key that is the string the map
+// still owns, so freeing the returned vector releases its buffer only. A key
+// appears once, at its first insertion, so iterating the result visits every
+// live entry exactly once in a deterministic order.
+export func map_keys<K, V>(m: *Map<K, V>) -> *Vector<K> {
+    out: *Vector<K> = alloc(vec_new())
+    src: *Vector<K> = (*m).order
     mut i: int64 = 0
     while i < vec_len(src) {
         vec_push(out, vec_get(src, i))
@@ -226,7 +224,7 @@ export func map_keys<V>(m: *Map<V>) -> *Vector<string> {
     return out
 }
 
-export func map_free<V>(m: *Map<V>) -> void {
+export func map_free<K, V>(m: *Map<K, V>) -> void {
     free((*m).used)
     free((*m).keys)
     free((*m).vals)

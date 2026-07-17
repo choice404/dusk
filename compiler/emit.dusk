@@ -24,9 +24,9 @@ export struct EmitModule {
     globals: *Vector<string>,
     funcs: *Vector<string>,
     str_count: int64,
-    strings: *Map<string>,
+    strings: *Map<string, string>,
     lambda_count: int64,
-    funcval_thunks: *Map<int64>,
+    funcval_thunks: *Map<string, int64>,
     faults: *Vector<string>,
 }
 
@@ -43,8 +43,8 @@ export func emit_module_new(name: string, triple: string) -> *EmitModule {
     externs: *Vector<string> = alloc(vec_new())
     globals: *Vector<string> = alloc(vec_new())
     funcs: *Vector<string> = alloc(vec_new())
-    strings: *Map<string> = alloc(map_new())
-    thunks: *Map<int64> = alloc(map_new())
+    strings: *Map<string, string> = alloc(map_new())
+    thunks: *Map<string, int64> = alloc(map_new())
     faults: *Vector<string> = alloc(vec_new())
     return alloc(EmitModule {
         name: copy_string(name),
@@ -76,7 +76,7 @@ export func emit_fresh_lambda(m: *EmitModule) -> int64 {
 }
 
 export func emit_need_funcval_thunk(m: *EmitModule, name: string) -> bool {
-    thunks: *Map<int64> = (*m).funcval_thunks
+    thunks: *Map<string, int64> = (*m).funcval_thunks
     if map_has(thunks, name) {
         return false
     }
@@ -170,7 +170,7 @@ export func encode_cstring(text: string) -> EncodedCString {
 // one global; the encoded form is a bijection of the constant's bytes, so an
 // embedded NUL cannot truncate the key the way a decoded dusk string would.
 func emit_intern_cstr(m: *EmitModule, enc_text: string, enc_len: int64) -> string {
-    strings: *Map<string> = (*m).strings
+    strings: *Map<string, string> = (*m).strings
     if map_has(strings, enc_text) {
         return unwrap_or(map_get(strings, enc_text), "")
     }

@@ -15,7 +15,7 @@ export struct SizeAlign { size: int64, align: int64 }
 export struct CTyArena {
     ast: *Ast,
     nodes: *Vector<CTyNode>,
-    dedup: *Map<int64>,
+    dedup: *Map<string, int64>,
 }
 
 export func ctyk_int() -> int64 { return 0 }
@@ -46,12 +46,12 @@ func cty_built(b: *StringBuilder) -> string { return substring(sb_cstr(b), 0, sb
 
 export func cty_new(a: *Ast) -> *CTyArena {
     nodes: *Vector<CTyNode> = alloc(vec_new())
-    dedup: *Map<int64> = alloc(map_new())
+    dedup: *Map<string, int64> = alloc(map_new())
     return alloc(CTyArena { ast: a, nodes: nodes, dedup: dedup })
 }
 
 export func cty_nodes(c: *CTyArena) -> *Vector<CTyNode> { return (*c).nodes }
-func cty_dedup(c: *CTyArena) -> *Map<int64> { return (*c).dedup }
+func cty_dedup(c: *CTyArena) -> *Map<string, int64> { return (*c).dedup }
 
 func cty_key(kind: int64, a: int64, b: int64, c0: int64, text: string) -> string {
     out: *StringBuilder = alloc(sb_new())
@@ -76,7 +76,7 @@ export func cty_intern(c: *CTyArena, kind: int64, a: int64, b: int64, text: stri
 
 export func cty_intern_full(c: *CTyArena, kind: int64, a: int64, b: int64, c0: int64, text: string) -> int64 {
     key: string = cty_key(kind, a, b, c0, text)
-    dedup: *Map<int64> = cty_dedup(c)
+    dedup: *Map<string, int64> = cty_dedup(c)
     if map_has(dedup, key) { return unwrap_or(map_get(dedup, key), -1) }
     nodes: *Vector<CTyNode> = cty_nodes(c)
     id: int64 = vec_len(nodes)

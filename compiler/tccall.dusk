@@ -86,11 +86,11 @@ func hashable(tc: *TypeChecker, tyid: int64) -> bool {
     }
     if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
-        structs: *Map<StructSig> = (*tc).structs
+        structs: *Map<string, StructSig> = (*tc).structs
         if map_has(structs, name) { return false }
-        enums: *Map<EnumSig> = (*tc).enums
+        enums: *Map<string, EnumSig> = (*tc).enums
         if map_has(enums, name) { return false }
-        ifaces: *Map<int64> = (*tc).ifaces
+        ifaces: *Map<string, int64> = (*tc).ifaces
         if map_has(ifaces, name) { return false }
         return true
     }
@@ -165,7 +165,7 @@ func base_lookup(tc: *TypeChecker, id: int64) -> int64 {
 }
 
 func enum_contains_variant(tc: *TypeChecker, en: string, v: string) -> bool {
-    enums: *Map<EnumSig> = (*tc).enums
+    enums: *Map<string, EnumSig> = (*tc).enums
     es: EnumSig = unwrap_or(map_get(enums, en), EnumSig { off: 0, len: 0 })
     sigs: *TypeSigs = (*tc).sigtab
     mut i: int64 = 0
@@ -229,12 +229,12 @@ func check_variant_ctor_args(tc: *TypeChecker, en: string, v: string, arg_off: i
         pn: TyNode = ty_get((*tc).ty, p)
         mut skip_plain: bool = false
         if pn.kind == tyk_named() {
-            ifaces: *Map<int64> = (*tc).ifaces
+            ifaces: *Map<string, int64> = (*tc).ifaces
             if map_has(ifaces, ty_name((*tc).ty, p)) {
                 skip_plain = true
             }
-            structs: *Map<StructSig> = (*tc).structs
-            enums: *Map<EnumSig> = (*tc).enums
+            structs: *Map<string, StructSig> = (*tc).structs
+            enums: *Map<string, EnumSig> = (*tc).enums
             pname: string = ty_name((*tc).ty, p)
             if !map_has(structs, pname) && !map_has(enums, pname) {
                 skip_plain = true
@@ -243,7 +243,7 @@ func check_variant_ctor_args(tc: *TypeChecker, en: string, v: string, arg_off: i
         if pn.kind == tyk_slice() {
             pe: TyNode = ty_get((*tc).ty, pn.a)
             if pe.kind == tyk_named() {
-                ifaces2: *Map<int64> = (*tc).ifaces
+                ifaces2: *Map<string, int64> = (*tc).ifaces
                 if map_has(ifaces2, ty_name((*tc).ty, pn.a)) {
                     skip_plain = true
                 }
@@ -309,7 +309,7 @@ func infer_async_run(tc: *TypeChecker, arg_off: int64, arg_len: int64, lo: int64
             callee: ExprNode = vec_get((*a).exprs, first.a)
             if callee.kind == xk_ident() {
                 name: string = ast_name(a, callee.a)
-                asyncs: *Map<int64> = (*tc).async_fns
+                asyncs: *Map<string, int64> = (*tc).async_fns
                 if map_has(asyncs, name) && !is_local(tc, name) {
                     async_name = name
                 }
@@ -317,7 +317,7 @@ func infer_async_run(tc: *TypeChecker, arg_off: int64, arg_len: int64, lo: int64
         }
     }
     if str_len(async_name) > 0 {
-        asyncs2: *Map<int64> = (*tc).async_fns
+        asyncs2: *Map<string, int64> = (*tc).async_fns
         return unwrap_or(map_get(asyncs2, async_name), ty_unknown((*tc).ty))
     }
     tc_emit(tc, "async_run takes a direct call of an async func, written at the call site", lo, hi)
@@ -432,7 +432,7 @@ func task_holds_view_msg(name: string, cap: string) -> string {
     return out
 }
 
-func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_future() { return true }
     if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_slice() || n.kind == tyk_array() {
@@ -448,7 +448,7 @@ func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> 
         name: string = ty_name((*tc).ty, tyid)
         if map_has(seen, name) { return false }
         map_put(seen, name, 1)
-        embeds: *Map<TyList> = (*tc).embed_fields
+        embeds: *Map<string, TyList> = (*tc).embed_fields
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
             mut j: int64 = 0
@@ -461,7 +461,7 @@ func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> 
     return false
 }
 
-func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_collector() { return true }
     if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_slice() || n.kind == tyk_array() {
@@ -477,7 +477,7 @@ func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) 
         name: string = ty_name((*tc).ty, tyid)
         if map_has(seen, name) { return false }
         map_put(seen, name, 1)
-        embeds: *Map<TyList> = (*tc).embed_fields
+        embeds: *Map<string, TyList> = (*tc).embed_fields
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
             mut j: int64 = 0
@@ -490,14 +490,14 @@ func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) 
     return false
 }
 
-func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_future() || n.kind == tyk_collector() || n.kind == tyk_slice() || n.kind == tyk_func() {
         return false
     }
     if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
-        fseen: *Map<int64> = alloc(map_new())
-        cseen: *Map<int64> = alloc(map_new())
+        fseen: *Map<string, int64> = alloc(map_new())
+        cseen: *Map<string, int64> = alloc(map_new())
         return !ptr_reaches_future_ty(tc, n.a, fseen) && !ptr_reaches_collector_ty(tc, n.a, cseen)
     }
     if n.kind == tyk_array() { return spawn_capturable_ty(tc, n.a, seen) }
@@ -509,11 +509,11 @@ func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bo
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
-        ifaces: *Map<int64> = (*tc).ifaces
+        ifaces: *Map<string, int64> = (*tc).ifaces
         if map_has(ifaces, name) { return false }
         if map_has(seen, name) { return true }
         map_put(seen, name, 1)
-        embeds: *Map<TyList> = (*tc).embed_fields
+        embeds: *Map<string, TyList> = (*tc).embed_fields
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
             mut j: int64 = 0
@@ -555,9 +555,9 @@ func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, arg_len: 
     while cidx < vec_len(caps) {
         cap: string = vec_get(caps, cidx)
         t: int64 = lookup(tc, cap)
-        seen: *Map<int64> = alloc(map_new())
-        fseen: *Map<int64> = alloc(map_new())
-        cseen: *Map<int64> = alloc(map_new())
+        seen: *Map<string, int64> = alloc(map_new())
+        fseen: *Map<string, int64> = alloc(map_new())
+        cseen: *Map<string, int64> = alloc(map_new())
         reaches_collector: bool = ptr_reaches_collector_ty(tc, t, cseen)
         if ptr_reaches_future_ty(tc, t, fseen) {
             tc_emit(tc, task_future_msg(name, cap), arg.lo, arg.hi)
@@ -566,7 +566,7 @@ func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, arg_len: 
         } else if !spawn_capturable_ty(tc, t, seen) || str_len(iface_bind_name(tc, cap)) > 0 {
             tc_emit(tc, task_view_msg(name, cap), arg.lo, arg.hi)
         } else if is_esc_slice(tc, cap) || is_esc_closure(tc, cap) {
-            fp: *Map<FlowProv> = (*tc).flow_prov
+            fp: *Map<string, FlowProv> = (*tc).flow_prov
             if map_has(fp, cap) {
                 prov: FlowProv = unwrap_or(map_get(fp, cap), FlowProv { lo: arg.lo, hi: arg.hi, src: 0, dst: 0 })
                 tc_emit(tc, task_flow_msg(name, cap, prov.src, prov.dst), prov.lo, prov.hi)
@@ -682,7 +682,7 @@ func variadic_arg_msg(tc: *TypeChecker, tyid: int64, argno: int64) -> string {
     }
     if k == tyk_named() {
         nm: string = ty_name((*tc).ty, tyid)
-        ifaces: *Map<int64> = (*tc).ifaces
+        ifaces: *Map<string, int64> = (*tc).ifaces
         if map_has(ifaces, nm) {
             return variadic_reject_msg(argno, "an interface value", "a variadic foreign function takes only scalars and raw pointers")
         }
@@ -839,7 +839,7 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
         arg_tys: *Vector<int64> = infer_call_args(tc, arg_off, arg_len)
         if base.kind == xk_ident() {
             en: string = ast_name(a, base.a)
-            enums2: *Map<EnumSig> = (*tc).enums
+            enums2: *Map<string, EnumSig> = (*tc).enums
             if map_has(enums2, en) {
                 check_variant_ctor_args(tc, en, mname, arg_off, arg_len, arg_tys, f.lo, f.hi)
                 payloads: VariantSig = sig_variant_for_enum((*tc).sigtab, en, mname)
@@ -855,7 +855,7 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
         }
         bn_base: TyNode = ty_get((*tc).ty, base_ty)
         mut recv_enum: string = ""
-        enums3: *Map<EnumSig> = (*tc).enums
+        enums3: *Map<string, EnumSig> = (*tc).enums
         if bn_base.kind == tyk_named() && map_has(enums3, ty_name((*tc).ty, base_ty)) {
             recv_enum = ty_name((*tc).ty, base_ty)
         } else if base.kind == xk_ident() {
@@ -885,8 +885,8 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
             key: string = sig_pair_key(recv_name, mname)
             mut has_params: bool = false
             mut params: TyList = empty_tylist()
-            method_params: *Map<TyList> = (*tc).method_params
-            iface_method_params: *Map<TyList> = (*tc).iface_method_params
+            method_params: *Map<string, TyList> = (*tc).method_params
+            iface_method_params: *Map<string, TyList> = (*tc).iface_method_params
             if map_has(method_params, key) {
                 params = unwrap_or(map_get(method_params, key), empty_tylist())
                 has_params = true
@@ -1175,7 +1175,7 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
             }
             if f.kind == xk_ident() {
                 name2: string = ast_name(a, f.a)
-                raw_sigs: *Map<TyList> = (*tc).raw_sigs
+                raw_sigs: *Map<string, TyList> = (*tc).raw_sigs
                 if map_has(raw_sigs, name2) {
                     raw_params: TyList = unwrap_or(map_get(raw_sigs, name2), empty_tylist())
                     mut ri: int64 = 0

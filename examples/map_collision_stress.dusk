@@ -1,0 +1,41 @@
+@paradigm procedural
+
+// Hundreds of int64 keys drive multiple grows, then half are removed and every
+// survivor is verified, so the probe, the grow rehash, and the remove backshift
+// hold under load. Values encode their key so a wrong slot read is visible.
+@import std.io
+@import std.string
+@import std.map
+@import std.functional.maybe
+
+func main() -> int32 {
+    m: *Map<int64, int64> = alloc(map_new())
+    mut i: int64 = 0
+    while i < 400 {
+        map_put(m, i * 7, i * 7 + 1)
+        i = i + 1
+    }
+    println(map_len(m))
+    mut r: int64 = 0
+    while r < 400 {
+        if r % 2 == 0 {
+            map_remove(m, r * 7)
+        }
+        r = r + 1
+    }
+    println(map_len(m))
+    mut bad: int64 = 0
+    mut c: int64 = 0
+    while c < 400 {
+        k: int64 = c * 7
+        v: int64 = unwrap_or(map_get(m, k), -1)
+        if c % 2 == 0 {
+            if v != -1 { bad = bad + 1 }
+        } else {
+            if v != k + 1 { bad = bad + 1 }
+        }
+        c = c + 1
+    }
+    println(bad)
+    return 0
+}

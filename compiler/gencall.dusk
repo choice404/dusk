@@ -166,6 +166,15 @@ func gen_hash(s: *GenFuncState, args_off: int64, args_len: int64) -> Val {
     if args_len > 0 { v = gen_expr(s, vec_get((*a).kids, args_off)) }
     vn: CTyNode = vec_get(cty_nodes(c), v.ty)
     if vn.kind == ctyk_rawptr() {
+        // The checker admits only a string among pointer-shaped operands, and a
+        // string's ctype is a raw pointer to char; any other pointee reaching here
+        // means the gate above codegen has a hole, so refuse loudly rather than
+        // walk arbitrary memory as a NUL terminated string.
+        inner: CTyNode = vec_get(cty_nodes(c), vn.a)
+        if inner.kind != ctyk_char() {
+            emit_error((*s).module, "unsupported hash operand type")
+            return Val { ty: cty_int(c, 64), op: gs_copy("0") }
+        }
         emit_declare((*s).module, "i64 @cool_hash_str(ptr)")
         dest: string = next_tmp((*s).fb)
         b: *StringBuilder = alloc(sb_new())
@@ -716,7 +725,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
         return Val { ty: cty_void(c), op: gs_copy("") }
     }
     name: string = ast_name(a, callee.a)
-    locals: *Map<LocalVal> = (*s).locals
+    locals: *Map<string, LocalVal> = (*s).locals
     if map_has(locals, name) {
         lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
         ln: CTyNode = vec_get(cty_nodes(c), lv.ty)

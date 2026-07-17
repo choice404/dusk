@@ -44,7 +44,7 @@ func projection_root(tc: *TypeChecker, expr_id: int64) -> string {
     return ""
 }
 
-func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_ptr() {
         inner: TyNode = ty_get((*tc).ty, n.a)
@@ -63,7 +63,7 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
         name: string = ty_name((*tc).ty, tyid)
         if map_has(seen, name) { return false }
         map_put(seen, name, 1)
-        structs: *Map<StructSig> = (*tc).structs
+        structs: *Map<string, StructSig> = (*tc).structs
         if map_has(structs, name) {
             st: StructSig = sig_struct((*tc).sigtab, name)
             mut j: int64 = 0
@@ -73,7 +73,7 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
                 j = j + 1
             }
         }
-        enums: *Map<EnumSig> = (*tc).enums
+        enums: *Map<string, EnumSig> = (*tc).enums
         if map_has(enums, name) {
             es: EnumSig = unwrap_or(map_get(enums, name), EnumSig { off: 0, len: 0 })
             mut k: int64 = 0
@@ -93,7 +93,7 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
 }
 
 export func ty_reaches_managed(tc: *TypeChecker, tyid: int64) -> bool {
-    seen: *Map<int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
     return managed_reaches(tc, tyid, seen)
 }
 
@@ -113,15 +113,15 @@ export func member_carries_view(tc: *TypeChecker, tyid: int64) -> bool {
     if n.kind == tyk_array() { return member_carries_view(tc, n.a) }
     if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
-        structs: *Map<StructSig> = (*tc).structs
-        enums: *Map<EnumSig> = (*tc).enums
-        ifaces: *Map<int64> = (*tc).ifaces
+        structs: *Map<string, StructSig> = (*tc).structs
+        enums: *Map<string, EnumSig> = (*tc).enums
+        ifaces: *Map<string, int64> = (*tc).ifaces
         return map_has(structs, name) || map_has(enums, name) || map_has(ifaces, name)
     }
     return false
 }
 
-func view_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
+func view_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_slice() || n.kind == tyk_func() { return true }
     if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_collector() { return false }
@@ -134,11 +134,11 @@ func view_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
-        ifaces: *Map<int64> = (*tc).ifaces
+        ifaces: *Map<string, int64> = (*tc).ifaces
         if map_has(ifaces, name) { return true }
         if map_has(seen, name) { return false }
         map_put(seen, name, 1)
-        embeds: *Map<TyList> = (*tc).embed_fields
+        embeds: *Map<string, TyList> = (*tc).embed_fields
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
             mut j: int64 = 0
@@ -152,7 +152,7 @@ func view_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<int64>) -> bool {
 }
 
 export func ty_reaches_view(tc: *TypeChecker, tyid: int64) -> bool {
-    seen: *Map<int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
     return view_reaches(tc, tyid, seen)
 }
 
@@ -174,7 +174,7 @@ func projection_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
 }
 
 func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
-    structs: *Map<StructSig> = (*tc).structs
+    structs: *Map<string, StructSig> = (*tc).structs
     if !map_has(structs, sname) { return ty_unknown((*tc).ty) }
     st: StructSig = sig_struct((*tc).sigtab, sname)
     mut i: int64 = 0
@@ -211,13 +211,13 @@ export func variant_name(tc: *TypeChecker, callee_id: int64) -> string {
     f: ExprNode = vec_get((*a).exprs, callee_id)
     if f.kind == xk_ident() {
         name: string = ast_name(a, f.a)
-        payloads: *Map<VariantSig> = (*tc).variant_payloads
+        payloads: *Map<string, VariantSig> = (*tc).variant_payloads
         if map_has(payloads, name) { return name }
     } else if f.kind == xk_field() {
         base: ExprNode = vec_get((*a).exprs, f.a)
         name2: string = ast_name(a, f.b)
-        enums: *Map<EnumSig> = (*tc).enums
-        payloads2: *Map<VariantSig> = (*tc).variant_payloads
+        enums: *Map<string, EnumSig> = (*tc).enums
+        payloads2: *Map<string, VariantSig> = (*tc).variant_payloads
         if base.kind == xk_ident() {
             if map_has(enums, ast_name(a, base.a)) && map_has(payloads2, name2) { return name2 }
         }
@@ -335,7 +335,7 @@ export func value_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
     return esc_none()
 }
 
-func capture_add(tc: *TypeChecker, name: string, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+func capture_add(tc: *TypeChecker, name: string, bound: *Map<string, int64>, seen: *Map<string, int64>, out: *Vector<string>) -> void {
     if !map_has(bound, name) && is_local(tc, name) && !map_has(seen, name) {
         map_put(seen, name, 1)
         vec_push(out, name)
@@ -348,7 +348,7 @@ func capture_add(tc: *TypeChecker, name: string, bound: *Map<int64>, seen: *Map<
 // this scope did not own. This is what keeps a nested lambda parameter, a match
 // arm pattern, or a for loop variable from leaking out of its own construct and
 // masking a same named outer local the enclosing closure genuinely captures.
-func bind_scoped(bound: *Map<int64>, name: string, added: *Vector<string>) -> void {
+func bind_scoped(bound: *Map<string, int64>, name: string, added: *Vector<string>) -> void {
     if !map_has(bound, name) {
         map_put(bound, name, 1)
         vec_push(added, name)
@@ -357,7 +357,7 @@ func bind_scoped(bound: *Map<int64>, name: string, added: *Vector<string>) -> vo
 
 // Removes exactly the names bind_scoped added for a scope, restoring the map to
 // what it was before the scope was entered.
-func unbind_scoped(bound: *Map<int64>, added: *Vector<string>) -> void {
+func unbind_scoped(bound: *Map<string, int64>, added: *Vector<string>) -> void {
     mut i: int64 = 0
     while i < vec_len(added) {
         map_remove(bound, vec_get(added, i))
@@ -365,7 +365,7 @@ func unbind_scoped(bound: *Map<int64>, added: *Vector<string>) -> void {
     }
 }
 
-func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, int64>, seen: *Map<string, int64>, out: *Vector<string>) -> void {
     if expr_id < 0 { return }
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
@@ -429,7 +429,7 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<int64>, 
     }
 }
 
-func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<int64>, added: *Vector<string>) -> void {
+func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<string, int64>, added: *Vector<string>) -> void {
     a: *Ast = (*tc).ast
     p: PatternNode = vec_get((*a).patterns, pat_id)
     if p.kind == pk_ident() {
@@ -443,7 +443,7 @@ func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<int64>, ad
     }
 }
 
-func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>, added: *Vector<string>) -> void {
+func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, int64>, seen: *Map<string, int64>, out: *Vector<string>, added: *Vector<string>) -> void {
     a: *Ast = (*tc).ast
     s: StmtNode = vec_get((*a).stmts, stmt_id)
     if s.kind == sk_let() {
@@ -496,7 +496,7 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<int64>, 
 // enclosing closure captures after the block. A for variable and a match arm
 // pattern are scoped tighter still, to their own statement, and manage their
 // own unbinding.
-func collect_capture_block(tc: *TypeChecker, block_id: int64, bound: *Map<int64>, seen: *Map<int64>, out: *Vector<string>) -> void {
+func collect_capture_block(tc: *TypeChecker, block_id: int64, bound: *Map<string, int64>, seen: *Map<string, int64>, out: *Vector<string>) -> void {
     a: *Ast = (*tc).ast
     b: BlockNode = vec_get((*a).blocks, block_id)
     added: *Vector<string> = alloc(vec_new())
@@ -510,8 +510,8 @@ func collect_capture_block(tc: *TypeChecker, block_id: int64, bound: *Map<int64>
 
 export func lambda_captures(tc: *TypeChecker, e: ExprNode) -> *Vector<string> {
     out: *Vector<string> = alloc(vec_new())
-    seen: *Map<int64> = alloc(map_new())
-    bound: *Map<int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
+    bound: *Map<string, int64> = alloc(map_new())
     a: *Ast = (*tc).ast
     mut i: int64 = 0
     while i < e.b {
@@ -587,8 +587,8 @@ func escape_walk(tc: *TypeChecker, expr_id: int64, declared: int64, inferred: in
         }
     } else if dn.kind == tyk_named() {
         name: string = ty_name((*tc).ty, declared)
-        structs2: *Map<StructSig> = (*tc).structs
-        enums2: *Map<EnumSig> = (*tc).enums
+        structs2: *Map<string, StructSig> = (*tc).structs
+        enums2: *Map<string, EnumSig> = (*tc).enums
         if map_has(structs2, name) || map_has(enums2, name) {
             esc3: EscPair = value_escape(tc, expr_id)
             if esc3.slice { report_slice_escape(tc, expr_id) } else if esc3.closure { report_closure_escape(tc, expr_id) }
@@ -807,10 +807,10 @@ export func esc_snapshot(tc: *TypeChecker) -> string {
     return out
 }
 
-func snap_stack(b: *StringBuilder, stack: *Vector<*Map<int64>>) -> void {
+func snap_stack(b: *StringBuilder, stack: *Vector<*Map<string, int64>>) -> void {
     mut i: int64 = 0
     while i < vec_len(stack) {
-        m: *Map<int64> = vec_get(stack, i)
+        m: *Map<string, int64> = vec_get(stack, i)
         keys: *Vector<string> = map_keys(m)
         mut j: int64 = 0
         while j < vec_len(keys) {

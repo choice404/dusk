@@ -2,6 +2,28 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.5.2
+
+The generic map. `std.map` was keyed by strings alone since it first shipped; it is now generic over both its key and its value, `Map<K, V>`, with K drawn from the hashable set the `hash` builtin defined one release earlier: an integer of any width, a `char`, a `rune`, or a `string`. A struct, pointer, or float key is rejected by name. Every existing map is spelled `Map<string, V>` now, and the compiler itself, the heaviest map user in the tree at more than seven hundred annotation sites, migrated with it. The split from 1.5.1 is deliberate sequencing: the map uses `hash`, so `hash` had to be one release old before the map could, keeping the previous release's binary able to build the current source.
+
+The generic map.
+
+- `lib/std/map.dusk` threads K through the whole structure: `keys` is a `*raw K`, the insertion order record a `*Vector<K>`, and every function takes and returns K where it took a string. The key hash is the `hash` builtin and key equality is `==`, so a string key hashes and compares by content exactly as before, byte for byte through the same polynomial hash, and a scalar key by value. The open addressing, the linear probe, the half full grow, the remove backshift, and the insertion order iteration are unchanged. `map_hash` stays exported as a thin wrapper over `hash` for one release.
+- The migration to the two parameter spelling is uniform: every `Map<` in the compiler, the standard library, and the examples became `Map<string, ` in one pass, and no call site changed at all, since `map_new()` and every accessor infer K and V from the annotated binding or the map argument. `map_keys` callers keep working unchanged, since every existing key type is still string.
+- Six call sites in codegen needed one local rebind each: a map held in a struct field, read through `map_get` nested directly inside `unwrap_or`, does not pin K, since the mono pass resolves a field's type only for a generic struct and K no longer appears in `map_get`'s return type for the expected type to pin. The rebind, `slocals: *Map<string, LocalVal> = (*s).locals`, restores the inference; the limitation is recorded in the standard library documentation with the same pattern. A general fix is an inference improvement deferred so this release's compiler stays buildable by the previous release's binary.
+- `examples/map_int_keys.dusk` covers an int keyed map end to end, put, get, overwrite, has, remove across a probe chain, length, and insertion order; `examples/map_char_rune_keys.dusk` covers char and rune keys; `examples/map_collision_stress.dusk` drives four hundred keys through multiple grows, removes half, and verifies every survivor; `examples/map_nested_keys.dusk` nests an int keyed map inside a string keyed one; `examples/map_struct_key_reject.dusk` pins the non hashable key reject at the ground type.
+
+Soundness.
+
+- A top-level function named `hash` passed the checker, which resolved a call to it as the user's function, while codegen resolved the same bare name to the builtin unconditionally, so the program computed the builtin's hash where the checker had accepted the user's signature, silently: a two argument `hash` hashed only its first argument, and a function reference `f := hash` called the user function while `hash(v)` beside it called the builtin. The declaration is now refused in the resolver the same way the eight cast names are, `'hash' is a builtin; a function cannot take its name`, with `examples/hash_shadow_fail.dusk` pinning the reject. The spec also now states plainly that a numeric cast is unchecked, `rune(v)` included, which can mint a value no Unicode scalar carries; a consumer that needs a valid scalar checks it itself.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 695 records, 6 new since 1.5.1: five for the generic key surface and the `hash` shadow reject.
+- The compiler's own migration is output invisible: the `v1.5.1` release binary and the migrated compiler emit byte identical LLVM IR over the whole example corpus, so the map going generic changed nothing the compiler produces.
+- The stage ladder re-fixed with the `v1.5.1` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (58a3fee4...) and one compiler IR sha256 (654165fb...), the collapse, fixpoint, and determinism checks all green, 695/695 under stage1 and stage2 alike.
+- The ratchet holds: the `v1.5.1` release binary builds the 1.5.2 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+
 ## 1.5.1
 
 The hash builtin. This is the groundwork for a generic key-value map: a standard library `Map` is keyed only by strings today, and generalizing it over its key type needs one thing the language did not have, a way to hash an arbitrary key. `hash(v)` is that primitive, and it ships one release ahead of the map migration so the previous release's compiler can still build the standard library that will use it. It touches the resolver, the type checker, codegen, and the runtime; no standard library change yet.

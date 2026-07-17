@@ -81,7 +81,7 @@ export func bind_match_arm(tc: *TypeChecker, pat_id: int64) -> void {
 
 export func check_match_coverage(tc: *TypeChecker, es: EnumSig, arm_off: int64, arm_len: int64, lo: int64, hi: int64) -> void {
     a: *Ast = (*tc).ast
-    covered: *Map<int64> = alloc(map_new())
+    covered: *Map<string, int64> = alloc(map_new())
     mut catch_all: bool = false
     mut i: int64 = 0
     while i < arm_len {
@@ -129,12 +129,12 @@ export func check_match_scrutinee(tc: *TypeChecker, st: int64, scrut_id: int64, 
     n: TyNode = ty_get((*tc).ty, st)
     if n.kind == tyk_named() {
         ename: string = ty_name((*tc).ty, st)
-        enums: *Map<EnumSig> = (*tc).enums
+        enums: *Map<string, EnumSig> = (*tc).enums
         if map_has(enums, ename) {
             check_match_coverage(tc, unwrap_or(map_get(enums, ename), EnumSig { off: 0, len: 0 }), arm_off, arm_len, scrut.lo, scrut.hi)
         } else {
-            structs: *Map<StructSig> = (*tc).structs
-            ifaces: *Map<int64> = (*tc).ifaces
+            structs: *Map<string, StructSig> = (*tc).structs
+            ifaces: *Map<string, int64> = (*tc).ifaces
             if map_has(structs, ename) || map_has(ifaces, ename) {
                 tc_emit(tc, match_not_enum_msg(ty_render((*tc).ty, st)), scrut.lo, scrut.hi)
             }

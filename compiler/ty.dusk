@@ -15,7 +15,7 @@ export struct TyArena {
     nodes: *Vector<TyNode>,
     kids: *Vector<int64>,
     interner: *Interner,
-    ids: *Map<int64>,
+    ids: *Map<string, int64>,
 }
 
 export func tyk_int() -> int64 { return 0 }
@@ -41,7 +41,7 @@ export func tyk_func() -> int64 { return 18 }
 export func ty_arena_new() -> *TyArena {
     nodes: *Vector<TyNode> = alloc(vec_new())
     kids: *Vector<int64> = alloc(vec_new())
-    ids: *Map<int64> = alloc(map_new())
+    ids: *Map<string, int64> = alloc(map_new())
     return alloc(TyArena {
         nodes: nodes,
         kids: kids,
@@ -168,7 +168,7 @@ export func ty_intern(t: *TyArena, n: TyNode) -> int64 {
     c: string = ty_canon(t, n)
     kid: int64 = intern_owned((*t).interner, c)
     key: string = intern_get((*t).interner, kid)
-    ids: *Map<int64> = (*t).ids
+    ids: *Map<string, int64> = (*t).ids
     if map_has(ids, key) {
         return unwrap_or(map_get(ids, key), -1)
     }
@@ -240,7 +240,7 @@ export func named_ty(t: *TyArena, name: string) -> int64 {
     return ty_named(t, name)
 }
 
-export func lower(t: *TyArena, a: *Ast, id: int64, gens: *Map<int64>) -> int64 {
+export func lower(t: *TyArena, a: *Ast, id: int64, gens: *Map<string, int64>) -> int64 {
     if id < 0 { return ty_unknown(t) }
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_named() {
@@ -551,7 +551,7 @@ export func elem_of(t: *TyArena, id: int64) -> int64 {
 // mangled name to its element's checked-type id in this arena. An empty table
 // (the surface pass) short-circuits to a pass-through, so unmangle costs nothing
 // there and only rewrites on the ground re-check.
-export func unmangle(t: *TyArena, id: int64, future_elems: *Map<int64>) -> int64 {
+export func unmangle(t: *TyArena, id: int64, future_elems: *Map<string, int64>) -> int64 {
     if map_len(future_elems) == 0 { return id }
     n: TyNode = ty_get(t, id)
     if n.kind == tyk_named() {

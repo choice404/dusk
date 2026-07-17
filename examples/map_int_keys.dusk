@@ -1,0 +1,38 @@
+@paradigm procedural
+
+// A map keyed by int64: put, get, has, overwrite, remove, length, and insertion
+// order iteration, including keys that collide modulo the initial capacity so
+// the probe chain is exercised.
+@import std.io
+@import std.string
+@import std.map
+@import std.functional.maybe
+
+func main() -> int32 {
+    m: *Map<int64, string> = alloc(map_new())
+    map_put(m, 0, "zero")
+    map_put(m, 8, "eight")
+    map_put(m, 16, "sixteen")
+    map_put(m, 3, "three")
+    println(unwrap_or(map_get(m, 8), "?"))
+    println(unwrap_or(map_get(m, 16), "?"))
+    map_put(m, 3, "THREE")
+    println(unwrap_or(map_get(m, 3), "?"))
+    if map_has(m, 0) { println("has_0") }
+    if !map_has(m, 99) { println("no_99") }
+    map_remove(m, 8)
+    if !map_has(m, 8) { println("removed_8") }
+    println(unwrap_or(map_get(m, 16), "?"))
+    println(map_len(m))
+    ks: *Vector<int64> = map_keys(m)
+    mut i: int64 = 0
+    while i < vec_len(ks) {
+        println(vec_get(ks, i))
+        i = i + 1
+    }
+    vec_free(ks)
+    free(ks)
+    map_free(m)
+    free(m)
+    return 0
+}

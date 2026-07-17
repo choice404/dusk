@@ -33,34 +33,34 @@ export struct ArgResult { targs: *Vector<int64>, missing: *Vector<string> }
 export struct Mono {
     ast: *Ast,
     ty: *TyArena,
-    gfuncs: *Map<int64>,
-    gstructs: *Map<int64>,
-    genums: *Map<int64>,
-    ifaces: *Map<int64>,
-    nfuncs: *Map<int64>,
-    requested: *Map<int64>,
+    gfuncs: *Map<string, int64>,
+    gstructs: *Map<string, int64>,
+    genums: *Map<string, int64>,
+    ifaces: *Map<string, int64>,
+    nfuncs: *Map<string, int64>,
+    requested: *Map<string, int64>,
     worklist: *Vector<WorkItem>,
     out: *Vector<ItemNode>,
     diags: *Vector<SpanDiagnostic>,
-    future_table: *Map<int64>,
-    mut_tuple: *Map<MutTupleEntry>,
+    future_table: *Map<string, int64>,
+    mut_tuple: *Map<string, MutTupleEntry>,
 }
 
 // The instantiation budget the worklist drain may spend before it is declared non
 // terminating. Matches stage0's ceiling exactly.
 export func mono_limit() -> int64 { return 10000 }
 
-export func mono_new(a: *Ast, tyarena: *TyArena, muts: *Map<MutTupleEntry>) -> *Mono {
-    gfuncs: *Map<int64> = alloc(map_new())
-    gstructs: *Map<int64> = alloc(map_new())
-    genums: *Map<int64> = alloc(map_new())
-    ifaces: *Map<int64> = alloc(map_new())
-    nfuncs: *Map<int64> = alloc(map_new())
-    requested: *Map<int64> = alloc(map_new())
+export func mono_new(a: *Ast, tyarena: *TyArena, muts: *Map<string, MutTupleEntry>) -> *Mono {
+    gfuncs: *Map<string, int64> = alloc(map_new())
+    gstructs: *Map<string, int64> = alloc(map_new())
+    genums: *Map<string, int64> = alloc(map_new())
+    ifaces: *Map<string, int64> = alloc(map_new())
+    nfuncs: *Map<string, int64> = alloc(map_new())
+    requested: *Map<string, int64> = alloc(map_new())
     worklist: *Vector<WorkItem> = alloc(vec_new())
     out: *Vector<ItemNode> = alloc(vec_new())
     diags: *Vector<SpanDiagnostic> = alloc(vec_new())
-    future_table: *Map<int64> = alloc(map_new())
+    future_table: *Map<string, int64> = alloc(map_new())
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {
@@ -113,14 +113,14 @@ export func mono_diag(m: *Mono, msg: string, lo: int64, hi: int64) -> void {
 // its element type through a bare field access on a non-generic struct, so every
 // generic map or vector call routes its argument through one of these, whose
 // declared return pins the element type.
-export func m_gstructs(m: *Mono) -> *Map<int64> { return (*m).gstructs }
-export func m_genums(m: *Mono) -> *Map<int64> { return (*m).genums }
-export func m_gfuncs(m: *Mono) -> *Map<int64> { return (*m).gfuncs }
-export func m_nfuncs(m: *Mono) -> *Map<int64> { return (*m).nfuncs }
-export func m_ifaces(m: *Mono) -> *Map<int64> { return (*m).ifaces }
-export func m_requested(m: *Mono) -> *Map<int64> { return (*m).requested }
-export func m_future_table(m: *Mono) -> *Map<int64> { return (*m).future_table }
-export func m_mut_tuple(m: *Mono) -> *Map<MutTupleEntry> { return (*m).mut_tuple }
+export func m_gstructs(m: *Mono) -> *Map<string, int64> { return (*m).gstructs }
+export func m_genums(m: *Mono) -> *Map<string, int64> { return (*m).genums }
+export func m_gfuncs(m: *Mono) -> *Map<string, int64> { return (*m).gfuncs }
+export func m_nfuncs(m: *Mono) -> *Map<string, int64> { return (*m).nfuncs }
+export func m_ifaces(m: *Mono) -> *Map<string, int64> { return (*m).ifaces }
+export func m_requested(m: *Mono) -> *Map<string, int64> { return (*m).requested }
+export func m_future_table(m: *Mono) -> *Map<string, int64> { return (*m).future_table }
+export func m_mut_tuple(m: *Mono) -> *Map<string, MutTupleEntry> { return (*m).mut_tuple }
 export func m_worklist(m: *Mono) -> *Vector<WorkItem> { return (*m).worklist }
 
 export func mono_is_generic(m: *Mono, name: string) -> bool {

@@ -1,0 +1,23 @@
+@paradigm procedural
+
+// A string keyed map of int64 keyed maps, both key kinds nested in one value.
+@import std.io
+@import std.string
+@import std.map
+@import std.functional.maybe
+
+func main() -> int32 {
+    inner: *Map<int64, string> = alloc(map_new())
+    map_put(inner, 42, "answer")
+    outer: *Map<string, *Map<int64, string>> = alloc(map_new())
+    map_put(outer, "numbers", inner)
+    mi: Maybe<*Map<int64, string>> = map_get(outer, "numbers")
+    match mi {
+        Some(im) => {
+            got: *Map<int64, string> = im
+            println(unwrap_or(map_get(got, 42), "?"))
+        }
+        None => println("missing"),
+    }
+    return 0
+}

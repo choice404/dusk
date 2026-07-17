@@ -36,7 +36,7 @@ export func tc_callee_esc(tc: *TypeChecker, callee_id: int64) -> CalleeEsc {
     c: ExprNode = vec_get((*a).exprs, callee_id)
     if c.kind == xk_ident() {
         name: string = ast_name(a, c.a)
-        sums: *Map<SummaryHandle> = (*tc).summaries
+        sums: *Map<string, SummaryHandle> = (*tc).summaries
         if !is_local(tc, name) {
             if map_has(sums, name) {
                 return CalleeEsc { opaque: false, sum: unwrap_or(map_get(sums, name), empty_summary()) }
@@ -44,7 +44,7 @@ export func tc_callee_esc(tc: *TypeChecker, callee_id: int64) -> CalleeEsc {
             bs: SummaryHandle = builtin_summary(name)
             if !bs.empty { return CalleeEsc { opaque: false, sum: bs } }
         } else {
-            rfb: *Map<string> = (*tc).resolvable_fn_binds
+            rfb: *Map<string, string> = (*tc).resolvable_fn_binds
             if map_has(rfb, name) {
                 g: string = unwrap_or(map_get(rfb, name), "")
                 if map_has(sums, g) {
@@ -132,7 +132,7 @@ export func higher_order_taint(tc: *TypeChecker, callee_id: int64, arg_off: int6
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind != xk_ident() { return no_taint() }
     name: string = ast_name(a, callee.a)
-    sums: *Map<SummaryHandle> = (*tc).summaries
+    sums: *Map<string, SummaryHandle> = (*tc).summaries
     if is_local(tc, name) || map_has(sums, name) { return no_taint() }
     if str_eq(name, "map") && arg_len == 2 {
         mut esc: EscPair = esc_none()
@@ -173,7 +173,7 @@ export func mapper_aliases(tc: *TypeChecker, fexpr_id: int64, i: int64) -> bool 
     a: *Ast = (*tc).ast
     f: ExprNode = vec_get((*a).exprs, fexpr_id)
     if f.kind == xk_lambda() {
-        lr: *Map<int64> = (*tc).lambda_returns
+        lr: *Map<string, int64> = (*tc).lambda_returns
         key: string = span_key(f.lo, f.hi)
         if map_has(lr, key) { return ps_has(unwrap_or(map_get(lr, key), 0), i) }
         return true
@@ -181,7 +181,7 @@ export func mapper_aliases(tc: *TypeChecker, fexpr_id: int64, i: int64) -> bool 
     if f.kind == xk_ident() {
         name: string = ast_name(a, f.a)
         if !is_local(tc, name) {
-            sums: *Map<SummaryHandle> = (*tc).summaries
+            sums: *Map<string, SummaryHandle> = (*tc).summaries
             if map_has(sums, name) {
                 sum: SummaryHandle = unwrap_or(map_get(sums, name), empty_summary())
                 return ps_has(sum.returns_alias, i) || ps_has(sum.reads_through, i)
@@ -203,7 +203,7 @@ func func_ret_viewy(tc: *TypeChecker, fexpr_id: int64) -> bool {
 export func returned_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
-    fp: *Map<FlowProv> = (*tc).flow_prov
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
     if e.kind == xk_ident() {
         name: string = ast_name(a, e.a)
         if map_has(fp, name) { return unwrap_or(map_get(fp, name), no_flow_prov()) }
@@ -219,7 +219,7 @@ export func struct_lit_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
     if e.kind != xk_struct_lit() { return no_flow_prov() }
-    fp: *Map<FlowProv> = (*tc).flow_prov
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
     mut j: int64 = 1
     while j < e.c {
         init: int64 = vec_get((*a).kids, e.b + j)
@@ -342,7 +342,7 @@ func has_method_summary(tc: *TypeChecker, callee_id: int64) -> bool {
     if callee.kind != xk_field() { return false }
     tname: string = receiver_type_name(tc, callee.a)
     if str_len(tname) == 0 { return false }
-    ms: *Map<SummaryHandle> = (*tc).method_summaries
+    ms: *Map<string, SummaryHandle> = (*tc).method_summaries
     return map_has(ms, method_key(tname, ast_name(a, callee.b)))
 }
 
@@ -371,13 +371,13 @@ func callee_is_opaque(tc: *TypeChecker, callee_id: int64) -> bool {
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind == xk_ident() {
         name: string = ast_name(a, callee.a)
-        sums: *Map<SummaryHandle> = (*tc).summaries
+        sums: *Map<string, SummaryHandle> = (*tc).summaries
         if !is_local(tc, name) {
             if map_has(sums, name) { return false }
             if !builtin_summary(name).empty { return false }
             return true
         }
-        rfb: *Map<string> = (*tc).resolvable_fn_binds
+        rfb: *Map<string, string> = (*tc).resolvable_fn_binds
         if map_has(rfb, name) { return false }
         if lambda_sink_bind_lookup(tc, name).found { return false }
         return true
@@ -392,7 +392,7 @@ func callee_is_opaque(tc: *TypeChecker, callee_id: int64) -> bool {
 func check_opaque_call_send(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
     if !callee_is_opaque(tc, callee_id) { return }
     a: *Ast = (*tc).ast
-    fp: *Map<FlowProv> = (*tc).flow_prov
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
     mut i: int64 = 0
     while i < arg_len {
         arg_id: int64 = vec_get((*a).kids, arg_off + i)
@@ -459,7 +459,7 @@ func apply_lambda_capture_flows(tc: *TypeChecker, callee_id: int64, arg_off: int
     cl: CapLookup = lambda_capture_bind_lookup(tc, cname)
     if !cl.found { return }
     caps: string = cl.edges
-    cps: *Map<int64> = (*tc).cur_params
+    cps: *Map<string, int64> = (*tc).cur_params
     mut p: int64 = 0
     while caps[p] != 0 {
         mut idx: int64 = 0
@@ -501,16 +501,16 @@ func check_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
     if callee.kind != xk_ident() { return }
     cname: string = ast_name(a, callee.a)
     if str_eq(cname, "chan_send") || str_eq(cname, "chan_try_send") { return }
-    sums: *Map<SummaryHandle> = (*tc).summaries
+    sums: *Map<string, SummaryHandle> = (*tc).summaries
     mut target: string = cname
     if is_local(tc, cname) {
-        rfb: *Map<string> = (*tc).resolvable_fn_binds
+        rfb: *Map<string, string> = (*tc).resolvable_fn_binds
         if !map_has(rfb, cname) { return }
         target = unwrap_or(map_get(rfb, cname), "")
     }
     if !map_has(sums, target) { return }
     sum: SummaryHandle = unwrap_or(map_get(sums, target), empty_summary())
-    fp: *Map<FlowProv> = (*tc).flow_prov
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
     mut j: int64 = 0
     while j < arg_len && j < 64 {
         if ps_has(sum.sinks, j) {
@@ -540,7 +540,7 @@ func check_lambda_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64,
     if !sl.found { return }
     sinks: int64 = sl.sinks
     collect: int64 = sl.collect
-    fp: *Map<FlowProv> = (*tc).flow_prov
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
     mut j: int64 = 0
     while j < arg_len && j < 64 {
         if ps_has(sinks, j) {
@@ -656,7 +656,7 @@ func check_chan_send_flow(tc: *TypeChecker, callee_id: int64, arg_off: int64, ar
     root: string = send_value_root(tc, arg_id)
     if str_len(root) == 0 { return }
     if !is_esc_slice(tc, root) && !is_esc_closure(tc, root) { return }
-    fp: *Map<FlowProv> = (*tc).flow_prov
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, name)
     sb_push(b, " cannot send '")

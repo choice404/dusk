@@ -21,50 +21,50 @@ export struct MethodList { off: int64, len: int64 }
 export struct TypeSigs {
     ast: *Ast,
     ty: *TyArena,
-    future_elems: *Map<int64>,
+    future_elems: *Map<string, int64>,
     tys: *Vector<int64>,
     fields: *Vector<FieldSig>,
     names: *Vector<string>,
     methods: *Vector<MethodReq>,
-    fns: *Map<FnSig>,
-    raw_sigs: *Map<TyList>,
-    async_fns: *Map<int64>,
-    structs: *Map<StructSig>,
-    enums: *Map<EnumSig>,
-    ifaces: *Map<int64>,
-    iface_methods: *Map<MethodList>,
-    impls: *Map<int64>,
-    foreigns: *Map<int64>,
-    variadic_foreigns: *Map<int64>,
-    variant_payloads: *Map<VariantSig>,
-    variant_payloads_by_enum: *Map<VariantSig>,
-    variant_owner: *Map<string>,
-    embed_fields: *Map<TyList>,
-    method_params: *Map<TyList>,
-    iface_method_params: *Map<TyList>,
+    fns: *Map<string, FnSig>,
+    raw_sigs: *Map<string, TyList>,
+    async_fns: *Map<string, int64>,
+    structs: *Map<string, StructSig>,
+    enums: *Map<string, EnumSig>,
+    ifaces: *Map<string, int64>,
+    iface_methods: *Map<string, MethodList>,
+    impls: *Map<string, int64>,
+    foreigns: *Map<string, int64>,
+    variadic_foreigns: *Map<string, int64>,
+    variant_payloads: *Map<string, VariantSig>,
+    variant_payloads_by_enum: *Map<string, VariantSig>,
+    variant_owner: *Map<string, string>,
+    embed_fields: *Map<string, TyList>,
+    method_params: *Map<string, TyList>,
+    iface_method_params: *Map<string, TyList>,
 }
 
-export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<int64>) -> *TypeSigs {
+export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<string, int64>) -> *TypeSigs {
     tys: *Vector<int64> = alloc(vec_new())
     fields: *Vector<FieldSig> = alloc(vec_new())
     names: *Vector<string> = alloc(vec_new())
     methods: *Vector<MethodReq> = alloc(vec_new())
-    fns: *Map<FnSig> = alloc(map_new())
-    raw_sigs: *Map<TyList> = alloc(map_new())
-    async_fns: *Map<int64> = alloc(map_new())
-    structs: *Map<StructSig> = alloc(map_new())
-    enums: *Map<EnumSig> = alloc(map_new())
-    ifaces: *Map<int64> = alloc(map_new())
-    iface_methods: *Map<MethodList> = alloc(map_new())
-    impls: *Map<int64> = alloc(map_new())
-    foreigns: *Map<int64> = alloc(map_new())
-    variadic_foreigns: *Map<int64> = alloc(map_new())
-    variant_payloads: *Map<VariantSig> = alloc(map_new())
-    variant_payloads_by_enum: *Map<VariantSig> = alloc(map_new())
-    variant_owner: *Map<string> = alloc(map_new())
-    embed_fields: *Map<TyList> = alloc(map_new())
-    method_params: *Map<TyList> = alloc(map_new())
-    iface_method_params: *Map<TyList> = alloc(map_new())
+    fns: *Map<string, FnSig> = alloc(map_new())
+    raw_sigs: *Map<string, TyList> = alloc(map_new())
+    async_fns: *Map<string, int64> = alloc(map_new())
+    structs: *Map<string, StructSig> = alloc(map_new())
+    enums: *Map<string, EnumSig> = alloc(map_new())
+    ifaces: *Map<string, int64> = alloc(map_new())
+    iface_methods: *Map<string, MethodList> = alloc(map_new())
+    impls: *Map<string, int64> = alloc(map_new())
+    foreigns: *Map<string, int64> = alloc(map_new())
+    variadic_foreigns: *Map<string, int64> = alloc(map_new())
+    variant_payloads: *Map<string, VariantSig> = alloc(map_new())
+    variant_payloads_by_enum: *Map<string, VariantSig> = alloc(map_new())
+    variant_owner: *Map<string, string> = alloc(map_new())
+    embed_fields: *Map<string, TyList> = alloc(map_new())
+    method_params: *Map<string, TyList> = alloc(map_new())
+    iface_method_params: *Map<string, TyList> = alloc(map_new())
     return alloc(TypeSigs {
         ast: a,
         ty: t,
@@ -124,12 +124,12 @@ export func sig_pair_key(a: string, b: string) -> string {
     return key2(a, b)
 }
 
-func new_set() -> *Map<int64> {
+func new_set() -> *Map<string, int64> {
     return alloc(map_new())
 }
 
-func generics_set(s: *TypeSigs, off: int64, len: int64) -> *Map<int64> {
-    g: *Map<int64> = new_set()
+func generics_set(s: *TypeSigs, off: int64, len: int64) -> *Map<string, int64> {
+    g: *Map<string, int64> = new_set()
     a: *Ast = (*s).ast
     mut i: int64 = 0
     while i < len {
@@ -154,7 +154,7 @@ func push_tys(dst: *Vector<int64>, src: *Vector<int64>) -> TyList {
 // Future$T left by mono is restored to its future shape, exactly as the ground
 // pass restores it for func signatures (and only func signatures, matching
 // stage0: foreign, interface, and impl method params keep the mangled name).
-func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>, fixed: bool, unmangle_fixed: bool) -> TyList {
+func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<string, int64>, fixed: bool, unmangle_fixed: bool) -> TyList {
     vals: *Vector<int64> = alloc(vec_new())
     a: *Ast = (*s).ast
     mut i: int64 = 0
@@ -169,7 +169,7 @@ func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>, fixed:
     return push_tys((*s).tys, vals)
 }
 
-func push_fields(s: *TypeSigs, off: int64, len: int64, gens: *Map<int64>) -> (int64, int64, TyList) {
+func push_fields(s: *TypeSigs, off: int64, len: int64, gens: *Map<string, int64>) -> (int64, int64, TyList) {
     fields_vec: *Vector<FieldSig> = (*s).fields
     fields_off: int64 = vec_len(fields_vec)
     raws: *Vector<int64> = alloc(vec_new())
@@ -192,7 +192,7 @@ export func fix(s: *TypeSigs, id: int64) -> int64 {
     n: TyNode = ty_get(t, id)
     if n.kind == tyk_named() {
         name: string = ty_name(t, id)
-        ifaces: *Map<int64> = (*s).ifaces
+        ifaces: *Map<string, int64> = (*s).ifaces
         if map_has(ifaces, name) { return ty_unknown(t) }
         return id
     }
@@ -228,7 +228,7 @@ func collect_iface(s: *TypeSigs, id: int64) -> void {
     iface: InterfaceNode = vec_get((*a).interfaces, id)
     iname: string = ast_name(a, iface.name)
     map_put((*s).ifaces, iname, 1)
-    gens: *Map<int64> = generics_set(s, iface.generics_off, iface.generics_len)
+    gens: *Map<string, int64> = generics_set(s, iface.generics_off, iface.generics_len)
     methods_vec: *Vector<MethodReq> = (*s).methods
     moff: int64 = vec_len(methods_vec)
     mut i: int64 = 0
@@ -247,7 +247,7 @@ func collect_enum(s: *TypeSigs, id: int64) -> void {
     a: *Ast = (*s).ast
     e: EnumNode = vec_get((*a).enums, id)
     ename: string = ast_name(a, e.name)
-    gens: *Map<int64> = generics_set(s, e.generics_off, e.generics_len)
+    gens: *Map<string, int64> = generics_set(s, e.generics_off, e.generics_len)
     names_vec: *Vector<string> = (*s).names
     noff: int64 = vec_len(names_vec)
     embed: *Vector<int64> = alloc(vec_new())
@@ -286,7 +286,7 @@ func collect_impl(s: *TypeSigs, id: int64) -> void {
     mut i: int64 = 0
     while i < im.methods_len {
         f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
-        gens: *Map<int64> = generics_set(s, f.generics_off, f.generics_len)
+        gens: *Map<string, int64> = generics_set(s, f.generics_off, f.generics_len)
         params: TyList = push_params(s, f.params_off, f.params_len, gens, false, false)
         map_put((*s).method_params, key2(recv, ast_name(a, f.name)), params)
         i = i + 1
@@ -296,7 +296,7 @@ func collect_impl(s: *TypeSigs, id: int64) -> void {
 func collect_func_sig(s: *TypeSigs, f: FuncNode) -> void {
     a: *Ast = (*s).ast
     name: string = ast_name(a, f.name)
-    gens: *Map<int64> = generics_set(s, f.generics_off, f.generics_len)
+    gens: *Map<string, int64> = generics_set(s, f.generics_off, f.generics_len)
     raw_params: TyList = push_params(s, f.params_off, f.params_len, gens, false, false)
     params: TyList = push_params(s, f.params_off, f.params_len, gens, true, true)
     raw_ret: int64 = lower((*s).ty, a, f.ret, gens)
@@ -313,7 +313,7 @@ func collect_struct(s: *TypeSigs, id: int64) -> void {
     a: *Ast = (*s).ast
     st: StructNode = vec_get((*a).structs, id)
     name: string = ast_name(a, st.name)
-    gens: *Map<int64> = generics_set(s, st.generics_off, st.generics_len)
+    gens: *Map<string, int64> = generics_set(s, st.generics_off, st.generics_len)
     off, len, raw := push_fields(s, st.fields_off, st.fields_len, gens)
     map_put((*s).structs, name, StructSig { is_gen: st.generics_len > 0, off: off, len: len })
     map_put((*s).embed_fields, name, raw)
@@ -322,7 +322,7 @@ func collect_struct(s: *TypeSigs, id: int64) -> void {
 func collect_foreign(s: *TypeSigs, id: int64) -> void {
     a: *Ast = (*s).ast
     fb: ForeignNode = vec_get((*a).foreigns, id)
-    gens: *Map<int64> = new_set()
+    gens: *Map<string, int64> = new_set()
     mut i: int64 = 0
     while i < fb.funcs_len {
         ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + i))
@@ -344,14 +344,14 @@ func collect_foreign(s: *TypeSigs, id: int64) -> void {
 // Whether a top-level name binds a variadic foreign function, one whose C
 // signature ends in `...` and so accepts arguments beyond its fixed parameters.
 export func sig_is_variadic_foreign(s: *TypeSigs, name: string) -> bool {
-    vf: *Map<int64> = (*s).variadic_foreigns
+    vf: *Map<string, int64> = (*s).variadic_foreigns
     return map_has(vf, name)
 }
 
 // Whether a top-level name binds a foreign function, one declared in a
 // foreign "C" block and lowered through the C ABI rather than called directly.
 export func sig_is_foreign(s: *TypeSigs, name: string) -> bool {
-    fs: *Map<int64> = (*s).foreigns
+    fs: *Map<string, int64> = (*s).foreigns
     return map_has(fs, name)
 }
 
@@ -381,7 +381,7 @@ export func collect_sigs(s: *TypeSigs) -> void {
 }
 
 export func sig_has_fn(s: *TypeSigs, name: string) -> bool {
-    fns: *Map<FnSig> = (*s).fns
+    fns: *Map<string, FnSig> = (*s).fns
     return map_has(fns, name)
 }
 

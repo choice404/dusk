@@ -37,7 +37,7 @@ export enum Json {
     JNum(n: float64),
     JStr(s: string),
     JArr(items: *Vector<*Json>),
-    JObj(fields: *Map<*Json>),
+    JObj(fields: *Map<string, *Json>),
 }
 
 // The parser's cursor over the source: s is the input, pos the current byte
@@ -396,7 +396,7 @@ func jp_array(p: *JParser) -> *Json {
 
 // Parse one "key": value member into fields, advancing past the pair. Records a
 // fault when a key is not a string or the colon is missing.
-func jp_member(p: *JParser, fields: *Map<*Json>) -> void {
+func jp_member(p: *JParser, fields: *Map<string, *Json>) -> void {
     if jp_peek(p) != 34 {
         jp_fail(p, "expected a string key in object")
         return
@@ -424,7 +424,7 @@ func jp_member(p: *JParser, fields: *Map<*Json>) -> void {
 // source order, which is the order json_emit writes them back out.
 func jp_object(p: *JParser) -> *Json {
     (*p).pos = (*p).pos + 1
-    fields: *Map<*Json> = alloc(map_new())
+    fields: *Map<string, *Json> = alloc(map_new())
     jp_skip_ws(p)
     if jp_peek(p) == 125 {
         (*p).pos = (*p).pos + 1
@@ -653,7 +653,7 @@ func emit_value(sb: *StringBuilder, j: *Json) -> void {
             sb_push_char(sb, 93)
         }
         JObj(fields) => {
-            fs: *Map<*Json> = fields
+            fs: *Map<string, *Json> = fields
             emit_object(sb, fs)
         }
     }
@@ -661,7 +661,7 @@ func emit_value(sb: *StringBuilder, j: *Json) -> void {
 
 // Append an object's members to sb, keys in insertion order. Split out of
 // emit_value so the match arm stays shallow.
-func emit_object(sb: *StringBuilder, fs: *Map<*Json>) -> void {
+func emit_object(sb: *StringBuilder, fs: *Map<string, *Json>) -> void {
     keys: *Vector<string> = map_keys(fs)
     sb_push_char(sb, 123)
     mut i: int64 = 0

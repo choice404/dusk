@@ -36,7 +36,7 @@ func ident_variant_value_msg(en: string, name: string) -> string {
 func ty_is_named_struct(tc: *TypeChecker, id: int64) -> bool {
     n: TyNode = ty_get((*tc).ty, id)
     if n.kind != tyk_named() { return false }
-    structs: *Map<StructSig> = (*tc).structs
+    structs: *Map<string, StructSig> = (*tc).structs
     return map_has(structs, ty_name((*tc).ty, id))
 }
 
@@ -169,7 +169,7 @@ func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64
 }
 
 func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
-    structs: *Map<StructSig> = (*tc).structs
+    structs: *Map<string, StructSig> = (*tc).structs
     if !map_has(structs, sname) { return ty_unknown((*tc).ty) }
     st: StructSig = sig_struct((*tc).sigtab, sname)
     idx: int64 = struct_field_index(tc, st, fname)
@@ -201,7 +201,7 @@ func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: int64, lo
         vec_push(vals, infer_expr(tc, val_id))
         vi = vi + 2
     }
-    structs: *Map<StructSig> = (*tc).structs
+    structs: *Map<string, StructSig> = (*tc).structs
     if !map_has(structs, name) { return }
     st: StructSig = sig_struct((*tc).sigtab, name)
     mut i: int64 = 0
@@ -231,7 +231,7 @@ func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: int64, lo
                 tc_emit(tc, wrong_field_msg(name, fname2), val.lo, val.hi)
             }
             check_int_fits(tc, val_id2, fld.ty)
-            embeds: *Map<TyList> = (*tc).embed_fields
+            embeds: *Map<string, TyList> = (*tc).embed_fields
             if map_has(embeds, name) {
                 raws: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
                 raw: int64 = sig_ty_at((*tc).sigtab, raws, idx)
@@ -378,7 +378,7 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
     if e.kind == xk_ident() {
         name: string = ast_name(a, e.a)
         check_ident_move_use(tc, name, e.lo, e.hi)
-        asyncs: *Map<int64> = (*tc).async_fns
+        asyncs: *Map<string, int64> = (*tc).async_fns
         if map_has(asyncs, name) && !is_local(tc, name) {
             bmsg: *StringBuilder = alloc(sb_new())
             sb_push_char(bmsg, 39)

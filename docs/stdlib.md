@@ -284,33 +284,40 @@ free(v)
 
 ## std.map
 
-A hash map from string keys to values, generic over the value type. It uses open addressing with linear probing over heap buffers that double and rehash once the table is half full. Pass the map by pointer so inserts and growth persist across calls. Keys are compared by their bytes.
+A hash map generic over both its key type K and its value type V. A key is any hashable type: an integer of any width, a `char`, a `rune`, or a `string`. Keys hash through the `hash` builtin and compare with `==`, so a string key hashes and compares by its content and a scalar key by its value; a struct, pointer, or float key is rejected by name, `cannot hash <type>; a map key is an integer, char, rune, or string`. The map uses open addressing with linear probing over heap buffers that double and rehash once the table is half full. Pass the map by pointer so inserts and growth persist across calls.
 
-| Function                                          | Description                              |
-| ------------------------------------------------- | ---------------------------------------- |
-| `map_new<V>() -> Map<V>`                          | A new empty map.                         |
-| `map_put<V>(m: *Map<V>, k: string, v: V) -> void` | Insert the value, or overwrite the key.  |
-| `map_get<V>(m: *Map<V>, k: string) -> Maybe<V>`   | The value for a key, or `None` when absent. |
-| `map_has<V>(m: *Map<V>, k: string) -> bool`       | True when the key is present.            |
-| `map_len<V>(m: *Map<V>) -> int64`                 | The entry count.                         |
-| `map_keys<V>(m: *Map<V>) -> *Vector<string>`      | The keys in insertion order, a fresh owned vector. |
-| `map_free<V>(m: *Map<V>) -> void`                 | Free the backing buffers.                |
-| `map_hash(s: string) -> int64`                    | The key hash, exposed for reuse.         |
+| Function                                                | Description                              |
+| ------------------------------------------------------- | ---------------------------------------- |
+| `map_new<K, V>() -> Map<K, V>`                          | A new empty map.                         |
+| `map_put<K, V>(m: *Map<K, V>, k: K, v: V) -> void`      | Insert the value, or overwrite the key.  |
+| `map_get<K, V>(m: *Map<K, V>, k: K) -> Maybe<V>`        | The value for a key, or `None` when absent. |
+| `map_has<K, V>(m: *Map<K, V>, k: K) -> bool`            | True when the key is present.            |
+| `map_remove<K, V>(m: *Map<K, V>, k: K) -> bool`         | Remove a key, true when it was present.  |
+| `map_len<K, V>(m: *Map<K, V>) -> int64`                 | The entry count.                         |
+| `map_keys<K, V>(m: *Map<K, V>) -> *Vector<K>`           | The keys in insertion order, a fresh owned vector. |
+| `map_free<K, V>(m: *Map<K, V>) -> void`                 | Free the backing buffers.                |
+| `map_hash(s: string) -> int64`                          | The old string hash, now a thin wrapper over `hash`. |
 
 ```text
 @import std.map
 @import std.functional.maybe
 
-m: *Map<int64> = alloc(map_new())
+m: *Map<string, int64> = alloc(map_new())
 map_put(m, "two", 2)
 map_put(m, "two", 22)
 println(map_len(m))                       // 1
 println(unwrap_or(map_get(m, "two"), 0))  // 22
 map_free(m)
 free(m)
+
+byid: *Map<int64, string> = alloc(map_new())
+map_put(byid, 42, "answer")
+println(unwrap_or(map_get(byid, 42), "?"))  // answer
 ```
 
-`map_get` returns a `Maybe<V>`, so import `std.functional.maybe` to unwrap it. Capacity starts at 8 and doubles each time the map fills to half. `map_free` releases the buffers, not the key strings, which the caller still owns. `map_keys` returns the keys in the order they were first inserted, so iteration is a pure function of the insert sequence rather than the hash layout. A key appears once, at its first insertion; an overwrite does not move it and a grow rehashes without disturbing it. The returned vector is a fresh copy the caller owns and frees with `vec_free` and `free`, independent of the map, so there is no shared owner. Its elements are the key strings, which the map still owns. Import `std.vector` to walk it with `vec_len` and `vec_get`.
+`map_get` returns a `Maybe<V>`, so import `std.functional.maybe` to unwrap it. Capacity starts at 8 and doubles each time the map fills to half. The map stores keys by value: a scalar key carries no lifetime, and a string key is the caller's pointer, which must outlive the map; `map_free` releases the buffers, never a key string. `map_keys` returns the keys in the order they were first inserted, so iteration is a pure function of the insert sequence rather than the hash layout. A key appears once, at its first insertion; an overwrite does not move it and a grow rehashes without disturbing it. The returned vector is a fresh copy the caller owns and frees with `vec_free` and `free`, independent of the map, so there is no shared owner. Import `std.vector` to walk it with `vec_len` and `vec_get`.
+
+One inference note: a map read whose map argument is a struct field, nested directly inside another generic call such as `unwrap_or`, may fail to pin K, `cannot infer the type parameter 'K' for 'map_get'`. Rebind the field to a locally annotated variable first, `mm: *Map<string, V> = (*s).field`, then call through `mm`; a map held in a local or a parameter infers directly.
 
 ## std.os
 
@@ -603,7 +610,7 @@ enum Json {
     JNum(n: float64),
     JStr(s: string),
     JArr(items: *Vector<*Json>),
-    JObj(fields: *Map<*Json>),
+    JObj(fields: *Map<string, *Json>),
 }
 ```
 

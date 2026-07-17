@@ -47,7 +47,7 @@ struct Resolved {
     leaf: string,
 }
 
-func new_set() -> *Map<int64> {
+func new_set() -> *Map<string, int64> {
     return alloc(map_new())
 }
 
@@ -345,8 +345,8 @@ func register_file(files: *Vector<FileSrc>, base: int64, path: string, src: Sour
     return base + src.len + 1
 }
 
-func exported_names(a: *Ast) -> *Map<int64> {
-    names: *Map<int64> = new_set()
+func exported_names(a: *Ast) -> *Map<string, int64> {
+    names: *Map<string, int64> = new_set()
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {
@@ -377,7 +377,7 @@ func exported_names(a: *Ast) -> *Map<int64> {
     return names
 }
 
-func add_namespace(ns: *Map<int64>, modpath: string) -> void {
+func add_namespace(ns: *Map<string, int64>, modpath: string) -> void {
     b: *StringBuilder = alloc(sb_new())
     mut i: int64 = 0
     while modpath[i] != 0 {
@@ -410,19 +410,19 @@ func module_namespace(imp: string, has_leaf: bool) -> string {
     return imp
 }
 
-func extend_ns_exports(ns_exports: *Map<*Map<int64>>, modpath: string, ex: *Map<int64>) -> void {
+func extend_ns_exports(ns_exports: *Map<string, *Map<string, int64>>, modpath: string, ex: *Map<string, int64>) -> void {
     if map_has(ns_exports, modpath) {
-        empty: *Map<int64> = new_set()
-        target: *Map<int64> = unwrap_or(map_get(ns_exports, modpath), empty)
+        empty: *Map<string, int64> = new_set()
+        target: *Map<string, int64> = unwrap_or(map_get(ns_exports, modpath), empty)
         copy_export_keys(target, ex)
     } else {
-        target: *Map<int64> = new_set()
+        target: *Map<string, int64> = new_set()
         map_put(ns_exports, modpath, target)
         copy_export_keys(target, ex)
     }
 }
 
-func copy_export_keys(target: *Map<int64>, ex: *Map<int64>) -> void {
+func copy_export_keys(target: *Map<string, int64>, ex: *Map<string, int64>) -> void {
     keys: *Vector<string> = map_keys(ex)
     mut i: int64 = 0
     while i < vec_len(keys) {
@@ -491,7 +491,7 @@ func empty_program(errors: *Vector<string>, files: *Vector<FileSrc>, links: *Vec
 // time, so the linker receives a path relative to the invocation root. First
 // appearance wins, and a value already seen in an earlier file is skipped, which
 // keeps the tables in the loader's deterministic module walk order.
-func collect_directives(src: string, len: int64, file: string, errors: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<int64>, seen_csources: *Map<int64>) -> void {
+func collect_directives(src: string, len: int64, file: string, errors: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>) -> void {
     p: Prescan = prescan(src, len)
     // Prescan validates each directive as it reads it, a bad link or csource
     // value among them; those faults reach the build here, not only the scan
@@ -540,13 +540,13 @@ export func load(root_path: string, prog: string) -> Program {
     files: *Vector<FileSrc> = alloc(vec_new())
     links: *Vector<string> = alloc(vec_new())
     csources: *Vector<string> = alloc(vec_new())
-    seen_links: *Map<int64> = new_set()
-    seen_csources: *Map<int64> = new_set()
+    seen_links: *Map<string, int64> = new_set()
+    seen_csources: *Map<string, int64> = new_set()
     stdlib: string = path_join(dusk_home_for(prog, "lib"), "lib")
-    visited: *Map<int64> = new_set()
-    exports: *Map<*Map<int64>> = alloc(map_new())
-    namespaces: *Map<int64> = new_set()
-    ns_exports: *Map<*Map<int64>> = alloc(map_new())
+    visited: *Map<string, int64> = new_set()
+    exports: *Map<string, *Map<string, int64>> = alloc(map_new())
+    namespaces: *Map<string, int64> = new_set()
+    ns_exports: *Map<string, *Map<string, int64>> = alloc(map_new())
     mut base: int64 = 0
 
     root: ParsedFile = parse_file(root_path, errors)
@@ -583,7 +583,7 @@ export func load(root_path: string, prog: string) -> Program {
                     map_put(visited, cfile, 1)
                     parsed: ParsedFile = parse_file(r.file, errors)
                     if parsed.ok {
-                        ex: *Map<int64> = exported_names(parsed.ast)
+                        ex: *Map<string, int64> = exported_names(parsed.ast)
                         map_put(exports, cfile, ex)
                         suffix: string = suffix_for(r.file, vec_len(files))
                         privatize(parsed.ast, suffix)
@@ -596,15 +596,15 @@ export func load(root_path: string, prog: string) -> Program {
 
                 if has_mod_ns {
                     if map_has(exports, cfile) {
-                        empty: *Map<int64> = new_set()
-                        ex2: *Map<int64> = unwrap_or(map_get(exports, cfile), empty)
+                        empty: *Map<string, int64> = new_set()
+                        ex2: *Map<string, int64> = unwrap_or(map_get(exports, cfile), empty)
                         extend_ns_exports(ns_exports, mod_ns, ex2)
                     }
                 }
                 if r.has_leaf {
                     if map_has(exports, cfile) {
-                        empty2: *Map<int64> = new_set()
-                        ex3: *Map<int64> = unwrap_or(map_get(exports, cfile), empty2)
+                        empty2: *Map<string, int64> = new_set()
+                        ex3: *Map<string, int64> = unwrap_or(map_get(exports, cfile), empty2)
                         if !map_has(ex3, r.leaf) {
                             vec_push(errors, leaf_error(w.importer, imp, r.leaf))
                         }

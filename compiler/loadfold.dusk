@@ -640,7 +640,7 @@ func render_global_diag(files: *Vector<FileSrc>, lo: int64, hi: int64, msg: stri
     return render_diag(files, span_diag(lo, hi, msg))
 }
 
-func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
     mut i: int64 = 0
     while i < len {
         fold_expr(a, vec_get((*a).kids, off + i), ns, exports, files, errors)
@@ -648,7 +648,7 @@ func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<int64>, exports: 
     }
 }
 
-func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
     fold_expr(a, scrut, ns, exports, files, errors)
     mut i: int64 = 0
     while i < len {
@@ -658,7 +658,7 @@ func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, ns: *Map<int64>, 
     }
 }
 
-func fold_block(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_block(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
     b: BlockNode = vec_get((*a).blocks, id)
     mut i: int64 = 0
     while i < b.len {
@@ -667,7 +667,7 @@ func fold_block(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>,
     }
 }
 
-func fold_stmt(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_stmt(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
     s: StmtNode = vec_get((*a).stmts, id)
     if s.kind == sk_let() {
         fold_expr(a, s.c, ns, exports, files, errors)
@@ -703,7 +703,7 @@ func fold_stmt(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, 
     }
 }
 
-func fold_expr(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_expr(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
     exprs: *Vector<ExprNode> = (*a).exprs
     e: ExprNode = vec_get(exprs, id)
     if e.kind == xk_call() {
@@ -716,8 +716,8 @@ func fold_expr(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, 
                 if map_has(ns, prefix) {
                     leaf: string = ast_name(a, callee.b)
                     if map_has(exports, prefix) {
-                        empty: *Map<int64> = alloc(map_new())
-                        ex: *Map<int64> = unwrap_or(map_get(exports, prefix), empty)
+                        empty: *Map<string, int64> = alloc(map_new())
+                        ex: *Map<string, int64> = unwrap_or(map_get(exports, prefix), empty)
                         if !map_has(ex, leaf) {
                             msg: string = private_msg(leaf, prefix)
                             vec_push(errors, render_global_diag(files, e.lo, e.hi, msg))
@@ -770,7 +770,7 @@ func fold_expr(a: *Ast, id: int64, ns: *Map<int64>, exports: *Map<*Map<int64>>, 
     }
 }
 
-export func load_fold_qualified_calls(a: *Ast, ns: *Map<int64>, exports: *Map<*Map<int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+export func load_fold_qualified_calls(a: *Ast, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {

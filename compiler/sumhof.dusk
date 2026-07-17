@@ -28,7 +28,7 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
     record_lambda_summary(c, e)
     a: *Ast = (*(*c).t).ast
     used: *Vector<string> = alloc(vec_new())
-    bound: *Map<int64> = alloc(map_new())
+    bound: *Map<string, int64> = alloc(map_new())
     mut p: int64 = 0
     while p < e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
@@ -36,9 +36,9 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
         p = p + 1
     }
     collect_block_used((*c).t, e.d, used, bound)
-    env: *Map<SumVal> = (*c).env
-    locals: *Map<int64> = (*c).locals
-    pidx: *Map<int64> = (*c).param_index
+    env: *Map<string, SumVal> = (*c).env
+    locals: *Map<string, int64> = (*c).locals
+    pidx: *Map<string, int64> = (*c).param_index
     mut origins: int64 = 0
     mut reads: int64 = 0
     mut frame: bool = false
@@ -67,10 +67,10 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
 // desugar stamps a do's generated lambdas with the whole do span, so one span
 // records once, in walk order.
 func record_lambda_summary(c: *SumCtx, e: ExprNode) -> void {
-    lret: *Map<int64> = (*c).lambda_returns
-    lsink: *Map<int64> = (*c).lambda_sinks
-    lcoll: *Map<int64> = (*c).lambda_collect_sinks
-    lcap: *Map<string> = (*c).lambda_capture_flows
+    lret: *Map<string, int64> = (*c).lambda_returns
+    lsink: *Map<string, int64> = (*c).lambda_sinks
+    lcoll: *Map<string, int64> = (*c).lambda_collect_sinks
+    lcap: *Map<string, string> = (*c).lambda_capture_flows
     lspans: *Vector<SpanKey> = (*c).lambda_spans
     key: string = sum_span_key(e.lo, e.hi)
     if map_has(lret, key) { return }
@@ -88,11 +88,11 @@ func record_lambda_summary(c: *SumCtx, e: ExprNode) -> void {
 func sum_transfer_lambda(c: *SumCtx, e: ExprNode) -> (SummaryHandle, *Vector<CapFlow>) {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
-    fnb: *Map<string> = sum_resolvable_fn_binds(t, e.d)
-    lret: *Map<int64> = alloc(map_new())
-    lsink: *Map<int64> = alloc(map_new())
-    lcoll: *Map<int64> = alloc(map_new())
-    lcap: *Map<string> = alloc(map_new())
+    fnb: *Map<string, string> = sum_resolvable_fn_binds(t, e.d)
+    lret: *Map<string, int64> = alloc(map_new())
+    lsink: *Map<string, int64> = alloc(map_new())
+    lcoll: *Map<string, int64> = alloc(map_new())
+    lcap: *Map<string, string> = alloc(map_new())
     lspans: *Vector<SpanKey> = alloc(vec_new())
     fs: *Vector<FlowProv> = alloc(vec_new())
     syn: *SumCtx = ctx_new(t, (*c).summaries, (*c).gens, fnb, lret, lsink, lcoll, lcap, lspans, fs)
@@ -114,9 +114,9 @@ func sum_transfer_lambda(c: *SumCtx, e: ExprNode) -> (SummaryHandle, *Vector<Cap
 // bindings are restored afterwards.
 export func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) -> SumVal {
     a: *Ast = (*(*c).t).ast
-    env: *Map<SumVal> = (*c).env
-    lt: *Map<int64> = (*c).local_types
-    locals: *Map<int64> = (*c).locals
+    env: *Map<string, SumVal> = (*c).env
+    lt: *Map<string, int64> = (*c).local_types
+    locals: *Map<string, int64> = (*c).locals
     saved: *Vector<SavedParam> = alloc(vec_new())
     mut i: int64 = 0
     while i < e.b {
@@ -207,9 +207,9 @@ func mapper_result(c: *SumCtx, fexpr_id: int64, seeds: *Vector<SumVal>) -> SumVa
     f: ExprNode = vec_get((*a).exprs, fexpr_id)
     if f.kind == xk_lambda() { return walk_lambda_inline(c, f, seeds) }
     if f.kind == xk_ident() {
-        locals: *Map<int64> = (*c).locals
-        pidx: *Map<int64> = (*c).param_index
-        sums: *Map<SummaryHandle> = (*c).summaries
+        locals: *Map<string, int64> = (*c).locals
+        pidx: *Map<string, int64> = (*c).param_index
+        sums: *Map<string, SummaryHandle> = (*c).summaries
         n: string = ast_name(a, f.a)
         if !map_has(locals, n) && !map_has(pidx, n) {
             if map_has(sums, n) {
@@ -313,19 +313,19 @@ export func serialize_caps(caps: *Vector<CapFlow>) -> string {
 // The names a function binds exactly once by a straight `name := g` to a known
 // module function and never reassigns or rebinds. At a call these resolve to the
 // target's real summary instead of the opaque TOP.
-export func sum_resolvable_fn_binds(t: *SumTables, body: int64) -> *Map<string> {
-    candidate: *Map<string> = alloc(map_new())
-    poisoned: *Map<int64> = alloc(map_new())
+export func sum_resolvable_fn_binds(t: *SumTables, body: int64) -> *Map<string, string> {
+    candidate: *Map<string, string> = alloc(map_new())
+    poisoned: *Map<string, int64> = alloc(map_new())
     fnb_block(t, body, candidate, poisoned)
     return candidate
 }
 
-func fnb_poison(name: string, cand: *Map<string>, pois: *Map<int64>) -> void {
+func fnb_poison(name: string, cand: *Map<string, string>, pois: *Map<string, int64>) -> void {
     map_remove(cand, name).ignore()
     map_put(pois, name, 1)
 }
 
-func fnb_block(t: *SumTables, bid: int64, cand: *Map<string>, pois: *Map<int64>) -> void {
+func fnb_block(t: *SumTables, bid: int64, cand: *Map<string, string>, pois: *Map<string, int64>) -> void {
     if bid < 0 { return }
     a: *Ast = (*t).ast
     blocks: *Vector<BlockNode> = (*a).blocks
@@ -338,7 +338,7 @@ func fnb_block(t: *SumTables, bid: int64, cand: *Map<string>, pois: *Map<int64>)
     }
 }
 
-func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string>, pois: *Map<int64>) -> void {
+func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string, string>, pois: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     s: StmtNode = vec_get((*a).stmts, sid)
     if s.kind == sk_let() {
@@ -346,7 +346,7 @@ func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string>, pois: *Map<int64>) 
         if s.b == 1 {
             bind: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a))
             name: string = ast_name(a, bind.name)
-            mfns: *Map<int64> = (*t).module_fns
+            mfns: *Map<string, int64> = (*t).module_fns
             val: ExprNode = vec_get((*a).exprs, s.c)
             mut resolved: bool = false
             if val.kind == xk_ident() {
@@ -397,7 +397,7 @@ func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string>, pois: *Map<int64>) 
     }
 }
 
-func fnb_match(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, cand: *Map<string>, pois: *Map<int64>) -> void {
+func fnb_match(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, cand: *Map<string, string>, pois: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     fnb_expr(t, scrut, cand, pois)
     mut i: int64 = 0
@@ -418,7 +418,7 @@ func fnb_match(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, ca
     }
 }
 
-func fnb_expr(t: *SumTables, id: int64, cand: *Map<string>, pois: *Map<int64>) -> void {
+func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<string, int64>) -> void {
     if id < 0 { return }
     a: *Ast = (*t).ast
     exprs: *Vector<ExprNode> = (*a).exprs
@@ -470,7 +470,7 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string>, pois: *Map<int64>) -
 
 // collect_block equivalent: gathers every used identifier and the names bound in a
 // lambda body, so the capture value can pull each free binding's provenance.
-export func collect_block_used(t: *SumTables, bid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+export func collect_block_used(t: *SumTables, bid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     if bid < 0 { return }
     a: *Ast = (*t).ast
     blocks: *Vector<BlockNode> = (*a).blocks
@@ -483,7 +483,7 @@ export func collect_block_used(t: *SumTables, bid: int64, used: *Vector<string>,
     }
 }
 
-func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     s: StmtNode = vec_get((*a).stmts, sid)
     if s.kind == sk_let() {
@@ -518,7 +518,7 @@ func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: 
     }
 }
 
-func collect_match_used(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func collect_match_used(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     collect_expr_used(t, scrut, used, bound)
     mut i: int64 = 0
@@ -539,7 +539,7 @@ func collect_match_used(t: *SumTables, scrut: int64, arms_off: int64, arms_len: 
     }
 }
 
-func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *Map<int64>) -> void {
+func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     if id < 0 { return }
     a: *Ast = (*t).ast
     e: ExprNode = vec_get((*a).exprs, id)

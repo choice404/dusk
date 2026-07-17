@@ -17,14 +17,14 @@
 
 export struct SumCtx {
     t: *SumTables,
-    summaries: *Map<SummaryHandle>,
-    gens: *Map<int64>,
-    param_index: *Map<int64>,
+    summaries: *Map<string, SummaryHandle>,
+    gens: *Map<string, int64>,
+    param_index: *Map<string, int64>,
     dest_mask: int64,
-    fn_binds: *Map<string>,
-    locals: *Map<int64>,
-    local_types: *Map<int64>,
-    env: *Map<SumVal>,
+    fn_binds: *Map<string, string>,
+    locals: *Map<string, int64>,
+    local_types: *Map<string, int64>,
+    env: *Map<string, SumVal>,
     returns_alias: int64,
     reads_through: int64,
     sinks: int64,
@@ -32,10 +32,10 @@ export struct SumCtx {
     flows: string,
     lambda_rets: *Vector<SumVal>,
     lambda_depth: int64,
-    lambda_returns: *Map<int64>,
-    lambda_sinks: *Map<int64>,
-    lambda_collect_sinks: *Map<int64>,
-    lambda_capture_flows: *Map<string>,
+    lambda_returns: *Map<string, int64>,
+    lambda_sinks: *Map<string, int64>,
+    lambda_collect_sinks: *Map<string, int64>,
+    lambda_capture_flows: *Map<string, string>,
     lambda_spans: *Vector<SpanKey>,
     frame_stores: *Vector<FlowProv>,
     capture_flows: *Vector<CapFlow>,
@@ -44,11 +44,11 @@ export struct SumCtx {
 // Creates a walk state over the given tables and settled summary map. The lambda
 // tables, span list, and frame-store vector are the caller's, so the fixpoint
 // passes throwaway ones and only the collection pass passes the shared outputs.
-export func ctx_new(t: *SumTables, summaries: *Map<SummaryHandle>, gens: *Map<int64>, fn_binds: *Map<string>, lret: *Map<int64>, lsink: *Map<int64>, lcoll: *Map<int64>, lcap: *Map<string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> *SumCtx {
-    param_index: *Map<int64> = alloc(map_new())
-    locals: *Map<int64> = alloc(map_new())
-    local_types: *Map<int64> = alloc(map_new())
-    env: *Map<SumVal> = alloc(map_new())
+export func ctx_new(t: *SumTables, summaries: *Map<string, SummaryHandle>, gens: *Map<string, int64>, fn_binds: *Map<string, string>, lret: *Map<string, int64>, lsink: *Map<string, int64>, lcoll: *Map<string, int64>, lcap: *Map<string, string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> *SumCtx {
+    param_index: *Map<string, int64> = alloc(map_new())
+    locals: *Map<string, int64> = alloc(map_new())
+    local_types: *Map<string, int64> = alloc(map_new())
+    env: *Map<string, SumVal> = alloc(map_new())
     lambda_rets: *Vector<SumVal> = alloc(vec_new())
     capture_flows: *Vector<CapFlow> = alloc(vec_new())
     return alloc(SumCtx {
@@ -209,8 +209,8 @@ func sum_let(c: *SumCtx, s: StmtNode) -> void {
 
 func note_local(c: *SumCtx, b: BindNode) -> void {
     a: *Ast = (*(*c).t).ast
-    locals: *Map<int64> = (*c).locals
-    lt: *Map<int64> = (*c).local_types
+    locals: *Map<string, int64> = (*c).locals
+    lt: *Map<string, int64> = (*c).local_types
     map_put(locals, ast_name(a, b.name), 1)
     if b.ty >= 0 { map_put(lt, ast_name(a, b.name), b.ty) }
 }
@@ -357,12 +357,12 @@ func sum_struct_lit(c: *SumCtx, e: ExprNode) -> SumVal {
 func struct_field_view(c: *SumCtx, sname: string, fname: string) -> bool {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
-    sidx: *Map<int64> = (*t).struct_idx
+    sidx: *Map<string, int64> = (*t).struct_idx
     if !map_has(sidx, sname) { return true }
     st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, sname), 0))
     // The field type is classified against the enclosing function's generics, not
     // the struct's own, matching stage0's eval_struct_lit which passes self.generics.
-    gens: *Map<int64> = (*c).gens
+    gens: *Map<string, int64> = (*c).gens
     mut i: int64 = 0
     while i < st.fields_len {
         fld: FieldNode = vec_get((*a).fields, kid(a, st.fields_off, i))
@@ -372,9 +372,9 @@ func struct_field_view(c: *SumCtx, sname: string, fname: string) -> bool {
     return true
 }
 
-export func struct_gens(t: *SumTables, st: StructNode) -> *Map<int64> {
+export func struct_gens(t: *SumTables, st: StructNode) -> *Map<string, int64> {
     a: *Ast = (*t).ast
-    g: *Map<int64> = alloc(map_new())
+    g: *Map<string, int64> = alloc(map_new())
     mut i: int64 = 0
     while i < st.generics_len {
         map_put(g, ast_name(a, vec_get((*a).kids, st.generics_off + i)), 1)
@@ -408,8 +408,8 @@ func sum_eval_match(c: *SumCtx, e: ExprNode) -> SumVal {
 export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len: int64) -> SumVal {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
-    vidx: *Map<int64> = (*t).variant_idx
-    eidx: *Map<int64> = (*t).enum_idx
+    vidx: *Map<string, int64> = (*t).variant_idx
+    eidx: *Map<string, int64> = (*t).enum_idx
     argvals: *Vector<SumVal> = alloc(vec_new())
     mut i: int64 = 0
     while i < arg_len {
@@ -422,7 +422,7 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
         if (str_eq(name, "chan_send") || str_eq(name, "chan_try_send")) && arg_len == 2 {
             record_chan_sink(c, vec_get(argvals, 1))
         }
-        sums: *Map<SummaryHandle> = (*c).summaries
+        sums: *Map<string, SummaryHandle> = (*c).summaries
         if map_has(sums, name) {
             return apply_summary(c, unwrap_or(map_get(sums, name), empty_summary()), arg_off, arg_len, argvals)
         }
@@ -436,7 +436,7 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
             }
             return apply_summary(c, bs, arg_off, arg_len, argvals)
         }
-        fb: *Map<string> = (*c).fn_binds
+        fb: *Map<string, string> = (*c).fn_binds
         if map_has(fb, name) {
             g: string = unwrap_or(map_get(fb, name), "")
             if map_has(sums, g) {
@@ -560,7 +560,7 @@ export func record_collect_sink(c: *SumCtx, sent: SumVal) -> void {
 // frame-store counts, and the innermost inline-lambda return sink.
 func loop_state(c: *SumCtx) -> string {
     b: *StringBuilder = alloc(sb_new())
-    env: *Map<SumVal> = (*c).env
+    env: *Map<string, SumVal> = (*c).env
     keys: *Vector<string> = map_keys(env)
     sort_strings(keys)
     mut i: int64 = 0
@@ -646,7 +646,7 @@ export func str_less(x: string, y: string) -> bool {
     return x[i] == 0 && y[i] != 0
 }
 
-func map_count(m: *Map<int64>) -> int64 {
+func map_count(m: *Map<string, int64>) -> int64 {
     keys: *Vector<string> = map_keys(m)
     return vec_len(keys)
 }

@@ -28,12 +28,12 @@ export func record_store(c: *SumCtx, place_id: int64, src: SumVal, via_call: boo
     root: string = dest_root(c, place_id)
     if str_len(root) == 0 { return }
     mut targets: int64 = 0
-    pi: *Map<int64> = (*c).param_index
+    pi: *Map<string, int64> = (*c).param_index
     if map_has(pi, root) {
         j: int64 = unwrap_or(map_get(pi, root), 0)
         if ps_has((*c).dest_mask, j) { targets = targets | ps_single(j) }
     }
-    env: *Map<SumVal> = (*c).env
+    env: *Map<string, SumVal> = (*c).env
     if map_has(env, root) {
         av: SumVal = unwrap_or(map_get(env, root), val_none())
         targets = targets | av.origins | av.reads
@@ -56,7 +56,7 @@ export func record_store(c: *SumCtx, place_id: int64, src: SumVal, via_call: boo
             j = j + 1
         }
     }
-    locals: *Map<int64> = (*c).locals
+    locals: *Map<string, int64> = (*c).locals
     if !map_has(pi, root) && !map_has(locals, root) {
         caps: *Vector<CapFlow> = (*c).capture_flows
         mut k2: int64 = 0
@@ -157,7 +157,7 @@ export func sum_chain_ty(c: *SumCtx, id: int64) -> int64 {
 
 func struct_field_ty(t: *SumTables, sname: string, fname: string) -> int64 {
     a: *Ast = (*t).ast
-    sidx: *Map<int64> = (*t).struct_idx
+    sidx: *Map<string, int64> = (*t).struct_idx
     if !map_has(sidx, sname) { return (*t).infer_ty }
     st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, sname), 0))
     mut i: int64 = 0
@@ -177,7 +177,7 @@ export func projection_val(c: *SumCtx, id: int64) -> SumVal {
     t: *SumTables = (*c).t
     ct: int64 = sum_chain_ty(c, id)
     if !sum_is_view(t, ct, (*c).gens) { return val_none() }
-    env: *Map<SumVal> = (*c).env
+    env: *Map<string, SumVal> = (*c).env
     mut v: SumVal = val_none()
     proot: string = projection_root(c, id)
     if str_len(proot) > 0 { v = unwrap_or(map_get(env, proot), val_none()) }

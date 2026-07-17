@@ -53,10 +53,10 @@ func is_known_type_name(tc: *TypeChecker, name: string) -> bool {
     if str_eq(name, "float32") || str_eq(name, "float64") { return true }
     if str_eq(name, "bool") || str_eq(name, "char") || str_eq(name, "rune") { return true }
     if str_eq(name, "string") || str_eq(name, "void") || str_eq(name, "error") || str_eq(name, "thread") { return true }
-    gens: *Map<int64> = (*tc).cur_generics
-    structs: *Map<StructSig> = (*tc).structs
-    enums: *Map<EnumSig> = (*tc).enums
-    ifaces: *Map<int64> = (*tc).ifaces
+    gens: *Map<string, int64> = (*tc).cur_generics
+    structs: *Map<string, StructSig> = (*tc).structs
+    enums: *Map<string, EnumSig> = (*tc).enums
+    ifaces: *Map<string, int64> = (*tc).ifaces
     if map_has(gens, name) { return true }
     if map_has(structs, name) { return true }
     if map_has(enums, name) { return true }
@@ -154,8 +154,8 @@ export func check_main_sig(tc: *TypeChecker, f: FuncNode) -> void {
 
 func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
     a: *Ast = (*tc).ast
-    cp: *Map<int64> = alloc(map_new())
-    cpi: *Map<int64> = alloc(map_new())
+    cp: *Map<string, int64> = alloc(map_new())
+    cpi: *Map<string, int64> = alloc(map_new())
     (*tc).cur_params = cp
     (*tc).cur_param_index = cpi
     mut i: int64 = 0
@@ -167,7 +167,7 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
         tyid: int64 = tc_type(tc, p.ty)
         raw: int64 = tc_raw_type(tc, p.ty)
         rn: TyNode = ty_get((*tc).ty, raw)
-        ifaces: *Map<int64> = (*tc).ifaces
+        ifaces: *Map<string, int64> = (*tc).ifaces
         if rn.kind == tyk_named() && map_has(ifaces, ty_name((*tc).ty, raw)) {
             declare_iface_bind(tc, ast_name(a, p.name), ty_name((*tc).ty, raw))
         }
@@ -300,7 +300,7 @@ export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
         check_async_sig(tc, f)
     } else {
         raw_ret: TyNode = ty_get((*tc).ty, (*tc).cur_raw_ret)
-        ifaces2: *Map<int64> = (*tc).ifaces
+        ifaces2: *Map<string, int64> = (*tc).ifaces
         if raw_ret.kind == tyk_named() && map_has(ifaces2, ty_name((*tc).ty, (*tc).cur_raw_ret)) {
             tc_emit(tc, "returning an interface value is not supported; return the concrete type or a pointer to it", f.lo, f.hi)
         }
@@ -415,7 +415,7 @@ export func tc_run(tc: *TypeChecker) -> void {
             check_func(tc, vec_get((*a).funcs, it.id), "")
         } else if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
-            enums: *Map<EnumSig> = (*tc).enums
+            enums: *Map<string, EnumSig> = (*tc).enums
             if map_has(enums, ast_name(a, im.ty)) {
                 b: *StringBuilder = alloc(sb_new())
                 sb_push(b, "methods on the enum '")
@@ -443,7 +443,7 @@ export func tc_run(tc: *TypeChecker) -> void {
 // Runs the surface type pass and returns the checker, so the mono command can read
 // its reconciled mutable-tuple table and type arena alongside the diagnostics.
 export func typeck_run_with_info(a: *Ast, info: EscapeInfo) -> *TypeChecker {
-    empty_future: *Map<int64> = alloc(map_new())
+    empty_future: *Map<string, int64> = alloc(map_new())
     tc: *TypeChecker = tc_new(a, false, empty_future)
     (*tc).summaries = info.summaries
     (*tc).method_summaries = info.method_summaries
@@ -478,7 +478,7 @@ export func typeck_check(a: *Ast) -> *Vector<SpanDiagnostic> {
 // future passed, returned, or stored ground-checks the same shape the surface pass
 // accepted. Ownership, escape, and must-handle stay suppressed here (types_only,
 // empty summaries), since the surface pass already ran them at full fidelity.
-export func typeck_check_ground(a: *Ast, future_table: *Map<int64>) -> *Vector<SpanDiagnostic> {
+export func typeck_check_ground(a: *Ast, future_table: *Map<string, int64>) -> *Vector<SpanDiagnostic> {
     tc: *TypeChecker = tc_new(a, true, future_table)
     tc_run(tc)
     return (*tc).errors

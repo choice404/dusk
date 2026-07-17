@@ -16,10 +16,10 @@ export struct GenFnSig { ret: int64, params: *Vector<int64>, is_async: bool, var
 export struct GenCtx {
     ast: *Ast,
     ctys: *CTyArena,
-    fns: *Map<GenFnSig>,
-    methods: *Map<GenFnSig>,
-    structs: *Map<int64>,
-    enums: *Map<int64>,
+    fns: *Map<string, GenFnSig>,
+    methods: *Map<string, GenFnSig>,
+    structs: *Map<string, int64>,
+    enums: *Map<string, int64>,
     // The loaded source files and the merged-source offsets of every newline,
     // both for rendering a fault site's "path:line". The newline offsets are
     // sorted, so a line number is two binary searches.
@@ -48,10 +48,10 @@ func genctx_param_ctys(ctx: *GenCtx, f: FuncNode) -> *Vector<int64> {
 // call site sees the same signature regardless of item order.
 export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
     ctys: *CTyArena = cty_new(a)
-    fns: *Map<GenFnSig> = alloc(map_new())
-    methods: *Map<GenFnSig> = alloc(map_new())
-    structs: *Map<int64> = alloc(map_new())
-    enums: *Map<int64> = alloc(map_new())
+    fns: *Map<string, GenFnSig> = alloc(map_new())
+    methods: *Map<string, GenFnSig> = alloc(map_new())
+    structs: *Map<string, int64> = alloc(map_new())
+    enums: *Map<string, int64> = alloc(map_new())
     // The files arrive in base order, so the newlines collected file by file are
     // already globally sorted.
     newlines: *Vector<int64> = alloc(vec_new())
@@ -134,10 +134,10 @@ export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
 }
 
 export func genctx_ctys(ctx: *GenCtx) -> *CTyArena { return (*ctx).ctys }
-export func genctx_fns(ctx: *GenCtx) -> *Map<GenFnSig> { return (*ctx).fns }
-export func genctx_methods(ctx: *GenCtx) -> *Map<GenFnSig> { return (*ctx).methods }
-func genctx_structs(ctx: *GenCtx) -> *Map<int64> { return (*ctx).structs }
-func genctx_enums(ctx: *GenCtx) -> *Map<int64> { return (*ctx).enums }
+export func genctx_fns(ctx: *GenCtx) -> *Map<string, GenFnSig> { return (*ctx).fns }
+export func genctx_methods(ctx: *GenCtx) -> *Map<string, GenFnSig> { return (*ctx).methods }
+func genctx_structs(ctx: *GenCtx) -> *Map<string, int64> { return (*ctx).structs }
+func genctx_enums(ctx: *GenCtx) -> *Map<string, int64> { return (*ctx).enums }
 
 // Looks up a top-level or foreign function signature by its lowered symbol name.
 export func genctx_fn(ctx: *GenCtx, name: string) -> GenFnSig {

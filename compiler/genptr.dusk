@@ -172,7 +172,8 @@ export func alloc_of(s: *GenFuncState, pointee: int64, has_value: bool, value: V
     sb_push(b, p)
     if (*s).allocator_ty != cty_void(c) {
         an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
-        lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        slocals: *Map<string, LocalVal> = (*s).locals
+        lv: LocalVal = unwrap_or(map_get(slocals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
         sa: SizeAlign = cty_size_align(c, pointee)
         if an.kind == ctyk_iface() {
             iv: string = gen_load_slot(s, (*s).allocator_ty, lv.op)
@@ -257,7 +258,8 @@ export func gen_alloc_call_raw(s: *GenFuncState, size: string, align: int64) -> 
         sb_push_char(b, 41)
     } else {
         an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
-        lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        slocals: *Map<string, LocalVal> = (*s).locals
+        lv: LocalVal = unwrap_or(map_get(slocals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
         if an.kind == ctyk_struct() {
             sb_push(b, " = call ptr @")
             sb_push(b, an.text)
@@ -317,7 +319,8 @@ export func gen_free(s: *GenFuncState, off: int64, len: int64) -> Val {
         b: *StringBuilder = alloc(sb_new())
         if (*s).allocator_ty != cty_void(c) {
             an: CTyNode = vec_get(cty_nodes(c), (*s).allocator_ty)
-            lv: LocalVal = unwrap_or(map_get((*s).locals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+            slocals: *Map<string, LocalVal> = (*s).locals
+            lv: LocalVal = unwrap_or(map_get(slocals, (*s).allocator_name), LocalVal { ty: cty_void(c), op: gs_copy("") })
             if an.kind == ctyk_iface() {
                 iv: string = gen_load_slot(s, (*s).allocator_ty, lv.op)
                 slot: IfaceSlot = iface_slot(s, (*s).allocator_ty, iv, "free")
@@ -408,7 +411,7 @@ export func gen_sizeof(s: *GenFuncState, off: int64, len: int64) -> Val {
         e: ExprNode = vec_get((*a).exprs, eid)
         if e.kind == xk_ident() {
             name: string = ast_name(a, e.a)
-            locals: *Map<LocalVal> = (*s).locals
+            locals: *Map<string, LocalVal> = (*s).locals
             if map_has(locals, name) { ty = unwrap_or(map_get(locals, name), LocalVal { ty: ty, op: gs_copy("") }).ty }
             else { ty = cty_lower_ast(c, a, ast_type(a, tk_named(), e.a, 0, 0)) }
         } else {

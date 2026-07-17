@@ -141,7 +141,7 @@ export func emit_ty(m: *Mono, id: int64, lo: int64, hi: int64) -> int64 {
     return mt_named0(a, "int64")
 }
 
-export func emit_field_ty(m: *Mono, id: int64, subst: *Map<int64>, lo: int64, hi: int64) -> int64 {
+export func emit_field_ty(m: *Mono, id: int64, subst: *Map<string, int64>, lo: int64, hi: int64) -> int64 {
     applied: int64 = subst_apply(m, id, subst)
     check_future_spell(m, applied, lo, hi)
     return emit_ty(m, applied, lo, hi)
@@ -153,7 +153,7 @@ func expand_instance(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi
     if map_has(m_gfuncs(m), name) {
         gfid: int64 = unwrap_or(map_get(m_gfuncs(m), name), -1)
         gf: FuncNode = vec_get((*a).funcs, gfid)
-        subst: *Map<int64> = build_subst(m, gf.generics_off, gf.generics_len, args)
+        subst: *Map<string, int64> = build_subst(m, gf.generics_off, gf.generics_len, args)
         nameid: int64 = intern_owned((*a).interner, mangled)
         fid: int64 = rw_func(m, gfid, subst, nameid)
         vec_push((*m).out, ItemNode { kind: ik_func(), id: fid })
@@ -162,7 +162,7 @@ func expand_instance(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi
     if map_has(m_gstructs(m), name) {
         gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
         gs: StructNode = vec_get((*a).structs, gsid)
-        subst2: *Map<int64> = build_subst(m, gs.generics_off, gs.generics_len, args)
+        subst2: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, args)
         nameid2: int64 = intern_owned((*a).interner, mangled)
         gens: *Vector<int64> = alloc(vec_new())
         fields: *Vector<int64> = alloc(vec_new())
@@ -179,7 +179,7 @@ func expand_instance(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi
     if map_has(m_genums(m), name) {
         geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
         ge: EnumNode = vec_get((*a).enums, geid)
-        subst3: *Map<int64> = build_subst(m, ge.generics_off, ge.generics_len, args)
+        subst3: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, args)
         nameid3: int64 = intern_owned((*a).interner, mangled)
         gens2: *Vector<int64> = alloc(vec_new())
         variants: *Vector<int64> = alloc(vec_new())
@@ -204,7 +204,7 @@ func expand_instance(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi
 
 func rewrite_item(m: *Mono, it: ItemNode) -> void {
     a: *Ast = (*m).ast
-    empty_subst: *Map<int64> = alloc(map_new())
+    empty_subst: *Map<string, int64> = alloc(map_new())
     if it.kind == ik_func() {
         f: FuncNode = vec_get((*a).funcs, it.id)
         if f.generics_len == 0 {
@@ -320,7 +320,7 @@ func force_future_instances(m: *Mono) -> void {
                 mut p: int64 = 0
                 while p < f2.params_len {
                     pm: ParamNode = vec_get((*a).params, vec_get((*a).kids, f2.params_off + p))
-                    e1: *Map<int64> = alloc(map_new())
+                    e1: *Map<string, int64> = alloc(map_new())
                     if !crossable(m, pm.ty, true, true, e1) {
                         b: *StringBuilder = alloc(sb_new())
                         sb_push(b, "an async func cannot take '")
@@ -333,7 +333,7 @@ func force_future_instances(m: *Mono) -> void {
                     }
                     p = p + 1
                 }
-                e2: *Map<int64> = alloc(map_new())
+                e2: *Map<string, int64> = alloc(map_new())
                 if !crossable(m, f2.ret, true, true, e2) {
                     mono_diag(m, "an async func cannot return a slice, closure, interface value, or future that would outlive the task frame it views", f2.lo, f2.hi)
                 }
@@ -377,7 +377,7 @@ func mono_run(m: *Mono) -> void {
 // Runs monomorphization over the checked module and returns the Mono record, whose
 // `out` holds the ground items, `diags` the inference and ban diagnostics, and
 // `future_table` the mangled Future to element map.
-export func mono_expand(a: *Ast, tyarena: *TyArena, muts: *Map<MutTupleEntry>) -> *Mono {
+export func mono_expand(a: *Ast, tyarena: *TyArena, muts: *Map<string, MutTupleEntry>) -> *Mono {
     m: *Mono = mono_new(a, tyarena, muts)
     mono_run(m)
     return m
