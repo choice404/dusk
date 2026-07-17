@@ -1,0 +1,112 @@
+// Exercises the std.string byte toolkit end to end: suffix test, reverse and
+// forward find on a repeated needle, unsigned compare, the trim family over an
+// all whitespace string, split with adjacent and trailing separators, join,
+// replace_all including the empty-old copy, repeat with a zero count, and ASCII
+// case folding that leaves a multibyte UTF-8 sequence untouched. Every printed
+// value is deterministic. Bools print as 1 and 0.
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+func main() -> int32 {
+    // ends_with, the tail mirror of starts_with.
+    println(ends_with("readme.md", ".md"))
+    println(ends_with("readme.md", ".rs"))
+    println(ends_with("hi", ""))
+
+    // str_rfind versus str_find on a repeated needle, and the empty-needle and
+    // absent cases.
+    hay := "abcabcabc"
+    println(str_find(hay, "bc"))
+    println(str_rfind(hay, "bc"))
+    println(str_rfind(hay, "zz"))
+    println(str_rfind("abc", ""))
+
+    // str_cmp: unsigned lexicographic order, and a prefix sorting first.
+    println(str_cmp("abc", "abc"))
+    println(str_cmp("abc", "abd"))
+    println(str_cmp("abd", "abc"))
+    println(str_cmp("ab", "abc"))
+
+    // trim family. The all whitespace string trims to empty, still a fresh
+    // allocation, so its length is zero.
+    ts := trim_start("   hi")
+    println(ts)
+    free(ts)
+    te := trim_end("hi\t\n")
+    println(te)
+    free(te)
+    tb := trim("  hi there  ")
+    println(tb)
+    free(tb)
+    allws := trim("   \t\n ")
+    println(str_len(allws))
+    free(allws)
+
+    // str_split on a non-empty separator: adjacent separators yield an empty
+    // piece and a trailing separator yields a trailing empty piece.
+    parts := str_split("a,,b,", ",")
+    println(vec_len(parts))
+    mut i: int64 = 0
+    while i < vec_len(parts) {
+        print("[")
+        print(vec_get(parts, i))
+        println("]")
+        i = i + 1
+    }
+    // str_join is the inverse shape: the four pieces rejoined with a pipe.
+    joined := str_join(parts, "|")
+    println(joined)
+    free(joined)
+    i = 0
+    while i < vec_len(parts) {
+        free(vec_get(parts, i))
+        i = i + 1
+    }
+    vec_free(parts)
+    free(parts)
+
+    // Empty separator: a single-element vector holding a copy of s.
+    one := str_split("xyz", "")
+    println(vec_len(one))
+    println(vec_get(one, 0))
+    free(vec_get(one, 0))
+    vec_free(one)
+    free(one)
+
+    // replace_all: every occurrence, non overlapping, left to right.
+    r1 := replace_all("aaa", "a", "b")
+    println(r1)
+    free(r1)
+    r2 := replace_all("aaa", "aa", "b")
+    println(r2)
+    free(r2)
+    // Empty old copies s rather than looping forever.
+    r3 := replace_all("hello", "", "X")
+    println(r3)
+    free(r3)
+
+    // repeat, including a zero count.
+    rep := repeat("ab", 3)
+    println(rep)
+    free(rep)
+    rep0 := repeat("ab", 0)
+    println(str_len(rep0))
+    free(rep0)
+
+    // ASCII case folding. The accented e in cafe is a two byte UTF-8 sequence,
+    // both bytes above 127, so to_upper leaves it untouched while folding the
+    // ASCII letters around it.
+    up := to_upper("Hello, World! 123")
+    println(up)
+    free(up)
+    low := to_lower("Hello, World!")
+    println(low)
+    free(low)
+    uni := to_upper("café")
+    println(uni)
+    free(uni)
+
+    return 0
+}

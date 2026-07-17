@@ -1,7 +1,11 @@
 // std.string: helpers over NUL terminated strings. Length and comparison,
 // signed integer parsing and formatting, a growable StringBuilder, the raw
 // buffer bridge a foreign call reads, and the float constant formatting the
-// bootstrap compiler emits its IR through.
+// bootstrap compiler emits its IR through. The byte oriented toolkit at the end
+// searches, trims, splits, joins, replaces, repeats, and ASCII case folds, each
+// returning a fresh heap string the caller owns and frees.
+
+@import std.vector
 
 foreign "C" {
     func cool_f64_bits(x: float64) -> int64
@@ -425,4 +429,300 @@ export func str_from_chars(cs: char[]) -> string {
     sb_free(s)
     free(s)
     return out
+}
+
+// Whether s ends with suffix, comparing NUL terminated bytes, the tail mirror of
+// starts_with. The empty suffix is a suffix of every string. A suffix longer than
+// s fails without reading past either terminator.
+export func ends_with(s: string, suffix: string) -> bool {
+    n: int64 = str_len(s)
+    m: int64 = str_len(suffix)
+    if m > n {
+        return false
+    }
+    mut i: int64 = 0
+    while i < m {
+        if s[n - m + i] != suffix[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// The byte offset of the last occurrence of needle in s, or -1 when absent. The
+// empty needle matches at the end, str_len(s), the tail mirror of str_find
+// returning 0 for the empty needle at the start. The scan walks candidate offsets
+// down from the last that could fit and returns the first that matches.
+export func str_rfind(s: string, needle: string) -> int64 {
+    n: int64 = str_len(s)
+    m: int64 = str_len(needle)
+    if m == 0 {
+        return n
+    }
+    if m > n {
+        return -1
+    }
+    mut i: int64 = n - m
+    while i >= 0 {
+        mut j: int64 = 0
+        mut hit: bool = true
+        while j < m && hit {
+            if s[i + j] != needle[j] {
+                hit = false
+            }
+            j = j + 1
+        }
+        if hit {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+// Compare a and b as sequences of unsigned bytes, lexicographically: negative
+// when a sorts before b, zero when the two are equal, positive when a sorts
+// after. Bytes read unsigned, so a byte of a multibyte UTF-8 sequence orders
+// above ASCII rather than below it, and a shorter string that is a prefix of a
+// longer one sorts first at the NUL. Shaped as an int32 comparator to pass
+// straight to vec_sort.
+export func str_cmp(a: string, b: string) -> int32 {
+    mut i: int64 = 0
+    mut result: int32 = 0
+    mut done: bool = false
+    while !done {
+        ca: int64 = int64(a[i])
+        cb: int64 = int64(b[i])
+        if ca != cb {
+            if ca < cb {
+                result = -1
+            } else {
+                result = 1
+            }
+            done = true
+        } else {
+            if ca == 0 {
+                done = true
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// Whether c is one of the four ASCII whitespace bytes trim recognizes: space,
+// horizontal tab, carriage return, and line feed. Not exported; the trim family's
+// own predicate.
+func is_ascii_ws(c: char) -> bool {
+    if c == 32 {
+        return true
+    }
+    if c == 9 {
+        return true
+    }
+    if c == 13 {
+        return true
+    }
+    if c == 10 {
+        return true
+    }
+    return false
+}
+
+// Strip ASCII whitespace from the front of s, returning a fresh heap string the
+// caller owns. The result is always a fresh string, a copy of s when nothing
+// strips.
+export func trim_start(s: string) -> string {
+    n: int64 = str_len(s)
+    mut lo: int64 = 0
+    while lo < n && is_ascii_ws(s[lo]) {
+        lo = lo + 1
+    }
+    return substring(s, lo, n)
+}
+
+// Strip ASCII whitespace from the end of s, returning a fresh heap string the
+// caller owns. The result is always a fresh string, a copy of s when nothing
+// strips.
+export func trim_end(s: string) -> string {
+    n: int64 = str_len(s)
+    mut hi: int64 = n
+    while hi > 0 && is_ascii_ws(s[hi - 1]) {
+        hi = hi - 1
+    }
+    return substring(s, 0, hi)
+}
+
+// Strip ASCII whitespace from both ends of s, returning a fresh heap string the
+// caller owns. An all whitespace string trims to the empty string, still a fresh
+// allocation.
+export func trim(s: string) -> string {
+    n: int64 = str_len(s)
+    mut lo: int64 = 0
+    while lo < n && is_ascii_ws(s[lo]) {
+        lo = lo + 1
+    }
+    mut hi: int64 = n
+    while hi > lo && is_ascii_ws(s[hi - 1]) {
+        hi = hi - 1
+    }
+    return substring(s, lo, hi)
+}
+
+// Split s on every occurrence of sep, returning the pieces in order as a fresh
+// heap Vector of fresh heap strings, the vector and every element owned by the
+// caller (free each element, then vec_free and free the vector). Adjacent
+// separators yield an empty string between them, and a leading or trailing
+// separator yields a leading or trailing empty element, the same pieces Go's
+// strings.Split produces. An empty sep is not scanned for, since it would match
+// between every byte; the result is a single element vector holding a copy of s.
+export func str_split(s: string, sep: string) -> *Vector<string> {
+    v: *Vector<string> = alloc(vec_new())
+    m: int64 = str_len(sep)
+    n: int64 = str_len(s)
+    if m == 0 {
+        vec_push(v, substring(s, 0, n))
+        return v
+    }
+    mut start: int64 = 0
+    mut i: int64 = 0
+    while i <= n - m {
+        mut j: int64 = 0
+        mut hit: bool = true
+        while j < m && hit {
+            if s[i + j] != sep[j] {
+                hit = false
+            }
+            j = j + 1
+        }
+        if hit {
+            vec_push(v, substring(s, start, i))
+            i = i + m
+            start = i
+        } else {
+            i = i + 1
+        }
+    }
+    vec_push(v, substring(s, start, n))
+    return v
+}
+
+// Concatenate the elements of parts with sep between each adjacent pair, into a
+// fresh heap string the caller owns. An empty vector yields the empty string, and
+// a single element yields a copy of that element with no separator. The elements
+// are read, never taken, so parts and its strings stay the caller's to free.
+export func str_join(parts: *Vector<string>, sep: string) -> string {
+    sb: *StringBuilder = alloc(sb_new())
+    n: int64 = vec_len(parts)
+    mut i: int64 = 0
+    while i < n {
+        if i > 0 {
+            sb_push(sb, sep)
+        }
+        sb_push(sb, vec_get(parts, i))
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// Replace every non overlapping occurrence of old in s with new_s, scanning left
+// to right, into a fresh heap string the caller owns. After a match the scan
+// resumes past the whole matched run, so replacements never overlap. An empty old
+// is not scanned for, since it would match between every byte; the result is then
+// a fresh copy of s. A missing old also yields a fresh copy of s.
+export func replace_all(s: string, old: string, new_s: string) -> string {
+    m: int64 = str_len(old)
+    n: int64 = str_len(s)
+    if m == 0 {
+        return substring(s, 0, n)
+    }
+    sb: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < n {
+        mut hit: bool = false
+        if i <= n - m {
+            mut j: int64 = 0
+            hit = true
+            while j < m && hit {
+                if s[i + j] != old[j] {
+                    hit = false
+                }
+                j = j + 1
+            }
+        }
+        if hit {
+            sb_push(sb, new_s)
+            i = i + m
+        } else {
+            sb_push_char(sb, s[i])
+            i = i + 1
+        }
+    }
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// s concatenated n times, into a fresh heap string the caller owns. A count of
+// zero or less yields the empty string, still a fresh allocation.
+export func repeat(s: string, n: int64) -> string {
+    sb: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < n {
+        sb_push(sb, s)
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// Uppercase the ASCII letters a to z of s, leaving every other byte unchanged, in
+// a fresh heap string the caller owns. Only ASCII folds: a byte of a multibyte
+// UTF-8 sequence is 128 or above and passes through untouched, so non ASCII text
+// copies verbatim. This is deliberately ASCII only; a full Unicode case fold is
+// out of scope here.
+export func to_upper(s: string) -> string {
+    n: int64 = str_len(s)
+    d: *raw char = alloc_bytes(n + 1)
+    mut i: int64 = 0
+    while i < n {
+        c: int64 = int64(s[i])
+        if c >= 97 && c <= 122 {
+            d[i] = c - 32
+        } else {
+            d[i] = s[i]
+        }
+        i = i + 1
+    }
+    d[n] = 0
+    return cstr(d)
+}
+
+// Lowercase the ASCII letters A to Z of s, leaving every other byte unchanged, in
+// a fresh heap string the caller owns. Only ASCII folds: a byte of a multibyte
+// UTF-8 sequence is 128 or above and passes through untouched, so non ASCII text
+// copies verbatim. This is deliberately ASCII only; a full Unicode case fold is
+// out of scope here.
+export func to_lower(s: string) -> string {
+    n: int64 = str_len(s)
+    d: *raw char = alloc_bytes(n + 1)
+    mut i: int64 = 0
+    while i < n {
+        c: int64 = int64(s[i])
+        if c >= 65 && c <= 90 {
+            d[i] = c + 32
+        } else {
+            d[i] = s[i]
+        }
+        i = i + 1
+    }
+    d[n] = 0
+    return cstr(d)
 }

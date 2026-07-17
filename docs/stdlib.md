@@ -139,14 +139,28 @@ The order is `Debug < Info < Warn < Error`, and the default threshold is `Info`.
 
 ## std.string
 
-Helpers over NUL terminated strings: length and comparison, signed integer parsing and formatting, substring slicing, a growable builder, and the float constant formatting the bootstrap compiler emits its IR through.
+Helpers over NUL terminated strings: length and comparison, searching, trimming, splitting, joining, replacing, ASCII case folding, signed integer parsing and formatting, substring slicing, a growable builder, and the float constant formatting the bootstrap compiler emits its IR through.
 
 | Function                                              | Description                                 |
 | ----------------------------------------------------- | ------------------------------------------- |
 | `str_len(s: string) -> int64`                         | Length up to the NUL terminator.            |
 | `str_eq(a: string, b: string) -> bool`                | True when both strings hold the same bytes. |
+| `str_cmp(a: string, b: string) -> int32`              | Unsigned lexicographic compare: negative, zero, or positive, shaped to pass to `vec_sort`. |
 | `starts_with(s: string, prefix: string) -> bool`      | True when `s` begins with `prefix`.         |
+| `ends_with(s: string, suffix: string) -> bool`        | True when `s` ends with `suffix`, the tail mirror of `starts_with`. |
+| `str_find(s: string, needle: string) -> int64`        | The byte offset of the first `needle` in `s`, or -1; the empty needle matches at 0. |
+| `str_rfind(s: string, needle: string) -> int64`       | The byte offset of the last `needle` in `s`, or -1; the empty needle matches at `str_len(s)`. |
+| `str_contains(s: string, needle: string) -> bool`     | True when `needle` occurs anywhere in `s`.  |
 | `substring(s: string, lo: int64, hi: int64) -> string`| A fresh heap string of `s[lo, hi)`, clamped to the string. |
+| `trim_start(s: string) -> string`                     | A fresh copy of `s` with leading whitespace removed: space, tab, CR, LF. |
+| `trim_end(s: string) -> string`                       | A fresh copy of `s` with trailing whitespace removed: space, tab, CR, LF. |
+| `trim(s: string) -> string`                           | A fresh copy of `s` with whitespace removed from both ends: space, tab, CR, LF. |
+| `str_split(s: string, sep: string) -> *Vector<string>`| Split `s` on every `sep` into a fresh vector of fresh strings; an empty `sep` yields one copy of `s`. |
+| `str_join(parts: *Vector<string>, sep: string) -> string` | Concatenate `parts` with `sep` between each pair into a fresh string. |
+| `replace_all(s: string, old: string, new_s: string) -> string` | A fresh copy of `s` with every non overlapping `old` replaced by `new_s`; an empty `old` copies `s`. |
+| `repeat(s: string, n: int64) -> string`               | A fresh string of `s` repeated `n` times; `n <= 0` yields the empty string. |
+| `to_upper(s: string) -> string`                       | A fresh copy of `s` with ASCII letters uppercased, every other byte unchanged. |
+| `to_lower(s: string) -> string`                       | A fresh copy of `s` with ASCII letters lowercased, every other byte unchanged. |
 | `int_to_string(n: int64) -> string`                   | The base 10 text of a signed integer.       |
 | `int_to_hex16(n: int64) -> string`                    | The `0x` prefixed, 16 digit, uppercase hex of `n` read as a 64 bit word. |
 | `parse_int(s: string) -> (int64, error)`              | Parse a signed base 10 integer.             |
@@ -176,6 +190,8 @@ free(s)
 `cbuf` is the bridge the other way, out to a foreign call. A `string` is a fat view typed apart from a raw pointer, so a foreign signature, which takes only a scalar, a `*raw T`, or a `*void`, cannot read one directly; `cbuf` copies the bytes into a fresh, NUL terminated, heap allocated buffer the caller owns and frees once the call that reads it has returned. `std.os`'s `run` and `env` both cross this way.
 
 `parse_int` takes a base 10 string, so a `0x`, `0o`, or `0b` prefix fails on the prefix letter. `parse_int_radix` takes the base and accepts the matching prefix, `0x` for 16, `0o` for 8, `0b` for 2, but never infers the base from the prefix. Each parser returns the value with an error you must handle.
+
+`str_split` and `str_join` are inverse shapes over a `*Vector<string>`, which is why `std.string` imports `std.vector`; the vector and every element it holds are fresh heap allocations the caller frees. The case folds and the trim family are ASCII only by design, a byte at 128 or above passes through untouched, so a multibyte UTF-8 scalar survives them intact and a full Unicode fold stays out of the string module, the same posture the unicode tables took.
 
 ### Mutable strings
 

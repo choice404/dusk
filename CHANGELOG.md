@@ -2,6 +2,24 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.5.3
+
+The string toolkit. `std.string` grew up serving the compiler, so it had parsing, a builder, and the foreign bridge, but not the everyday manipulation set a program reaches for first. This release adds it: searching from the tail, ordering, trimming, splitting and joining, replacing, repeating, and ASCII case folding, twelve functions, all pure dusk over the existing builder, no compiler or runtime change.
+
+The string toolkit.
+
+- `ends_with` mirrors `starts_with` at the tail; `str_rfind` finds the last occurrence the way `str_find` finds the first, the empty needle matching at the end; `str_cmp` compares by unsigned byte order and returns the negative, zero, positive shape `vec_sort`'s comparator takes, so a vector of strings sorts with no glue.
+- `trim_start`, `trim_end`, and `trim` strip ASCII whitespace from the named ends, always returning a fresh heap string; `repeat` concatenates a string with itself n times, zero or negative n yielding the empty string; `replace_all` replaces every non overlapping occurrence left to right, an empty pattern copying the input rather than looping.
+- `str_split` splits on every occurrence of a separator, adjacent separators yielding empty strings and a leading or trailing separator a leading or trailing empty string; an empty separator yields one copy of the input. `str_join` is its inverse over a `*Vector<string>`. The pair is why `std.string` now imports `std.vector`; both the vector and its elements are fresh allocations the caller owns. The names carry the `str_` prefix because a bare `join` is the thread builtin's call form, the same reserved set `hash` joined one release ago. One consequence of the import: since nearly every module imports `std.string`, a program that imports any of them now sees the `vec_*` names too, so a program defining its own `vec_len` or `Vector` fails loudly with a duplicate definition where it compiled before; rename the private copy.
+- `to_upper` and `to_lower` fold ASCII letters only: a byte at 128 or above passes through untouched, so a multibyte UTF-8 scalar survives intact, and a full Unicode case fold stays out of the module, the same posture the unicode tables took.
+- `examples/string_toolkit.dusk` exercises every function including the edges, an all whitespace trim, a trailing separator split, a repeated needle searched from both ends, an empty pattern replace, and a multibyte string through the case fold; `examples/string_toolkit_reject.dusk` pins a wrong typed argument.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 697 records, 2 new since 1.5.2 for the toolkit and its reject.
+- The stage ladder re-fixed with the `v1.5.2` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (e2a7d4be...) and one compiler IR sha256 (9af74291...), the collapse, fixpoint, and determinism checks all green, 697/697 under stage1 and stage2 alike.
+- The ratchet holds: the `v1.5.2` release binary builds the 1.5.3 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+
 ## 1.5.2
 
 The generic map. `std.map` was keyed by strings alone since it first shipped; it is now generic over both its key and its value, `Map<K, V>`, with K drawn from the hashable set the `hash` builtin defined one release earlier: an integer of any width, a `char`, a `rune`, or a `string`. A struct, pointer, or float key is rejected by name. Every existing map is spelled `Map<string, V>` now, and the compiler itself, the heaviest map user in the tree at more than seven hundred annotation sites, migrated with it. The split from 1.5.1 is deliberate sequencing: the map uses `hash`, so `hash` had to be one release old before the map could, keeping the previous release's binary able to build the current source.
