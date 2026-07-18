@@ -182,16 +182,94 @@ func quoted_msg(prefix: string, payload: string) -> string {
     return out
 }
 
-// Processes one line. Returns true to keep scanning, false at the first code line,
-// where the sweep stops. Blank and comment lines are skipped; a directive updates
-// the collections; an unknown @directive is a recorded fault.
-func process_line(src: string, n: int64, ls: int64, le: int64, p: Prescan) -> bool {
-    ts, te := trim_range(src, n, ls, le)
+// Builds the effective bytes of a line outside block comments, threading the
+// block-comment nesting depth in from the previous line and out to the next.
+// Inside a block comment only "/*" and "*/" are significant, so a commented-out
+// directive is dropped and never reaches classification. Outside a comment a double
+// quoted string shields both "/*" and "*/", so a quoted "/*" cannot open a comment
+// that swallows the lines below, mirroring the lexer rule that a string literal is a
+// token before trivia. A "//" outside a comment copies the rest of the line
+// verbatim, so clean_rest's existing quote-unaware cut stays byte-identical. The
+// string state is line-local, since a directive argument string is single-line.
+func line_effective(src: string, n: int64, ls: int64, le: int64, depth: int64) -> (string, int64, int64) {
+    b: *StringBuilder = alloc(sb_new())
+    mut d: int64 = depth
+    mut in_str: bool = false
+    mut i: int64 = ls
+    mut going: bool = true
+    while going {
+        if i >= le {
+            going = false
+        } else {
+            c: int64 = bytes.byte_at(src, n, i)
+            if d > 0 {
+                if c == 42 && bytes.byte_at(src, n, i + 1) == 47 {
+                    d = d - 1
+                    i = i + 2
+                } else if c == 47 && bytes.byte_at(src, n, i + 1) == 42 {
+                    d = d + 1
+                    i = i + 2
+                } else {
+                    i = i + 1
+                }
+            } else if in_str {
+                if c == 92 {
+                    sb_push_char(b, c)
+                    if i + 1 < le {
+                        sb_push_char(b, bytes.byte_at(src, n, i + 1))
+                        i = i + 2
+                    } else {
+                        i = i + 1
+                    }
+                } else if c == 34 {
+                    sb_push_char(b, c)
+                    in_str = false
+                    i = i + 1
+                } else {
+                    sb_push_char(b, c)
+                    i = i + 1
+                }
+            } else if c == 47 && bytes.byte_at(src, n, i + 1) == 47 {
+                while i < le {
+                    sb_push_char(b, bytes.byte_at(src, n, i))
+                    i = i + 1
+                }
+                going = false
+            } else if c == 47 && bytes.byte_at(src, n, i + 1) == 42 {
+                // A comment separates tokens in the lexer, so its elision
+                // leaves one space: @link/*c*/"m" must not glue to @link"m".
+                sb_push_char(b, 32)
+                d = d + 1
+                i = i + 2
+            } else if c == 34 {
+                sb_push_char(b, c)
+                in_str = true
+                i = i + 1
+            } else {
+                sb_push_char(b, c)
+                i = i + 1
+            }
+        }
+    }
+    en: int64 = sb_size(b)
+    eff: string = substring_n(sb_cstr(b), en, 0, en)
+    sb_free(b)
+    free(b)
+    return (eff, en, d)
+}
+
+// Processes one line's effective text (eff, its length en), the bytes outside any
+// block comment. Returns true to keep scanning, false at the first code line, where
+// the sweep stops. Blank and comment lines are skipped; a directive updates the
+// collections; an unknown @directive is a recorded fault. Classification runs over
+// eff, but a fault span stays on the original line [ls, le).
+func process_line(eff: string, en: int64, ls: int64, le: int64, p: Prescan) -> bool {
+    ts, te := trim_range(eff, en, 0, en)
     if ts == te {
         return true
     }
-    if bytes.byte_at(src, n, ts) == 47 {
-        if bytes.byte_at(src, n, ts + 1) == 47 {
+    if bytes.byte_at(eff, en, ts) == 47 {
+        if bytes.byte_at(eff, en, ts + 1) == 47 {
             return true
         }
     }
@@ -203,21 +281,21 @@ func process_line(src: string, n: int64, ls: int64, le: int64, p: Prescan) -> bo
         if he >= te {
             scanning = false
         } else {
-            w: int64 = ws_len_at(src, n, he)
+            w: int64 = ws_len_at(eff, en, he)
             if w > 0 {
                 scanning = false
             } else {
-                d: Decoded = bytes.decode_utf8(src, n, he)
+                d: Decoded = bytes.decode_utf8(eff, en, he)
                 he = he + d.len
             }
         }
     }
-    head: string = substring_n(src, n, ts, he)
+    head: string = substring_n(eff, en, ts, he)
     mut rest_start: int64 = he
     if he < te {
-        rest_start = he + ws_len_at(src, n, he)
+        rest_start = he + ws_len_at(eff, en, he)
     }
-    rest: string = clean_rest(src, n, rest_start, te)
+    rest: string = clean_rest(eff, en, rest_start, te)
 
     mut keep: bool = true
     if str_eq(head, "@paradigm") {
@@ -259,7 +337,7 @@ func process_line(src: string, n: int64, ls: int64, le: int64, p: Prescan) -> bo
         } else {
             vec_push(p.csources, cv)
         }
-    } else if bytes.byte_at(src, n, ts) == 64 {
+    } else if bytes.byte_at(eff, en, ts) == 64 {
         vec_push(p.errors, located(ls, le, quoted_msg("unknown directive '", head)))
     } else {
         keep = false
@@ -285,6 +363,7 @@ export func prescan(src: string, n: int64) -> Prescan {
         errors: ev,
     }
     mut pos: int64 = 0
+    mut depth: int64 = 0
     mut running: bool = true
     while running {
         if pos > n {
@@ -302,7 +381,10 @@ export func prescan(src: string, n: int64) -> Prescan {
                     end = end + 1
                 }
             }
-            keep: bool = process_line(src, n, pos, end, p)
+            eff, en, nd := line_effective(src, n, pos, end, depth)
+            depth = nd
+            keep: bool = process_line(eff, en, pos, end, p)
+            free(eff)
             if !keep {
                 running = false
             } else if bytes.byte_at(src, n, end) == 10 {

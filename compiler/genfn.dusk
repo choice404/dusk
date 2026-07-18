@@ -270,14 +270,49 @@ export func main_is_argc_argv(ctx: *GenCtx, f: FuncNode) -> bool {
     return false
 }
 
-// Emits the C ABI wrapper for an argc/argv main after the user body was renamed.
-export func emit_main_wrapper(ctx: *GenCtx, f: FuncNode) -> string {
+// The native default LLVM target triple, the one every build emits unless asked
+// otherwise. Kept as one named value so the default lives in a single place.
+export func default_target() -> string {
+    return "x86_64-pc-linux-gnu"
+}
+
+// The wasm32-wasip1 target triple, in the canonical spelling clang normalizes
+// to, so the emitted module header does not draw an override warning at link.
+export func wasm_target() -> string {
+    return "wasm32-unknown-wasip1"
+}
+
+// True when a target triple names the wasm32-wasip1 backend. The triple is the
+// only target signal the emitter carries, so codegen keys wasm-specific choices
+// (the C entry symbol) off it rather than a separate flag.
+export func target_is_wasm(target: string) -> bool {
+    return str_eq(target, wasm_target())
+}
+
+// The C entry symbol for an argc/argv main on the given target: wasi-libc's crt1
+// calls __main_argc_argv, while a native C runtime calls main.
+export func entry_name_for(wasm: bool) -> string {
+    if wasm {
+        return "__main_argc_argv"
+    }
+    return "main"
+}
+
+// Emits the C ABI wrapper for an argc/argv main after the user body was renamed
+// to dusk__main. entry_name is the exported symbol: "main" for a native link,
+// where the C runtime's crt calls main, or "__main_argc_argv" for wasm, the
+// symbol wasi-libc's crt1 calls (its __main_void forwards to it). The parameter
+// list stays (i32, ptr), which is (i32, i32) on wasm where a pointer is 32 bit,
+// matching the signature wasi expects.
+export func emit_main_wrapper(ctx: *GenCtx, f: FuncNode, entry_name: string) -> string {
     a: *Ast = (*ctx).ast
     rty: string = cty_ll(genctx_ctys(ctx), cty_lower_ast(genctx_ctys(ctx), a, f.ret))
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "define ")
     sb_push(b, rty)
-    sb_push(b, " @main(i32 %argc, ptr %argv) {\n")
+    sb_push(b, " @")
+    sb_push(b, entry_name)
+    sb_push(b, "(i32 %argc, ptr %argv) {\n")
     sb_push(b, "entry:\n")
     sb_push(b, "  %len = sext i32 %argc to i64\n")
     sb_push(b, "  %s0 = insertvalue { ptr, i64 } undef, ptr %argv, 0\n")
@@ -285,6 +320,32 @@ export func emit_main_wrapper(ctx: *GenCtx, f: FuncNode) -> string {
     sb_push(b, "  %r = call ")
     sb_push(b, rty)
     sb_push(b, " @dusk__main(i32 %argc, { ptr, i64 } %s1)\n")
+    sb_push(b, "  ret ")
+    sb_push(b, rty)
+    sb_push(b, " %r\n}")
+    out: string = gf_built(b)
+    sb_free(b)
+    free(b)
+    free(rty)
+    return out
+}
+
+// The wasm entry wrapper for a nullary main. wasi-libc's crt1 always calls
+// __main_argc_argv(i32, i32), so even a main() with no parameters must present
+// that two-argument entry; this wrapper takes the argc/argv wasi hands it,
+// ignores both, and calls the parameterless dusk__main. Native keeps emitting a
+// bare @main() and needs no wrapper, so this form is wasm only.
+export func emit_main_wrapper_void(ctx: *GenCtx, f: FuncNode) -> string {
+    a: *Ast = (*ctx).ast
+    rty: string = cty_ll(genctx_ctys(ctx), cty_lower_ast(genctx_ctys(ctx), a, f.ret))
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "define ")
+    sb_push(b, rty)
+    sb_push(b, " @__main_argc_argv(i32 %argc, ptr %argv) {\n")
+    sb_push(b, "entry:\n")
+    sb_push(b, "  %r = call ")
+    sb_push(b, rty)
+    sb_push(b, " @dusk__main()\n")
     sb_push(b, "  ret ")
     sb_push(b, rty)
     sb_push(b, " %r\n}")

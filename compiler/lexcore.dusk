@@ -121,6 +121,8 @@ export func lx_skip_trivia(lx: *Lexer) -> void {
         } else if c == 47 {
             if lx_peek2(lx) == 47 {
                 lx_skip_line_comment(lx)
+            } else if lx_peek2(lx) == 42 {
+                lx_skip_block_comment(lx)
             } else {
                 going = false
             }
@@ -138,6 +140,49 @@ func lx_skip_line_comment(lx: *Lexer) -> void {
             going = false
         } else if c < 0 {
             going = false
+        } else {
+            (*lx).pos = (*lx).pos + 1
+        }
+    }
+}
+
+// Skips a Rust-style nested block comment starting at "/*". Inside a block comment
+// only "/*" and "*/" are significant: quotes and "//" are inert, so a commented-out
+// string literal or line comment cannot reopen or extend the block. A newline inside
+// the comment sets the pending newline flag, so a multi-line comment terminates a
+// statement the way a bare newline does; a same-line comment does not. An
+// unterminated comment records a fault at its opening "/*". The byte scan is UTF-8
+// safe: 0x2A, 0x2F, and 0x0A never appear as a continuation byte.
+func lx_skip_block_comment(lx: *Lexer) -> void {
+    open: int64 = lx_pos(lx)
+    (*lx).pos = (*lx).pos + 2
+    mut depth: int64 = 1
+    mut going: bool = true
+    while going {
+        b: int64 = lx_peek(lx)
+        if b < 0 {
+            lx_err(lx, open, "unterminated block comment")
+            going = false
+        } else if b == 42 {
+            if lx_peek2(lx) == 47 {
+                (*lx).pos = (*lx).pos + 2
+                depth = depth - 1
+                if depth == 0 {
+                    going = false
+                }
+            } else {
+                (*lx).pos = (*lx).pos + 1
+            }
+        } else if b == 47 {
+            if lx_peek2(lx) == 42 {
+                (*lx).pos = (*lx).pos + 2
+                depth = depth + 1
+            } else {
+                (*lx).pos = (*lx).pos + 1
+            }
+        } else if b == 10 {
+            (*lx).pending_nl = true
+            (*lx).pos = (*lx).pos + 1
         } else {
             (*lx).pos = (*lx).pos + 1
         }

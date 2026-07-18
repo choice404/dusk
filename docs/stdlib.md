@@ -343,7 +343,7 @@ A thin wrapper over the process environment, the command shell, and the C librar
 | ------------------------------- | ----------------------------------------------------------------- |
 | `run(cmd: string) -> int64`     | Run `cmd` through the C library `system` and return the exit code.|
 | `env(name: string) -> string`   | The value of an environment variable, or the empty string when unset. |
-| `errno() -> int64`              | The C library's errno, read right after a foreign call that may have set it. |
+| `os_errno() -> int64`           | The C library's errno, read right after a foreign call that may have set it. |
 | `errstr(code: int64) -> string` | The message `strerror` reports for an errno value.                |
 | `quote(arg: string) -> string`  | Wrap `arg` in single quotes so a POSIX shell reads it as one word. |
 
@@ -361,7 +361,7 @@ free(msg)
 
 `run` returns the child's exit code, decoded from the wait status `system` reports. A normally terminated child reports its exit code. A child the OS kills reports 128 plus the signal, the shell convention, so a process killed by, say, the out of memory killer is never mistaken for a clean exit. `env` reads back the empty string for an unset variable, never a null, so test the result with `str_len` or `str_eq`. `quote` writes every embedded single quote as the four byte close quote, escaped quote, reopen quote sequence, so the quoted result is safe to splice into a command line passed to `run`.
 
-Added in 1.4.0, `errno` and `errstr` are the read side of the C library's own error channel. dusk never sets errno itself; a call to `errno()` always reports whatever the most recent foreign call, a libc function or a third party one, left behind, so read it immediately after the call whose failure it names, before anything else crosses the C boundary and overwrites it. `errstr` hands back `strerror`'s message for a code, `errno()`'s own result or a literal like `2` for `ENOENT`, copied off `strerror`'s static buffer into a fresh heap string the caller owns and frees, since that buffer is only good until the thread's next `strerror` call.
+Added in 1.4.0, `os_errno` and `errstr` are the read side of the C library's own error channel; the read carried the bare name `errno` through 1.5.x and 1.6.0 renames it so its symbol never collides with the C `errno` it reads on a target whose libc declares one. dusk never sets errno itself; a call to `os_errno()` always reports whatever the most recent foreign call, a libc function or a third party one, left behind, so read it immediately after the call whose failure it names, before anything else crosses the C boundary and overwrites it. `errstr` hands back `strerror`'s message for a code, `os_errno()`'s own result or a literal like `2` for `ENOENT`, copied off `strerror`'s static buffer into a fresh heap string the caller owns and frees, since that buffer is only good until the thread's next `strerror` call.
 
 ## std.process
 
@@ -448,7 +448,7 @@ free(r)
 
 ## std.fs
 
-Added in 1.4.1. Files, directories, and paths. The low level `foreign` block binds `open`, `close`, `read`, `write`, `lseek`, `mkdir`, `rmdir`, `unlink`, and `rename` straight from libc; every wrapper below that can fail returns its value alongside an `error` built from `std.os`'s `errno()`/`errstr`, read immediately after the call that may have set it.
+Added in 1.4.1. Files, directories, and paths. The low level `foreign` block binds `open`, `close`, `read`, `write`, `lseek`, `mkdir`, `rmdir`, `unlink`, and `rename` straight from libc; every wrapper below that can fail returns its value alongside an `error` built from `std.os`'s `os_errno()`/`errstr`, read immediately after the call that may have set it.
 
 | Function                                                    | Description                                                       |
 | ------------------------------------------------------------ | ------------------------------------------------------------------ |

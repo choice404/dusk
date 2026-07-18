@@ -2,8 +2,8 @@
 // libc directly (open, close, read, write, lseek, mkdir, rmdir, unlink,
 // rename), including the variadic form of open that carries the create
 // mode as its optional third argument. Every wrapper that can fail returns
-// its value alongside an error built from errno/errstr, std.os's own
-// convention: read errno() immediately after the call that may have set it,
+// its value alongside an error built from os_errno/errstr, std.os's own
+// convention: read os_errno() immediately after the call that may have set it,
 // before any other foreign call has a chance to overwrite it.
 //
 // file_stat and directory iteration are shims in the C runtime rather than a
@@ -82,7 +82,7 @@ export func mode_0755() -> int32 { return 493 }
 export func open_file(path: string, flags: int32, mode: int32) -> (int32, error) {
     buf: *raw char = cbuf(path)
     fd: int32 = open(buf, flags, mode)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(buf)
     if fd < 0 {
         return (-1, error { message: errstr(code) })
@@ -93,7 +93,7 @@ export func open_file(path: string, flags: int32, mode: int32) -> (int32, error)
 // Closes a descriptor opened by open_file.
 export func close_file(fd: int32) -> error {
     rc: int32 = close(fd)
-    code: int64 = errno()
+    code: int64 = os_errno()
     if rc < 0 {
         return error { message: errstr(code) }
     }
@@ -105,7 +105,7 @@ export func close_file(fd: int32) -> error {
 // alloc_bytes idiom std.async.io's read_nb uses.
 export func read_bytes(fd: int32, buf: *void, cap: int64) -> (int64, error) {
     n: int64 = read(fd, buf, cap)
-    code: int64 = errno()
+    code: int64 = os_errno()
     if n < 0 {
         return (0, error { message: errstr(code) })
     }
@@ -117,7 +117,7 @@ export func read_bytes(fd: int32, buf: *void, cap: int64) -> (int64, error) {
 // byte.
 export func write_bytes(fd: int32, buf: *void, n: int64) -> (int64, error) {
     wr: int64 = write(fd, buf, n)
-    code: int64 = errno()
+    code: int64 = os_errno()
     if wr < 0 {
         return (0, error { message: errstr(code) })
     }
@@ -128,7 +128,7 @@ export func write_bytes(fd: int32, buf: *void, n: int64) -> (int64, error) {
 // (seek_set/seek_cur/seek_end) and returns the resulting absolute offset.
 export func seek(fd: int32, offset: int64, whence: int32) -> (int64, error) {
     pos: int64 = lseek(fd, offset, whence)
-    code: int64 = errno()
+    code: int64 = os_errno()
     if pos < 0 {
         return (0, error { message: errstr(code) })
     }
@@ -140,7 +140,7 @@ export func seek(fd: int32, offset: int64, whence: int32) -> (int64, error) {
 export func make_dir(path: string, mode: int32) -> error {
     buf: *raw char = cbuf(path)
     rc: int32 = mkdir(buf, mode)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(buf)
     if rc < 0 {
         return error { message: errstr(code) }
@@ -152,7 +152,7 @@ export func make_dir(path: string, mode: int32) -> error {
 export func remove_dir(path: string) -> error {
     buf: *raw char = cbuf(path)
     rc: int32 = rmdir(buf)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(buf)
     if rc < 0 {
         return error { message: errstr(code) }
@@ -164,7 +164,7 @@ export func remove_dir(path: string) -> error {
 export func remove_file(path: string) -> error {
     buf: *raw char = cbuf(path)
     rc: int32 = unlink(buf)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(buf)
     if rc < 0 {
         return error { message: errstr(code) }
@@ -179,7 +179,7 @@ export func move_file(old_path: string, new_path: string) -> error {
     obuf: *raw char = cbuf(old_path)
     nbuf: *raw char = cbuf(new_path)
     rc: int32 = rename(obuf, nbuf)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(obuf)
     free(nbuf)
     if rc < 0 {
@@ -208,7 +208,7 @@ export func file_stat(path: string) -> (FileStat, error) {
     out_mode: *raw int64 = alloc_bytes(sizeof(int64))
     out_mtime: *raw int64 = alloc_bytes(sizeof(int64))
     rc: int64 = cool_stat(buf, out_size, out_mode, out_mtime)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(buf)
     if rc != 0 {
         free(out_size)
@@ -235,7 +235,7 @@ export func dir_open(path: string) -> (Dir, error) {
     buf: *raw char = cbuf(path)
     out_handle: *raw int64 = alloc_bytes(sizeof(int64))
     rc: int64 = cool_dir_open(buf, out_handle)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(buf)
     if rc != 0 {
         free(out_handle)
@@ -280,7 +280,7 @@ export func dir_next(d: Dir) -> (string, bool) {
 // Closes a directory stream opened by dir_open.
 export func dir_close(d: Dir) -> error {
     rc: int64 = cool_dir_close(d.h)
-    code: int64 = errno()
+    code: int64 = os_errno()
     if rc != 0 {
         return error { message: errstr(code) }
     }

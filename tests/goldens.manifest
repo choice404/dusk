@@ -3046,7 +3046,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.5.3\n
+out dusk 1.6.0\n
 argv version
 code 0
 ---
@@ -3605,4 +3605,73 @@ mode check_fail
 file examples/string_toolkit_reject.dusk
 err_has argument 1 has the wrong type
 err_has println(str_join("a,b,c", ","))
+---
+
+# Block comments (1.6.0): nested /* */, string-aware prescan, pending-newline rule.
+test comments_basic
+mode run
+file examples/comments_basic.dusk
+out A\nB\n*/ inside a string\n3\n
+---
+test comments_stmt_break
+mode run
+file examples/comments_stmt_break.dusk
+out 1\n2\n
+---
+test comments_no_break
+mode check_fail
+file examples/comments_no_break.dusk
+err_has return type does not match the function's return type
+---
+test comments_everywhere
+mode check_ok
+file examples/comments_everywhere.dusk
+---
+test comments_untermed
+mode check_fail
+file examples/comments_untermed.dusk
+err_has unterminated block comment
+---
+test comments_untermed_nested
+mode check_fail
+file examples/comments_untermed_nested.dusk
+err_has unterminated block comment
+---
+test comments_scan_dead_import
+mode tool
+argv scan examples/comments_scan_dead_import.dusk
+out paradigms: [Procedural]\nimports:\n  std.string\n
+code 0
+---
+test comments_scan_string_shield
+mode tool
+argv scan examples/comments_scan_string_shield.dusk
+out paradigms: [Procedural]\nimports:\n  std.string\n
+code 0
+---
+test comments_loader_dead_import
+mode run
+file examples/comments_loader_dead_import.dusk
+out 42\n
+---
+test comments_loader_live_twin
+mode check_fail
+file examples/comments_loader_live_twin.dusk
+err_has cannot resolve import 'nosuch.mod'
+---
+test comments_split_directive
+mode check_fail
+file examples/comments_split_directive.dusk
+err_has unknown directive
+---
+test comments_tight_elide
+mode run
+file examples/comments_tight_elide.dusk
+out 1\n
+---
+test comments_scan_tight_elide
+mode tool
+argv scan examples/comments_scan_tight_elide.dusk
+out paradigms: [Procedural]\nimports:\n  std.string\n
+code 0
 ---

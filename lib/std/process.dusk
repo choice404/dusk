@@ -9,7 +9,7 @@
 // stream against NULL the way a C caller would test popen's own return.
 // Every shim here that can fail hands the failure back through a separate
 // int64 status instead of a nullable pointer, the same convention std.fs and
-// std.os follow: read errno() immediately after the call that may have set
+// std.os follow: read os_errno() immediately after the call that may have set
 // it, before any other foreign call has a chance to overwrite it.
 
 @paradigm procedural
@@ -39,7 +39,7 @@ export func proc_open(cmd: string) -> (Proc, error) {
     modebuf: *raw char = cbuf("r")
     out_handle: *raw int64 = alloc_bytes(sizeof(int64))
     rc: int64 = cool_popen(cmdbuf, modebuf, out_handle)
-    code: int64 = errno()
+    code: int64 = os_errno()
     free(cmdbuf)
     free(modebuf)
     if rc != 0 {
@@ -123,7 +123,7 @@ export func proc_close(p: *Proc) -> (int64, error) {
         return (-1, error { message: "process already closed" })
     }
     status: int64 = cool_pclose((*p).h)
-    code: int64 = errno()
+    code: int64 = os_errno()
     (*p).h = 0
     if status == -1 {
         return (-1, error { message: errstr(code) })

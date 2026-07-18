@@ -21,6 +21,7 @@
 @import emit
 @import emitfb
 @import cli
+@import genfn
 
 // The directory the scaffold writes its artifacts to, parallel to the stage0
 // compiler's target/dusk-out. Returned as a literal, never freed.
@@ -314,7 +315,7 @@ export func build_module(prog: string, path: string, run_it: bool, argv: string[
 // line, and the exit-code passthrough, is shared, so the two entry points differ
 // only in where the two files land.
 export func build_module_to(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string) -> int32 {
-    ir: CliIrResult = compile_ir_text(path, prog)
+    ir: CliIrResult = compile_ir_text(path, prog, default_target())
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
         return 1
@@ -725,7 +726,7 @@ func archive_lib(home: string, ll: string, stem: string, out: string, csources: 
 // build with no exports still produces an archive, empty of dusk entry points.
 export func build_lib(prog: string, path: string) -> int32 {
     out: string = out_dir()
-    ir: CliIrResult = compile_ir_text(path, prog)
+    ir: CliIrResult = compile_ir_text(path, prog, default_target())
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
         return 1

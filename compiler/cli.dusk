@@ -354,7 +354,7 @@ export func cmd_mono(path: string, prog: string) -> int32 {
 // Checks a source file through the same gated spine as mono, then lowers the
 // ground module to LLVM IR. The build commands share this path so every front-end
 // gate observes the same diagnostics before codegen runs.
-export func compile_ir_text(path: string, prog: string) -> CliIrResult {
+export func compile_ir_text(path: string, prog: string, target: string) -> CliIrResult {
     no_exp: *Vector<string> = alloc(vec_new())
     p: Program = load(path, prog)
     errs: *Vector<string> = p.errors
@@ -389,7 +389,7 @@ export func compile_ir_text(path: string, prog: string) -> CliIrResult {
         return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
     ground: *Ast = mono_ground(m)
-    res: GenResult = gen_compile(ground, p.files)
+    res: GenResult = gen_compile(ground, p.files, target)
     if !res.ok {
         return CliIrResult { ok: false, text: res.text, links: p.links, csources: p.csources, exports: no_exp }
     }
@@ -397,8 +397,10 @@ export func compile_ir_text(path: string, prog: string) -> CliIrResult {
 }
 
 // Emits the shared IR text to stdout, preserving the oracle-facing ir command.
-export func cmd_ir(path: string, prog: string) -> int32 {
-    res: CliIrResult = compile_ir_text(path, prog)
+// target is the LLVM triple to emit for: the native default, or the wasm triple
+// when `ir --target=wasm32` is used to cross-emit the compiler for the browser.
+export func cmd_ir(path: string, prog: string, target: string) -> int32 {
+    res: CliIrResult = compile_ir_text(path, prog, target)
     if !res.ok {
         if str_len(res.text) > 0 { printerr(res.text) }
         return 1

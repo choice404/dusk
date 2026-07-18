@@ -2,7 +2,31 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
-## 1.5.3
+## 1.6.0
+
+The block comment and the second target. dusk carried exactly one comment form since 0.1.0, the `//` line comment, and the spec never wrote even that one down. This release adds `/* */`, nesting the way commented out code needs, and gives the spec a Comments section that records both forms. Alongside it, `dusk ir` learns to cross-emit: `ir --target=wasm32 <file>` produces the module's LLVM IR for wasm32-wasip1, the shape a wasi toolchain links and the form a browser playground builds from, while every other command keeps the native triple untouched.
+
+Block comments.
+
+- `/*` opens a block comment and `*/` closes it, and they nest: each `/*` inside an open comment opens another level, so a block comment can comment out code that itself contains block comments. The comment evaporates at the lexer and produces no token; an unterminated comment is a lexical error reported at its opening `/*`. Inside a block comment only `/*` and `*/` are significant, so a quote or a `//` inside one is inert, and symmetrically a `/*` inside a string, char, or rune literal is text.
+- A block comment that contains a newline terminates a statement exactly the way the newline would, and one that opens and closes on a single line does not, so wrapping a comment around code never glues two statements together. Both directions are pinned by goldens, since this is the one edge where a comment could silently change what a program means.
+- The directive prescan, the line sweep that collects `@paradigm`, `@import`, `@link`, and `@csource` before lexing, carries the comment state too: it threads the nesting depth across lines with a line local string state, so a directive inside a block comment is dead in every consumer, the scan dump, the loader, and the link line alike, and a quoted `/*` in a directive argument cannot swallow the lines below it. An elided comment leaves one space behind, so a comment separates words exactly the way it separates tokens: `@link/* note */"m"` still links libm, and a comment splitting a directive word fails loudly as an unknown directive rather than reassembling.
+- `tools/comment-differential.sh` proves the feature invisible: it rewrites every line comment in the example corpus into block form without moving any token's line or column, in a per line wrap and a run merge variant, and asserts the emitted IR is byte identical.
+- Thirteen new goldens cover nesting, adjacency, the statement break rule in both directions, comments among directives and match arms and types, both unterminated shapes, the dead directive on the scan and loader surfaces with its live twin, the shielded quoted `/*`, the tight elision, and the split directive reject.
+
+A second target.
+
+- `dusk ir --target=wasm32 <file>` emits the module for `wasm32-unknown-wasip1`, the canonical spelling clang normalizes to. The entry point is the difference: wasi-libc's crt1 calls `__main_argc_argv` where a native C runtime calls `main`, so the argc/argv main wrapper takes the entry symbol for the target, and a nullary `main` gets a wrapper that accepts and drops the two wasi arguments. The native path emits through the same single named default triple it always has.
+- `runtime/wasm_shim.c` carries the wasm side of the runtime: inert stubs for the process and shell layer wasi has no shape for, and a stand in for `collect.c`, which cannot compile for wasm while setjmp waits on the exception handling proposal, so the anchor prologue is a no-op and every pointer reports non collected, leaving the generational heap to own all memory. `runtime/runtime.c` declares `popen`/`pclose` under `__wasm__` so it compiles against wasi-libc's stdio, which omits them. Emission is the supported surface; the wasi link that consumes the shim happens outside the compiler, with a wasi sysroot, which keeps the toolchain list unchanged.
+- `std.os`'s errno read is renamed `os_errno`. The wrapper's old bare name collided with the very C symbol it reads on a target whose libc declares `errno` as a symbol of its own; the new name keeps the wrapper linkable everywhere. `errstr` is unchanged, `std.fs` and `std.process` follow the rename at every call site, and the spec and stdlib docs record it.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 710 records, 13 new since 1.5.3, all for the block comment surface.
+- The stage ladder re-fixed with the `v1.5.3` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (8238eb6e...) and one compiler IR sha256 (627ffcb4...), the collapse, fixpoint, and determinism checks all green, 710/710 under the ladder's own suite runs.
+- The comment differential holds: 682 rewritten variants across the 712 example files emit byte identical IR, zero divergences.
+- The ratchet holds: the `v1.5.3` release binary builds the 1.6.0 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+- The wasm emission is smoke verified at the IR level: the cross emitted module carries the wasip1 triple and the `__main_argc_argv` entry, and the native module is unchanged. No golden executes a wasm module, since running one takes a wasi runtime the toolchain list does not include.
 
 The string toolkit. `std.string` grew up serving the compiler, so it had parsing, a builder, and the foreign bridge, but not the everyday manipulation set a program reaches for first. This release adds it: searching from the tail, ordering, trimming, splitting and joining, replacing, repeating, and ASCII case folding, twelve functions, all pure dusk over the existing builder, no compiler or runtime change.
 

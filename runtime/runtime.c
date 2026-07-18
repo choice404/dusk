@@ -15,6 +15,15 @@
 #include <dirent.h>
 #include <time.h>
 
+#ifdef __wasm__
+/* wasi-libc has no process or shell layer, so popen and pclose are absent from
+   its stdio.h. cool_popen and cool_pclose below must still compile for the wasm
+   build (the browser playground), which never calls them; declare the two here
+   so this file compiles, and runtime/wasm_shim.c defines them as inert stubs. */
+FILE *popen(const char *command, const char *type);
+int pclose(FILE *stream);
+#endif
+
 static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void cool_gen_fault(void);

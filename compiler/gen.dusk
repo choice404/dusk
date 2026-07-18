@@ -434,9 +434,9 @@ func foreign_declare(m: *EmitModule, ctx: *GenCtx, ff: ForeignFuncNode) -> void 
 
 // Lowers a ground, monomorphized AST to textual LLVM IR. Unsupported Phase A
 // constructs record faults so callers never observe a malformed partial module.
-export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
+export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> GenResult {
     ctx: *GenCtx = genctx_new(a, files)
-    m: *EmitModule = emit_module_new("dusk", "x86_64-pc-linux-gnu")
+    m: *EmitModule = emit_module_new("dusk", target)
     declare_prelude(m)
     emit_ground_types(m, ctx)
     exports: *Vector<string> = alloc(vec_new())
@@ -452,13 +452,23 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>) -> GenResult {
                 emit_push_function(m, abody)
                 free(abody)
             } else if str_eq(name, "main") {
+                wasm: bool = target_is_wasm(target)
                 if main_is_argc_argv(ctx, f) {
                     body: string = gen_func(m, ctx, f, "dusk__main")
                     emit_push_function(m, body)
                     free(body)
-                    wrapper: string = emit_main_wrapper(ctx, f)
+                    wrapper: string = emit_main_wrapper(ctx, f, entry_name_for(wasm))
                     emit_push_function(m, wrapper)
                     free(wrapper)
+                } else if wasm {
+                    // A nullary main still needs the two-argument wasi entry, so
+                    // emit the body as dusk__main and a wrapper that drops the args.
+                    bodyw: string = gen_func(m, ctx, f, "dusk__main")
+                    emit_push_function(m, bodyw)
+                    free(bodyw)
+                    vw: string = emit_main_wrapper_void(ctx, f)
+                    emit_push_function(m, vw)
+                    free(vw)
                 } else {
                     body2: string = gen_func(m, ctx, f, name)
                     emit_push_function(m, body2)
