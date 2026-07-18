@@ -8,10 +8,15 @@
    compile for wasm because setjmp needs the not-yet-shipped exception-handling
    proposal). The compiler only emits IR for wasm; the wasi link that consumes
    this file happens outside it, with collect.c left out of that link's source
-   list. A native build never sees this file. */
+   list. The whole body is fenced to the wasm target, so a native link that
+   sweeps the runtime directory with a glob, the bootstrap and the packaging
+   both do, compiles this file to an empty object instead of colliding with
+   collect.c and libc. */
 
 #include <stdio.h>
 #include <stdint.h>
+
+#ifdef __wasm__
 
 /* Process and shell layer: absent from wasi-libc. These back std.os.run and
    std.process, which the playground never invokes. system returns the int64
@@ -42,3 +47,5 @@ int cool_gc_is_collected(void *p) {
     (void)p;
     return 0;
 }
+
+#endif /* __wasm__ */
