@@ -1,14 +1,12 @@
 @paradigm procedural
 @paradigm functional
-// KNOWN RESIDUAL (deferred): an alias buried inside an aggregate returned by a
-// call is not surfaced by the escape summary, so `st := wrap(c)` where `wrap`
-// returns `Store { c: c }` forms no edge from `st` to `c`. A frame slice stored
-// through `st.c` raises `st` but not `c`, so the returned `c` is accepted here
-// even though it dangles. Generation point 5 links a call result to a pointer
-// argument only when the summary names it, and it does not reach inside a
-// returned struct. This probe documents the boundary; it must NOT be run, and a
-// later milestone that surfaces aggregate-buried aliases will flip it to a
-// reject. Kept as a check-only marker of the current front-end acceptance.
+// An alias buried inside an aggregate returned by a call is now surfaced by the
+// escape summary. `wrap` returns `Store { c: c }`, whose pointer member reaches a
+// managed pointer, so `wrap`'s summary reads `c` back (Algorithm A); `st := wrap(c)`
+// links `st` to `c` (Algorithm B). The frame slice stored through `(*st.c).rows`
+// raises the group, so returning `c` hands out a dangling frame view and is caught.
+// Left running would print a value read from the dead `local` frame; this is the
+// check-fail proof that the call-result-buried alias hole is closed.
 struct Cell { rows: int64[] }
 struct Store { c: *Cell }
 func heap4() -> int64[] {

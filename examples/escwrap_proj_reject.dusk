@@ -1,0 +1,29 @@
+@paradigm procedural
+@paradigm functional
+// A pointer bound from a projection off a call result must still taint on a store.
+// `d := wrap(c).c` is rooted at the call `wrap(c)`, whose summary reads `c` back
+// through the returned aggregate, so `d` links to `c`. `(*d).rows = local[0..4]`
+// raises the group, and returning `c` hands the dangling frame view out, which is
+// caught. This is the projection twin of escalias_wrap_residual.
+struct Cell { rows: int64[] }
+struct Store { c: *Cell }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func wrap(c: *Cell) -> Store {
+    return Store { c: c }
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    d := wrap(c).c
+    local: int64[4] = [111, 222, 333, 444]
+    (*d).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

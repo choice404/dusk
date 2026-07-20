@@ -275,7 +275,7 @@ func ptr_param_borrows_put(tc: *TypeChecker, name: string, idx: int64) -> void {
 
 // The argument indices a call's result may alias: the callee's returns_alias and
 // reads_through parameters, or every argument for an opaque callee.
-func summary_alias_mask(tc: *TypeChecker, callee_id: int64, arg_len: int64) -> int64 {
+export func summary_alias_mask(tc: *TypeChecker, callee_id: int64, arg_len: int64) -> int64 {
     ce: CalleeEsc = tc_callee_esc(tc, callee_id)
     if ce.opaque {
         mut m: int64 = 0
@@ -287,6 +287,29 @@ func summary_alias_mask(tc: *TypeChecker, callee_id: int64, arg_len: int64) -> i
         return m
     }
     return ce.sum.returns_alias | ce.sum.reads_through
+}
+
+// The bindings a plain call's result may alias, for the single-choke alias linker
+// (Algorithm B). The call is neither a variant constructor nor the alloc builtin;
+// those keep their own arms in binding_alias_targets. A call whose result type
+// neither is nor reaches a managed pointer links nothing, the guard against a mass
+// of false rejects on scalar and pure-view results (vec_len, str_eq). An opaque
+// callee links nothing as well: its argument-to-result relation is unknown, and
+// linking every argument of every unknown call over-rejects (documented residual
+// R2). Otherwise each argument the summary names as returned or read back through
+// contributes its own per-name embedded aliases.
+export func call_result_alias_targets(tc: *TypeChecker, call_id: int64, out: *Vector<string>) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, call_id)
+    if !links_as_alias(tc, chain_ty(tc, call_id)) { return }
+    ce: CalleeEsc = tc_callee_esc(tc, e.a)
+    if ce.opaque { return }
+    mask: int64 = summary_alias_mask(tc, e.a, e.c)
+    mut k: int64 = 0
+    while k < e.c && k < 64 {
+        if ps_has(mask, k) { collect_embedded(tc, vec_get((*a).kids, e.b + k), out) }
+        k = k + 1
+    }
 }
 
 // Routes one call store edge (i, j) whose source argument holds a frame view into

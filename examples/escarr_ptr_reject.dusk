@@ -1,0 +1,31 @@
+@paradigm procedural
+@paradigm functional
+// A managed pointer buried in a fixed array member of a returned aggregate must
+// reach the summary (Algorithm A step 6: an array literal joins its elements'
+// reads, not just their origins). `Bag` carries the pointer by value in a fixed
+// array of holders, so returning it is legal, but its summary reads `c` back.
+// `b := wrapbag(c)` links `b` to `c`, `(*b.hs[0].c).rows = local[0..4]` raises the
+// group, and returning `c` hands the dangling frame view out, which is caught.
+struct Cell { rows: int64[] }
+struct Holder { c: *Cell }
+struct Bag { hs: Holder[1] }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func wrapbag(c: *Cell) -> Bag {
+    return Bag { hs: [Holder { c: c }] }
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    b := wrapbag(c)
+    local: int64[4] = [111, 222, 333, 444]
+    (*b.hs[0].c).rows = local[0..4]
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

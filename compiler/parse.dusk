@@ -247,6 +247,64 @@ export func p_guard_progress(p: *Parser, before: int64, ctx: string) -> bool {
     return false
 }
 
+// A top-level declaration keyword (enum, struct, interface, impl) at statement
+// position is a common mistake, and left to the expression grammar it derails into
+// a long cascade of follow-on errors. This names the mistake once against the
+// keyword's own span, then skips the whole misplaced declaration so the rest of the
+// body parses cleanly. Returns true when the current token began such a declaration,
+// in which case it has already been reported and consumed and the caller yields the
+// no-statement sentinel; the keyword is always consumed, so block progress holds.
+// Recovery consumes forward through the matching close brace of the first {...}
+// group, counting nested braces; a close brace seen before any open brace is the
+// enclosing body's, so it is left in place, and EOF stops the scan either way.
+export func p_skip_stmt_decl(p: *Parser) -> bool {
+    mut what: string = ""
+    if p_kw(p, "enum") {
+        what = "an enum"
+    } else if p_kw(p, "struct") {
+        what = "a struct"
+    } else if p_kw(p, "interface") {
+        what = "an interface"
+    } else if p_kw(p, "impl") {
+        what = "an impl block"
+    } else {
+        return false
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, what)
+    sb_push(b, " is declared at the top level, not inside a function body")
+    msg: string = substring(sb_cstr(b), 0, sb_size(b))
+    p_error(p, msg)
+    sb_free(b)
+    free(b)
+    p_bump(p)
+    mut depth: int64 = 0
+    mut seen: bool = false
+    mut going: bool = true
+    while going {
+        if p_at_eof(p) {
+            going = false
+        } else if p_at(p, k_lbrace()) {
+            depth = depth + 1
+            seen = true
+            p_bump(p)
+        } else if p_at(p, k_rbrace()) {
+            if seen {
+                depth = depth - 1
+                p_bump(p)
+                if depth == 0 {
+                    going = false
+                }
+            } else {
+                going = false
+            }
+        } else {
+            p_bump(p)
+        }
+    }
+    return true
+}
+
 export func p_enter_nesting(p: *Parser, what: string, fix: string) -> bool {
     (*p).depth = (*p).depth + 1
     if (*p).depth > 500 {

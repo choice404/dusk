@@ -37,7 +37,10 @@ export func parse_block(p: *Parser) -> int64 {
             reading = false
         } else {
             before: int64 = (*p).pos
-            vec_push(stmts, parse_stmt(p))
+            sid: int64 = parse_stmt(p)
+            if sid >= 0 {
+                vec_push(stmts, sid)
+            }
             p_guard_progress(p, before, "unexpected token in block")
         }
     }
@@ -83,6 +86,7 @@ export func parse_stmt(p: *Parser) -> int64 {
         }
     }
     if is_binding_start(p) { return parse_let_rest(p, false, false) }
+    if p_skip_stmt_decl(p) { return -1 }
     e: int64 = parse_await_or_expr(p)
     if p_eat(p, k_assign()) {
         rhs: int64 = parse_expr(p)
@@ -694,7 +698,9 @@ func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
                 }
             } else {
                 sid2: int64 = parse_stmt(p)
-                vec_push(elems, DoElemNode { kind: 1, a: sid2, b: 0 })
+                if sid2 >= 0 {
+                    vec_push(elems, DoElemNode { kind: 1, a: sid2, b: 0 })
+                }
             }
             p_guard_progress(p, before, "unexpected token in do block")
         }

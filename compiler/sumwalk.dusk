@@ -273,12 +273,15 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
     }
     if e.kind == xk_array() {
         mut origins: int64 = 0
+        mut reads: int64 = 0
         mut i: int64 = 0
         while i < e.b {
-            origins = origins | sum_eval(c, kid(a, e.a, i)).origins
+            ev: SumVal = sum_eval(c, kid(a, e.a, i))
+            origins = origins | ev.origins
+            reads = reads | ev.reads
             i = i + 1
         }
-        return SumVal { origins: origins, reads: 0, frame: true }
+        return SumVal { origins: origins, reads: reads, frame: true }
     }
     if e.kind == xk_tuple() {
         mut v: SumVal = val_none()
@@ -340,36 +343,53 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
 }
 
 func sum_struct_lit(c: *SumCtx, e: ExprNode) -> SumVal {
-    a: *Ast = (*(*c).t).ast
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
     sname: string = ast_name(a, e.a)
+    gens: *Map<string, int64> = (*c).gens
     mut v: SumVal = val_none()
     mut j: int64 = 0
     while j < e.c {
         fname: string = ast_name(a, kid(a, e.b, j))
         init: int64 = kid(a, e.b, j + 1)
         iv: SumVal = sum_eval(c, init)
-        if struct_field_view(c, sname, fname) { v = val_join(v, iv) }
+        v = val_join(v, member_contrib(t, iv, struct_field_ty_id(c, sname, fname), gens))
         j = j + 2
     }
     return v
 }
 
-func struct_field_view(c: *SumCtx, sname: string, fname: string) -> bool {
+// The contribution one aggregate member init makes to the aggregate's summary
+// value, by its declared field type: a view member joins whole (frame flag and
+// all); a non-view member that still reaches a managed pointer joins only its
+// origins and reads with the frame flag cleared, so a buried pointer's parameter
+// identity travels while the pointer never frame-taints the literal (invariant
+// I1); anything else contributes nothing. A field type that could not be resolved
+// (-1) joins whole, the conservative fallback the classifier used before.
+func member_contrib(t: *SumTables, iv: SumVal, ft: int64, gens: *Map<string, int64>) -> SumVal {
+    if ft < 0 { return iv }
+    if sum_is_view(t, ft, gens) { return iv }
+    if sum_reaches_managed(t, ft) { return SumVal { origins: iv.origins, reads: iv.reads, frame: false } }
+    return val_none()
+}
+
+// The declared type of a struct's field, or -1 when the struct or field is not
+// found. The field type is classified against the enclosing function's generics,
+// not the struct's own, matching stage0's eval_struct_lit which passes
+// self.generics.
+func struct_field_ty_id(c: *SumCtx, sname: string, fname: string) -> int64 {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
     sidx: *Map<string, int64> = (*t).struct_idx
-    if !map_has(sidx, sname) { return true }
+    if !map_has(sidx, sname) { return -1 }
     st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, sname), 0))
-    // The field type is classified against the enclosing function's generics, not
-    // the struct's own, matching stage0's eval_struct_lit which passes self.generics.
-    gens: *Map<string, int64> = (*c).gens
     mut i: int64 = 0
     while i < st.fields_len {
         fld: FieldNode = vec_get((*a).fields, kid(a, st.fields_off, i))
-        if str_eq(ast_name(a, fld.name), fname) { return sum_is_view(t, fld.ty, gens) }
+        if str_eq(ast_name(a, fld.name), fname) { return fld.ty }
         i = i + 1
     }
-    return true
+    return -1
 }
 
 export func struct_gens(t: *SumTables, st: StructNode) -> *Map<string, int64> {
@@ -522,15 +542,16 @@ func ctor_val(c: *SumCtx, vname: string, argvals: *Vector<SumVal>) -> SumVal {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
     vr: VariantNode = vec_get((*a).variants, unwrap_or(map_get((*t).variant_idx, vname), 0))
+    gens: *Map<string, int64> = (*c).gens
     mut v: SumVal = val_none()
     mut i: int64 = 0
     while i < vec_len(argvals) {
-        mut keep: bool = true
+        mut ft: int64 = -1
         if i < vr.fields_len {
             fld: FieldNode = vec_get((*a).fields, kid(a, vr.fields_off, i))
-            keep = sum_is_view(t, fld.ty, (*c).gens)
+            ft = fld.ty
         }
-        if keep { v = val_join(v, vec_get(argvals, i)) }
+        v = val_join(v, member_contrib(t, vec_get(argvals, i), ft, gens))
         i = i + 1
     }
     return v

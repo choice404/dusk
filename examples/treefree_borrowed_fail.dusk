@@ -1,0 +1,29 @@
+// treefree_borrowed_fail: a value read out of a container is a borrow, so the
+// worklist spelling of a hand-rolled deep free is refused at the free of the
+// popped node. The spec's ownership section records the boundary; a tree that
+// must reclaim per node uses the collected heap instead.
+@paradigm procedural
+@import std.vector
+
+struct Node { v: int64 }
+
+func consume(root: *Node) -> int64 {
+    work: *Vector<*Node> = alloc(vec_new())
+    vec_push(work, root)
+    mut total: int64 = 0
+    while vec_len(work) > 0 {
+        t: *Node = vec_get(work, vec_len(work) - 1)
+        vec_pop(work)
+        total = total + (*t).v
+        free(t)
+    }
+    vec_free(work)
+    free(work)
+    return total
+}
+
+func main() -> int64 {
+    n: *Node = alloc(Node { v: 5 })
+    println(consume(n))
+    return 0
+}

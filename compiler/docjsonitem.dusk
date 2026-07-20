@@ -178,8 +178,9 @@ func push_interface(b: *StringBuilder, level: int64, a: *Ast, src: string, n: in
     sb_push_char(b, 125)
 }
 
-// An impls entry, `{interface, type, methods}`. interface is `null` for a bare
-// inherent impl; the impl block itself carries no doc field, only its methods do.
+// An impls entry, `{interface, type, methods, doc}`. interface is `null` for a bare
+// inherent impl; doc is the impl block's own header doc, `null` when none is attached,
+// and each method carries its own doc besides.
 func push_impl(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, imid: int64) -> void {
     im: ImplNode = vec_get((*a).impls, imid)
     l: int64 = level + 1
@@ -207,6 +208,9 @@ func push_impl(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, 
         ind(b, l)
         sb_push_char(b, 93)
     }
+    sb_push(b, ",\n")
+    push_key(b, l, "doc")
+    push_doc(b, l, a, src, n, dk_impl(), imid)
     sb_push_char(b, 10)
     ind(b, level)
     sb_push_char(b, 125)

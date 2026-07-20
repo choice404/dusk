@@ -23,6 +23,7 @@
 @import ast
 @import diag
 @import doccore
+@import docty
 @import docmd
 @import docjsonitem
 @import driver
@@ -52,6 +53,21 @@ func params_have(a: *Ast, off: int64, len: int64, name: string) -> bool {
     while i < len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, off + i))
         if str_eq(ast_name(a, p.name), name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Whether the generic parameter set kids[goff, goff+glen) declares a type parameter
+// named name. A `@param` may name a value parameter or a generic type parameter, so a
+// generic `func id<T>(x: T)` documents both `T` and `x` without drift.
+func generics_have(a: *Ast, goff: int64, glen: int64, name: string) -> bool {
+    mut i: int64 = 0
+    while i < glen {
+        gname: string = ast_name(a, vec_get((*a).kids, goff + i))
+        if str_eq(gname, name) {
             return true
         }
         i = i + 1
@@ -113,13 +129,16 @@ func msg_tag_on_nonfunc(tag: string, name: string) -> string {
 }
 
 func dangling_msg() -> string {
-    return "this doc comment documents nothing; attach it to a function, struct, enum, interface, or method, or use a plain comment"
+    return "this doc comment documents nothing; attach it to a function, struct, enum, interface, impl, or method, or use a plain comment"
 }
 
-// Checks the tags of a doc bound to a function or method against its parameter set and
-// return type, appending each drift fault to errs. name is the declaration name; off
-// and len bound its parameters; ret is its return type.
-func check_func_drift(a: *Ast, di: DocInfo, name: string, off: int64, len: int64, ret: int64, errs: *Vector<Located>) -> void {
+// Checks the tags of a doc bound to a function or method against its parameter set,
+// generic type parameters, and return type, appending each drift fault to errs. name
+// is the declaration name; off and len bound its value parameters; goff and glen bound
+// its generic type parameters; ret is its return type. A `@param` naming either a value
+// parameter or a generic type parameter is legal; a duplicated `@param` is rejected
+// across both sets, since the check runs on the doc's own tag list.
+func check_func_drift(a: *Ast, di: DocInfo, name: string, off: int64, len: int64, goff: int64, glen: int64, ret: int64, errs: *Vector<Located>) -> void {
     ps: *Vector<DocParam> = di.params
     mut i: int64 = 0
     while i < vec_len(ps) {
@@ -135,7 +154,7 @@ func check_func_drift(a: *Ast, di: DocInfo, name: string, off: int64, len: int64
         }
         if dup {
             vec_push(errs, located(p.name_lo, p.name_hi, msg_param_dup(p.name)))
-        } else if !params_have(a, off, len, p.name) {
+        } else if !params_have(a, off, len, p.name) && !generics_have(a, goff, glen, p.name) {
             vec_push(errs, located(p.name_lo, p.name_hi, msg_param_drift(name, p.name)))
         }
         i = i + 1
@@ -201,10 +220,14 @@ func check_bound(a: *Ast, src: string, n: int64, kind: int64, id: int64, lo: int
     }
     if kind == dk_func() {
         f: FuncNode = vec_get((*a).funcs, id)
-        check_func_drift(a, di, ast_name(a, f.name), f.params_off, f.params_len, f.ret, errs)
+        check_func_drift(a, di, ast_name(a, f.name), f.params_off, f.params_len, f.generics_off, f.generics_len, f.ret, errs)
     } else if kind == dk_method_sig() {
         m: MethodSigNode = vec_get((*a).method_sigs, id)
-        check_func_drift(a, di, ast_name(a, m.name), m.params_off, m.params_len, m.ret, errs)
+        check_func_drift(a, di, ast_name(a, m.name), m.params_off, m.params_len, 0, 0, m.ret, errs)
+    } else if kind == dk_impl() {
+        header: string = docty_impl_header(a, id)
+        check_nonfunc_drift(di, header, errs)
+        free(header)
     } else {
         check_nonfunc_drift(di, decl_name(a, kind, id, stem), errs)
     }

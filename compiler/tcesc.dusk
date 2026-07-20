@@ -44,6 +44,17 @@ func projection_root(tc: *TypeChecker, expr_id: int64) -> string {
     return ""
 }
 
+// The expression a field, index, or dereference projection chain bottoms out at,
+// so a projection off a call result (wrap(c).c) can be rooted at the call it
+// wraps when store_root finds no bare-name binding.
+func chain_base_id(tc: *TypeChecker, expr_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_field() || e.kind == xk_index() { return chain_base_id(tc, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return chain_base_id(tc, e.b) }
+    return expr_id
+}
+
 func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_ptr() {
@@ -643,7 +654,15 @@ func binding_alias_targets(tc: *TypeChecker, expr_id: int64) -> *Vector<string> 
     } else if e.kind == xk_field() || e.kind == xk_index() || (e.kind == xk_unary() && e.a == uop_deref()) {
         if links_as_alias(tc, chain_ty(tc, expr_id)) {
             root: string = store_root(tc, expr_id)
-            if str_len(root) > 0 { vec_push(out, root) }
+            if str_len(root) > 0 {
+                vec_push(out, root)
+            } else {
+                base_id: int64 = chain_base_id(tc, expr_id)
+                base: ExprNode = vec_get((*a).exprs, base_id)
+                if base.kind == xk_call() && str_len(variant_name(tc, base.a)) == 0 {
+                    call_result_alias_targets(tc, base_id, out)
+                }
+            }
         }
     } else if e.kind == xk_tuple() || e.kind == xk_array() {
         mut i: int64 = 0
@@ -667,11 +686,14 @@ func binding_alias_targets(tc: *TypeChecker, expr_id: int64) -> *Vector<string> 
             }
         } else {
             callee: ExprNode = vec_get((*a).exprs, e.a)
+            mut alloc_arm: bool = false
             if callee.kind == xk_ident() {
                 if e.c == 1 && str_eq(ast_name(a, callee.a), "alloc") && !sig_has_fn((*tc).sigtab, "alloc") {
                     collect_embedded(tc, vec_get((*a).kids, e.b), out)
+                    alloc_arm = true
                 }
             }
+            if !alloc_arm { call_result_alias_targets(tc, expr_id, out) }
         }
     }
     return out

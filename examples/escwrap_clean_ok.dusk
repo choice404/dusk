@@ -1,0 +1,28 @@
+@paradigm procedural
+@paradigm functional
+// The false-positive guard for Algorithm B: `st := wrap(c)` links `st` and `c`,
+// but no frame view is ever stored through the aggregate, so the group stays clean
+// and returning `c` is legal. A heap slice stored through `st.c` must not raise the
+// group. Proves the call-result link raises only on a genuine frame store, not on
+// the mere existence of the alias.
+struct Cell { rows: int64[] }
+struct Store { c: *Cell }
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+func wrap(c: *Cell) -> Store {
+    return Store { c: c }
+}
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    st := wrap(c)
+    (*st.c).rows = heap4()
+    return c
+}
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

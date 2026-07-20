@@ -38,9 +38,9 @@ export func parse_module(p: *Parser) -> *Ast {
 
 // Binds a top-level doc block, captured before the item was parsed, to the item that
 // parse_item just pushed. The doc's target kind follows the item kind: a func, struct,
-// enum, or interface takes the matching dk_* tag keyed by its node id. An impl or
-// foreign block has no doc kind, so a doc before it dangles (W5 reports it); an error
-// item that pushed nothing binds nothing.
+// enum, interface, or impl takes the matching dk_* tag keyed by its node id. A foreign
+// block has no doc kind, so a doc before it dangles (clidoc reports it); an error item
+// that pushed nothing binds nothing.
 func record_item_doc(p: *Parser, nbefore: int64, dlo: int64, dhi: int64) -> void {
     if dlo < 0 {
         return
@@ -58,6 +58,8 @@ func record_item_doc(p: *Parser, nbefore: int64, dlo: int64, dhi: int64) -> void
         ast_doc(p_ast(p), dk_enum(), it.id, dlo, dhi)
     } else if it.kind == ik_interface() {
         ast_doc(p_ast(p), dk_interface(), it.id, dlo, dhi)
+    } else if it.kind == ik_impl() {
+        ast_doc(p_ast(p), dk_impl(), it.id, dlo, dhi)
     }
 }
 
