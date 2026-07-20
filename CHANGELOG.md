@@ -2,6 +2,24 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.7.1
+
+The machine face. The compiler's diagnostics and its doc model are now data a tool consumes, not text a person scrapes: `dusk check --json` emits one deterministic JSON document with every diagnostic's message and source span, and the doc model gains a span key on every item, the two contracts an editor integration builds on. No language surface changes.
+
+The machine face.
+
+- `dusk check --json <file>` runs the exact pipeline `check` runs and reports the result as data. stdout is exactly one JSON document plus one trailing newline in every outcome, clean or broken, stderr stays silent, and the exit code mirrors the human command, a read error on the root included, reported inside the envelope rather than beside it. Diagnostics appear in the order the human command prints them, so the two faces never disagree about what went wrong first.
+- A span carries file local byte offsets, `lo` and `hi` clamped to UTF-8 boundaries, plus 1 based line and column pairs counted in Unicode scalars at both ends. Bytes are the primitive a tool converts from, the precomputed pairs serve a consumer that wants them, and a multibyte line is pinned by a golden where the scalar column and the byte extent visibly diverge. A diagnostic in an imported file names that file and carries offsets local to it, and a diagnostic with no position, an unresolvable import for one, carries a null span.
+- Underneath, the loader's errors stopped being pre-rendered strings: each is now a structured record carrying its path, span, and message, and the human renderer consumes the same records the JSON face does, so the two can never drift. The human output is byte identical to 1.7.0, which every existing failing-check golden proves by not changing.
+- The doc model gains positions: every item object carries a `span` key with its name token's location, the impl object its `impl` keyword's, and every doc object opens with the span of its whole doc block, delimiters included. The consumers-ignore-unknown-keys rule is now written into the spec for both machine surfaces, which is what makes an additive key a non-event from here on.
+- `severity` is always `"error"` today and the key exists so a warning can arrive without a schema break; a `stage` key was deliberately left out, since freezing pipeline internals into a stable contract serves no consumer.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 750 records, 9 new since 1.7.0: the clean, type error, parse error, imported-file span, null span, read error, UTF-8 divergence, and human parity records for `check --json`, and the span-bearing doc model golden, with four existing doc model goldens regenerated for the added keys.
+- The stage ladder re-fixed with the `v1.7.0` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (4fc3de88...) and one compiler IR sha256 (ce46c3ba...), the collapse, fixpoint, and determinism checks all green, 750/750 under the ladder's own suite runs.
+- The ratchet holds: the `v1.7.0` release binary builds the 1.7.1 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green, and the comment differential still holds, 682 rewritten variants byte equal.
+
 ## 1.7.0
 
 The debt release. Every entry in the known defect ledger was re-verified against the current compiler instead of trusted from memory, and the verdicts drove the release: three entries were already closed by earlier work and are now pinned by goldens and spec text, one had shrunk from a codegen bug to a diagnostics problem, one turned out to be inexpressible in the ownership model and is now documented honestly, and one was a live soundness hole, a program the checker accepted that read a dead stack frame at runtime. That hole is closed.

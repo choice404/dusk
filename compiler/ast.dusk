@@ -31,11 +31,11 @@ export struct FieldNode { name: int64, ty: int64 }
 export struct BindNode { name: int64, ty: int64 }
 export struct ArmNode { pat: int64, body: int64 }
 export struct VariantNode { name: int64, fields_off: int64, fields_len: int64 }
-export struct MethodSigNode { name: int64, params_off: int64, params_len: int64, ret: int64 }
+export struct MethodSigNode { name: int64, lo: int64, hi: int64, params_off: int64, params_len: int64, ret: int64 }
 export struct ForeignFuncNode { name: int64, params_off: int64, params_len: int64, ret: int64, variadic: bool }
-export struct StructNode { exported: bool, name: int64, generics_off: int64, generics_len: int64, fields_off: int64, fields_len: int64 }
-export struct EnumNode { exported: bool, name: int64, generics_off: int64, generics_len: int64, variants_off: int64, variants_len: int64 }
-export struct InterfaceNode { exported: bool, name: int64, generics_off: int64, generics_len: int64, methods_off: int64, methods_len: int64 }
+export struct StructNode { exported: bool, name: int64, lo: int64, hi: int64, generics_off: int64, generics_len: int64, fields_off: int64, fields_len: int64 }
+export struct EnumNode { exported: bool, name: int64, lo: int64, hi: int64, generics_off: int64, generics_len: int64, variants_off: int64, variants_len: int64 }
+export struct InterfaceNode { exported: bool, name: int64, lo: int64, hi: int64, generics_off: int64, generics_len: int64, methods_off: int64, methods_len: int64 }
 export struct ImplNode { iface: int64, ty: int64, lo: int64, hi: int64, methods_off: int64, methods_len: int64 }
 export struct ForeignNode { abi: int64, lo: int64, hi: int64, funcs_off: int64, funcs_len: int64 }
 export struct DoBindNode { name: int64, expr: int64 }
@@ -293,11 +293,11 @@ export func ast_variant(a: *Ast, name: int64, fields: *Vector<int64>) -> int64 {
     return id
 }
 
-export func ast_method_sig(a: *Ast, name: int64, params: *Vector<int64>, ret: int64) -> int64 {
+export func ast_method_sig(a: *Ast, name: int64, lo: int64, hi: int64, params: *Vector<int64>, ret: int64) -> int64 {
     off, len := ast_kids(a, params)
     v: *Vector<MethodSigNode> = (*a).method_sigs
     id: int64 = vec_len(v)
-    vec_push(v, MethodSigNode { name: name, params_off: off, params_len: len, ret: ret })
+    vec_push(v, MethodSigNode { name: name, lo: lo, hi: hi, params_off: off, params_len: len, ret: ret })
     return id
 }
 
@@ -316,30 +316,30 @@ export func ast_func(a: *Ast, n: FuncNode) -> int64 {
     return id
 }
 
-export func ast_struct(a: *Ast, exported: bool, name: int64, gens: *Vector<int64>, fields: *Vector<int64>) -> int64 {
+export func ast_struct(a: *Ast, exported: bool, name: int64, lo: int64, hi: int64, gens: *Vector<int64>, fields: *Vector<int64>) -> int64 {
     goff, glen := ast_kids(a, gens)
     foff, flen := ast_kids(a, fields)
     v: *Vector<StructNode> = (*a).structs
     id: int64 = vec_len(v)
-    vec_push(v, StructNode { exported: exported, name: name, generics_off: goff, generics_len: glen, fields_off: foff, fields_len: flen })
+    vec_push(v, StructNode { exported: exported, name: name, lo: lo, hi: hi, generics_off: goff, generics_len: glen, fields_off: foff, fields_len: flen })
     return id
 }
 
-export func ast_enum(a: *Ast, exported: bool, name: int64, gens: *Vector<int64>, vars: *Vector<int64>) -> int64 {
+export func ast_enum(a: *Ast, exported: bool, name: int64, lo: int64, hi: int64, gens: *Vector<int64>, vars: *Vector<int64>) -> int64 {
     goff, glen := ast_kids(a, gens)
     voff, vlen := ast_kids(a, vars)
     v: *Vector<EnumNode> = (*a).enums
     id: int64 = vec_len(v)
-    vec_push(v, EnumNode { exported: exported, name: name, generics_off: goff, generics_len: glen, variants_off: voff, variants_len: vlen })
+    vec_push(v, EnumNode { exported: exported, name: name, lo: lo, hi: hi, generics_off: goff, generics_len: glen, variants_off: voff, variants_len: vlen })
     return id
 }
 
-export func ast_interface(a: *Ast, exported: bool, name: int64, gens: *Vector<int64>, methods: *Vector<int64>) -> int64 {
+export func ast_interface(a: *Ast, exported: bool, name: int64, lo: int64, hi: int64, gens: *Vector<int64>, methods: *Vector<int64>) -> int64 {
     goff, glen := ast_kids(a, gens)
     moff, mlen := ast_kids(a, methods)
     v: *Vector<InterfaceNode> = (*a).interfaces
     id: int64 = vec_len(v)
-    vec_push(v, InterfaceNode { exported: exported, name: name, generics_off: goff, generics_len: glen, methods_off: moff, methods_len: mlen })
+    vec_push(v, InterfaceNode { exported: exported, name: name, lo: lo, hi: hi, generics_off: goff, generics_len: glen, methods_off: moff, methods_len: mlen })
     return id
 }
 

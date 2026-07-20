@@ -30,13 +30,16 @@
 @import monoemit
 @import mono
 @import gen
+@import checkjson
 
 export struct CliIrResult { ok: bool, text: string, links: *Vector<string>, csources: *Vector<string>, exports: *Vector<string> }
 
-func emit_errors(errs: *Vector<string>) -> void {
+func emit_errors(errs: *Vector<LoadDiag>) -> void {
     mut i: int64 = 0
     while i < vec_len(errs) {
-        printerr(vec_get(errs, i))
+        rendered: string = render_load_diag(vec_get(errs, i))
+        printerr(rendered)
+        free(rendered)
         i = i + 1
     }
 }
@@ -67,37 +70,43 @@ func diag_dedup_key(lo: int64, hi: int64, msg: string) -> string {
     return out
 }
 
-// Runs the ground double pass over the monomorphized module and prints each ground
-// diagnostic the mono pass has not already emitted, deduping by (lo, hi, msg) with
-// insertion order preserved. Returns the count of newly emitted diagnostics, which
-// the caller folds into its exit gate. The surface diagnostics are empty by
-// construction here, since the spine reaches mono only when resolve and typeck are
-// clean, so the seen set is exactly the mono set, matching sema::check's precedence.
-func emit_ground_pass(files: *Vector<FileSrc>, m: *Mono, mono_errs: *Vector<SpanDiagnostic>) -> int64 {
+// Runs the ground double pass over the monomorphized module and collects each ground
+// diagnostic the mono pass has not already produced, deduping by (lo, hi, msg) with
+// insertion order preserved. The surface diagnostics are empty by construction here,
+// since the spine reaches mono only when resolve and typeck are clean, so the seen
+// set is exactly the mono set, matching sema::check's precedence. Both the human and
+// the JSON face consume this one collection, so their ground streams cannot drift.
+func collect_ground_pass(m: *Mono, mono_errs: *Vector<SpanDiagnostic>) -> *Vector<SpanDiagnostic> {
     ground: *Ast = mono_ground(m)
     gdiags: *Vector<SpanDiagnostic> = typeck_check_ground(ground, m_future_table(m))
     seen: *Map<string, int64> = alloc(map_new())
+    out: *Vector<SpanDiagnostic> = alloc(vec_new())
     mut i: int64 = 0
     while i < vec_len(mono_errs) {
         e: SpanDiagnostic = vec_get(mono_errs, i)
         map_put(seen, diag_dedup_key(e.lo, e.hi, e.msg), 1)
         i = i + 1
     }
-    mut n: int64 = 0
     mut j: int64 = 0
     while j < vec_len(gdiags) {
         g: SpanDiagnostic = vec_get(gdiags, j)
         k: string = diag_dedup_key(g.lo, g.hi, g.msg)
         if !map_has(seen, k) {
             map_put(seen, k, 1)
-            rendered: string = render_diag(files, g)
-            printerr(rendered)
-            free(rendered)
-            n = n + 1
+            vec_push(out, g)
         }
         j = j + 1
     }
-    return n
+    return out
+}
+
+// Prints the newly-collected ground diagnostics and returns their count, the exit
+// gate for cmd_mono and the IR path. render_diag renders each in order, byte for byte
+// what the pre-1.7.1 inline ground pass emitted.
+func emit_ground_pass(files: *Vector<FileSrc>, m: *Mono, mono_errs: *Vector<SpanDiagnostic>) -> int64 {
+    news: *Vector<SpanDiagnostic> = collect_ground_pass(m, mono_errs)
+    emit_span_errors(files, news)
+    return vec_len(news)
 }
 
 // Runs the lexer on the file at path, printing one line per token to stdout and any
@@ -203,7 +212,7 @@ export func cmd_load(path: string, prog: string) -> int32 {
         println(out)
         free(out)
     }
-    errs: *Vector<string> = p.errors
+    errs: *Vector<LoadDiag> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
         return 1
@@ -225,7 +234,7 @@ export func cmd_desugar(path: string, prog: string) -> int32 {
         println(out)
         free(out)
     }
-    errs: *Vector<string> = p.errors
+    errs: *Vector<LoadDiag> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
         return 1
@@ -236,17 +245,68 @@ export func cmd_desugar(path: string, prog: string) -> int32 {
     return 0
 }
 
-// Runs load with the per-file paradigm gate, desugar, name resolution, then the
-// S3a type layer. Resolve diagnostics render first; typeck appends after.
-export func cmd_check(path: string, prog: string) -> int32 {
+// The diagnostics `dusk check` collects, grouped by the stage that raised them and
+// held in human emission order: the loader stream, then resolve, typeck, mono, and
+// the deduped ground pass. A stage that a gate skipped leaves its group empty, so the
+// same outcome drives both the human renderer and the JSON face without either one
+// re-running the pipeline. files backs span rendering; has_module is the loader gate.
+struct CheckOutcome {
+    load_diags: *Vector<LoadDiag>,
+    has_module: bool,
+    files: *Vector<FileSrc>,
+    resolve_errs: *Vector<SpanDiagnostic>,
+    type_errs: *Vector<SpanDiagnostic>,
+    mono_errs: *Vector<SpanDiagnostic>,
+    ground_errs: *Vector<SpanDiagnostic>,
+}
+
+func no_spans() -> *Vector<SpanDiagnostic> {
+    return alloc(vec_new())
+}
+
+// True when the check reported any diagnostic or never produced a module, the exit
+// gate the two check commands share. The JSON face negates it for the `ok` field, so
+// the machine `ok` and the human non-zero exit always agree.
+func outcome_failed(o: CheckOutcome) -> bool {
+    ld: *Vector<LoadDiag> = o.load_diags
+    if vec_len(ld) > 0 {
+        return true
+    }
+    if !o.has_module {
+        return true
+    }
+    re: *Vector<SpanDiagnostic> = o.resolve_errs
+    if vec_len(re) > 0 {
+        return true
+    }
+    te: *Vector<SpanDiagnostic> = o.type_errs
+    if vec_len(te) > 0 {
+        return true
+    }
+    me: *Vector<SpanDiagnostic> = o.mono_errs
+    if vec_len(me) > 0 {
+        return true
+    }
+    ge: *Vector<SpanDiagnostic> = o.ground_errs
+    if vec_len(ge) > 0 {
+        return true
+    }
+    return false
+}
+
+// The gated spine both check commands run: load, then, only when the loader is clean
+// and a module exists, desugar and the surface passes, then, only when those are
+// clean, mono and the ground double pass. The gates mirror sema::check exactly, so
+// the collected outcome carries precisely the diagnostics the human path would print
+// and no more. Nothing here prints; the caller renders the outcome for its audience.
+func run_check_spine(path: string, prog: string) -> CheckOutcome {
     p: Program = load(path, prog)
-    errs: *Vector<string> = p.errors
-    emit_errors(errs)
-    if vec_len(errs) > 0 {
-        return 1
+    load_diags: *Vector<LoadDiag> = p.errors
+    if vec_len(load_diags) > 0 {
+        return CheckOutcome { load_diags: load_diags, has_module: p.has_module, files: p.files, resolve_errs: no_spans(), type_errs: no_spans(), mono_errs: no_spans(), ground_errs: no_spans() }
     }
     if !p.has_module {
-        return 1
+        return CheckOutcome { load_diags: load_diags, has_module: false, files: p.files, resolve_errs: no_spans(), type_errs: no_spans(), mono_errs: no_spans(), ground_errs: no_spans() }
     }
     desugar(p.module)
     info: EscapeInfo = compute_escape_info(p.module)
@@ -254,15 +314,10 @@ export func cmd_check(path: string, prog: string) -> int32 {
     // resolve first, then the type pass; only monomorphization is gated on the
     // combined set being empty, mirroring sema's own ordering.
     resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
-    emit_span_errors(p.files, resolve_errs)
     tc: *TypeChecker = typeck_run_with_info(p.module, info)
     type_errs: *Vector<SpanDiagnostic> = (*tc).errors
-    emit_span_errors(p.files, type_errs)
-    if vec_len(resolve_errs) > 0 {
-        return 1
-    }
-    if vec_len(type_errs) > 0 {
-        return 1
+    if vec_len(resolve_errs) > 0 || vec_len(type_errs) > 0 {
+        return CheckOutcome { load_diags: load_diags, has_module: true, files: p.files, resolve_errs: resolve_errs, type_errs: type_errs, mono_errs: no_spans(), ground_errs: no_spans() }
     }
     // Monomorphization contributes its inference and frame-view ban diagnostics,
     // so a type parameter no site pins down, or a channel element that would view
@@ -270,15 +325,45 @@ export func cmd_check(path: string, prog: string) -> int32 {
     // an otherwise clean module. The ground double pass then re-runs the type,
     // width, argument, and exhaustiveness class over the mono-expanded module,
     // recovering exactly the class a generic do wildcarded on the surface. Mono
-    // and ground both run even when mono has diagnostics, matching sema::check.
+    // and ground both contribute even when mono has diagnostics, matching sema::check.
     m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
     mono_errs: *Vector<SpanDiagnostic> = (*m).diags
-    emit_span_errors(p.files, mono_errs)
-    ground_new: int64 = emit_ground_pass(p.files, m, mono_errs)
-    if vec_len(mono_errs) > 0 {
+    ground_errs: *Vector<SpanDiagnostic> = collect_ground_pass(m, mono_errs)
+    return CheckOutcome { load_diags: load_diags, has_module: true, files: p.files, resolve_errs: resolve_errs, type_errs: type_errs, mono_errs: mono_errs, ground_errs: ground_errs }
+}
+
+// Runs load with the per-file paradigm gate, desugar, name resolution, then the
+// S3a type layer. Resolve diagnostics render first; typeck appends after. The gated
+// spine is shared with cmd_check_json, so the two commands never diverge on which
+// diagnostics they report; only the rendering differs.
+export func cmd_check(path: string, prog: string) -> int32 {
+    o: CheckOutcome = run_check_spine(path, prog)
+    ld: *Vector<LoadDiag> = o.load_diags
+    emit_errors(ld)
+    if vec_len(ld) > 0 {
         return 1
     }
-    if ground_new > 0 {
+    if !o.has_module {
+        return 1
+    }
+    re: *Vector<SpanDiagnostic> = o.resolve_errs
+    te: *Vector<SpanDiagnostic> = o.type_errs
+    emit_span_errors(o.files, re)
+    emit_span_errors(o.files, te)
+    if vec_len(re) > 0 {
+        return 1
+    }
+    if vec_len(te) > 0 {
+        return 1
+    }
+    me: *Vector<SpanDiagnostic> = o.mono_errs
+    ge: *Vector<SpanDiagnostic> = o.ground_errs
+    emit_span_errors(o.files, me)
+    emit_span_errors(o.files, ge)
+    if vec_len(me) > 0 {
+        return 1
+    }
+    if vec_len(ge) > 0 {
         return 1
     }
     b: *StringBuilder = alloc(sb_new())
@@ -292,9 +377,26 @@ export func cmd_check(path: string, prog: string) -> int32 {
     return 0
 }
 
+// The machine face of cmd_check: runs the same gated spine and serializes its outcome
+// as one JSON document to stdout in every case, clean or faulty, with a trailing
+// newline and nothing on stderr. The exit code mirrors the human check, 0 clean and 1
+// with any diagnostic, so a tool reads the code and the envelope and they agree.
+export func cmd_check_json(path: string, prog: string) -> int32 {
+    o: CheckOutcome = run_check_spine(path, prog)
+    failed: bool = outcome_failed(o)
+    ok: bool = !failed
+    out: string = check_json(path, ok, o.files, o.load_diags, o.resolve_errs, o.type_errs, o.mono_errs, o.ground_errs)
+    print(out)
+    free(out)
+    if failed {
+        return 1
+    }
+    return 0
+}
+
 export func cmd_esc(path: string, prog: string) -> int32 {
     p: Program = load(path, prog)
-    errs: *Vector<string> = p.errors
+    errs: *Vector<LoadDiag> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 { return 1 }
     if !p.has_module { return 1 }
@@ -314,7 +416,7 @@ export func cmd_esc(path: string, prog: string) -> int32 {
 // (a generic do width mismatch, say) is now rejected here too, so no dump is printed.
 export func cmd_mono(path: string, prog: string) -> int32 {
     p: Program = load(path, prog)
-    errs: *Vector<string> = p.errors
+    errs: *Vector<LoadDiag> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
         return 1
@@ -358,7 +460,7 @@ export func cmd_mono(path: string, prog: string) -> int32 {
 export func compile_ir_text(path: string, prog: string, target: string) -> CliIrResult {
     no_exp: *Vector<string> = alloc(vec_new())
     p: Program = load(path, prog)
-    errs: *Vector<string> = p.errors
+    errs: *Vector<LoadDiag> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
         return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }

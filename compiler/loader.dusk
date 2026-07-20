@@ -22,7 +22,7 @@
 export struct Program {
     module: *Ast,
     has_module: bool,
-    errors: *Vector<string>,
+    errors: *Vector<LoadDiag>,
     files: *Vector<FileSrc>,
     links: *Vector<string>,
     csources: *Vector<string>,
@@ -274,25 +274,24 @@ func resolve(imp: string, base: string, stdlib: string) -> Resolved {
     return resolve_in_one(rel, stdlib)
 }
 
-func render_located_string(path: string, src: string, n: int64, e: Located) -> string {
-    return render_file_diag(path, src, n, span_diag(e.lo, e.hi, e.msg))
+func located_diag(path: string, src: string, n: int64, e: Located) -> LoadDiag {
+    return load_diag_span(path, src, n, e.lo, e.hi, e.msg)
 }
 
-func read_error(path: string, e: error) -> string {
+func read_error(path: string, e: error) -> LoadDiag {
     if !e.exists() {
-        return path
+        return load_diag_plain(path, "")
     }
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, path)
-    sb_push(b, ": read error: ")
+    sb_push(b, "read error: ")
     sb_push(b, e.toString())
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
     free(b)
-    return out
+    return load_diag_plain(path, out)
 }
 
-func parse_file(path: string, errors: *Vector<string>) -> ParsedFile {
+func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
     s, e := source_load(path)
     if e.exists() {
         vec_push(errors, read_error(path, e))
@@ -306,14 +305,14 @@ func parse_file(path: string, errors: *Vector<string>) -> ParsedFile {
     lex_errs: *Vector<Located> = lx_errors(lx)
     mut i: int64 = 0
     while i < vec_len(lex_errs) {
-        vec_push(errors, render_located_string(path, s.text, s.len, vec_get(lex_errs, i)))
+        vec_push(errors, located_diag(path, s.text, s.len, vec_get(lex_errs, i)))
         ok = false
         i = i + 1
     }
     parse_errs: *Vector<Located> = p_errors(p)
     mut j: int64 = 0
     while j < vec_len(parse_errs) {
-        vec_push(errors, render_located_string(path, s.text, s.len, vec_get(parse_errs, j)))
+        vec_push(errors, located_diag(path, s.text, s.len, vec_get(parse_errs, j)))
         ok = false
         j = j + 1
     }
@@ -321,7 +320,8 @@ func parse_file(path: string, errors: *Vector<string>) -> ParsedFile {
         paradigm_errs: *Vector<SpanDiagnostic> = paradigm_check(a)
         mut k: int64 = 0
         while k < vec_len(paradigm_errs) {
-            vec_push(errors, render_file_diag(path, s.text, s.len, vec_get(paradigm_errs, k)))
+            sd: SpanDiagnostic = vec_get(paradigm_errs, k)
+            vec_push(errors, load_diag_span(path, s.text, s.len, sd.lo, sd.hi, sd.msg))
             ok = false
             k = k + 1
         }
@@ -432,19 +432,18 @@ func copy_export_keys(target: *Map<string, int64>, ex: *Map<string, int64>) -> v
     }
 }
 
-func cannot_resolve(importer: string, imp: string) -> string {
+func cannot_resolve(importer: string, imp: string) -> LoadDiag {
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, importer)
-    sb_push(b, ": cannot resolve import '")
+    sb_push(b, "cannot resolve import '")
     sb_push(b, imp)
     sb_push_char(b, 39)
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
     free(b)
-    return out
+    return load_diag_plain(importer, out)
 }
 
-func leaf_error(importer: string, imp: string, leaf: string) -> string {
+func leaf_error(importer: string, imp: string, leaf: string) -> LoadDiag {
     mut modpath: string = imp
     dot: int64 = last_dot(imp)
     slash: int64 = last_slash(imp)
@@ -456,8 +455,7 @@ func leaf_error(importer: string, imp: string, leaf: string) -> string {
         modpath = substring(imp, 0, cut)
     }
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, importer)
-    sb_push(b, ": import '")
+    sb_push(b, "import '")
     sb_push(b, imp)
     sb_push(b, "' names '")
     sb_push(b, leaf)
@@ -467,7 +465,7 @@ func leaf_error(importer: string, imp: string, leaf: string) -> string {
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
     free(b)
-    return out
+    return load_diag_plain(importer, out)
 }
 
 func pop_work(work: *Vector<WorkItem>) -> WorkItem {
@@ -481,7 +479,7 @@ func push_work(work: *Vector<WorkItem>, imports: *Vector<string>, dir: string, i
     vec_push(work, WorkItem { imports: imports, dir: dir, importer: importer })
 }
 
-func empty_program(errors: *Vector<string>, files: *Vector<FileSrc>, links: *Vector<string>, csources: *Vector<string>) -> Program {
+func empty_program(errors: *Vector<LoadDiag>, files: *Vector<FileSrc>, links: *Vector<string>, csources: *Vector<string>) -> Program {
     return Program { module: ast_new(), has_module: false, errors: errors, files: files, links: links, csources: csources }
 }
 
@@ -492,7 +490,7 @@ func empty_program(errors: *Vector<string>, files: *Vector<FileSrc>, links: *Vec
 // time, so the linker receives a path relative to the invocation root. First
 // appearance wins, and a value already seen in an earlier file is skipped, which
 // keeps the tables in the loader's deterministic module walk order.
-func collect_directives(src: string, len: int64, file: string, errors: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>) -> void {
+func collect_directives(src: string, len: int64, file: string, errors: *Vector<LoadDiag>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>) -> void {
     p: Prescan = prescan(src, len)
     // Prescan validates each directive as it reads it, a bad link or csource
     // value among them; those faults reach the build here, not only the scan
@@ -500,7 +498,7 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<s
     pe: *Vector<Located> = p.errors
     mut d: int64 = 0
     while d < vec_len(pe) {
-        vec_push(errors, render_located_string(file, src, len, vec_get(pe, d)))
+        vec_push(errors, located_diag(file, src, len, vec_get(pe, d)))
         d = d + 1
     }
     lv: *Vector<string> = p.links
@@ -537,7 +535,7 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<s
 }
 
 export func load(root_path: string, prog: string) -> Program {
-    errors: *Vector<string> = alloc(vec_new())
+    errors: *Vector<LoadDiag> = alloc(vec_new())
     files: *Vector<FileSrc> = alloc(vec_new())
     links: *Vector<string> = alloc(vec_new())
     csources: *Vector<string> = alloc(vec_new())

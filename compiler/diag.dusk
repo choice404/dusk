@@ -35,6 +35,37 @@ export struct SpanDiagnostic {
     msg: string,
 }
 
+// A loader-stage diagnostic, structured so the human renderer and the JSON machine
+// face both derive their output from one record. A span diagnostic (a lex, parse,
+// paradigm, prescan, or privatize fault) carries the declaring file's path, source,
+// and file-local byte span; a plain diagnostic (a read failure or an unresolvable
+// import) carries only its message and the file it belongs to, with has_span false.
+// The message is the raw text with no file prefix and no caret, so the JSON face
+// prints it verbatim and the human face reconstructs the `path: message` header.
+export struct LoadDiag {
+    path: string,
+    lo: int64,
+    hi: int64,
+    has_span: bool,
+    msg: string,
+    src: string,
+    len: int64,
+}
+
+// A plain loader diagnostic with no source span: the file it belongs to and the raw
+// message. The human renderer prints `path: message`, or the path alone when the
+// message is empty (a missing file names only its path).
+export func load_diag_plain(path: string, msg: string) -> LoadDiag {
+    return LoadDiag { path: path, lo: 0, hi: 0, has_span: false, msg: msg, src: "", len: 0 }
+}
+
+// A span-bearing loader diagnostic: the declaring file's path, its source and length
+// for rendering, and the file-local byte span. lo and hi are already file local, so
+// the human renderer and the JSON face both work directly against src.
+export func load_diag_span(path: string, src: string, n: int64, lo: int64, hi: int64, msg: string) -> LoadDiag {
+    return LoadDiag { path: path, lo: lo, hi: hi, has_span: true, msg: msg, src: src, len: n }
+}
+
 struct Loc {
     line: int64,
     col: int64,
@@ -175,6 +206,43 @@ export func line_col(src: string, n: int64, off: int64) -> (int64, int64) {
     return (loc.line, loc.col)
 }
 
+// The file-local byte extent of a diagnostic and its 1 based line and column, the
+// machine face of a span. lo and hi are clamped to UTF-8 scalar boundaries; line and
+// col locate lo; end_line and end_col locate the true hi, not the caret renderer's
+// end-of-line clamp, so a consumer reads the exact byte range the span covers.
+export struct SpanLoc {
+    lo: int64,
+    hi: int64,
+    line: int64,
+    col: int64,
+    end_line: int64,
+    end_col: int64,
+}
+
+export func span_loc(src: string, n: int64, lo0: int64, hi0: int64) -> SpanLoc {
+    lo: int64 = clamp_boundary(src, n, lo0)
+    hi: int64 = clamp_boundary(src, n, hi0)
+    lline, lcol := line_col(src, n, lo)
+    hline, hcol := line_col(src, n, hi)
+    return SpanLoc { lo: lo, hi: hi, line: lline, col: lcol, end_line: hline, end_col: hcol }
+}
+
+// The index of the loaded file a program-wide span start falls in, the file whose
+// base is greatest but not past lo, or -1 when lo precedes every file. This is
+// render_diag's file-selection rule, exposed so the JSON face resolves a span to its
+// file exactly the way the human renderer does.
+export func file_for_span(files: *Vector<FileSrc>, lo: int64) -> int64 {
+    mut i: int64 = vec_len(files) - 1
+    while i >= 0 {
+        f: FileSrc = vec_get(files, i)
+        if lo >= f.base {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
 func push_pad(b: *StringBuilder, src: string, n: int64, lo: int64, hi: int64) -> void {
     mut i: int64 = lo
     while i < hi {
@@ -291,6 +359,48 @@ export func render_diag(files: *Vector<FileSrc>, d: SpanDiagnostic) -> string {
     sb_free(b2)
     free(b2)
     return out2
+}
+
+// Resolves a program-wide span to a file-local LoadDiag, choosing the loaded file
+// whose base is greatest but not past the span start, exactly as render_diag does.
+// The privatize fold raises its private-symbol fault against the merged module, so
+// its span is program wide; every other loader producer is already file local.
+export func load_diag_global(files: *Vector<FileSrc>, lo: int64, hi: int64, msg: string) -> LoadDiag {
+    mut i: int64 = vec_len(files) - 1
+    while i >= 0 {
+        f: FileSrc = vec_get(files, i)
+        if lo >= f.base {
+            return load_diag_span(f.path, f.src, f.len, lo - f.base, hi - f.base, msg)
+        }
+        i = i - 1
+    }
+    return load_diag_plain("", msg)
+}
+
+// Renders one loader diagnostic to the fresh heap string the caller owns and frees,
+// byte for byte what the pre-1.7.1 loader produced. A span diagnostic goes through
+// render_file_diag, the same header-plus-caret path the producers used; a plain
+// diagnostic reconstructs its `path: message` header, or the path alone when the
+// message is empty, or the `error: message` no-file fallback render_diag falls to.
+export func render_load_diag(d: LoadDiag) -> string {
+    if d.has_span {
+        return render_file_diag(d.path, d.src, d.len, span_diag(d.lo, d.hi, d.msg))
+    }
+    b: *StringBuilder = alloc(sb_new())
+    if str_len(d.path) == 0 {
+        sb_push(b, "error: ")
+        sb_push(b, d.msg)
+    } else if str_len(d.msg) == 0 {
+        sb_push(b, d.path)
+    } else {
+        sb_push(b, d.path)
+        sb_push(b, ": ")
+        sb_push(b, d.msg)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 // Prints a located fault through the same source-span renderer used by check

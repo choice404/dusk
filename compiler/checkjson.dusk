@@ -1,0 +1,165 @@
+// checkjson: the JSON machine face for `dusk check`, the LSP-facing twin to the
+// human diagnostics stream. It serializes exactly one deterministic document for
+// every outcome, clean or faulty alike, so a consumer always parses one JSON value
+// and never has to distinguish an empty stream from a crash. The schema is fixed and
+// hand written, the same discipline docjson holds for `dusk doc --json`:
+//
+//   {"file": <root path>, "ok": bool, "diagnostics": [<diag>, ...]}
+//   <diag> = {"file": <span's file>, "severity": "error", "message": <verbatim>,
+//             "span": {"lo","hi","line","col","end_line","end_col"} | null}
+//
+// lo and hi are file-local byte offsets, line and col are 1 based and count columns
+// in Unicode scalars, and every diagnostic is severity "error" today. Emission order
+// is the human check's order: the loader stream first, then resolve, typeck, mono,
+// and the ground pass, deduplicated exactly as the human path deduplicates.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import diag
+@import docjson
+
+// Appends a `{...}` span object for a file-local byte span at the given indent, the
+// six fixed keys in order. The caller has already written the `"span": ` key.
+func push_span_obj(b: *StringBuilder, level: int64, src: string, n: int64, lo: int64, hi: int64) -> void {
+    sl: SpanLoc = span_loc(src, n, lo, hi)
+    sb_push(b, "{\n")
+    push_key(b, level + 1, "lo")
+    sb_push_int(b, sl.lo)
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "hi")
+    sb_push_int(b, sl.hi)
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "line")
+    sb_push_int(b, sl.line)
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "col")
+    sb_push_int(b, sl.col)
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "end_line")
+    sb_push_int(b, sl.end_line)
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "end_col")
+    sb_push_int(b, sl.end_col)
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+// Appends one diagnostic object at the given element indent: file, severity, message,
+// then span, present as an object or `null`. The object is written without its own
+// leading indent; the array walker indents before the call.
+func push_diag_obj(b: *StringBuilder, level: int64, file: string, has_span: bool, src: string, n: int64, lo: int64, hi: int64, msg: string) -> void {
+    sb_push(b, "{\n")
+    push_key(b, level + 1, "file")
+    push_str(b, file)
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "severity")
+    push_str(b, "error")
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "message")
+    push_str(b, msg)
+    sb_push(b, ",\n")
+    push_key(b, level + 1, "span")
+    if has_span {
+        push_span_obj(b, level + 1, src, n, lo, hi)
+    } else {
+        sb_push(b, "null")
+    }
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+// Writes a comma after an element unless it is the array's last, then a newline, the
+// one place trailing-comma placement is decided so it never drifts between groups.
+func push_elem_sep(b: *StringBuilder, idx: int64, total: int64) -> void {
+    if idx < total {
+        sb_push_char(b, 44)
+    }
+    sb_push_char(b, 10)
+}
+
+// Appends the loader diagnostics, each already carrying its own file, file-local
+// span, and raw message. Returns the running element index for the next group.
+func push_load_group(b: *StringBuilder, level: int64, diags: *Vector<LoadDiag>, total: int64, idx0: int64) -> int64 {
+    mut idx: int64 = idx0
+    mut i: int64 = 0
+    while i < vec_len(diags) {
+        d: LoadDiag = vec_get(diags, i)
+        ind(b, level)
+        push_diag_obj(b, level, d.path, d.has_span, d.src, d.len, d.lo, d.hi, d.msg)
+        idx = idx + 1
+        push_elem_sep(b, idx, total)
+        i = i + 1
+    }
+    return idx
+}
+
+// Appends a group of program-wide span diagnostics, resolving each to its file by the
+// greatest-base rule and subtracting the file base to file-local offsets. A span that
+// precedes every file (unreachable for a real diagnostic) renders with the root file
+// and a null span. Returns the running element index for the next group.
+func push_span_group(b: *StringBuilder, level: int64, root_file: string, files: *Vector<FileSrc>, diags: *Vector<SpanDiagnostic>, total: int64, idx0: int64) -> int64 {
+    mut idx: int64 = idx0
+    mut i: int64 = 0
+    while i < vec_len(diags) {
+        d: SpanDiagnostic = vec_get(diags, i)
+        fi: int64 = file_for_span(files, d.lo)
+        ind(b, level)
+        if fi < 0 {
+            push_diag_obj(b, level, root_file, false, "", 0, 0, 0, d.msg)
+        } else {
+            f: FileSrc = vec_get(files, fi)
+            push_diag_obj(b, level, f.path, true, f.src, f.len, d.lo - f.base, d.hi - f.base, d.msg)
+        }
+        idx = idx + 1
+        push_elem_sep(b, idx, total)
+        i = i + 1
+    }
+    return idx
+}
+
+// Appends the whole `[...]` diagnostics array in human emission order: loader stream,
+// resolve, typeck, mono, ground. Renders `[]` when there is nothing to report.
+func push_diags(b: *StringBuilder, level: int64, root_file: string, files: *Vector<FileSrc>, load_diags: *Vector<LoadDiag>, resolve_errs: *Vector<SpanDiagnostic>, type_errs: *Vector<SpanDiagnostic>, mono_errs: *Vector<SpanDiagnostic>, ground_errs: *Vector<SpanDiagnostic>) -> void {
+    total: int64 = vec_len(load_diags) + vec_len(resolve_errs) + vec_len(type_errs) + vec_len(mono_errs) + vec_len(ground_errs)
+    if total == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    el: int64 = level + 1
+    mut idx: int64 = 0
+    idx = push_load_group(b, el, load_diags, total, idx)
+    idx = push_span_group(b, el, root_file, files, resolve_errs, total, idx)
+    idx = push_span_group(b, el, root_file, files, type_errs, total, idx)
+    idx = push_span_group(b, el, root_file, files, mono_errs, total, idx)
+    idx = push_span_group(b, el, root_file, files, ground_errs, total, idx)
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
+// Builds the whole `dusk check --json` document to a fresh heap string the caller
+// owns and frees. root_file is the path as written on the command line; ok mirrors
+// the human check's clean exit; the five diagnostic vectors are the collected stream.
+export func check_json(root_file: string, ok: bool, files: *Vector<FileSrc>, load_diags: *Vector<LoadDiag>, resolve_errs: *Vector<SpanDiagnostic>, type_errs: *Vector<SpanDiagnostic>, mono_errs: *Vector<SpanDiagnostic>, ground_errs: *Vector<SpanDiagnostic>) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "{\n")
+    push_key(b, 1, "file")
+    push_str(b, root_file)
+    sb_push(b, ",\n")
+    push_key(b, 1, "ok")
+    push_bool(b, ok)
+    sb_push(b, ",\n")
+    push_key(b, 1, "diagnostics")
+    push_diags(b, 1, root_file, files, load_diags, resolve_errs, type_errs, mono_errs, ground_errs)
+    sb_push_char(b, 10)
+    sb_push_char(b, 125)
+    sb_push_char(b, 10)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

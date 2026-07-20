@@ -11,6 +11,7 @@
 @import std.string
 @import std.vector
 @import ast
+@import diag
 @import doccore
 @import docty
 
@@ -35,6 +36,24 @@ export func push_key(b: *StringBuilder, level: int64, key: string) -> void {
     sb_push_char(b, 34)
     sb_push(b, key)
     sb_push(b, "\": ")
+}
+
+// Appends the inline span object `{"lo": .., "hi": .., "line": .., "col": ..}` for a
+// declaration's byte extent. lo and hi are file-local byte offsets into the single
+// unmerged source `dusk doc` reads; line and col are the 1 based line and Unicode
+// scalar column of lo. Rendered on one line, the compact object shape the schema uses
+// for its leaf records.
+export func push_span(b: *StringBuilder, src: string, n: int64, lo: int64, hi: int64) -> void {
+    line, col := line_col(src, n, lo)
+    sb_push(b, "{\"lo\": ")
+    sb_push_int(b, lo)
+    sb_push(b, ", \"hi\": ")
+    sb_push_int(b, hi)
+    sb_push(b, ", \"line\": ")
+    sb_push_int(b, line)
+    sb_push(b, ", \"col\": ")
+    sb_push_int(b, col)
+    sb_push_char(b, 125)
 }
 
 func hex_nibble(v: int64) -> int64 {
@@ -185,9 +204,10 @@ func push_doc_params(b: *StringBuilder, level: int64, params: *Vector<DocParam>)
 }
 
 // Appends the doc object bound to (kind, id): `null` when no block binds there, else
-// `{summary, body, params, return, examples}`, the one shape every doc field in the
-// schema shares. return is `null` only when the block carried no `@return` at all; an
-// empty description still renders as `""`.
+// `{span, summary, body, params, return, examples}`, the one shape every doc field in
+// the schema shares. span is the doc block's own byte extent. return is `null` only
+// when the block carried no `@return` at all; an empty description still renders as
+// `""`.
 export func push_doc(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, kind: int64, id: int64) -> void {
     found, lo, hi := find_doc(a, kind, id)
     if !found {
@@ -197,6 +217,9 @@ export func push_doc(b: *StringBuilder, level: int64, a: *Ast, src: string, n: i
     di: DocInfo = doc_parse(src, n, lo, hi)
     l: int64 = level + 1
     sb_push(b, "{\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, lo, hi)
+    sb_push(b, ",\n")
     push_key(b, l, "summary")
     push_str(b, di.summary)
     sb_push(b, ",\n")

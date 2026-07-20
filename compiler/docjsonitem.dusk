@@ -13,14 +13,17 @@
 @import docty
 @import docjson
 
-// Appends the shared body of a func object, `name` (and, when with_flags, `exported`
-// and `async`), `generics`, `params`, `return`, `signature`, `doc`. A top level
-// function or a monad method renders with_flags true; an impl method renders it
+// Appends the shared body of a func object, `name`, `span` (and, when with_flags,
+// `exported` and `async`), `generics`, `params`, `return`, `signature`, `doc`. A top
+// level function or a monad method renders with_flags true; an impl method renders it
 // false, the "func shape minus exported/async" the impl entry uses.
 func push_func_fields(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, fid: int64, with_flags: bool) -> void {
     f: FuncNode = vec_get((*a).funcs, fid)
     push_key(b, level, "name")
     push_str(b, ast_name(a, f.name))
+    sb_push(b, ",\n")
+    push_key(b, level, "span")
+    push_span(b, src, n, f.lo, f.hi)
     sb_push(b, ",\n")
     if with_flags {
         push_key(b, level, "exported")
@@ -65,7 +68,7 @@ func push_impl_method(b: *StringBuilder, level: int64, a: *Ast, src: string, n: 
     sb_push_char(b, 125)
 }
 
-// An interface method entry, `{name, params, return, signature, doc}`; a method
+// An interface method entry, `{name, span, params, return, signature, doc}`; a method
 // signature carries no generics of its own.
 func push_method_sig(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, msid: int64) -> void {
     m: MethodSigNode = vec_get((*a).method_sigs, msid)
@@ -73,6 +76,9 @@ func push_method_sig(b: *StringBuilder, level: int64, a: *Ast, src: string, n: i
     sb_push(b, "{\n")
     push_key(b, l, "name")
     push_str(b, ast_name(a, m.name))
+    sb_push(b, ",\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, m.lo, m.hi)
     sb_push(b, ",\n")
     push_key(b, l, "params")
     push_params(b, l, a, m.params_off, m.params_len)
@@ -101,6 +107,9 @@ func push_struct(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64
     push_key(b, l, "name")
     push_str(b, ast_name(a, s.name))
     sb_push(b, ",\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, s.lo, s.hi)
+    sb_push(b, ",\n")
     push_key(b, l, "exported")
     push_bool(b, s.exported)
     sb_push(b, ",\n")
@@ -124,6 +133,9 @@ func push_enum(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, 
     push_key(b, l, "name")
     push_str(b, ast_name(a, e.name))
     sb_push(b, ",\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, e.lo, e.hi)
+    sb_push(b, ",\n")
     push_key(b, l, "exported")
     push_bool(b, e.exported)
     sb_push(b, ",\n")
@@ -146,6 +158,9 @@ func push_interface(b: *StringBuilder, level: int64, a: *Ast, src: string, n: in
     sb_push(b, "{\n")
     push_key(b, l, "name")
     push_str(b, ast_name(a, it.name))
+    sb_push(b, ",\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, it.lo, it.hi)
     sb_push(b, ",\n")
     push_key(b, l, "exported")
     push_bool(b, it.exported)
@@ -178,9 +193,10 @@ func push_interface(b: *StringBuilder, level: int64, a: *Ast, src: string, n: in
     sb_push_char(b, 125)
 }
 
-// An impls entry, `{interface, type, methods, doc}`. interface is `null` for a bare
-// inherent impl; doc is the impl block's own header doc, `null` when none is attached,
-// and each method carries its own doc besides.
+// An impls entry, `{interface, type, span, methods, doc}`. interface is `null` for a
+// bare inherent impl; span is the impl head's own byte extent; doc is the impl block's
+// own header doc, `null` when none is attached, and each method carries its own doc
+// besides.
 func push_impl(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, imid: int64) -> void {
     im: ImplNode = vec_get((*a).impls, imid)
     l: int64 = level + 1
@@ -190,6 +206,9 @@ func push_impl(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, 
     sb_push(b, ",\n")
     push_key(b, l, "type")
     push_str(b, ast_name(a, im.ty))
+    sb_push(b, ",\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, im.lo, im.hi)
     sb_push(b, ",\n")
     push_key(b, l, "methods")
     if im.methods_len == 0 {

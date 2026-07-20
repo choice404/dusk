@@ -15,7 +15,7 @@
 
 // The version string the version command prints.
 func version_string() -> string {
-    return "dusk 1.7.0"
+    return "dusk 1.7.1"
 }
 
 // Prints the command list to stderr, where every message that is not a built
@@ -31,6 +31,7 @@ func usage() -> void {
     printerr("  load <file>   load imports, dump the merged AST")
     printerr("  desugar <file> load + desugar, dump the merged AST")
     printerr("  check <file>  type check a source file and report diagnostics")
+    printerr("  check --json <file>  report diagnostics as JSON")
     printerr("  mono <file>   check, then dump the mono-expanded ground module")
     printerr("  ir <file>     lower the mono-expanded module to LLVM IR")
     printerr("  ir --target=wasm32 <file>  cross-emit the LLVM IR for wasm32-wasip1")
@@ -64,6 +65,12 @@ func run_file_cmd(cmd: string, argv: string[]) -> int32 {
         return cmd_desugar(path, argv[0])
     }
     if str_eq(cmd, "check") {
+        // `check --json <file>` emits the diagnostics as JSON, mirroring
+        // `doc --json`: the flag sits at argv[2] and the file at argv[3]. Without
+        // it, the human diagnostics stream.
+        if argv.len >= 4 && str_eq(argv[2], "--json") {
+            return cmd_check_json(argv[3], argv[0])
+        }
         return cmd_check(path, argv[0])
     }
     if str_eq(cmd, "mono") {

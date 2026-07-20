@@ -259,14 +259,18 @@ func parse_field_block(p: *Parser) -> *Vector<int64> {
 
 func parse_struct_item(p: *Parser, exported: bool) -> int64 {
     p_expect_kw(p, "struct")
+    name_lo: int64 = p_lo(p)
+    name_hi: int64 = p_hi(p)
     name: int64 = p_ident(p)
     gens: *Vector<int64> = parse_generics(p)
     fields: *Vector<int64> = parse_field_block(p)
-    return ast_struct(p_ast(p), exported, name, gens, fields)
+    return ast_struct(p_ast(p), exported, name, name_lo, name_hi, gens, fields)
 }
 
 func parse_enum_item(p: *Parser, exported: bool) -> int64 {
     p_expect_kw(p, "enum")
+    name_lo: int64 = p_lo(p)
+    name_hi: int64 = p_hi(p)
     name: int64 = p_ident(p)
     gens: *Vector<int64> = parse_generics(p)
     vars: *Vector<int64> = alloc(vec_new())
@@ -306,11 +310,13 @@ func parse_enum_item(p: *Parser, exported: bool) -> int64 {
         }
     }
     p_expect(p, k_rbrace())
-    return ast_enum(p_ast(p), exported, name, gens, vars)
+    return ast_enum(p_ast(p), exported, name, name_lo, name_hi, gens, vars)
 }
 
 func parse_interface_item(p: *Parser, exported: bool) -> int64 {
     p_expect_kw(p, "interface")
+    name_lo: int64 = p_lo(p)
+    name_hi: int64 = p_hi(p)
     name: int64 = p_ident(p)
     gens: *Vector<int64> = parse_generics(p)
     methods: *Vector<int64> = alloc(vec_new())
@@ -324,12 +330,14 @@ func parse_interface_item(p: *Parser, exported: bool) -> int64 {
         } else {
             before: int64 = (*p).pos
             dlo, dhi := p_take_doc(p)
+            mname_lo: int64 = p_lo(p)
+            mname_hi: int64 = p_hi(p)
             mname: int64 = p_ident(p)
             params: *Vector<int64> = parse_params(p)
             p_expect(p, k_arrow())
             ret: int64 = parse_type(p)
             p_eat(p, k_semi())
-            msid: int64 = ast_method_sig(p_ast(p), mname, params, ret)
+            msid: int64 = ast_method_sig(p_ast(p), mname, mname_lo, mname_hi, params, ret)
             vec_push(methods, msid)
             if dlo >= 0 {
                 ast_doc(p_ast(p), dk_method_sig(), msid, dlo, dhi)
@@ -338,7 +346,7 @@ func parse_interface_item(p: *Parser, exported: bool) -> int64 {
         }
     }
     p_expect(p, k_rbrace())
-    return ast_interface(p_ast(p), exported, name, gens, methods)
+    return ast_interface(p_ast(p), exported, name, name_lo, name_hi, gens, methods)
 }
 
 func parse_foreign_item(p: *Parser) -> int64 {

@@ -366,7 +366,7 @@ func copy_method_sig(dst: *Ast, src: *Ast, id: int64) -> int64 {
         vec_push(params, vec_get((*dst).kids, poff + i))
         i = i + 1
     }
-    return ast_method_sig(dst, copy_name(dst, src, m.name), params, copy_type(dst, src, m.ret))
+    return ast_method_sig(dst, copy_name(dst, src, m.name), m.lo, m.hi, params, copy_type(dst, src, m.ret))
 }
 
 func copy_method_sig_list(dst: *Ast, src: *Ast, off: int64, len: int64) -> *Vector<int64> {
@@ -413,7 +413,7 @@ func copy_item(dst: *Ast, src: *Ast, it: ItemNode) -> void {
             i = i + 1
         }
         fields: *Vector<int64> = copy_field_list(dst, src, s.fields_off, s.fields_len)
-        ast_item(dst, ik_struct(), ast_struct(dst, s.exported, copy_name(dst, src, s.name), gens, fields))
+        ast_item(dst, ik_struct(), ast_struct(dst, s.exported, copy_name(dst, src, s.name), s.lo, s.hi, gens, fields))
     } else if it.kind == ik_enum() {
         e: EnumNode = vec_get((*src).enums, it.id)
         gens2: *Vector<int64> = alloc(vec_new())
@@ -423,7 +423,7 @@ func copy_item(dst: *Ast, src: *Ast, it: ItemNode) -> void {
             j = j + 1
         }
         vars: *Vector<int64> = copy_variant_list(dst, src, e.variants_off, e.variants_len)
-        ast_item(dst, ik_enum(), ast_enum(dst, e.exported, copy_name(dst, src, e.name), gens2, vars))
+        ast_item(dst, ik_enum(), ast_enum(dst, e.exported, copy_name(dst, src, e.name), e.lo, e.hi, gens2, vars))
     } else if it.kind == ik_interface() {
         iface: InterfaceNode = vec_get((*src).interfaces, it.id)
         gens3: *Vector<int64> = alloc(vec_new())
@@ -433,7 +433,7 @@ func copy_item(dst: *Ast, src: *Ast, it: ItemNode) -> void {
             k = k + 1
         }
         methods: *Vector<int64> = copy_method_sig_list(dst, src, iface.methods_off, iface.methods_len)
-        ast_item(dst, ik_interface(), ast_interface(dst, iface.exported, copy_name(dst, src, iface.name), gens3, methods))
+        ast_item(dst, ik_interface(), ast_interface(dst, iface.exported, copy_name(dst, src, iface.name), iface.lo, iface.hi, gens3, methods))
     } else if it.kind == ik_impl() {
         im: ImplNode = vec_get((*src).impls, it.id)
         methods2: *Vector<int64> = alloc(vec_new())
@@ -641,11 +641,7 @@ func private_msg(leaf: string, prefix: string) -> string {
     return out
 }
 
-func render_global_diag(files: *Vector<FileSrc>, lo: int64, hi: int64, msg: string) -> string {
-    return render_diag(files, span_diag(lo, hi, msg))
-}
-
-func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
     mut i: int64 = 0
     while i < len {
         fold_expr(a, vec_get((*a).kids, off + i), ns, exports, files, errors)
@@ -653,7 +649,7 @@ func fold_expr_slice(a: *Ast, off: int64, len: int64, ns: *Map<string, int64>, e
     }
 }
 
-func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
     fold_expr(a, scrut, ns, exports, files, errors)
     mut i: int64 = 0
     while i < len {
@@ -663,7 +659,7 @@ func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, ns: *Map<string, 
     }
 }
 
-func fold_block(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_block(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
     b: BlockNode = vec_get((*a).blocks, id)
     mut i: int64 = 0
     while i < b.len {
@@ -672,7 +668,7 @@ func fold_block(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<strin
     }
 }
 
-func fold_stmt(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_stmt(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
     s: StmtNode = vec_get((*a).stmts, id)
     if s.kind == sk_let() {
         fold_expr(a, s.c, ns, exports, files, errors)
@@ -708,7 +704,7 @@ func fold_stmt(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string
     }
 }
 
-func fold_expr(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+func fold_expr(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
     exprs: *Vector<ExprNode> = (*a).exprs
     e: ExprNode = vec_get(exprs, id)
     if e.kind == xk_call() {
@@ -725,7 +721,7 @@ func fold_expr(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string
                         ex: *Map<string, int64> = unwrap_or(map_get(exports, prefix), empty)
                         if !map_has(ex, leaf) {
                             msg: string = private_msg(leaf, prefix)
-                            vec_push(errors, render_global_diag(files, e.lo, e.hi, msg))
+                            vec_push(errors, load_diag_global(files, e.lo, e.hi, msg))
                         }
                     }
                     callee.kind = xk_ident()
@@ -775,7 +771,7 @@ func fold_expr(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string
     }
 }
 
-export func load_fold_qualified_calls(a: *Ast, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<string>) -> void {
+export func load_fold_qualified_calls(a: *Ast, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
     while i < vec_len(items) {
