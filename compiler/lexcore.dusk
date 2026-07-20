@@ -21,11 +21,13 @@ export struct Lexer {
     pending_nl: bool,
     tokens: *Vector<Token>,
     errors: *Vector<Located>,
+    docs: *Vector<DocBlock>,
 }
 
 export func lx_new(src: string, n: int64) -> *Lexer {
     tv: *Vector<Token> = alloc(vec_new())
     ev: *Vector<Located> = alloc(vec_new())
+    dv: *Vector<DocBlock> = alloc(vec_new())
     return alloc(Lexer {
         src: src,
         n: n,
@@ -33,6 +35,7 @@ export func lx_new(src: string, n: int64) -> *Lexer {
         pending_nl: false,
         tokens: tv,
         errors: ev,
+        docs: dv,
     })
 }
 
@@ -58,6 +61,13 @@ export func lx_tokens(lx: *Lexer) -> *Vector<Token> {
 }
 export func lx_errors(lx: *Lexer) -> *Vector<Located> {
     return (*lx).errors
+}
+
+// The documentation blocks captured by a finished lexer, in source order. The
+// parser reads this side table to bind each `/**` block to the item it precedes;
+// every other consumer ignores it, so a doc block changes no token and no dump.
+export func lx_docs(lx: *Lexer) -> *Vector<DocBlock> {
+    return (*lx).docs
 }
 
 // Advances the offset by m bytes.
@@ -146,6 +156,25 @@ func lx_skip_line_comment(lx: *Lexer) -> void {
     }
 }
 
+// Whether the block comment opening at the current "/*" is a doc block. A doc block
+// opens with "/**" whose fourth byte is neither "*" nor "/", the Rust rule: "/**/"
+// (empty), "/***/", and "/**** banner" are all plain comments. At entry lx_peek is
+// "/" and lx_peek2 is "*", so only the third and fourth bytes need testing.
+func lx_is_doc_open(lx: *Lexer) -> bool {
+    third: int64 = lx_peek3(lx)
+    fourth: int64 = bytes.byte_at((*lx).src, (*lx).n, (*lx).pos + 3)
+    if third != 42 {
+        return false
+    }
+    if fourth == 42 {
+        return false
+    }
+    if fourth == 47 {
+        return false
+    }
+    return true
+}
+
 // Skips a Rust-style nested block comment starting at "/*". Inside a block comment
 // only "/*" and "*/" are significant: quotes and "//" are inert, so a commented-out
 // string literal or line comment cannot reopen or extend the block. A newline inside
@@ -153,8 +182,14 @@ func lx_skip_line_comment(lx: *Lexer) -> void {
 // statement the way a bare newline does; a same-line comment does not. An
 // unterminated comment records a fault at its opening "/*". The byte scan is UTF-8
 // safe: 0x2A, 0x2F, and 0x0A never appear as a continuation byte.
+//
+// A doc block ("/**") is skipped identically, producing no token, but on clean
+// termination its full byte span [open, pos), delimiters included, is recorded in
+// the docs side table for the parser to bind to the item it precedes. An
+// unterminated doc block records the same fault and captures nothing.
 func lx_skip_block_comment(lx: *Lexer) -> void {
     open: int64 = lx_pos(lx)
+    is_doc: bool = lx_is_doc_open(lx)
     (*lx).pos = (*lx).pos + 2
     mut depth: int64 = 1
     mut going: bool = true
@@ -168,6 +203,9 @@ func lx_skip_block_comment(lx: *Lexer) -> void {
                 (*lx).pos = (*lx).pos + 2
                 depth = depth - 1
                 if depth == 0 {
+                    if is_doc {
+                        vec_push((*lx).docs, DocBlock { lo: open, hi: (*lx).pos })
+                    }
                     going = false
                 }
             } else {

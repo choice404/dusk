@@ -2,6 +2,25 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.6.1
+
+The doc comment. A block comment that opens with `/**` now binds to the declaration it precedes, and the new `dusk doc` command renders a module's documentation as markdown or, with `--json`, as a stable JSON model for tooling. The doc carries prose only, the summary, the parameter and return descriptions, and examples, while every fact, the names, the types, the whole signature, comes from the declaration itself, so the documentation cannot drift from the code, and where the prose does contradict the signature the command refuses to emit and says why.
+
+The doc comment.
+
+- `/**` whose next byte is neither `*` nor `/` opens a doc block: `/**/` stays an empty plain comment and `/***/` or a `/****` banner stays plain. Everything else about it is an ordinary block comment, nesting, terminating, and evaporating by the 1.6.0 rules, so a doc block changes nothing about how a program compiles: `check`, `build`, and `ir` output is byte identical with the docs present or stripped.
+- Binding follows the token gap. A doc block binds to the item whose first token comes next, `export` and other modifiers included; blank lines and plain comments in between do not break it, and a same line doc binds too. A doc before the directive prologue documents the module; in a file with no directives a leading doc binds to the first item. Bindable targets are functions, structs, enums, interfaces, interface method signatures, impl methods, and monad methods. Anything else dangles, and a dangling doc is an error the doc command reports with a caret on the block.
+- Three tags, recognized at line start after the gutter strip: `@param name description`, `@return description`, and `@example`, which opens a verbatim block where an unknown `@` word is content and a line starting with one of the three tag words ends the example. The first paragraph is the summary, later paragraphs the body. Both the aligned `*` gutter style and the plain indented style normalize cleanly.
+- `dusk doc <file>` emits deterministic markdown, every item in source order with its signature rebuilt from the declaration, undocumented items listed with the signature alone, prose verbatim. An emitted code fence grows one backtick past the longest backtick run inside its content, so an example carrying a fence of its own renders intact. `dusk doc --json <file>` emits the same model as JSON with a fixed key order, two space indent, and null for absent docs, the contract a language server consumes. Both read the single file with no import loading and no type check.
+- The refusals: a dangling doc, an unknown tag outside an example, an `@param` naming no parameter or repeating one, an `@return` on a `void` function, and an `@param` or `@return` on a module, struct, enum, or interface doc. Each is located at its real byte inside the doc block, everything is reported at once, the exit is nonzero, and stdout stays empty, so a doc pipeline never consumes half a page. Partial documentation is deliberately not drift: a function may document some parameters and omit `@return`, and only a claim that contradicts the signature refuses.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 728 records, 18 new since 1.6.0: attachment and dump stability, the markdown and JSON surfaces, every refusal, the directive-less binding, and the fence growth.
+- The stage ladder re-fixed with the `v1.6.0` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (7795ce68...) and one compiler IR sha256 (12315ba9...), the collapse, fixpoint, and determinism checks all green, 728/728 under the ladder's own suite runs.
+- Doc blocks are proven compile invisible: a doc-bearing module and its plain-comment twin emit byte identical IR, and the 1.6.0 comment differential still holds, 682 rewritten variants byte equal, zero divergences.
+- The ratchet holds: the `v1.6.0` release binary builds the 1.6.1 source and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+
 ## 1.6.0
 
 The block comment and the second target. dusk carried exactly one comment form since 0.1.0, the `//` line comment, and the spec never wrote even that one down. This release adds `/* */`, nesting the way commented out code needs, and gives the spec a Comments section that records both forms. Alongside it, `dusk ir` learns to cross-emit: `ir --target=wasm32 <file>` produces the module's LLVM IR for wasm32-wasip1, the shape a wasi toolchain links and the form a browser playground builds from, while every other command keeps the native triple untouched.

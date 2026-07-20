@@ -1,0 +1,308 @@
+// clidoc: the `dusk doc` command, Algorithm E. It compiles one file only as far as a
+// parse, with no loader, no privatize, and no sema, so an import renders by the name
+// as written and the doc blocks bind exactly as the parser captured them. A lex or
+// parse fault prints through the shared located renderer and stops. Otherwise every
+// captured block is checked: a block the parser bound to no declaration is dangling,
+// and a bound block is normalized and drift-checked against its signature, a `@param`
+// that names no parameter, a duplicated `@param`, a `@return` on void, or a `@param`
+// or `@return` on a declaration that takes neither. Any fault prints to stderr with a
+// non-zero exit and nothing on stdout; a clean module prints markdown (`dusk doc`) or
+// JSON (`dusk doc --json`) and exits 0. Both forms share the one pipeline below, so
+// the error surface is identical no matter which rendering the caller asked for.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import source
+@import lex
+@import lexcore
+@import token
+@import parse
+@import parseitem
+@import ast
+@import diag
+@import doccore
+@import docmd
+@import docjsonitem
+@import driver
+
+// The outcome of the shared lex/parse/drift pipeline: ok false means a fault already
+// printed to stderr and the caller should return code unchanged; ok true carries the
+// parsed module and its source, ready for either renderer.
+struct DocCheckResult { ok: bool, code: int32, a: *Ast, src: string, n: int64, stem: string }
+
+func read_error_line(path: string, e: error) -> string {
+    if !e.exists() {
+        return path
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, path)
+    sb_push(b, ": read error: ")
+    sb_push(b, e.toString())
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Whether the parameter set kids[off, off+len) binds a parameter named name.
+func params_have(a: *Ast, off: int64, len: int64, name: string) -> bool {
+    mut i: int64 = 0
+    while i < len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, off + i))
+        if str_eq(ast_name(a, p.name), name) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func type_is_void(a: *Ast, ty: int64) -> bool {
+    t: TypeNode = vec_get((*a).types, ty)
+    return t.kind == tk_unit()
+}
+
+func msg_param_drift(fname: string, pname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "@param '")
+    sb_push(b, pname)
+    sb_push(b, "' does not name a parameter of '")
+    sb_push(b, fname)
+    sb_push(b, "'")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func msg_param_dup(pname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "@param '")
+    sb_push(b, pname)
+    sb_push(b, "' repeats; one description per parameter")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func msg_return_void(fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "@return on '")
+    sb_push(b, fname)
+    sb_push(b, "', which returns void")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func msg_tag_on_nonfunc(tag: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, tag)
+    sb_push(b, " on '")
+    sb_push(b, name)
+    sb_push(b, "'; only a function or method signature takes ")
+    sb_push(b, tag)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func dangling_msg() -> string {
+    return "this doc comment documents nothing; attach it to a function, struct, enum, interface, or method, or use a plain comment"
+}
+
+// Checks the tags of a doc bound to a function or method against its parameter set and
+// return type, appending each drift fault to errs. name is the declaration name; off
+// and len bound its parameters; ret is its return type.
+func check_func_drift(a: *Ast, di: DocInfo, name: string, off: int64, len: int64, ret: int64, errs: *Vector<Located>) -> void {
+    ps: *Vector<DocParam> = di.params
+    mut i: int64 = 0
+    while i < vec_len(ps) {
+        p: DocParam = vec_get(ps, i)
+        mut dup: bool = false
+        mut k: int64 = 0
+        while k < i {
+            q: DocParam = vec_get(ps, k)
+            if str_eq(q.name, p.name) {
+                dup = true
+            }
+            k = k + 1
+        }
+        if dup {
+            vec_push(errs, located(p.name_lo, p.name_hi, msg_param_dup(p.name)))
+        } else if !params_have(a, off, len, p.name) {
+            vec_push(errs, located(p.name_lo, p.name_hi, msg_param_drift(name, p.name)))
+        }
+        i = i + 1
+    }
+    if di.has_ret {
+        if type_is_void(a, ret) {
+            vec_push(errs, located(di.ret_lo, di.ret_hi, msg_return_void(name)))
+        }
+    }
+}
+
+// Checks a doc bound to a non-function declaration: neither `@param` nor `@return` is
+// legal there. name is the declaration's own name.
+func check_nonfunc_drift(di: DocInfo, name: string, errs: *Vector<Located>) -> void {
+    ps: *Vector<DocParam> = di.params
+    if vec_len(ps) > 0 {
+        p: DocParam = vec_get(ps, 0)
+        vec_push(errs, located(p.tag_lo, p.tag_lo + 6, msg_tag_on_nonfunc("@param", name)))
+    }
+    if di.has_ret {
+        vec_push(errs, located(di.ret_lo, di.ret_hi, msg_tag_on_nonfunc("@return", name)))
+    }
+}
+
+func find_docnode(a: *Ast, lo: int64, hi: int64) -> (bool, int64, int64) {
+    docs: *Vector<DocNode> = (*a).docs
+    mut i: int64 = 0
+    while i < vec_len(docs) {
+        d: DocNode = vec_get(docs, i)
+        if d.lo == lo && d.hi == hi {
+            return (true, d.kind, d.id)
+        }
+        i = i + 1
+    }
+    return (false, 0, 0)
+}
+
+// The display name of the declaration a bound doc targets, for a drift message.
+func decl_name(a: *Ast, kind: int64, id: int64, stem: string) -> string {
+    if kind == dk_struct() {
+        s: StructNode = vec_get((*a).structs, id)
+        return ast_name(a, s.name)
+    }
+    if kind == dk_enum() {
+        e: EnumNode = vec_get((*a).enums, id)
+        return ast_name(a, e.name)
+    }
+    if kind == dk_interface() {
+        it: InterfaceNode = vec_get((*a).interfaces, id)
+        return ast_name(a, it.name)
+    }
+    return stem
+}
+
+// Runs the drift check on one bound doc block. kind/id name the target declaration.
+func check_bound(a: *Ast, src: string, n: int64, kind: int64, id: int64, lo: int64, hi: int64, stem: string, errs: *Vector<Located>) -> void {
+    di: DocInfo = doc_parse(src, n, lo, hi)
+    derrs: *Vector<Located> = di.errors
+    mut e: int64 = 0
+    while e < vec_len(derrs) {
+        vec_push(errs, vec_get(derrs, e))
+        e = e + 1
+    }
+    if kind == dk_func() {
+        f: FuncNode = vec_get((*a).funcs, id)
+        check_func_drift(a, di, ast_name(a, f.name), f.params_off, f.params_len, f.ret, errs)
+    } else if kind == dk_method_sig() {
+        m: MethodSigNode = vec_get((*a).method_sigs, id)
+        check_func_drift(a, di, ast_name(a, m.name), m.params_off, m.params_len, m.ret, errs)
+    } else {
+        check_nonfunc_drift(di, decl_name(a, kind, id, stem), errs)
+    }
+}
+
+// Scans every captured doc block: a block bound to no declaration is dangling, and a
+// bound block is drift-checked. Faults accumulate in errs in source order.
+func collect_doc_errors(a: *Ast, docs: *Vector<DocBlock>, src: string, n: int64, stem: string) -> *Vector<Located> {
+    errs: *Vector<Located> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(docs) {
+        blk: DocBlock = vec_get(docs, i)
+        found, kind, id := find_docnode(a, blk.lo, blk.hi)
+        if !found {
+            vec_push(errs, located(blk.lo, blk.hi, dangling_msg()))
+        } else {
+            check_bound(a, src, n, kind, id, blk.lo, blk.hi, stem, errs)
+        }
+        i = i + 1
+    }
+    return errs
+}
+
+// Runs the shared pipeline every `dusk doc` form uses: read, lex, parse, then check
+// every captured doc block for a dangling attachment or signature drift. Any fault
+// prints through the shared located renderer and yields ok: false with the exit code
+// already decided; a clean file yields ok: true with the parsed module the caller
+// renders as markdown or JSON.
+func doc_check(path: string) -> DocCheckResult {
+    s, e := source_load(path)
+    if e.exists() {
+        line: string = read_error_line(path, e)
+        printerr(line)
+        free(line)
+        return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }
+    }
+    src: string = s.text
+    n: int64 = s.len
+    lx: *Lexer = lex(src, n)
+    p: *Parser = parser_new(lx_tokens(lx), src, n)
+    p_set_docs(p, lx_docs(lx))
+    a: *Ast = parse_module(p)
+
+    lex_errs: *Vector<Located> = lx_errors(lx)
+    parse_errs: *Vector<Located> = p_errors(p)
+    if vec_len(lex_errs) > 0 || vec_len(parse_errs) > 0 {
+        mut i: int64 = 0
+        while i < vec_len(lex_errs) {
+            emit_located(path, src, n, vec_get(lex_errs, i))
+            i = i + 1
+        }
+        mut j: int64 = 0
+        while j < vec_len(parse_errs) {
+            emit_located(path, src, n, vec_get(parse_errs, j))
+            j = j + 1
+        }
+        return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }
+    }
+
+    stem: string = stem_of(path)
+    doc_errs: *Vector<Located> = collect_doc_errors(a, lx_docs(lx), src, n, stem)
+    if vec_len(doc_errs) > 0 {
+        mut k: int64 = 0
+        while k < vec_len(doc_errs) {
+            emit_located(path, src, n, vec_get(doc_errs, k))
+            k = k + 1
+        }
+        return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }
+    }
+
+    return DocCheckResult { ok: true, code: 0, a: a, src: src, n: n, stem: stem }
+}
+
+// Renders a module's doc comments as markdown. Any lex, parse, dangling, or drift
+// fault prints to stderr and returns 1 with nothing on stdout; a clean file prints its
+// markdown and returns 0. prog is argv[0], the compiler path, kept for signature
+// symmetry with the other single-file commands even though doc loads no imports.
+export func cmd_doc(path: string, prog: string) -> int32 {
+    res: DocCheckResult = doc_check(path)
+    if !res.ok {
+        return res.code
+    }
+    out: string = doc_markdown(res.a, res.src, res.n, res.stem)
+    print(out)
+    free(out)
+    return 0
+}
+
+// Renders a module's doc comments as the `dusk doc --json` schema. Shares doc_check's
+// error surface exactly with cmd_doc: any fault prints to stderr and returns 1 with
+// nothing on stdout; a clean file prints its JSON and returns 0.
+export func cmd_doc_json(path: string, prog: string) -> int32 {
+    res: DocCheckResult = doc_check(path)
+    if !res.ok {
+        return res.code
+    }
+    out: string = doc_json(res.a, res.src, res.n, res.stem, path)
+    print(out)
+    free(out)
+    return 0
+}

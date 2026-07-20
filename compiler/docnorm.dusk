@@ -1,0 +1,280 @@
+// docnorm: the line-normalization half of Algorithm D. A captured `/**` block is a
+// raw byte span; this pass strips the delimiters and the comment gutter (the aligned
+// `*` column, or the common leading indent when there is no star column), yielding a
+// list of content lines each carrying the source offset where its text begins so a
+// later tag fault lands on a real byte. It also groups normalized lines into
+// paragraphs and builds a verbatim example block. Tag recognition and drift live in
+// doccore and clidoc; this file knows only whitespace and stars.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import bytes
+
+// A physical line of the block body, a half-open byte span into the source.
+struct PLine { ps: int64, pe: int64 }
+
+// A normalized content line: its text with the gutter removed, and the source byte
+// offset abs where that text begins, so a tag fault lands on the real byte.
+export struct DLine { abs: int64, text: string }
+
+export func is_ws(b: int64) -> bool {
+    if b == 32 { return true }
+    if b == 9 { return true }
+    if b == 13 { return true }
+    if b == 10 { return true }
+    return false
+}
+
+// The count of leading ASCII whitespace bytes of the source range [ps, pe).
+func lead_ws(src: string, n: int64, ps: int64, pe: int64) -> int64 {
+    mut i: int64 = ps
+    while i < pe {
+        if !is_ws(bytes.byte_at(src, n, i)) {
+            return i - ps
+        }
+        i = i + 1
+    }
+    return pe - ps
+}
+
+func line_blank(src: string, n: int64, ps: int64, pe: int64) -> bool {
+    return lead_ws(src, n, ps, pe) == pe - ps
+}
+
+// The count of leading ASCII whitespace bytes of a NUL-terminated string.
+export func str_lead_ws(s: string) -> int64 {
+    m: int64 = str_len(s)
+    mut i: int64 = 0
+    while i < m {
+        if !is_ws(s[i]) {
+            return i
+        }
+        i = i + 1
+    }
+    return m
+}
+
+// Splits the block body [clo, chi) into physical lines on each newline. Always yields
+// at least one line, the same-line-as-open piece, even when the body is empty.
+func collect_phys(src: string, n: int64, clo: int64, chi: int64) -> *Vector<PLine> {
+    v: *Vector<PLine> = alloc(vec_new())
+    mut s: int64 = clo
+    mut i: int64 = clo
+    while i < chi {
+        if bytes.byte_at(src, n, i) == 10 {
+            vec_push(v, PLine { ps: s, pe: i })
+            s = i + 1
+        }
+        i = i + 1
+    }
+    vec_push(v, PLine { ps: s, pe: chi })
+    return v
+}
+
+// Whether every non-blank interior line opens, after optional whitespace, with a
+// `*`, the gutter form; false when no interior line carries content.
+func detect_gutter(src: string, n: int64, phys: *Vector<PLine>) -> bool {
+    mut saw: bool = false
+    mut i: int64 = 1
+    while i < vec_len(phys) {
+        p: PLine = vec_get(phys, i)
+        if !line_blank(src, n, p.ps, p.pe) {
+            star: int64 = p.ps + lead_ws(src, n, p.ps, p.pe)
+            if bytes.byte_at(src, n, star) != 42 {
+                return false
+            }
+            saw = true
+        }
+        i = i + 1
+    }
+    return saw
+}
+
+// The least leading-whitespace width over the non-blank interior lines, the common
+// indent stripped in the non-gutter form; zero when no interior line carries content.
+func interior_min_indent(src: string, n: int64, phys: *Vector<PLine>) -> int64 {
+    mut best: int64 = -1
+    mut i: int64 = 1
+    while i < vec_len(phys) {
+        p: PLine = vec_get(phys, i)
+        if !line_blank(src, n, p.ps, p.pe) {
+            w: int64 = lead_ws(src, n, p.ps, p.pe)
+            if best < 0 {
+                best = w
+            } else if w < best {
+                best = w
+            }
+        }
+        i = i + 1
+    }
+    if best < 0 { return 0 }
+    return best
+}
+
+// Normalizes one interior line, stripping the gutter or the common indent. A blank
+// line normalizes to an empty text at its own offset. Trailing whitespace is dropped;
+// leading content whitespace is kept so an example keeps its relative indentation.
+func normalize_interior(src: string, n: int64, p: PLine, gutter: bool, indent: int64) -> DLine {
+    if line_blank(src, n, p.ps, p.pe) {
+        return DLine { abs: p.ps, text: "" }
+    }
+    mut start: int64 = 0
+    if gutter {
+        star: int64 = p.ps + lead_ws(src, n, p.ps, p.pe)
+        start = star + 1
+        if bytes.byte_at(src, n, start) == 32 {
+            start = start + 1
+        }
+    } else {
+        start = p.ps + indent
+        if start > p.pe { start = p.pe }
+    }
+    raw: string = bytes.substring_n(src, n, start, p.pe)
+    return DLine { abs: start, text: trim_end(raw) }
+}
+
+// Builds the full normalized line list: the open-line piece trimmed, then every
+// interior line stripped of its gutter. An empty open-line piece is dropped, so it
+// neither starts a paragraph nor breaks one.
+export func normalize_all(src: string, n: int64, lo: int64, hi: int64) -> *Vector<DLine> {
+    out: *Vector<DLine> = alloc(vec_new())
+    clo: int64 = lo + 3
+    mut chi: int64 = hi - 2
+    if chi < clo { chi = clo }
+    phys: *Vector<PLine> = collect_phys(src, n, clo, chi)
+    first: PLine = vec_get(phys, 0)
+    fw: int64 = lead_ws(src, n, first.ps, first.pe)
+    fraw: string = bytes.substring_n(src, n, first.ps, first.pe)
+    ftext: string = trim(fraw)
+    if str_len(ftext) > 0 {
+        vec_push(out, DLine { abs: first.ps + fw, text: ftext })
+    }
+    gutter: bool = detect_gutter(src, n, phys)
+    indent: int64 = interior_min_indent(src, n, phys)
+    mut i: int64 = 1
+    while i < vec_len(phys) {
+        vec_push(out, normalize_interior(src, n, vec_get(phys, i), gutter, indent))
+        i = i + 1
+    }
+    return out
+}
+
+// Groups a list of normalized lines into paragraphs: a run of non-empty lines joined
+// with a single space, split on each empty line. Leading and trailing blanks fall
+// away. The result is a fresh vector of paragraph strings.
+func to_paragraphs(lines: *Vector<string>) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    total: int64 = vec_len(lines)
+    mut i: int64 = 0
+    while i < total {
+        if str_len(trim(vec_get(lines, i))) == 0 {
+            i = i + 1
+        } else {
+            b: *StringBuilder = alloc(sb_new())
+            mut first: bool = true
+            mut going: bool = true
+            while going {
+                if i >= total {
+                    going = false
+                } else {
+                    t: string = trim(vec_get(lines, i))
+                    if str_len(t) == 0 {
+                        going = false
+                    } else {
+                        if !first { sb_push_char(b, 32) }
+                        sb_push(b, t)
+                        first = false
+                        i = i + 1
+                    }
+                }
+            }
+            vec_push(out, substring(sb_cstr(b), 0, sb_size(b)))
+            sb_free(b)
+            free(b)
+        }
+    }
+    return out
+}
+
+func join_from(paras: *Vector<string>, start: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = start
+    while i < vec_len(paras) {
+        if i > start { sb_push_char(b, 10) }
+        sb_push(b, vec_get(paras, i))
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The summary and body of the leading prose: the first paragraph is the summary,
+// the rest join with newlines into the body.
+export func split_prose(lines: *Vector<string>) -> (string, string) {
+    paras: *Vector<string> = to_paragraphs(lines)
+    if vec_len(paras) == 0 {
+        return ("", "")
+    }
+    summary: string = vec_get(paras, 0)
+    body: string = join_from(paras, 1)
+    return (summary, body)
+}
+
+// A `@param`/`@return` description: its own lines joined into paragraphs, paragraphs
+// separated by newlines.
+export func join_desc(lines: *Vector<string>) -> string {
+    paras: *Vector<string> = to_paragraphs(lines)
+    return join_from(paras, 0)
+}
+
+// Builds one `@example` block from its raw content lines: the common indent is
+// stripped so the block reads flush while its interior relative indent survives,
+// trailing whitespace and surrounding blank lines are dropped, and the rest joins
+// with newlines.
+export func build_example(raw: *Vector<string>) -> string {
+    mut minlead: int64 = -1
+    mut i: int64 = 0
+    while i < vec_len(raw) {
+        ln: string = vec_get(raw, i)
+        if str_len(trim(ln)) > 0 {
+            w: int64 = str_lead_ws(ln)
+            if minlead < 0 || w < minlead { minlead = w }
+        }
+        i = i + 1
+    }
+    if minlead < 0 { minlead = 0 }
+    stripped: *Vector<string> = alloc(vec_new())
+    mut j: int64 = 0
+    while j < vec_len(raw) {
+        ln: string = vec_get(raw, j)
+        if str_len(trim(ln)) == 0 {
+            vec_push(stripped, "")
+        } else {
+            vec_push(stripped, trim_end(substring(ln, minlead, str_len(ln))))
+        }
+        j = j + 1
+    }
+    mut a: int64 = 0
+    while a < vec_len(stripped) && str_len(vec_get(stripped, a)) == 0 {
+        a = a + 1
+    }
+    mut z: int64 = vec_len(stripped)
+    while z > a && str_len(vec_get(stripped, z - 1)) == 0 {
+        z = z - 1
+    }
+    b: *StringBuilder = alloc(sb_new())
+    mut k: int64 = a
+    while k < z {
+        if k > a { sb_push_char(b, 10) }
+        sb_push(b, vec_get(stripped, k))
+        k = k + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

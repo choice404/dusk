@@ -1,0 +1,305 @@
+// docjsonitem: the per-declaration JSON object builders for `dusk doc --json`. It
+// walks the parsed module in the same source order docmd's markdown walker uses and
+// assembles one object per function, struct, enum, interface, and impl from the
+// generic value builders in docjson, docty's type and signature strings, and the doc
+// object bound to each declaration. doc_json, the exported entry, is the top level
+// document assembly clidoc calls.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import docty
+@import docjson
+
+// Appends the shared body of a func object, `name` (and, when with_flags, `exported`
+// and `async`), `generics`, `params`, `return`, `signature`, `doc`. A top level
+// function or a monad method renders with_flags true; an impl method renders it
+// false, the "func shape minus exported/async" the impl entry uses.
+func push_func_fields(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, fid: int64, with_flags: bool) -> void {
+    f: FuncNode = vec_get((*a).funcs, fid)
+    push_key(b, level, "name")
+    push_str(b, ast_name(a, f.name))
+    sb_push(b, ",\n")
+    if with_flags {
+        push_key(b, level, "exported")
+        push_bool(b, f.exported)
+        sb_push(b, ",\n")
+        push_key(b, level, "async")
+        push_bool(b, f.is_async)
+        sb_push(b, ",\n")
+    }
+    push_key(b, level, "generics")
+    push_name_array(b, level, a, f.generics_off, f.generics_len)
+    sb_push(b, ",\n")
+    push_key(b, level, "params")
+    push_params(b, level, a, f.params_off, f.params_len)
+    sb_push(b, ",\n")
+    ret: string = docty_type(a, f.ret)
+    push_key(b, level, "return")
+    push_str(b, ret)
+    free(ret)
+    sb_push(b, ",\n")
+    sig: string = docty_func_sig(a, fid)
+    push_key(b, level, "signature")
+    push_str(b, sig)
+    free(sig)
+    sb_push(b, ",\n")
+    push_key(b, level, "doc")
+    push_doc(b, level, a, src, n, dk_func(), fid)
+    sb_push_char(b, 10)
+}
+
+func push_func(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, fid: int64) -> void {
+    sb_push(b, "{\n")
+    push_func_fields(b, level + 1, a, src, n, fid, true)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+func push_impl_method(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, fid: int64) -> void {
+    sb_push(b, "{\n")
+    push_func_fields(b, level + 1, a, src, n, fid, false)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+// An interface method entry, `{name, params, return, signature, doc}`; a method
+// signature carries no generics of its own.
+func push_method_sig(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, msid: int64) -> void {
+    m: MethodSigNode = vec_get((*a).method_sigs, msid)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "name")
+    push_str(b, ast_name(a, m.name))
+    sb_push(b, ",\n")
+    push_key(b, l, "params")
+    push_params(b, l, a, m.params_off, m.params_len)
+    sb_push(b, ",\n")
+    ret: string = docty_type(a, m.ret)
+    push_key(b, l, "return")
+    push_str(b, ret)
+    free(ret)
+    sb_push(b, ",\n")
+    sig: string = docty_method_sig(a, msid)
+    push_key(b, l, "signature")
+    push_str(b, sig)
+    free(sig)
+    sb_push(b, ",\n")
+    push_key(b, l, "doc")
+    push_doc(b, l, a, src, n, dk_method_sig(), msid)
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+func push_struct(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, sid: int64) -> void {
+    s: StructNode = vec_get((*a).structs, sid)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "name")
+    push_str(b, ast_name(a, s.name))
+    sb_push(b, ",\n")
+    push_key(b, l, "exported")
+    push_bool(b, s.exported)
+    sb_push(b, ",\n")
+    push_key(b, l, "generics")
+    push_name_array(b, l, a, s.generics_off, s.generics_len)
+    sb_push(b, ",\n")
+    push_key(b, l, "fields")
+    push_fields(b, l, a, s.fields_off, s.fields_len)
+    sb_push(b, ",\n")
+    push_key(b, l, "doc")
+    push_doc(b, l, a, src, n, dk_struct(), sid)
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+func push_enum(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, eid: int64) -> void {
+    e: EnumNode = vec_get((*a).enums, eid)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "name")
+    push_str(b, ast_name(a, e.name))
+    sb_push(b, ",\n")
+    push_key(b, l, "exported")
+    push_bool(b, e.exported)
+    sb_push(b, ",\n")
+    push_key(b, l, "generics")
+    push_name_array(b, l, a, e.generics_off, e.generics_len)
+    sb_push(b, ",\n")
+    push_key(b, l, "variants")
+    push_variants(b, l, a, e.variants_off, e.variants_len)
+    sb_push(b, ",\n")
+    push_key(b, l, "doc")
+    push_doc(b, l, a, src, n, dk_enum(), eid)
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+func push_interface(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, iid: int64) -> void {
+    it: InterfaceNode = vec_get((*a).interfaces, iid)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "name")
+    push_str(b, ast_name(a, it.name))
+    sb_push(b, ",\n")
+    push_key(b, l, "exported")
+    push_bool(b, it.exported)
+    sb_push(b, ",\n")
+    push_key(b, l, "generics")
+    push_name_array(b, l, a, it.generics_off, it.generics_len)
+    sb_push(b, ",\n")
+    push_key(b, l, "methods")
+    if it.methods_len == 0 {
+        sb_push(b, "[]")
+    } else {
+        sb_push(b, "[\n")
+        mut i: int64 = 0
+        while i < it.methods_len {
+            msid: int64 = vec_get((*a).kids, it.methods_off + i)
+            ind(b, l + 1)
+            push_method_sig(b, l + 1, a, src, n, msid)
+            if i + 1 < it.methods_len { sb_push_char(b, 44) }
+            sb_push_char(b, 10)
+            i = i + 1
+        }
+        ind(b, l)
+        sb_push_char(b, 93)
+    }
+    sb_push(b, ",\n")
+    push_key(b, l, "doc")
+    push_doc(b, l, a, src, n, dk_interface(), iid)
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+// An impls entry, `{interface, type, methods}`. interface is `null` for a bare
+// inherent impl; the impl block itself carries no doc field, only its methods do.
+func push_impl(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, imid: int64) -> void {
+    im: ImplNode = vec_get((*a).impls, imid)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "interface")
+    if im.iface >= 0 { push_str(b, ast_name(a, im.iface)) } else { sb_push(b, "null") }
+    sb_push(b, ",\n")
+    push_key(b, l, "type")
+    push_str(b, ast_name(a, im.ty))
+    sb_push(b, ",\n")
+    push_key(b, l, "methods")
+    if im.methods_len == 0 {
+        sb_push(b, "[]")
+    } else {
+        sb_push(b, "[\n")
+        mut i: int64 = 0
+        while i < im.methods_len {
+            fid: int64 = vec_get((*a).kids, im.methods_off + i)
+            ind(b, l + 1)
+            push_impl_method(b, l + 1, a, src, n, fid)
+            if i + 1 < im.methods_len { sb_push_char(b, 44) }
+            sb_push_char(b, 10)
+            i = i + 1
+        }
+        ind(b, l)
+        sb_push_char(b, 93)
+    }
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+func count_kind(a: *Ast, kind: int64) -> int64 {
+    items: *Vector<ItemNode> = (*a).items
+    mut c: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        if vec_get(items, i).kind == kind { c = c + 1 }
+        i = i + 1
+    }
+    return c
+}
+
+// Appends the top level array for one item kind, `funcs`/`structs`/`enums`/
+// `interfaces`/`impls`, in source order. kind selects the ItemNode filter; the four
+// branches dispatch to the matching per item renderer, mirroring docmd's own
+// render_section switch.
+func push_item_array(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, kind: int64) -> void {
+    total: int64 = count_kind(a, kind)
+    if total == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    mut seen: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == kind {
+            ind(b, level + 1)
+            if kind == ik_func() {
+                push_func(b, level + 1, a, src, n, it.id)
+            } else if kind == ik_struct() {
+                push_struct(b, level + 1, a, src, n, it.id)
+            } else if kind == ik_enum() {
+                push_enum(b, level + 1, a, src, n, it.id)
+            } else if kind == ik_interface() {
+                push_interface(b, level + 1, a, src, n, it.id)
+            } else {
+                push_impl(b, level + 1, a, src, n, it.id)
+            }
+            seen = seen + 1
+            if seen < total { sb_push_char(b, 44) }
+            sb_push_char(b, 10)
+        }
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
+// Renders the whole module as the `dusk doc --json` document: `{module, file,
+// paradigms, doc, funcs, structs, enums, interfaces, impls}` in that fixed order,
+// stem naming the module and path the file as invoked. The result is a fresh heap
+// string ending in exactly one newline.
+export func doc_json(a: *Ast, src: string, n: int64, stem: string, path: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "{\n")
+    push_key(b, 1, "module")
+    push_str(b, stem)
+    sb_push(b, ",\n")
+    push_key(b, 1, "file")
+    push_str(b, path)
+    sb_push(b, ",\n")
+    push_key(b, 1, "paradigms")
+    push_paradigms(b, 1, a)
+    sb_push(b, ",\n")
+    push_key(b, 1, "doc")
+    push_doc(b, 1, a, src, n, dk_module(), 0)
+    sb_push(b, ",\n")
+    push_key(b, 1, "funcs")
+    push_item_array(b, 1, a, src, n, ik_func())
+    sb_push(b, ",\n")
+    push_key(b, 1, "structs")
+    push_item_array(b, 1, a, src, n, ik_struct())
+    sb_push(b, ",\n")
+    push_key(b, 1, "enums")
+    push_item_array(b, 1, a, src, n, ik_enum())
+    sb_push(b, ",\n")
+    push_key(b, 1, "interfaces")
+    push_item_array(b, 1, a, src, n, ik_interface())
+    sb_push(b, ",\n")
+    push_key(b, 1, "impls")
+    push_item_array(b, 1, a, src, n, ik_impl())
+    sb_push_char(b, 10)
+    sb_push_char(b, 125)
+    sb_push_char(b, 10)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

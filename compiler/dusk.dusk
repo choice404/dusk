@@ -10,11 +10,12 @@
 @import std.string
 @import driver
 @import cli
+@import clidoc
 @import genfn
 
 // The version string the version command prints.
 func version_string() -> string {
-    return "dusk 1.6.0"
+    return "dusk 1.6.1"
 }
 
 // Prints the command list to stderr, where every message that is not a built
@@ -37,6 +38,8 @@ func usage() -> void {
     printerr("  build --lib <file>  archive the module and its runtime into libstem.a + stem.h")
     printerr("  run <file>    build and run, forwarding trailing args")
     printerr("  esc <file>    dump native escape summaries")
+    printerr("  doc <file>     render a module's doc comments as markdown")
+    printerr("  doc --json <file>  emit the module's doc model as JSON")
 }
 
 // Dispatches a command that takes a source file argument, reporting a usage error
@@ -87,6 +90,14 @@ func run_file_cmd(cmd: string, argv: string[]) -> int32 {
     if str_eq(cmd, "esc") {
         return cmd_esc(path, argv[0])
     }
+    if str_eq(cmd, "doc") {
+        // `doc --json <file>` emits the JSON schema, mirroring `ir --target=wasm32`:
+        // the flag sits at argv[2] and the file at argv[3]. Without it, markdown.
+        if argv.len >= 4 && str_eq(argv[2], "--json") {
+            return cmd_doc_json(argv[3], argv[0])
+        }
+        return cmd_doc(path, argv[0])
+    }
     return cmd_scan(path)
 }
 
@@ -135,6 +146,9 @@ func main(argc: int32, argv: string[]) -> int32 {
         return run_file_cmd(cmd, argv)
     }
     if str_eq(cmd, "esc") {
+        return run_file_cmd(cmd, argv)
+    }
+    if str_eq(cmd, "doc") {
         return run_file_cmd(cmd, argv)
     }
     printerr("dusk: unknown command")

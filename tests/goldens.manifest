@@ -3046,7 +3046,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.6.0\n
+out dusk 1.6.1\n
 argv version
 code 0
 ---
@@ -3673,5 +3673,120 @@ test comments_scan_tight_elide
 mode tool
 argv scan examples/comments_scan_tight_elide.dusk
 out paradigms: [Procedural]\nimports:\n  std.string\n
+code 0
+---
+
+# Doc comments (1.6.1 W4): /** capture and token-gap attachment. Docs are a side
+# table; they change no token, no dump, and no check or build verdict.
+test doc_check_stable
+mode check_ok
+file examples/doc_check_stable.dusk
+---
+test doc_build_runs
+mode run
+file examples/doc_build_runs.dusk
+out 42\n
+---
+test doc_dump_stable
+mode tool
+argv parse examples/doc_dump.dusk
+out Module {\n    paradigms: [\n        "procedural",\n    ],\n    imports: [],\n    monads: [],\n    items: [\n        Func(\n            Func {\n                exported: false,\n                is_async: false,\n                name: "f",\n                span: Span {\n                    lo: 62,\n                    hi: 63,\n                },\n                generics: [],\n                params: [\n                    Param {\n                        using: false,\n                        name: "x",\n                        ty: Named(\n                            "int64",\n                            [],\n                        ),\n                    },\n                ],\n                ret: Named(\n                    "int64",\n                    [],\n                ),\n                body: Block {\n                    stmts: [\n                        Return(\n                            Some(\n                                Expr {\n                                    kind: Ident(\n                                        "x",\n                                    ),\n                                    span: Span {\n                                        lo: 96,\n                                        hi: 97,\n                                    },\n                                },\n                            ),\n                        ),\n                    ],\n                },\n            },\n        ),\n    ],\n}\n
+code 0
+---
+test doc_untermed
+mode check_fail
+file examples/doc_untermed.dusk
+err_has unterminated block comment
+---
+# Doc rendering (1.6.1 W5+W6): `dusk doc` normalizes each attached doc block and
+# renders the module as markdown. A dangling block or a drift against the signature
+# is a fault with a non-zero exit and nothing on stdout; a clean file prints the
+# markdown. Tool mode compares stdout and the exit code.
+test doc_attach_basic
+mode tool
+argv doc examples/doc_attach_basic.dusk
+out # Module doc_attach_basic\n\nParadigm: procedural\n\nThe doc_attach_basic module shows every place a doc block binds: the module itself, a top-level function, a struct, an enum, an interface and its method, an impl method, and a monad method. It also mixes the gutter and non-gutter styles and puts an at-word inside an example.\n\n## Functions\n\n### add\n\n```dusk\nfunc add(a: int64, b: int64) -> int64\n```\n\nAdds two numbers, in the gutter style.\n\nParameters:\n\n- `a`: the first addend\n- `b`: the second addend\n\nReturns: the sum of a and b\n\n### Box.unit\n\n```dusk\nexport func Box.unit<A>(x: A) -> Box<A>\n```\n\nunit lifts a value into a Box.\n\nParameters:\n\n- `x`: the value to lift\n\nReturns: a Box holding x\n\n### Box.bind\n\n```dusk\nexport func Box.bind<A, B>(m: Box<A>, f: (A) -> Box<B>) -> Box<B>\n```\n\n### main\n\n```dusk\nfunc main() -> int32\n```\n\n## Structs\n\n### Point\n\n```dusk\nstruct Point {\n    x: int64,\n    y: int64,\n}\n```\n\nA point in the plane, compact non-gutter style.\n\n### Host\n\n```dusk\nstruct Host {\n    id: int64,\n}\n```\n\n## Enums\n\n### Shape\n\n```dusk\nenum Shape {\n    Circle,\n    Square,\n}\n```\n\nThe shapes the renderer knows.\n\nExample:\n\n```dusk\ns := Shape.Circle\n@import std.io is content inside an example, not a tag\n```\n\n## Interfaces\n\n### Greeter\n\n```dusk\ninterface Greeter {\n    greet() -> int64\n}\n```\n\nAnything that can greet.\n\n#### greet\n\n```dusk\ngreet() -> int64\n```\n\ngreet returns a greeting code.\n\n## Impls\n\n### impl Greeter for Host\n\n#### greet\n\n```dusk\nfunc greet() -> int64\n```\n\ngreet on Host returns the host id.\n\nReturns: the stored id\n
+code 0
+---
+test doc_not_doc_forms
+mode tool
+argv doc examples/doc_not_doc_forms.dusk
+out # Module doc_not_doc_forms\n\nParadigm: procedural\n\n## Functions\n\n### a\n\n```dusk\nfunc a() -> int64\n```\n\n### b\n\n```dusk\nfunc b() -> int64\n```\n\n### c\n\n```dusk\nfunc c() -> int64\n```\n
+code 0
+---
+test doc_dangling
+mode tool
+argv doc examples/doc_dangling.dusk
+out 
+code 1
+---
+test doc_drift_param
+mode tool
+argv doc examples/doc_drift_param.dusk
+out 
+code 1
+---
+test doc_drift_dup
+mode tool
+argv doc examples/doc_drift_dup.dusk
+out 
+code 1
+---
+test doc_drift_return
+mode tool
+argv doc examples/doc_drift_return.dusk
+out 
+code 1
+---
+test doc_unknown_tag
+mode tool
+argv doc examples/doc_unknown_tag.dusk
+out 
+code 1
+---
+test doc_example_atword
+mode tool
+argv doc examples/doc_example_atword.dusk
+out # Module doc_example_atword\n\nParadigm: procedural\n\n## Functions\n\n### demo\n\n```dusk\nfunc demo() -> int64\n```\n\nShows an at-word living inside an example block.\n\nExample:\n\n```dusk\n@import std.io\nx := 1\n```\n
+code 0
+---
+test doc_module_param
+mode tool
+argv doc examples/doc_module_param.dusk
+out 
+code 1
+---
+test doc_first_item_default
+mode tool
+argv doc examples/doc_first_item_default.dusk
+out # Module doc_first_item_default\n\nParadigm: procedural\n\n## Functions\n\n### add_one\n\n```dusk\nfunc add_one(x: int64) -> int64\n```\n\nAdds one, and belongs to the function: with no directive prologue the leading doc block binds to the first item, not the module.\n
+code 0
+---
+# doc --json (1.6.1 W7): the same schema every consumer reads, two space indent,
+# fixed key order, null for an absent doc block, source order arrays. It shares
+# clidoc's error surface exactly with markdown: any fault prints to stderr and
+# exits 1 with nothing on stdout.
+test doc_json_basic
+mode tool
+argv doc --json examples/doc_attach_basic.dusk
+out {\n  "module": "doc_attach_basic",\n  "file": "examples/doc_attach_basic.dusk",\n  "paradigms": [\n    "procedural"\n  ],\n  "doc": {\n    "summary": "The doc_attach_basic module shows every place a doc block binds: the module itself, a top-level function, a struct, an enum, an interface and its method, an impl method, and a monad method. It also mixes the gutter and non-gutter styles and puts an at-word inside an example.",\n    "body": "",\n    "params": [],\n    "return": null,\n    "examples": []\n  },\n  "funcs": [\n    {\n      "name": "add",\n      "exported": false,\n      "async": false,\n      "generics": [],\n      "params": [\n        {"name": "a", "type": "int64", "using": false},\n        {"name": "b", "type": "int64", "using": false}\n      ],\n      "return": "int64",\n      "signature": "func add(a: int64, b: int64) -> int64",\n      "doc": {\n        "summary": "Adds two numbers, in the gutter style.",\n        "body": "",\n        "params": [\n          {"name": "a", "desc": "the first addend"},\n          {"name": "b", "desc": "the second addend"}\n        ],\n        "return": "the sum of a and b",\n        "examples": []\n      }\n    },\n    {\n      "name": "Box.unit",\n      "exported": true,\n      "async": false,\n      "generics": [\n        "A"\n      ],\n      "params": [\n        {"name": "x", "type": "A", "using": false}\n      ],\n      "return": "Box<A>",\n      "signature": "export func Box.unit<A>(x: A) -> Box<A>",\n      "doc": {\n        "summary": "unit lifts a value into a Box.",\n        "body": "",\n        "params": [\n          {"name": "x", "desc": "the value to lift"}\n        ],\n        "return": "a Box holding x",\n        "examples": []\n      }\n    },\n    {\n      "name": "Box.bind",\n      "exported": true,\n      "async": false,\n      "generics": [\n        "A",\n        "B"\n      ],\n      "params": [\n        {"name": "m", "type": "Box<A>", "using": false},\n        {"name": "f", "type": "(A) -> Box<B>", "using": false}\n      ],\n      "return": "Box<B>",\n      "signature": "export func Box.bind<A, B>(m: Box<A>, f: (A) -> Box<B>) -> Box<B>",\n      "doc": null\n    },\n    {\n      "name": "main",\n      "exported": false,\n      "async": false,\n      "generics": [],\n      "params": [],\n      "return": "int32",\n      "signature": "func main() -> int32",\n      "doc": null\n    }\n  ],\n  "structs": [\n    {\n      "name": "Point",\n      "exported": false,\n      "generics": [],\n      "fields": [\n        {"name": "x", "type": "int64"},\n        {"name": "y", "type": "int64"}\n      ],\n      "doc": {\n        "summary": "A point in the plane, compact non-gutter style.",\n        "body": "",\n        "params": [],\n        "return": null,\n        "examples": []\n      }\n    },\n    {\n      "name": "Host",\n      "exported": false,\n      "generics": [],\n      "fields": [\n        {"name": "id", "type": "int64"}\n      ],\n      "doc": null\n    }\n  ],\n  "enums": [\n    {\n      "name": "Shape",\n      "exported": false,\n      "generics": [],\n      "variants": [\n        {"name": "Circle", "fields": []},\n        {"name": "Square", "fields": []}\n      ],\n      "doc": {\n        "summary": "The shapes the renderer knows.",\n        "body": "",\n        "params": [],\n        "return": null,\n        "examples": [\n          "s := Shape.Circle\\n@import std.io is content inside an example, not a tag"\n        ]\n      }\n    }\n  ],\n  "interfaces": [\n    {\n      "name": "Greeter",\n      "exported": false,\n      "generics": [],\n      "methods": [\n        {\n          "name": "greet",\n          "params": [],\n          "return": "int64",\n          "signature": "greet() -> int64",\n          "doc": {\n            "summary": "greet returns a greeting code.",\n            "body": "",\n            "params": [],\n            "return": null,\n            "examples": []\n          }\n        }\n      ],\n      "doc": {\n        "summary": "Anything that can greet.",\n        "body": "",\n        "params": [],\n        "return": null,\n        "examples": []\n      }\n    }\n  ],\n  "impls": [\n    {\n      "interface": "Greeter",\n      "type": "Host",\n      "methods": [\n        {\n          "name": "greet",\n          "generics": [],\n          "params": [],\n          "return": "int64",\n          "signature": "func greet() -> int64",\n          "doc": {\n            "summary": "greet on Host returns the host id.",\n            "body": "",\n            "params": [],\n            "return": "the stored id",\n            "examples": []\n          }\n        }\n      ]\n    }\n  ]\n}\n
+code 0
+---
+test doc_json_minimal
+mode tool
+argv doc --json examples/doc_first_item_default.dusk
+out {\n  "module": "doc_first_item_default",\n  "file": "examples/doc_first_item_default.dusk",\n  "paradigms": [\n    "procedural"\n  ],\n  "doc": null,\n  "funcs": [\n    {\n      "name": "add_one",\n      "exported": false,\n      "async": false,\n      "generics": [],\n      "params": [\n        {"name": "x", "type": "int64", "using": false}\n      ],\n      "return": "int64",\n      "signature": "func add_one(x: int64) -> int64",\n      "doc": {\n        "summary": "Adds one, and belongs to the function: with no directive prologue the leading doc block binds to the first item, not the module.",\n        "body": "",\n        "params": [],\n        "return": null,\n        "examples": []\n      }\n    }\n  ],\n  "structs": [],\n  "enums": [],\n  "interfaces": [],\n  "impls": []\n}\n
+code 0
+---
+test doc_json_errors
+mode tool
+argv doc --json examples/doc_drift_param.dusk
+out 
+code 1
+---
+test doc_fence_growth
+mode tool
+argv doc examples/doc_fence_growth.dusk
+out # Module doc_fence_growth\n\nParadigm: procedural\n\n## Functions\n\n### fenced\n\n```dusk\nfunc fenced() -> void\n```\n\nShows a fence surviving inside a fence: the emitted fence must grow one backtick past the longest run in the example, so this block renders intact.\n\nExample:\n\n````dusk\n```\nx: int64 = 1\n```\n````\n
 code 0
 ---

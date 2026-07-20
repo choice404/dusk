@@ -67,6 +67,25 @@ Three rules give comments their exact meaning.
 
 Comments interleave freely with the directive prologue, and a directive inside a block comment is dead in every consumer: the loader does not load a commented `@import`, and the linker does not see a commented `@link` or `@csource`.
 
+### Doc Comments
+
+A block comment that opens with `/**`, with the next byte after the second star neither `*` nor `/`, is a doc comment: `/**/` is an empty plain comment, and `/***/` or a `/****` banner stays plain. In every other way it is an ordinary block comment, nesting and terminating by the same rules and producing no token, so a doc comment never changes what `check`, `build`, or `ir` does. What it adds is a binding: the compiler remembers the block and attaches it to the declaration it precedes.
+
+```dusk
+/** Scales every element in place.
+ * @param v the vector to scale
+ * @param k the factor applied to each element
+ * @return the new element count
+ */
+export func scale(v: *Vector<int64>, k: int64) -> int64 {
+```
+
+Binding follows the token gap: a doc block binds to the item whose first token is the next token after it, including a modifier like `export`, and blank lines or plain comments between the doc and the item do not break the binding, since neither adds a token. A block on the same line as the item's first token binds the same way. A doc block before the directive prologue is the module's doc; in a file with no directives a leading doc block binds to the first item instead, since there is no prologue to document. The bindable targets are a function, a struct, an enum, an interface, an interface method signature, an impl method, and a monad method. A doc block anywhere else, inside a function body, before an `impl` or `foreign` or `monad` block head, or trailing at the end of the file, binds nothing and is dangling.
+
+The body carries prose, not facts: the compiler already knows every name, type, and signature from the declaration itself, so the doc never restates them and cannot drift from them. The first paragraph is the summary and later paragraphs are the body. Three tags are recognized at the start of a line: `@param <name> <description>` describes one parameter, `@return <description>` describes the return value, and `@example` opens a verbatim block that runs to the next tag or the end of the comment: an unknown `@` word inside example code is content, while a line that starts with one of the three tag words ends the example. A leading gutter of aligned `*` columns is stripped; without one, the common indentation is.
+
+`dusk doc <file>` renders the module as markdown: every function, struct, enum, interface, and impl in source order, each with its signature built from the declaration and its prose from the doc, an undocumented item listed with its signature alone. Prose is copied verbatim. The command reads the one file, without loading imports or type checking, so an imported name renders as written. `dusk doc --json <file>` emits the same model as JSON with a stable shape, the form a language server or a doc pipeline consumes. Both forms refuse to emit from a broken module: a dangling doc block, an unknown tag outside an example, an `@param` that names no parameter of its item or repeats one, an `@return` on a function returning `void`, and an `@param` or `@return` on anything without parameters are each reported with the doc's own source position, and the command exits nonzero with nothing on stdout. The checks live in `dusk doc` alone; `check` and `build` accept a program regardless of what its doc comments say.
+
 ### Directives
 
 Directives appear at the top of the file, before declarations.

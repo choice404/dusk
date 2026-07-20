@@ -1,0 +1,291 @@
+// docty: renders a parsed type or signature back to dusk surface syntax, the
+// inverse of parsety. `dusk doc` prints a declaration's signature in a fenced block,
+// so every type form the parser builds needs a spelling here: a named type and its
+// type arguments, the two pointer forms, a slice, a sized array, a tuple, a function
+// type, a collector, and void. The signature builders assemble a func, a method, a
+// struct, an enum, and an interface from the same node arenas, matching the grammar
+// in parseitem and parsety form for form.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+
+// Appends the surface spelling of a type to a builder. Every branch mirrors one
+// parse_type_inner or parse_base_type case so a round trip through the parser and
+// back is stable.
+export func push_type(b: *StringBuilder, a: *Ast, id: int64) -> void {
+    t: TypeNode = vec_get((*a).types, id)
+    if t.kind == tk_unit() {
+        sb_push(b, "void")
+        return
+    }
+    if t.kind == tk_infer() {
+        sb_push(b, "_")
+        return
+    }
+    if t.kind == tk_named() {
+        sb_push(b, ast_name(a, t.a))
+        if t.c > 0 {
+            sb_push_char(b, 60)
+            push_type_list(b, a, t.b, t.c)
+            sb_push_char(b, 62)
+        }
+        return
+    }
+    if t.kind == tk_ptr() {
+        sb_push_char(b, 42)
+        push_type(b, a, t.a)
+        return
+    }
+    if t.kind == tk_rawptr() {
+        sb_push(b, "*raw ")
+        push_type(b, a, t.a)
+        return
+    }
+    if t.kind == tk_slice() {
+        push_type(b, a, t.a)
+        sb_push(b, "[]")
+        return
+    }
+    if t.kind == tk_array() {
+        push_type(b, a, t.a)
+        sb_push_char(b, 91)
+        sb_push_int(b, t.b)
+        sb_push_char(b, 93)
+        return
+    }
+    if t.kind == tk_tuple() {
+        sb_push_char(b, 40)
+        push_type_list(b, a, t.a, t.b)
+        sb_push_char(b, 41)
+        return
+    }
+    if t.kind == tk_func() {
+        sb_push_char(b, 40)
+        push_type_list(b, a, t.a, t.b)
+        sb_push(b, ") -> ")
+        push_type(b, a, t.c)
+        return
+    }
+    // tk_collector
+    sb_push(b, "collector<")
+    push_type(b, a, t.a)
+    sb_push_char(b, 62)
+}
+
+// Appends a comma-separated list of types drawn from the kids arena.
+func push_type_list(b: *StringBuilder, a: *Ast, off: int64, len: int64) -> void {
+    mut i: int64 = 0
+    while i < len {
+        if i > 0 { sb_push(b, ", ") }
+        push_type(b, a, vec_get((*a).kids, off + i))
+        i = i + 1
+    }
+}
+
+// A fresh string holding the surface spelling of a type.
+export func docty_type(a: *Ast, id: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    push_type(b, a, id)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Appends a `<T, U>` generic list when the parameter set is non-empty.
+func push_generics(b: *StringBuilder, a: *Ast, off: int64, len: int64) -> void {
+    if len == 0 { return }
+    sb_push_char(b, 60)
+    mut i: int64 = 0
+    while i < len {
+        if i > 0 { sb_push(b, ", ") }
+        sb_push(b, ast_name(a, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    sb_push_char(b, 62)
+}
+
+// Appends one parameter, `name: type`, with the `using` marker when the parameter
+// binds a using argument.
+func push_param(b: *StringBuilder, a: *Ast, pid: int64) -> void {
+    p: ParamNode = vec_get((*a).params, pid)
+    if p.is_using { sb_push(b, "using ") }
+    sb_push(b, ast_name(a, p.name))
+    sb_push(b, ": ")
+    push_type(b, a, p.ty)
+}
+
+// Appends a parenthesized parameter list from the kids arena.
+func push_params(b: *StringBuilder, a: *Ast, off: int64, len: int64) -> void {
+    sb_push_char(b, 40)
+    mut i: int64 = 0
+    while i < len {
+        if i > 0 { sb_push(b, ", ") }
+        push_param(b, a, vec_get((*a).kids, off + i))
+        i = i + 1
+    }
+    sb_push_char(b, 41)
+}
+
+// The signature of a function or a method, `[export ["C" ]][async ]func name<...>(...)
+// -> ret`. Impl and monad methods carry the same node shape, so the same builder
+// serves them.
+export func docty_func_sig(a: *Ast, fid: int64) -> string {
+    f: FuncNode = vec_get((*a).funcs, fid)
+    b: *StringBuilder = alloc(sb_new())
+    if f.exported {
+        sb_push(b, "export ")
+        if f.abi_export { sb_push(b, "\"C\" ") }
+    }
+    if f.is_async { sb_push(b, "async ") }
+    sb_push(b, "func ")
+    sb_push(b, ast_name(a, f.name))
+    push_generics(b, a, f.generics_off, f.generics_len)
+    push_params(b, a, f.params_off, f.params_len)
+    sb_push(b, " -> ")
+    push_type(b, a, f.ret)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The signature of an interface method, `name(...) -> ret`.
+export func docty_method_sig(a: *Ast, msid: int64) -> string {
+    m: MethodSigNode = vec_get((*a).method_sigs, msid)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, ast_name(a, m.name))
+    push_params(b, a, m.params_off, m.params_len)
+    sb_push(b, " -> ")
+    push_type(b, a, m.ret)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func push_header(b: *StringBuilder, exported: bool, kw: string, name: string) -> void {
+    if exported { sb_push(b, "export ") }
+    sb_push(b, kw)
+    sb_push_char(b, 32)
+    sb_push(b, name)
+}
+
+// A struct declaration with its field lines, one field per indented line.
+export func docty_struct_sig(a: *Ast, sid: int64) -> string {
+    s: StructNode = vec_get((*a).structs, sid)
+    b: *StringBuilder = alloc(sb_new())
+    push_header(b, s.exported, "struct", ast_name(a, s.name))
+    push_generics(b, a, s.generics_off, s.generics_len)
+    if s.fields_len == 0 {
+        sb_push(b, " {}")
+    } else {
+        sb_push(b, " {\n")
+        mut i: int64 = 0
+        while i < s.fields_len {
+            fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, s.fields_off + i))
+            sb_push(b, "    ")
+            sb_push(b, ast_name(a, fld.name))
+            sb_push(b, ": ")
+            push_type(b, a, fld.ty)
+            sb_push(b, ",\n")
+            i = i + 1
+        }
+        sb_push_char(b, 125)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func push_variant(b: *StringBuilder, a: *Ast, vid: int64) -> void {
+    v: VariantNode = vec_get((*a).variants, vid)
+    sb_push(b, "    ")
+    sb_push(b, ast_name(a, v.name))
+    if v.fields_len > 0 {
+        sb_push_char(b, 40)
+        mut i: int64 = 0
+        while i < v.fields_len {
+            if i > 0 { sb_push(b, ", ") }
+            fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, v.fields_off + i))
+            sb_push(b, ast_name(a, fld.name))
+            sb_push(b, ": ")
+            push_type(b, a, fld.ty)
+            i = i + 1
+        }
+        sb_push_char(b, 41)
+    }
+    sb_push(b, ",\n")
+}
+
+// An enum declaration with its variant lines, one variant per indented line.
+export func docty_enum_sig(a: *Ast, eid: int64) -> string {
+    e: EnumNode = vec_get((*a).enums, eid)
+    b: *StringBuilder = alloc(sb_new())
+    push_header(b, e.exported, "enum", ast_name(a, e.name))
+    push_generics(b, a, e.generics_off, e.generics_len)
+    if e.variants_len == 0 {
+        sb_push(b, " {}")
+    } else {
+        sb_push(b, " {\n")
+        mut i: int64 = 0
+        while i < e.variants_len {
+            push_variant(b, a, vec_get((*a).kids, e.variants_off + i))
+            i = i + 1
+        }
+        sb_push_char(b, 125)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// An interface declaration with its method signature lines.
+export func docty_interface_sig(a: *Ast, iid: int64) -> string {
+    it: InterfaceNode = vec_get((*a).interfaces, iid)
+    b: *StringBuilder = alloc(sb_new())
+    push_header(b, it.exported, "interface", ast_name(a, it.name))
+    push_generics(b, a, it.generics_off, it.generics_len)
+    if it.methods_len == 0 {
+        sb_push(b, " {}")
+    } else {
+        sb_push(b, " {\n")
+        mut i: int64 = 0
+        while i < it.methods_len {
+            msid: int64 = vec_get((*a).kids, it.methods_off + i)
+            sb_push(b, "    ")
+            sig: string = docty_method_sig(a, msid)
+            sb_push(b, sig)
+            free(sig)
+            sb_push_char(b, 10)
+            i = i + 1
+        }
+        sb_push_char(b, 125)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The header line of an impl block, `impl Iface for Type` or `impl Type` for a bare
+// inherent impl.
+export func docty_impl_header(a: *Ast, imid: int64) -> string {
+    im: ImplNode = vec_get((*a).impls, imid)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "impl ")
+    if im.iface >= 0 {
+        sb_push(b, ast_name(a, im.iface))
+        sb_push(b, " for ")
+    }
+    sb_push(b, ast_name(a, im.ty))
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

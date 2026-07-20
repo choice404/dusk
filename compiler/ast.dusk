@@ -43,6 +43,14 @@ export struct BlockNode { off: int64, len: int64 }
 export struct ItemNode { kind: int64, id: int64 }
 export struct MonadNode { name: int64, lo: int64, hi: int64 }
 
+// A documentation block bound to a declaration. kind selects which arena id keys the
+// binding: dk_func/dk_struct/dk_enum/dk_interface key the corresponding node id,
+// dk_method_sig keys a MethodSigNode id, and dk_module keys the module itself (id 0).
+// An impl or monad method is keyed by its FuncNode id under dk_func. lo and hi are
+// the doc block's full byte span, delimiters included. The dump never prints docs;
+// only `dusk doc` consumes them, and only for a single unmerged file.
+export struct DocNode { kind: int64, id: int64, lo: int64, hi: int64 }
+
 export struct Ast {
     interner: *Interner,
     exprs: *Vector<ExprNode>,
@@ -69,6 +77,7 @@ export struct Ast {
     imports: *Vector<int64>,
     monads: *Vector<MonadNode>,
     items: *Vector<ItemNode>,
+    docs: *Vector<DocNode>,
 }
 
 export func xk_int() -> int64 { return 0 }
@@ -129,6 +138,13 @@ export func ik_interface() -> int64 { return 3 }
 export func ik_impl() -> int64 { return 4 }
 export func ik_foreign() -> int64 { return 5 }
 
+export func dk_func() -> int64 { return 0 }
+export func dk_struct() -> int64 { return 1 }
+export func dk_enum() -> int64 { return 2 }
+export func dk_interface() -> int64 { return 3 }
+export func dk_method_sig() -> int64 { return 4 }
+export func dk_module() -> int64 { return 5 }
+
 export func uop_deref() -> int64 { return 0 }
 export func uop_neg() -> int64 { return 1 }
 export func uop_not() -> int64 { return 2 }
@@ -179,6 +195,7 @@ export func ast_new() -> *Ast {
     imports: *Vector<int64> = alloc(vec_new())
     monads: *Vector<MonadNode> = alloc(vec_new())
     items: *Vector<ItemNode> = alloc(vec_new())
+    docs: *Vector<DocNode> = alloc(vec_new())
     return alloc(Ast {
         interner: intern_new(),
         exprs: exprs, stmts: stmts, types: types, patterns: patterns,
@@ -187,6 +204,7 @@ export func ast_new() -> *Ast {
         structs: structs, enums: enums, interfaces: interfaces, impls: impls,
         foreigns: foreigns, do_binds: do_binds, blocks: blocks, kids: kids,
         paradigms: paradigms, imports: imports, monads: monads, items: items,
+        docs: docs,
     })
 }
 
@@ -353,6 +371,14 @@ export func ast_do_bind(a: *Ast, name: int64, expr: int64) -> int64 {
 export func ast_item(a: *Ast, kind: int64, id: int64) -> void {
     v: *Vector<ItemNode> = (*a).items
     vec_push(v, ItemNode { kind: kind, id: id })
+}
+
+// Records a documentation block bound to a declaration. kind is a dk_* tag, id keys
+// the target node in its arena, and [lo, hi) is the block's full byte span. Docs are
+// pushed in binding order; the table is read only by `dusk doc`.
+export func ast_doc(a: *Ast, kind: int64, id: int64, lo: int64, hi: int64) -> void {
+    v: *Vector<DocNode> = (*a).docs
+    vec_push(v, DocNode { kind: kind, id: id, lo: lo, hi: hi })
 }
 
 export func ast_name(a: *Ast, id: int64) -> string {

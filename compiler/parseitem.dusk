@@ -21,10 +21,14 @@ export func parse_module(p: *Parser) -> *Ast {
             reading = false
         } else {
             before: int64 = (*p).pos
+            dlo, dhi := p_take_doc(p)
             if p_kw(p, "monad") {
                 parse_monad_block(p)
             } else {
+                its: *Vector<ItemNode> = (*p_ast(p)).items
+                nitems: int64 = vec_len(its)
                 parse_item(p)
+                record_item_doc(p, nitems, dlo, dhi)
             }
             p_guard_progress(p, before, "unexpected token in module body")
         }
@@ -32,7 +36,41 @@ export func parse_module(p: *Parser) -> *Ast {
     return p_ast(p)
 }
 
+// Binds a top-level doc block, captured before the item was parsed, to the item that
+// parse_item just pushed. The doc's target kind follows the item kind: a func, struct,
+// enum, or interface takes the matching dk_* tag keyed by its node id. An impl or
+// foreign block has no doc kind, so a doc before it dangles (W5 reports it); an error
+// item that pushed nothing binds nothing.
+func record_item_doc(p: *Parser, nbefore: int64, dlo: int64, dhi: int64) -> void {
+    if dlo < 0 {
+        return
+    }
+    items: *Vector<ItemNode> = (*p_ast(p)).items
+    if vec_len(items) <= nbefore {
+        return
+    }
+    it: ItemNode = vec_get(items, vec_len(items) - 1)
+    if it.kind == ik_func() {
+        ast_doc(p_ast(p), dk_func(), it.id, dlo, dhi)
+    } else if it.kind == ik_struct() {
+        ast_doc(p_ast(p), dk_struct(), it.id, dlo, dhi)
+    } else if it.kind == ik_enum() {
+        ast_doc(p_ast(p), dk_enum(), it.id, dlo, dhi)
+    } else if it.kind == ik_interface() {
+        ast_doc(p_ast(p), dk_interface(), it.id, dlo, dhi)
+    }
+}
+
 func parse_module_head(p: *Parser) -> void {
+    // A leading doc block is the module doc only when a directive follows it.
+    // In a file with no directive prologue the first token is the first item's,
+    // so the block is left unclaimed here and binds to that item instead.
+    if p_at(p, k_at()) {
+        mdlo, mdhi := p_take_doc(p)
+        if mdlo >= 0 {
+            ast_doc(p_ast(p), dk_module(), 0, mdlo, mdhi)
+        }
+    }
     mut reading: bool = true
     while reading {
         if p_at(p, k_at()) {
@@ -283,12 +321,17 @@ func parse_interface_item(p: *Parser, exported: bool) -> int64 {
             reading = false
         } else {
             before: int64 = (*p).pos
+            dlo, dhi := p_take_doc(p)
             mname: int64 = p_ident(p)
             params: *Vector<int64> = parse_params(p)
             p_expect(p, k_arrow())
             ret: int64 = parse_type(p)
             p_eat(p, k_semi())
-            vec_push(methods, ast_method_sig(p_ast(p), mname, params, ret))
+            msid: int64 = ast_method_sig(p_ast(p), mname, params, ret)
+            vec_push(methods, msid)
+            if dlo >= 0 {
+                ast_doc(p_ast(p), dk_method_sig(), msid, dlo, dhi)
+            }
             p_guard_progress(p, before, "unexpected token in interface body")
         }
     }
@@ -353,13 +396,22 @@ func parse_impl_item(p: *Parser) -> int64 {
             reading = false
         } else {
             before: int64 = (*p).pos
+            dlo, dhi := p_take_doc(p)
             if p_kw(p, "func") {
-                vec_push(methods, parse_func(p, false, false, false))
+                mfid: int64 = parse_func(p, false, false, false)
+                vec_push(methods, mfid)
+                if dlo >= 0 {
+                    ast_doc(p_ast(p), dk_func(), mfid, dlo, dhi)
+                }
             } else if p_ident_text_is(p, "async") {
                 p_error(p, "a method cannot be async")
                 p_bump(p)
                 if p_kw(p, "func") {
-                    vec_push(methods, parse_func(p, false, false, false))
+                    mfid2: int64 = parse_func(p, false, false, false)
+                    vec_push(methods, mfid2)
+                    if dlo >= 0 {
+                        ast_doc(p_ast(p), dk_func(), mfid2, dlo, dhi)
+                    }
                 }
             } else {
                 p_error(p, "expected a method (func) in impl block")
@@ -400,6 +452,7 @@ func parse_monad_block(p: *Parser) -> void {
             reading = false
         } else {
             before: int64 = (*p).pos
+            dlo, dhi := p_take_doc(p)
             exported: bool = p_eat_kw(p, "export")
             if p_kw(p, "func") {
                 fid: int64 = parse_func(p, exported, false, false)
@@ -411,6 +464,9 @@ func parse_monad_block(p: *Parser) -> void {
                 f.name = qualified_method_name(p, name, f.name)
                 vec_set(funcs, fid, f)
                 ast_item(p_ast(p), ik_func(), fid)
+                if dlo >= 0 {
+                    ast_doc(p_ast(p), dk_func(), fid, dlo, dhi)
+                }
             } else {
                 p_error(p, "expected a method (func) in monad block")
                 p_bump(p)

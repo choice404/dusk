@@ -27,10 +27,13 @@ export struct Parser {
     ast: *Ast,
     src: string,
     n: int64,
+    docs: *Vector<DocBlock>,
+    doc_pos: int64,
 }
 
 export func parser_new(toks: *Vector<Token>, src: string, n: int64) -> *Parser {
     errs: *Vector<Located> = alloc(vec_new())
+    empty_docs: *Vector<DocBlock> = alloc(vec_new())
     return alloc(Parser {
         toks: toks,
         pos: 0,
@@ -43,11 +46,57 @@ export func parser_new(toks: *Vector<Token>, src: string, n: int64) -> *Parser {
         ast: ast_new(),
         src: src,
         n: n,
+        docs: empty_docs,
+        doc_pos: 0,
     })
 }
 
 export func p_ast(p: *Parser) -> *Ast { return (*p).ast }
 export func p_errors(p: *Parser) -> *Vector<Located> { return (*p).errors }
+
+// Supplies the lexer's captured doc blocks so the item grammar can bind each block
+// to the declaration it precedes. Kept separate from parser_new so the existing call
+// sites that build a parser without docs stay source compatible; a parser left
+// without docs simply binds none.
+export func p_set_docs(p: *Parser, docs: *Vector<DocBlock>) -> void {
+    (*p).docs = docs
+    (*p).doc_pos = 0
+}
+
+// Claims the doc block, if any, that binds to the item whose first token is current.
+// This is the token-gap rule, a pure byte comparison: cur is the current token's lo,
+// prev is the previous token's hi, and the doc position sweeps forward past every
+// block ending at or before cur. Among the blocks swept in this call, the last one
+// that begins at or after prev, so it sits strictly in the gap between the two
+// tokens, is the binding block; its span is returned, else (-1, -1). Blank lines and
+// plain comments in the gap never break the binding, since they change no byte
+// offset. Blocks whose end lies before prev, a body doc or a doc already claimed by
+// an earlier item, are swept but never bind, so a call from the next item skips them.
+export func p_take_doc(p: *Parser) -> (int64, int64) {
+    docs: *Vector<DocBlock> = (*p).docs
+    cur: int64 = p_lo(p)
+    prev: int64 = p_prev_hi(p)
+    mut best_lo: int64 = -1
+    mut best_hi: int64 = -1
+    mut going: bool = true
+    while going {
+        if (*p).doc_pos >= vec_len(docs) {
+            going = false
+        } else {
+            d: DocBlock = vec_get(docs, (*p).doc_pos)
+            if d.hi <= cur {
+                if d.lo >= prev {
+                    best_lo = d.lo
+                    best_hi = d.hi
+                }
+                (*p).doc_pos = (*p).doc_pos + 1
+            } else {
+                going = false
+            }
+        }
+    }
+    return (best_lo, best_hi)
+}
 
 export func p_tok(p: *Parser) -> Token {
     toks: *Vector<Token> = (*p).toks

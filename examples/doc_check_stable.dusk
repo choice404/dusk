@@ -1,0 +1,84 @@
+/** Module documentation for the doc_check_stable golden. This block precedes the
+    first token of the file, so it binds to the module itself. Doc blocks are a side
+    table the parser fills; check never reads them, so this file must pass check
+    byte-for-byte as if the doc blocks were plain comments. */
+@paradigm procedural
+@paradigm functional
+@paradigm oop
+
+struct Box<T> { v: T }
+
+/** A function documented in the gutter style, where each interior line opens with a
+ *  star aligned under the first.
+ *  @param n the value to echo
+ *  @return the value unchanged
+ */
+func identity(n: int64) -> int64 {
+    /** A doc block inside a function body has no capture point in the statement
+        grammar, so it binds to nothing and dangles. check must ignore it. */
+    return n
+}
+
+/** A struct documented in the compact, non-gutter style. */
+struct Point {
+    x: int64,
+    y: int64,
+}
+
+/** An enum whose doc block is followed by a blank line before the item; the blank
+    line does not break the binding. */
+
+enum Shape {
+    Circle,
+    Square,
+}
+
+/** An interface carries a doc, and so can each of its method signatures. */
+interface Greeter {
+    /** greet returns a greeting code. */
+    greet() -> int64
+}
+
+struct Host { id: int64 }
+
+/** The impl method takes its own doc, keyed by the method's func id. */
+impl Greeter for Host {
+    /** greet on Host returns the host id. */
+    func greet() -> int64 {
+        return self.id
+    }
+}
+
+/** A monad block whose methods each carry a doc. */
+monad Box {
+    /** unit lifts a value into Box. */
+    export func unit<A>(x: A) -> Box<A> {
+        return Box { v: x }
+    }
+    /** bind threads a Box through a continuation. */
+    export func bind<A, B>(m: Box<A>, f: (A) -> Box<B>) -> Box<B> {
+        return f(m.v)
+    }
+}
+
+/**/
+/***/
+
+func main() -> int32 {
+    p := Point { x: 1, y: 2 }
+    println(p.x + p.y)
+    s := Shape.Circle
+    match s {
+        Circle => { println(identity(7)) }
+        Square => { println(0) }
+    }
+    h := Host { id: 42 }
+    println(h.greet())
+    r := do Box {
+        a <- Box { v: 3 }
+        b <- Box { v: 4 }
+        a + b
+    }
+    println(r.v)
+    return 0
+}

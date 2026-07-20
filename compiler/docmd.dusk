@@ -1,0 +1,337 @@
+// docmd: the markdown emitter for `dusk doc`. It walks the parsed module in source
+// order and prints one deterministic document: a module heading and paradigm line,
+// the module's own prose, then a section per item kind (Functions, Structs, Enums,
+// Interfaces, Impls). Each item shows its signature in a fenced block and, when a doc
+// block is bound to it, the summary, body, parameters, return, and examples doccore
+// pulled from that block. An empty section is omitted; an undocumented item still
+// lists its signature. The output ends with exactly one newline.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import bytes
+@import doccore
+@import docty
+
+// Appends a block of text followed by a blank line, the uniform separator between
+// every markdown block, so paragraphs, headings, lists, and fences all stand apart.
+func push_block(b: *StringBuilder, s: string) -> void {
+    sb_push(b, s)
+    sb_push(b, "\n\n")
+}
+
+func push_heading(b: *StringBuilder, level: string, text: string) -> void {
+    hb: *StringBuilder = alloc(sb_new())
+    sb_push(hb, level)
+    sb_push_char(hb, 32)
+    sb_push(hb, text)
+    out: string = substring(sb_cstr(hb), 0, sb_size(hb))
+    push_block(b, out)
+    free(out)
+    sb_free(hb)
+    free(hb)
+}
+
+// Appends a `dusk`-fenced code block. The fence grows one backtick past the
+// longest backtick run inside the code, never below three, so example text that
+// carries a fence of its own cannot terminate the emitted block early.
+func push_fence(b: *StringBuilder, code: string) -> void {
+    n: int64 = str_len(code)
+    mut longest: int64 = 0
+    mut run: int64 = 0
+    mut i: int64 = 0
+    while i < n {
+        if bytes.byte_at(code, n, i) == 96 {
+            run = run + 1
+            if run > longest {
+                longest = run
+            }
+        } else {
+            run = 0
+        }
+        i = i + 1
+    }
+    mut flen: int64 = 3
+    if longest >= 3 {
+        flen = longest + 1
+    }
+    fb: *StringBuilder = alloc(sb_new())
+    mut j: int64 = 0
+    while j < flen {
+        sb_push_char(fb, 96)
+        j = j + 1
+    }
+    sb_push(fb, "dusk\n")
+    sb_push(fb, code)
+    sb_push(fb, "\n")
+    mut k: int64 = 0
+    while k < flen {
+        sb_push_char(fb, 96)
+        k = k + 1
+    }
+    out: string = substring(sb_cstr(fb), 0, sb_size(fb))
+    push_block(b, out)
+    free(out)
+    sb_free(fb)
+    free(fb)
+}
+
+// Collapses a multi-paragraph description to a single line so it reads inside a list
+// item or a Returns line.
+func inline_desc(s: string) -> string {
+    return replace_all(s, "\n", " ")
+}
+
+// Emits a doc block's prose: summary, body paragraphs, a parameter list, a return
+// line, then each example as its own fence.
+func render_prose(b: *StringBuilder, di: DocInfo) -> void {
+    if str_len(di.summary) > 0 {
+        push_block(b, di.summary)
+    }
+    if str_len(di.body) > 0 {
+        parts: *Vector<string> = str_split(di.body, "\n")
+        mut i: int64 = 0
+        while i < vec_len(parts) {
+            para: string = vec_get(parts, i)
+            if str_len(para) > 0 {
+                push_block(b, para)
+            }
+            i = i + 1
+        }
+    }
+    ps: *Vector<DocParam> = di.params
+    if vec_len(ps) > 0 {
+        push_block(b, "Parameters:")
+        lb: *StringBuilder = alloc(sb_new())
+        mut j: int64 = 0
+        while j < vec_len(ps) {
+            p: DocParam = vec_get(ps, j)
+            if j > 0 { sb_push_char(lb, 10) }
+            sb_push(lb, "- `")
+            sb_push(lb, p.name)
+            sb_push(lb, "`")
+            if str_len(p.desc) > 0 {
+                sb_push(lb, ": ")
+                inl: string = inline_desc(p.desc)
+                sb_push(lb, inl)
+                free(inl)
+            }
+            j = j + 1
+        }
+        list: string = substring(sb_cstr(lb), 0, sb_size(lb))
+        push_block(b, list)
+        free(list)
+        sb_free(lb)
+        free(lb)
+    }
+    if di.has_ret {
+        if str_len(di.ret) > 0 {
+            rb: *StringBuilder = alloc(sb_new())
+            sb_push(rb, "Returns: ")
+            inl: string = inline_desc(di.ret)
+            sb_push(rb, inl)
+            free(inl)
+            out: string = substring(sb_cstr(rb), 0, sb_size(rb))
+            push_block(b, out)
+            free(out)
+            sb_free(rb)
+            free(rb)
+        }
+    }
+    exs: *Vector<string> = di.examples
+    if vec_len(exs) > 0 {
+        push_block(b, "Example:")
+        mut k: int64 = 0
+        while k < vec_len(exs) {
+            push_fence(b, vec_get(exs, k))
+            k = k + 1
+        }
+    }
+}
+
+// Finds the doc block bound to (kind, id), returning whether one exists and its span.
+export func find_doc(a: *Ast, kind: int64, id: int64) -> (bool, int64, int64) {
+    docs: *Vector<DocNode> = (*a).docs
+    mut i: int64 = 0
+    while i < vec_len(docs) {
+        d: DocNode = vec_get(docs, i)
+        if d.kind == kind && d.id == id {
+            return (true, d.lo, d.hi)
+        }
+        i = i + 1
+    }
+    return (false, 0, 0)
+}
+
+// Emits the prose bound to (kind, id), if any, by re-parsing its block.
+func render_bound(b: *StringBuilder, a: *Ast, src: string, n: int64, kind: int64, id: int64) -> void {
+    found, lo, hi := find_doc(a, kind, id)
+    if found {
+        di: DocInfo = doc_parse(src, n, lo, hi)
+        render_prose(b, di)
+    }
+}
+
+func count_kind(a: *Ast, kind: int64) -> int64 {
+    items: *Vector<ItemNode> = (*a).items
+    mut c: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        if vec_get(items, i).kind == kind { c = c + 1 }
+        i = i + 1
+    }
+    return c
+}
+
+func render_func(b: *StringBuilder, a: *Ast, src: string, n: int64, fid: int64) -> void {
+    f: FuncNode = vec_get((*a).funcs, fid)
+    push_heading(b, "###", ast_name(a, f.name))
+    sig: string = docty_func_sig(a, fid)
+    push_fence(b, sig)
+    free(sig)
+    render_bound(b, a, src, n, dk_func(), fid)
+}
+
+func render_struct(b: *StringBuilder, a: *Ast, src: string, n: int64, sid: int64) -> void {
+    s: StructNode = vec_get((*a).structs, sid)
+    push_heading(b, "###", ast_name(a, s.name))
+    sig: string = docty_struct_sig(a, sid)
+    push_fence(b, sig)
+    free(sig)
+    render_bound(b, a, src, n, dk_struct(), sid)
+}
+
+func render_enum(b: *StringBuilder, a: *Ast, src: string, n: int64, eid: int64) -> void {
+    e: EnumNode = vec_get((*a).enums, eid)
+    push_heading(b, "###", ast_name(a, e.name))
+    sig: string = docty_enum_sig(a, eid)
+    push_fence(b, sig)
+    free(sig)
+    render_bound(b, a, src, n, dk_enum(), eid)
+}
+
+func render_interface(b: *StringBuilder, a: *Ast, src: string, n: int64, iid: int64) -> void {
+    it: InterfaceNode = vec_get((*a).interfaces, iid)
+    push_heading(b, "###", ast_name(a, it.name))
+    sig: string = docty_interface_sig(a, iid)
+    push_fence(b, sig)
+    free(sig)
+    render_bound(b, a, src, n, dk_interface(), iid)
+    // Each method signature can carry its own doc, keyed by the method-sig node.
+    mut i: int64 = 0
+    while i < it.methods_len {
+        msid: int64 = vec_get((*a).kids, it.methods_off + i)
+        m: MethodSigNode = vec_get((*a).method_sigs, msid)
+        push_heading(b, "####", ast_name(a, m.name))
+        msig: string = docty_method_sig(a, msid)
+        push_fence(b, msig)
+        free(msig)
+        render_bound(b, a, src, n, dk_method_sig(), msid)
+        i = i + 1
+    }
+}
+
+func render_impl(b: *StringBuilder, a: *Ast, src: string, n: int64, imid: int64) -> void {
+    im: ImplNode = vec_get((*a).impls, imid)
+    header: string = docty_impl_header(a, imid)
+    push_heading(b, "###", header)
+    free(header)
+    mut i: int64 = 0
+    while i < im.methods_len {
+        fid: int64 = vec_get((*a).kids, im.methods_off + i)
+        f: FuncNode = vec_get((*a).funcs, fid)
+        push_heading(b, "####", ast_name(a, f.name))
+        sig: string = docty_func_sig(a, fid)
+        push_fence(b, sig)
+        free(sig)
+        render_bound(b, a, src, n, dk_func(), fid)
+        i = i + 1
+    }
+}
+
+// Emits a section header and its items when at least one item of the kind exists.
+func render_section(b: *StringBuilder, a: *Ast, src: string, n: int64, kind: int64, title: string) -> void {
+    if count_kind(a, kind) == 0 { return }
+    push_heading(b, "##", title)
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == kind {
+            if kind == ik_func() {
+                render_func(b, a, src, n, it.id)
+            } else if kind == ik_struct() {
+                render_struct(b, a, src, n, it.id)
+            } else if kind == ik_enum() {
+                render_enum(b, a, src, n, it.id)
+            } else if kind == ik_interface() {
+                render_interface(b, a, src, n, it.id)
+            } else if kind == ik_impl() {
+                render_impl(b, a, src, n, it.id)
+            }
+        }
+        i = i + 1
+    }
+}
+
+func push_paradigm_line(b: *StringBuilder, a: *Ast) -> void {
+    ps: *Vector<int64> = (*a).paradigms
+    pb: *StringBuilder = alloc(sb_new())
+    sb_push(pb, "Paradigm: ")
+    if vec_len(ps) == 0 {
+        // No @paradigm directive means the procedural default, so the page
+        // reports what the compiler applies, not the directive's absence.
+        sb_push(pb, "procedural")
+    } else {
+        mut i: int64 = 0
+        while i < vec_len(ps) {
+            if i > 0 { sb_push(pb, ", ") }
+            sb_push(pb, ast_name(a, vec_get(ps, i)))
+            i = i + 1
+        }
+    }
+    out: string = substring(sb_cstr(pb), 0, sb_size(pb))
+    push_block(b, out)
+    free(out)
+    sb_free(pb)
+    free(pb)
+}
+
+// Renders the whole module as markdown, stem naming the module. The result is a fresh
+// heap string ending in exactly one newline.
+export func doc_markdown(a: *Ast, src: string, n: int64, stem: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    push_heading(b, "#", concat_module(stem))
+    push_paradigm_line(b, a)
+    render_bound(b, a, src, n, dk_module(), 0)
+    render_section(b, a, src, n, ik_func(), "Functions")
+    render_section(b, a, src, n, ik_struct(), "Structs")
+    render_section(b, a, src, n, ik_enum(), "Enums")
+    render_section(b, a, src, n, ik_interface(), "Interfaces")
+    render_section(b, a, src, n, ik_impl(), "Impls")
+    raw: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    trimmed: string = trim_end(raw)
+    free(raw)
+    fin: *StringBuilder = alloc(sb_new())
+    sb_push(fin, trimmed)
+    sb_push_char(fin, 10)
+    out: string = substring(sb_cstr(fin), 0, sb_size(fin))
+    free(trimmed)
+    sb_free(fin)
+    free(fin)
+    return out
+}
+
+func concat_module(stem: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "Module ")
+    sb_push(b, stem)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

@@ -1,0 +1,295 @@
+// docjson: the generic JSON value builders for `dusk doc --json`, Algorithm E's
+// structured twin to docmd. Two space indent, source order arrays, `null` for an
+// absent doc block. Every shape is hand written rather than built through a generic
+// value tree, since the schema is fixed and stable, the future LSP contract. This
+// file knows strings, arrays, the one doc object shape every item shares, and the
+// param/field/variant list shapes; docjsonitem walks the AST and assembles the
+// per-declaration objects from these.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import ast
+@import doccore
+@import docty
+
+// Two spaces per indent level, the JSON convention this schema commits to.
+export func ind(b: *StringBuilder, level: int64) -> void {
+    mut i: int64 = 0
+    while i < level {
+        sb_push(b, "  ")
+        i = i + 1
+    }
+}
+
+export func push_bool(b: *StringBuilder, v: bool) -> void {
+    if v { sb_push(b, "true") } else { sb_push(b, "false") }
+}
+
+// Appends one object key at the given indent, `  "key": `, ready for the value and
+// its own trailing comma-newline or closing newline. Every object field in the
+// schema goes through this one spelling, so the key quoting never drifts.
+export func push_key(b: *StringBuilder, level: int64, key: string) -> void {
+    ind(b, level)
+    sb_push_char(b, 34)
+    sb_push(b, key)
+    sb_push(b, "\": ")
+}
+
+func hex_nibble(v: int64) -> int64 {
+    if v < 10 { return 48 + v }
+    return 87 + v
+}
+
+// Appends a quoted, escaped JSON string: `"` `\` `\n` `\t` `\r` take their short
+// escape, every other control byte below 0x20 takes the `\u00XX` long form, and
+// every other byte, ASCII or a UTF-8 continuation byte alike, passes through
+// verbatim so the document stays valid UTF-8.
+export func push_str(b: *StringBuilder, s: string) -> void {
+    sb_push_char(b, 34)
+    m: int64 = str_len(s)
+    mut i: int64 = 0
+    while i < m {
+        c: int64 = s[i]
+        if c == 34 {
+            sb_push_char(b, 92)
+            sb_push_char(b, 34)
+        } else if c == 92 {
+            sb_push_char(b, 92)
+            sb_push_char(b, 92)
+        } else if c == 10 {
+            sb_push_char(b, 92)
+            sb_push_char(b, 110)
+        } else if c == 9 {
+            sb_push_char(b, 92)
+            sb_push_char(b, 116)
+        } else if c == 13 {
+            sb_push_char(b, 92)
+            sb_push_char(b, 114)
+        } else if c < 32 {
+            sb_push_char(b, 92)
+            sb_push_char(b, 117)
+            sb_push_char(b, 48)
+            sb_push_char(b, 48)
+            sb_push_char(b, hex_nibble((c / 16) & 15))
+            sb_push_char(b, hex_nibble(c & 15))
+        } else {
+            sb_push_char(b, c)
+        }
+        i = i + 1
+    }
+    sb_push_char(b, 34)
+}
+
+// Appends a `[...]` of quoted strings, one per line at level + 1, or `[]` when empty.
+export func push_str_array(b: *StringBuilder, level: int64, items: *Vector<string>) -> void {
+    if vec_len(items) == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        ind(b, level + 1)
+        push_str(b, vec_get(items, i))
+        if i + 1 < vec_len(items) { sb_push_char(b, 44) }
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
+// Appends a generic-parameter list, kids[off, off+len) read as names, the same shape
+// push_str_array renders for any other name list.
+export func push_name_array(b: *StringBuilder, level: int64, a: *Ast, off: int64, len: int64) -> void {
+    if len == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        ind(b, level + 1)
+        push_str(b, ast_name(a, vec_get((*a).kids, off + i)))
+        if i + 1 < len { sb_push_char(b, 44) }
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
+// The module's `@paradigm` names, or `["procedural"]` when the file carries no
+// directive, the same default docmd's paradigm line applies.
+export func push_paradigms(b: *StringBuilder, level: int64, a: *Ast) -> void {
+    ps: *Vector<int64> = (*a).paradigms
+    if vec_len(ps) == 0 {
+        sb_push(b, "[\n")
+        ind(b, level + 1)
+        push_str(b, "procedural")
+        sb_push_char(b, 10)
+        ind(b, level)
+        sb_push_char(b, 93)
+        return
+    }
+    names: *Vector<string> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(ps) {
+        vec_push(names, ast_name(a, vec_get(ps, i)))
+        i = i + 1
+    }
+    push_str_array(b, level, names)
+}
+
+// Finds the doc block bound to (kind, id), returning whether one exists and its span.
+func find_doc(a: *Ast, kind: int64, id: int64) -> (bool, int64, int64) {
+    docs: *Vector<DocNode> = (*a).docs
+    mut i: int64 = 0
+    while i < vec_len(docs) {
+        d: DocNode = vec_get(docs, i)
+        if d.kind == kind && d.id == id {
+            return (true, d.lo, d.hi)
+        }
+        i = i + 1
+    }
+    return (false, 0, 0)
+}
+
+// Appends a doc param entry, `{"name": ..., "desc": ...}`.
+func push_doc_param(b: *StringBuilder, p: DocParam) -> void {
+    sb_push(b, "{\"name\": ")
+    push_str(b, p.name)
+    sb_push(b, ", \"desc\": ")
+    push_str(b, p.desc)
+    sb_push_char(b, 125)
+}
+
+func push_doc_params(b: *StringBuilder, level: int64, params: *Vector<DocParam>) -> void {
+    if vec_len(params) == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    mut i: int64 = 0
+    while i < vec_len(params) {
+        ind(b, level + 1)
+        push_doc_param(b, vec_get(params, i))
+        if i + 1 < vec_len(params) { sb_push_char(b, 44) }
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
+// Appends the doc object bound to (kind, id): `null` when no block binds there, else
+// `{summary, body, params, return, examples}`, the one shape every doc field in the
+// schema shares. return is `null` only when the block carried no `@return` at all; an
+// empty description still renders as `""`.
+export func push_doc(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, kind: int64, id: int64) -> void {
+    found, lo, hi := find_doc(a, kind, id)
+    if !found {
+        sb_push(b, "null")
+        return
+    }
+    di: DocInfo = doc_parse(src, n, lo, hi)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "summary")
+    push_str(b, di.summary)
+    sb_push(b, ",\n")
+    push_key(b, l, "body")
+    push_str(b, di.body)
+    sb_push(b, ",\n")
+    push_key(b, l, "params")
+    push_doc_params(b, l, di.params)
+    sb_push(b, ",\n")
+    push_key(b, l, "return")
+    if di.has_ret { push_str(b, di.ret) } else { sb_push(b, "null") }
+    sb_push(b, ",\n")
+    push_key(b, l, "examples")
+    push_str_array(b, l, di.examples)
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+// Appends a `[{name, type, using}, ...]` parameter list from kids[off, off+len).
+export func push_params(b: *StringBuilder, level: int64, a: *Ast, off: int64, len: int64) -> void {
+    if len == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, off + i))
+        ind(b, level + 1)
+        sb_push(b, "{\"name\": ")
+        push_str(b, ast_name(a, p.name))
+        sb_push(b, ", \"type\": ")
+        ty: string = docty_type(a, p.ty)
+        push_str(b, ty)
+        free(ty)
+        sb_push(b, ", \"using\": ")
+        push_bool(b, p.is_using)
+        sb_push_char(b, 125)
+        if i + 1 < len { sb_push_char(b, 44) }
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
+// Appends a `[{name, type}, ...]` field list from kids[off, off+len).
+export func push_fields(b: *StringBuilder, level: int64, a: *Ast, off: int64, len: int64) -> void {
+    if len == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, off + i))
+        ind(b, level + 1)
+        sb_push(b, "{\"name\": ")
+        push_str(b, ast_name(a, fld.name))
+        sb_push(b, ", \"type\": ")
+        ty: string = docty_type(a, fld.ty)
+        push_str(b, ty)
+        free(ty)
+        sb_push_char(b, 125)
+        if i + 1 < len { sb_push_char(b, 44) }
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
+// Appends a `[{name, fields}, ...]` variant list from kids[off, off+len).
+export func push_variants(b: *StringBuilder, level: int64, a: *Ast, off: int64, len: int64) -> void {
+    if len == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    mut i: int64 = 0
+    while i < len {
+        v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, off + i))
+        ind(b, level + 1)
+        sb_push(b, "{\"name\": ")
+        push_str(b, ast_name(a, v.name))
+        sb_push(b, ", \"fields\": ")
+        push_fields(b, level + 1, a, v.fields_off, v.fields_len)
+        sb_push_char(b, 125)
+        if i + 1 < len { sb_push_char(b, 44) }
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}

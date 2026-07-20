@@ -1,0 +1,258 @@
+// doccore: the tag-parsing half of Algorithm D. It takes the normalized lines docnorm
+// produced from a `/**` block and reads a summary, an optional body, `@param` and
+// `@return` tags, and verbatim `@example` blocks out of them, reporting an unknown tag
+// at its real byte position inside the block. Drift against a signature (a `@param`
+// that names no parameter, a `@return` on void) is not decided here; that needs the
+// declaration, so clidoc runs it. This pass sees only the block text.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import diag
+@import docnorm
+
+// One `@param` tag: the parameter it names, its description, and the byte spans a
+// drift diagnostic points a caret at. tag_lo is the `@`; name_lo/name_hi bound the
+// name token, empty when the tag carried no name.
+export struct DocParam {
+    name: string,
+    desc: string,
+    tag_lo: int64,
+    name_lo: int64,
+    name_hi: int64,
+}
+
+// The normalized content of one doc block. summary and body are empty when absent;
+// has_ret distinguishes a `@return` with an empty description from no `@return` at
+// all. errors carries only the block-local faults, an unknown tag; drift faults are
+// appended by the caller that holds the declaration.
+export struct DocInfo {
+    summary: string,
+    body: string,
+    params: *Vector<DocParam>,
+    has_ret: bool,
+    ret: string,
+    ret_lo: int64,
+    ret_hi: int64,
+    examples: *Vector<string>,
+    errors: *Vector<Located>,
+}
+
+func is_letter(b: int64) -> bool {
+    if b >= 97 {
+        if b <= 122 { return true }
+    }
+    if b >= 65 {
+        if b <= 90 { return true }
+    }
+    return false
+}
+
+// The tag word of a line that opens with `@`, the run of letters after it, or the
+// empty string when the line is not a tag.
+func tag_word(text: string) -> string {
+    ts: string = trim_start(text)
+    if ts[0] != 64 {
+        return ""
+    }
+    mut i: int64 = 1
+    while is_letter(ts[i]) {
+        i = i + 1
+    }
+    return substring(ts, 1, i)
+}
+
+func is_known_tag(word: string) -> bool {
+    if str_eq(word, "param") { return true }
+    if str_eq(word, "return") { return true }
+    if str_eq(word, "example") { return true }
+    return false
+}
+
+func line_is_at(text: string) -> bool {
+    ts: string = trim_start(text)
+    return ts[0] == 64
+}
+
+func unknown_tag_msg(word: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "unknown doc tag '@")
+    sb_push(b, word)
+    sb_push(b, "'; a doc comment knows @param, @return, and @example")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Collects the continuation lines of a tag description: everything from index j up to
+// the next line that opens a tag. Returns the stop index and the collected lines.
+func collect_cont(lines: *Vector<DLine>, j: int64) -> (int64, *Vector<string>) {
+    cont: *Vector<string> = alloc(vec_new())
+    mut i: int64 = j
+    mut going: bool = true
+    while going {
+        if i >= vec_len(lines) {
+            going = false
+        } else {
+            dl: DLine = vec_get(lines, i)
+            if line_is_at(dl.text) {
+                going = false
+            } else {
+                vec_push(cont, dl.text)
+                i = i + 1
+            }
+        }
+    }
+    return (i, cont)
+}
+
+// Parses a `@param` tag at line index i: its name token and its description over any
+// continuation lines. Returns the stop index. The name and its byte span feed a later
+// drift check; an absent name records an empty name at the tag position.
+func parse_param(lines: *Vector<DLine>, i: int64, params: *Vector<DocParam>) -> int64 {
+    dl: DLine = vec_get(lines, i)
+    lead: int64 = str_lead_ws(dl.text)
+    abs2: int64 = dl.abs + lead
+    ts: string = trim_start(dl.text)
+    // step over "@param"
+    mut k: int64 = 1
+    while is_letter(ts[k]) { k = k + 1 }
+    while is_ws(ts[k]) { k = k + 1 }
+    name_start: int64 = k
+    while ts[k] != 0 && !is_ws(ts[k]) { k = k + 1 }
+    name: string = substring(ts, name_start, k)
+    name_lo: int64 = abs2 + name_start
+    name_hi: int64 = abs2 + k
+    while is_ws(ts[k]) { k = k + 1 }
+    first_desc: string = substring(ts, k, str_len(ts))
+    ni, cont := collect_cont(lines, i + 1)
+    desc_lines: *Vector<string> = alloc(vec_new())
+    vec_push(desc_lines, first_desc)
+    mut c: int64 = 0
+    while c < vec_len(cont) {
+        vec_push(desc_lines, vec_get(cont, c))
+        c = c + 1
+    }
+    desc: string = join_desc(desc_lines)
+    vec_push(params, DocParam { name: name, desc: desc, tag_lo: abs2, name_lo: name_lo, name_hi: name_hi })
+    return ni
+}
+
+// Parses a `@return` tag at line index i. Returns the stop index and the joined
+// description.
+func parse_return(lines: *Vector<DLine>, i: int64) -> (int64, string) {
+    dl: DLine = vec_get(lines, i)
+    ts: string = trim_start(dl.text)
+    mut k: int64 = 1
+    while is_letter(ts[k]) { k = k + 1 }
+    while is_ws(ts[k]) { k = k + 1 }
+    first_desc: string = substring(ts, k, str_len(ts))
+    ni, cont := collect_cont(lines, i + 1)
+    desc_lines: *Vector<string> = alloc(vec_new())
+    vec_push(desc_lines, first_desc)
+    mut c: int64 = 0
+    while c < vec_len(cont) {
+        vec_push(desc_lines, vec_get(cont, c))
+        c = c + 1
+    }
+    return (ni, join_desc(desc_lines))
+}
+
+// Collects a `@example` block from index i: every following line up to the next
+// known tag is verbatim content, so an unknown `@tag` inside the block is preserved.
+// Returns the stop index and appends the built block when it holds content.
+func parse_example(lines: *Vector<DLine>, i: int64, examples: *Vector<string>) -> int64 {
+    raw: *Vector<string> = alloc(vec_new())
+    mut k: int64 = i + 1
+    mut going: bool = true
+    while going {
+        if k >= vec_len(lines) {
+            going = false
+        } else {
+            dl: DLine = vec_get(lines, k)
+            if line_is_at(dl.text) && is_known_tag(tag_word(dl.text)) {
+                going = false
+            } else {
+                vec_push(raw, dl.text)
+                k = k + 1
+            }
+        }
+    }
+    ex: string = build_example(raw)
+    if str_len(ex) > 0 {
+        vec_push(examples, ex)
+    }
+    return k
+}
+
+// Normalizes and parses one doc block into a DocInfo. The block span [lo, hi) covers
+// the delimiters; only the block text is read, so drift against a signature is left
+// to the caller.
+export func doc_parse(src: string, n: int64, lo: int64, hi: int64) -> DocInfo {
+    lines: *Vector<DLine> = normalize_all(src, n, lo, hi)
+    params: *Vector<DocParam> = alloc(vec_new())
+    examples: *Vector<string> = alloc(vec_new())
+    errors: *Vector<Located> = alloc(vec_new())
+    mut has_ret: bool = false
+    mut ret: string = ""
+    mut ret_lo: int64 = 0
+    mut ret_hi: int64 = 0
+
+    prose: *Vector<string> = alloc(vec_new())
+    mut i: int64 = 0
+    mut in_prose: bool = true
+    while i < vec_len(lines) && in_prose {
+        dl: DLine = vec_get(lines, i)
+        if line_is_at(dl.text) {
+            in_prose = false
+        } else {
+            vec_push(prose, dl.text)
+            i = i + 1
+        }
+    }
+    summary, body := split_prose(prose)
+
+    while i < vec_len(lines) {
+        dl: DLine = vec_get(lines, i)
+        if !line_is_at(dl.text) {
+            i = i + 1
+        } else {
+            word: string = tag_word(dl.text)
+            if str_eq(word, "param") {
+                i = parse_param(lines, i, params)
+            } else if str_eq(word, "return") {
+                lead: int64 = str_lead_ws(dl.text)
+                abs2: int64 = dl.abs + lead
+                ni, desc := parse_return(lines, i)
+                if !has_ret {
+                    has_ret = true
+                    ret = desc
+                    ret_lo = abs2
+                    ret_hi = abs2 + 7
+                }
+                i = ni
+            } else if str_eq(word, "example") {
+                i = parse_example(lines, i, examples)
+            } else {
+                lead: int64 = str_lead_ws(dl.text)
+                abs2: int64 = dl.abs + lead
+                vec_push(errors, located(abs2, abs2 + str_len(word) + 1, unknown_tag_msg(word)))
+                i = i + 1
+            }
+        }
+    }
+
+    return DocInfo {
+        summary: summary,
+        body: body,
+        params: params,
+        has_ret: has_ret,
+        ret: ret,
+        ret_lo: ret_lo,
+        ret_hi: ret_hi,
+        examples: examples,
+        errors: errors,
+    }
+}
