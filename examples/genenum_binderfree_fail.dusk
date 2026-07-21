@@ -1,0 +1,29 @@
+@paradigm procedural
+
+// A generic enum payload binder borrows through a borrowed subject, even when its
+// type stays unresolved at surface. GBox<T> carries a bare T payload, so at the
+// surface pass the binder p has no provably managed type; the ownership rule still
+// classifies it a borrow because the subject `*b` derefs a borrowed parameter, and
+// the free guard no longer waives the check on an unprovable type. Freeing p is
+// refused with the borrowed-pointer message, closing the generic spelling of the
+// hole a concrete payload already rejected.
+enum GBox<T> {
+    Nil,
+    Hold(p: T),
+}
+
+func drop_it(b: *GBox<*int64>) -> void {
+    match *b {
+        Nil => {}
+        Hold(p) => { free(p) }
+    }
+}
+
+func main() -> int32 {
+    x: *int64 = alloc(41)
+    b: *GBox<*int64> = alloc(GBox.Hold(x))
+    drop_it(b)
+    println(*x)
+    free(b)
+    return 0
+}

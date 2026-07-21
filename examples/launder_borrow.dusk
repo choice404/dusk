@@ -1,0 +1,24 @@
+// Take asserts ownership; it does not verify provenance (design I3). Pushing a
+// borrowed pointer into a container and taking it back out forges an owner with no
+// claim to the block: q below is laundered into an owner even though p is the real
+// owner. The checker accepts this, because the single-owner discipline does not flow
+// through containers, so freeing q frees p's block. That is a leak-class misuse, not a
+// silent corruption: D24's generation backstop turns p's later deref of the now-freed
+// block into a named fault instead of a stale read. The abort is the proof the block
+// was reclaimed out from under p.
+@paradigm procedural
+@import std.vector
+
+func main() -> int32 {
+    p: *int64 = alloc(42)
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, p)                 // a borrow of p copied into the container
+    q: *int64 = vec_take(v, 0)     // take forges an owner; q aliases p's block
+    println(*q)
+    free(q)                        // frees p's block through the laundered owner
+    println(*p)                    // fault: p now names a freed block
+    vec_free(v)
+    free(v)
+    free(p)
+    return 0
+}

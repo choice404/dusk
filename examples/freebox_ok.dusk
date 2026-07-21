@@ -1,0 +1,19 @@
+@paradigm procedural
+
+// boxptr boxes a pointer into a fresh heap cell. The box is genuinely the caller's
+// to free, but the checker's summary only records that the result reaches the
+// argument, so the direct spelling free(boxptr(n)) is refused conservatively (its
+// twin pins that). Binding the result first names the owner through the concrete
+// return type, and free of the binding is legal; this golden pins that workaround.
+func boxptr(p: *int64) -> **int64 {
+    return alloc(p)
+}
+
+func main() -> int32 {
+    n: *int64 = alloc(7)
+    bp: **int64 = boxptr(n)
+    println(**bp)
+    free(bp)
+    free(n)
+    return 0
+}

@@ -1,0 +1,25 @@
+@paradigm procedural
+@import std.vector
+
+// Take asserts ownership; it does not verify provenance. Pushing the same node into
+// two vectors and taking it out of both forges two owners of one block. The static
+// single-owner discipline does not flow through containers, so the checker accepts
+// this; D24's generation backstop carries the misuse to a named fault. The second
+// free of the shared node faults instead of corrupting silently.
+func main() -> int32 {
+    node: *int64 = alloc(7)
+    a: *Vector<*int64> = alloc(vec_new())
+    b: *Vector<*int64> = alloc(vec_new())
+    vec_push(a, node)
+    vec_push(b, node)
+    x: *int64 = vec_take(a, 0)
+    y: *int64 = vec_take(b, 0)
+    println(*x)
+    free(x)
+    free(y)
+    vec_free(a)
+    free(a)
+    vec_free(b)
+    free(b)
+    return 0
+}

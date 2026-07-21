@@ -1,0 +1,20 @@
+@paradigm procedural
+@import std.vector
+
+// The container-read rule reads the callee's computed summary, not a name whitelist:
+// grab reads an element back out of the vector it is handed, so its summary names the
+// argument as read through and free of grab's result is refused. A function that
+// merely wraps a container read cannot launder the element into a false owner, no
+// matter what it is called; vec_take is the removal that forges a real owner.
+func grab(v: *Vector<*int64>) -> *int64 {
+    return vec_get(v, 0)
+}
+
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, alloc(10))
+    free(grab(v))
+    vec_free(v)
+    free(v)
+    return 0
+}

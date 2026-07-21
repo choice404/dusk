@@ -1,0 +1,27 @@
+@paradigm procedural
+@import std.vector
+
+// A managed payload binder under an owned subject is an owner, so copying it into a
+// second binding is refused with the copy-of-an-owner message, exactly as copying any
+// owner is. The raw binder p and its rebind q answer to one ownership judgment: p owns
+// the payload, and q := p would forge a silent second owner, so it is rejected. Bind a
+// `ref` alias or `move` p instead.
+enum Tree {
+    Leaf,
+    Node(payload: *Vector<int64>),
+}
+
+func main() -> int32 {
+    inner: *Vector<int64> = alloc(vec_new())
+    t: *Tree = alloc(Tree.Node(inner))
+    match *t {
+        Leaf => {}
+        Node(p) => {
+            q: *Vector<int64> = p
+            vec_free(q)
+            free(q)
+        }
+    }
+    free(t)
+    return 0
+}

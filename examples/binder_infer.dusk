@@ -1,0 +1,41 @@
+@paradigm procedural
+@import std.vector
+
+// A binder inside a match arm now carries its true payload type, so the generic
+// container reads (vec_len, vec_get) infer directly with no annotation rebind.
+// Before typed binders, xs arrived as an unknown type and vec_len(xs) failed
+// with "cannot infer the type parameter 'T'"; the workaround was an annotated
+// copy, xs2: *Vector<int64> = xs. Typed binders retire that workaround.
+enum Bag {
+    Empty,
+    Items(xs: *Vector<int64>),
+}
+
+func total(b: Bag) -> int64 {
+    match b {
+        Empty => { return 0 }
+        Items(xs) => {
+            mut sum: int64 = 0
+            mut i: int64 = 0
+            while i < vec_len(xs) {
+                sum = sum + vec_get(xs, i)
+                i = i + 1
+            }
+            return sum
+        }
+    }
+}
+
+func main() -> int32 {
+    v: *Vector<int64> = alloc(vec_new())
+    vec_push(v, 3)
+    vec_push(v, 4)
+    vec_push(v, 5)
+    b: Bag = Bag.Items(v)
+    println(total(b))
+    e: Bag = Bag.Empty
+    println(total(e))
+    vec_free(v)
+    free(v)
+    return 0
+}

@@ -1,0 +1,29 @@
+@paradigm procedural
+@import std.vector
+
+// Under an owned deref subject, a managed payload binder is the owner of what it
+// binds. t owns its Node block, so `match *t` deref of an owned identifier makes the
+// binder p the owner of the payload vector, and freeing p is legal. The deep free of
+// the tree, the payload vector then the node, checks and runs.
+enum Tree {
+    Leaf,
+    Node(payload: *Vector<int64>),
+}
+
+func main() -> int32 {
+    inner: *Vector<int64> = alloc(vec_new())
+    vec_push(inner, 10)
+    vec_push(inner, 20)
+    t: *Tree = alloc(Tree.Node(inner))
+    match *t {
+        Leaf => {}
+        Node(p) => {
+            println(vec_len(p))
+            vec_free(p)
+            free(p)
+        }
+    }
+    free(t)
+    println(0)
+    return 0
+}

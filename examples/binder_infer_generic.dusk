@@ -1,0 +1,38 @@
+@paradigm procedural
+@import std.vector
+
+// The typed-binder inference reaches generic enums too: a Box<int64> match
+// binds xs at *Vector<int64> with no annotation rebind, so vec_len and vec_get
+// infer directly. The concrete element rides in from the enum's type argument,
+// resolved once the enum is monomorphized, so the same drain reads that a raw
+// binder once stalled on now type-check straight through.
+enum Box<T> {
+    Nil,
+    Hold(xs: *Vector<T>),
+}
+
+func total(b: Box<int64>) -> int64 {
+    match b {
+        Nil => { return 0 }
+        Hold(xs) => {
+            mut sum: int64 = 0
+            mut i: int64 = 0
+            while i < vec_len(xs) {
+                sum = sum + vec_get(xs, i)
+                i = i + 1
+            }
+            return sum
+        }
+    }
+}
+
+func main() -> int32 {
+    v: *Vector<int64> = alloc(vec_new())
+    vec_push(v, 7)
+    vec_push(v, 8)
+    println(total(Box.Hold(v)))
+    println(total(Box.Nil))
+    vec_free(v)
+    free(v)
+    return 0
+}

@@ -1,0 +1,36 @@
+@paradigm procedural
+@import std.map
+@import std.vector
+@import std.functional.maybe
+
+// map_take removes an entry and returns its value. After taking "b" the map no
+// longer holds "b", its length drops by one, and the survivors keep their insertion
+// order. Reinserting the taken key appends it again, so the map stays usable.
+func main() -> int32 {
+    m: *Map<string, int64> = alloc(map_new())
+    map_put(m, "a", 1)
+    map_put(m, "b", 2)
+    map_put(m, "c", 3)
+
+    v: int64 = map_take(m, "b")
+    println(v)
+    if !map_has(m, "b") { println("no_b") }
+    println(map_len(m))
+
+    ks: *Vector<string> = map_keys(m)
+    mut i: int64 = 0
+    while i < vec_len(ks) {
+        println(vec_get(ks, i))
+        i = i + 1
+    }
+    vec_free(ks)
+    free(ks)
+
+    map_put(m, "b", 22)
+    if map_has(m, "b") { println("has_b") }
+    println(unwrap_or(map_get(m, "b"), -1))
+
+    map_free(m)
+    free(m)
+    return 0
+}

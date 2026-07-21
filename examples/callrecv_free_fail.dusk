@@ -1,0 +1,31 @@
+@paradigm oop
+@import std.vector
+
+// A container read reached through a method whose receiver is itself a call result
+// is refused the same as a receiver named through a place. mk returns a fresh *Box,
+// and get returns an element read out of that box's vector, so free(mk().get(0))
+// would free a live element the box still holds. receiver_type_name walks a place
+// chain and cannot ground a call node, so the receiver type falls back to the call's
+// return type; get's summary then reports the read-back and the free is caught. A
+// method reached by interface dynamic dispatch, with no static summary, stays
+// accepted.
+struct Box {
+    items: *Vector<*int64>,
+}
+
+impl Box {
+    func get(i: int64) -> *int64 {
+        return vec_get(self.items, i)
+    }
+}
+
+func mk() -> *Box {
+    items: *Vector<*int64> = alloc(vec_new())
+    vec_push(items, alloc(10))
+    return alloc(Box { items: items })
+}
+
+func main() -> int32 {
+    free(mk().get(0))
+    return 0
+}

@@ -1,0 +1,18 @@
+@paradigm procedural
+@import std.vector
+
+// This bind's borrow verdict is an artifact of unsubstituted generics, not a guarantee
+// the summary makes. The surface pass leaves vec_get's generic return unsubstituted, so
+// the inferred value type is not a managed pointer, and the ownership classifier falls
+// into its borrow case (the same hole-B path as an unannotated bind). Freeing q then hits
+// the existing borrowed-pointer message. This golden pins that W2's container-read rule
+// did not loosen that message; the general owning removal is vec_take.
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, alloc(10))
+    q: *int64 = vec_get(v, 0)
+    free(q)
+    vec_free(v)
+    free(v)
+    return 0
+}

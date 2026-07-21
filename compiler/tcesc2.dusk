@@ -346,6 +346,81 @@ func has_method_summary(tc: *TypeChecker, callee_id: int64) -> bool {
     return map_has(ms, method_key(tname, ast_name(a, callee.b)))
 }
 
+// The read-back relation of a method call's target for the free/move guard.
+// has_summary is true and reads_through carries the summary's read-back mask when
+// the receiver type resolves and a method summary is recorded for that type and
+// method name; has_summary is false for a non-field callee, an unresolved receiver,
+// or a method reached by interface dynamic dispatch (no static summary exists), whose
+// argument-to-result relation is unknown and stays accepted. This closes the method
+// spelling of hole A without touching tc_callee_esc, whose opaque polarity other
+// escape consumers depend on: a method that reads an element back out of its receiver
+// (a getter returning self.items[i]) reports reads_through != 0, one voice with the
+// direct vec_get spelling, while a method that mints a fresh value reports zero.
+export struct MethodEsc { has_summary: bool, reads_through: int64 }
+
+// The result type of a direct top-level call, resolved from the callee's recorded
+// signature without re-inferring the call (a second infer_expr over the receiver
+// would double any diagnostic its argument list carries). Only a bare top-level
+// function callee resolves; a closure value, a method field, or an unknown callee
+// stays unknown, so the receiver's type-name resolver keeps its accepting default
+// for a shape it cannot ground.
+func call_result_ty(tc: *TypeChecker, call_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, call_id)
+    if e.kind != xk_call() { return ty_unknown((*tc).ty) }
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind != xk_ident() { return ty_unknown((*tc).ty) }
+    name: string = ast_name(a, callee.a)
+    if is_local(tc, name) { return ty_unknown((*tc).ty) }
+    if !sig_has_fn((*tc).sigtab, name) { return ty_unknown((*tc).ty) }
+    ft: int64 = lookup(tc, name)
+    fn: TyNode = ty_get((*tc).ty, ft)
+    if fn.kind != tyk_func() { return ty_unknown((*tc).ty) }
+    return fn.a
+}
+
+// The named type a method receiver base carries, falling back past receiver_type_name
+// when the base is a call result. receiver_type_name walks a place chain (idents,
+// fields, indexes, dereferences) and returns "" for a call node, which has no place
+// to walk; a getter freed off a fresh call result (free(mk().get(i))) then lost its
+// receiver type and slipped the read-back guard. Here the call result's return type
+// grounds the receiver: it peels pointers to the underlying named type, a struct
+// whose method summary owns the report or an interface whose dynamic dispatch has no
+// static summary and rightly stays accepted.
+func recv_type_name_deep(tc: *TypeChecker, base_id: int64) -> string {
+    direct: string = receiver_type_name(tc, base_id)
+    if str_len(direct) != 0 { return direct }
+    a: *Ast = (*tc).ast
+    base: ExprNode = vec_get((*a).exprs, base_id)
+    if base.kind != xk_call() { return "" }
+    mut t: int64 = call_result_ty(tc, base_id)
+    mut going: bool = true
+    while going {
+        n: TyNode = ty_get((*tc).ty, t)
+        if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+            t = n.a
+        } else if n.kind == tyk_named() {
+            return ty_name((*tc).ty, t)
+        } else {
+            going = false
+        }
+    }
+    return ""
+}
+
+export func method_call_esc(tc: *TypeChecker, callee_id: int64) -> MethodEsc {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() { return MethodEsc { has_summary: false, reads_through: 0 } }
+    tname: string = recv_type_name_deep(tc, callee.a)
+    if str_len(tname) == 0 { return MethodEsc { has_summary: false, reads_through: 0 } }
+    ms: *Map<string, SummaryHandle> = (*tc).method_summaries
+    key: string = method_key(tname, ast_name(a, callee.b))
+    if !map_has(ms, key) { return MethodEsc { has_summary: false, reads_through: 0 } }
+    sum: SummaryHandle = unwrap_or(map_get(ms, key), empty_summary())
+    return MethodEsc { has_summary: true, reads_through: sum.reads_through }
+}
+
 // A synchronous error handler (e.check(h), e.ignore()) invokes its function
 // argument in place and never stores it, so it is not opaque.
 func callee_is_sync_handler(tc: *TypeChecker, callee_id: int64) -> bool {

@@ -1,0 +1,23 @@
+// The opaque-callee residual backstop. A named function that wraps a container read is
+// rejected at the free, because the checker reads its computed summary and sees the
+// argument read back through the result (see useralloc_launder_fail). A lambda has no
+// visible summary: a call through a closure variable is opaque, and the free-of-a-call
+// rule deliberately stays lenient on opaque callees rather than reject every indirect
+// call. So free(f(v, 0)) below passes the checker even though f only re-reads the
+// container element, laundering a borrow into a false owner. This is the residual the
+// design records: opaque leniency, runtime backstopped, not silent. After the stray
+// free frees the element's block, reading the element back out of the container and
+// dereferencing it faults named. The abort is the proof the block was reclaimed.
+@paradigm procedural
+@import std.vector
+
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, alloc(9))
+    f := lambda (vv: *Vector<*int64>, i: int64) -> *int64 { return vec_get(vv, i) }
+    println(*f(v, 0))              // reads 9, still live
+    free(f(v, 0))                  // ACCEPTED: opaque closure callee, summary invisible
+    r: *int64 = vec_get(v, 0)      // the container still holds the freed pointer
+    println(*r)                    // fault: stale read of the freed block
+    return 0
+}

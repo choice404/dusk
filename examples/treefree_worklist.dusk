@@ -1,0 +1,66 @@
+// A hand written deep free of a user tree through the worklist idiom, the general
+// shape Algorithm F specializes for json. A Tree is a Leaf or a Node holding a
+// vector of child pointers; the free pushes the root onto a work list, then repeatedly
+// takes a node out of the list with vec_take (which forges the owner the free needs),
+// pushes that node's children by draining its child vector with vec_take, frees the
+// node's backing buffer and the node itself, and stops when the list empties. Every
+// node is taken exactly once, so the count printed is the whole tree, and the program
+// exits clean: a hand written tree free is expressible and sound through take.
+@paradigm procedural
+@import std.vector
+
+enum Tree {
+    Leaf,
+    Node(kids: *Vector<*Tree>),
+}
+
+func leaf() -> *Tree {
+    return alloc(Tree.Leaf)
+}
+
+func node(kids: *Vector<*Tree>) -> *Tree {
+    return alloc(Tree.Node(kids))
+}
+
+func main() -> int32 {
+    // Build root -> [ a -> [leaf, leaf], leaf, b -> [leaf] ]: three internal nodes
+    // and four leaves, seven Tree blocks in all.
+    a_kids: *Vector<*Tree> = alloc(vec_new())
+    vec_push(a_kids, leaf())
+    vec_push(a_kids, leaf())
+    a: *Tree = node(a_kids)
+
+    b_kids: *Vector<*Tree> = alloc(vec_new())
+    vec_push(b_kids, leaf())
+    b: *Tree = node(b_kids)
+
+    root_kids: *Vector<*Tree> = alloc(vec_new())
+    vec_push(root_kids, a)
+    vec_push(root_kids, leaf())
+    vec_push(root_kids, b)
+    root: *Tree = node(root_kids)
+
+    // Deep free through the worklist, counting every node the take drains.
+    work: *Vector<*Tree> = alloc(vec_new())
+    vec_push(work, root)
+    mut count: int64 = 0
+    while vec_len(work) > 0 {
+        t: *Tree = vec_take(work, vec_len(work) - 1)
+        count = count + 1
+        match *t {
+            Leaf => {}
+            Node(kids) => {
+                while vec_len(kids) > 0 {
+                    vec_push(work, vec_take(kids, vec_len(kids) - 1))
+                }
+                vec_free(kids)
+                free(kids)
+            }
+        }
+        free(t)
+    }
+    vec_free(work)
+    free(work)
+    println(count)
+    return 0
+}

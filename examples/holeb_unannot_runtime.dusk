@@ -1,0 +1,24 @@
+// Hole B, the documented residual (design R6). An unannotated bind of a generic
+// returning call leaves the element type unsubstituted on the surface pass, so
+// vec_get's result gets no ownership entry and the free of q below passes the checker
+// even though q is a borrow of a container element, not an owner. Closing this needs
+// surface substitution of generic returns, which the two-pass architecture defers to
+// the ground pass, where ownership never runs; so the slip stays a documented residual
+// rather than a silent corruption. The proof it is backstopped, not silent: after the
+// stray free, the container still holds the freed pointer, and reading it back and
+// dereferencing it faults named. Annotating the bind (`q: *int64 = vec_get(v, 0)`)
+// would make the checker reject the free instead; the residual is exactly the
+// unannotated spelling.
+@paradigm procedural
+@import std.vector
+
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, alloc(5))
+    q := vec_get(v, 0)             // unannotated: surface leaves the return type open
+    println(*q)                    // reads 5, still live
+    free(q)                        // ACCEPTED (hole B): q had no ownership entry
+    r: *int64 = vec_get(v, 0)      // the container still holds the freed pointer
+    println(*r)                    // fault: stale read of the freed block
+    return 0
+}

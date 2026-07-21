@@ -65,17 +65,124 @@ func match_not_enum_msg(rendered: string) -> string {
     return out
 }
 
-export func bind_match_arm(tc: *TypeChecker, pat_id: int64) -> void {
+// Resolve the payload types for a variant pattern from the scrutinee type.
+// The scrutinee's enum must be a concrete named type present in the enums map
+// (always true post-mono at ground, true at surface for non-generic enums; a
+// surface generic enum carries no args at ty.dusk name comparison, so it stays
+// unresolved and every binder falls back to ty_unknown). An arity mismatch
+// keeps the untyped shape too, so today's ctor/coverage diagnostics still own
+// the report; here we never index past the recorded payload list.
+func match_binder_sig(tc: *TypeChecker, st: int64, vname: string, arity: int64) -> VariantSig {
+    n: TyNode = ty_get((*tc).ty, st)
+    if n.kind != tyk_named() { return empty_variant_sig() }
+    ename: string = ty_name((*tc).ty, st)
+    enums: *Map<string, EnumSig> = (*tc).enums
+    if !map_has(enums, ename) { return empty_variant_sig() }
+    vs: VariantSig = sig_variant_for_enum((*tc).sigtab, ename, vname)
+    if vs.len != arity { return empty_variant_sig() }
+    return vs
+}
+
+func pattern_arity_msg(v: string, got: int64, want: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "variant pattern '")
+    sb_push(b, v)
+    sb_push(b, "' binds ")
+    sb_push_int(b, got)
+    sb_push(b, " of ")
+    sb_push_int(b, want)
+    sb_push(b, " payload field(s)")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// A variant pattern binds every payload field of its variant, positionally. A
+// pattern that binds too few fields left a live field unnamed and used to slip
+// through; one that binds too many died later in codegen as an unsupported
+// identifier expression. Both are caught here, in the same voice as the ctor
+// arity check and under the same ungated convention (the surface pass owns the
+// non-generic report; a generic enum stays unresolved at surface and its ground
+// copy owns the report post-mono), so the count mismatch reads as a real
+// diagnostic. Only a resolved enum whose named variant exists is checked; an
+// unknown scrutinee, a non-enum, or an unknown variant keeps its own report.
+func check_pattern_arity(tc: *TypeChecker, p: PatternNode, st: int64, lo: int64, hi: int64) -> void {
+    if p.kind != pk_variant() { return }
+    n: TyNode = ty_get((*tc).ty, st)
+    if n.kind != tyk_named() { return }
+    ename: string = ty_name((*tc).ty, st)
+    enums: *Map<string, EnumSig> = (*tc).enums
+    if !map_has(enums, ename) { return }
+    a: *Ast = (*tc).ast
+    vname: string = ast_name(a, p.a)
+    es: EnumSig = unwrap_or(map_get(enums, ename), EnumSig { off: 0, len: 0 })
+    if !variant_in_enum(tc, es, vname) { return }
+    vs: VariantSig = sig_variant_for_enum((*tc).sigtab, ename, vname)
+    if p.c != vs.len {
+        tc_emit(tc, pattern_arity_msg(vname, p.c, vs.len), lo, hi)
+    }
+}
+
+// The ownership a managed payload binder inherits from the match subject (M2). A
+// binder owns its payload pointer exactly when the subject is a dereference of an
+// owned identifier (`match *t` where t owns), because the arm then names the fields
+// of a block the caller may free; every other subject (a borrowed pointer, a field
+// or call projection, a by-value scrutinee) yields a borrow, so a raw payload binder
+// and its annotated alias reject free with one voice. Kept intentionally narrow: the
+// deref-of-owned-ident shape is the only place single ownership is provable through
+// a match, and D24's generation backstop faults every misuse the static rule misses.
+func match_subject_own(tc: *TypeChecker, subject_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, subject_id)
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        inner: ExprNode = vec_get((*a).exprs, e.b)
+        if inner.kind == xk_ident() {
+            if own_of(tc, ast_name(a, inner.a)) == own_owner() { return own_owner() }
+        }
+    }
+    return own_borrow()
+}
+
+// bind_match_arm declares an arm's pattern binders. M1 gives them their true
+// types: a variant binder j takes payload type j when the scrutinee enum
+// resolves and the arity matches, else ty_unknown (an empty sig makes sig_ty_at
+// return ty_unknown for every index); an ident binder takes the scrutinee type
+// st itself (a whole-value catch-all, or a nullary variant value, both of which
+// carry the enum type). M2 then classifies ownership of each payload binder from
+// the subject (surface pass only), asymmetrically so a generic payload whose type
+// stays unresolved at surface (a bare T binder carries ty_unknown, unprovably
+// managed) still reports its borrow: under a borrowed subject every binder borrows,
+// regardless of whether its type proves managed, so free/move of a borrowed
+// generic payload rejects with one voice; under an owned deref subject only a
+// provably managed binder owns, because a non-managed binder wrongly marked owner
+// would false-reject its own copy as a copy of an owning pointer. subject_id is
+// the scrutinee expr id.
+export func bind_match_arm(tc: *TypeChecker, pat_id: int64, st: int64, subject_id: int64) -> void {
     a: *Ast = (*tc).ast
     p: PatternNode = vec_get((*a).patterns, pat_id)
     if p.kind == pk_variant() {
+        subj: ExprNode = vec_get((*a).exprs, subject_id)
+        check_pattern_arity(tc, p, st, subj.lo, subj.hi)
+        vs: VariantSig = match_binder_sig(tc, st, ast_name(a, p.a), p.c)
+        mut subj_own: int64 = own_borrow()
+        if !(*tc).types_only { subj_own = match_subject_own(tc, subject_id) }
         mut i: int64 = 0
         while i < p.c {
-            declare(tc, ast_name(a, vec_get((*a).kids, p.b + i)), ty_unknown((*tc).ty))
+            bname: string = ast_name(a, vec_get((*a).kids, p.b + i))
+            bty: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
+            declare(tc, bname, bty)
+            if !(*tc).types_only {
+                if subj_own == own_owner() {
+                    if is_managed_ty(tc, bty) { declare_own(tc, bname, own_owner()) }
+                } else {
+                    declare_own(tc, bname, own_borrow())
+                }
+            }
             i = i + 1
         }
     } else if p.kind == pk_ident() {
-        declare(tc, ast_name(a, p.a), ty_unknown((*tc).ty))
+        declare(tc, ast_name(a, p.a), st)
     }
 }
 

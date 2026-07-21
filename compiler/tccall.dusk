@@ -15,6 +15,7 @@
 @import tciface
 @import tcown
 @import tcesc
+@import tcesc2
 
 func call_msg_count(want: int64, got: int64) -> string {
     b: *StringBuilder = alloc(sb_new())
@@ -829,6 +830,45 @@ func check_callback_arg(tc: *TypeChecker, cbty: int64, av: int64, arg_id: int64,
     tc_emit(tc, callback_form_msg(argno), arg.lo, arg.hi)
 }
 
+// Whether free or move of a call result must be refused because the call hands back
+// a value a container still holds. Only a read-back through an argument condemns the
+// result: reads_through names a parameter whose storage the result was read out of
+// (vec_get returning data[i]), so the value still lives inside the container and
+// freeing it double frees a live element. A result that carries an argument itself
+// (returns_alias, without a read-back) is the caller's own value or a runtime
+// backstopped forgery: move hands its argument straight back, alloc boxes a pointer
+// into a fresh cell, a passthrough returns what it was given; none of these leaves a
+// live element behind, so returns_alias never condemns and no builtin whitelist is
+// needed. An owning intrinsic (vec_take, map_take) is exempt outright. A method
+// callee is judged by the resolved receiver type's computed summary; with no static
+// summary (interface dynamic dispatch, an unknown receiver) it stays accepted. An
+// opaque plain callee and a callee that reads nothing back stay accepted, so free of
+// a fresh-pointer-returning call, direct or through a method, stays legal.
+func free_call_arg_aliases(tc: *TypeChecker, e: ExprNode) -> bool {
+    if is_owning_take_call(tc, e) { return false }
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind == xk_field() {
+        me: MethodEsc = method_call_esc(tc, e.a)
+        if !me.has_summary { return false }
+        return me.reads_through != 0
+    }
+    ce: CalleeEsc = tc_callee_esc(tc, e.a)
+    if ce.opaque { return false }
+    return ce.sum.reads_through != 0
+}
+
+func alias_result_msg(verb: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot ")
+    sb_push(b, verb)
+    sb_push(b, " a call result that may alias its arguments; vec_take or map_take removes an element as its owner")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> int64 {
     a: *Ast = (*tc).ast
     f: ExprNode = vec_get((*a).exprs, callee_id)
@@ -1071,6 +1111,10 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                             tc_emit(tc, "cannot move a borrowed pointer; only its owner can be moved", arg0.lo, arg0.hi)
                         }
                         set_moved(tc, src)
+                    } else if arg0.kind == xk_call() {
+                        if !(*tc).types_only && free_call_arg_aliases(tc, arg0) {
+                            tc_emit(tc, alias_result_msg("move"), arg0.lo, arg0.hi)
+                        }
                     }
                     return mt
                 }
@@ -1083,10 +1127,18 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                     farg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, arg_off))
                     if fnode.kind == tyk_collector() {
                         tc_emit(tc, "a collected value is not freed; the collector reclaims it", farg.lo, farg.hi)
-                    } else if is_managed_ty(tc, ft) && farg.kind == xk_ident() {
+                    } else if farg.kind == xk_ident() {
+                        // No is_managed_ty gate: a generic payload binder freed
+                        // through a borrowed match subject carries a type that
+                        // stays unresolved (unprovably managed) at surface, yet
+                        // its borrow classification is recorded and must reject.
                         pname: string = ast_name(a, farg.a)
                         if !(*tc).types_only && own_of(tc, pname) == own_borrow() {
                             tc_emit(tc, "cannot free a borrowed pointer; only its owner frees it", farg.lo, farg.hi)
+                        }
+                    } else if farg.kind == xk_call() {
+                        if !(*tc).types_only && free_call_arg_aliases(tc, farg) {
+                            tc_emit(tc, alias_result_msg("free"), farg.lo, farg.hi)
                         }
                     }
                 }

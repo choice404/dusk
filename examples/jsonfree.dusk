@@ -1,0 +1,98 @@
+// The 1.8.0 acceptance: a hand written deep free of a heap json tree, Algorithm F
+// from the design verbatim, then a probe that proves the tree actually retired.
+//
+// json_parse builds a fully heap tree (object over an array over strings, numbers,
+// booleans, and null), json_emit prints it, and json_drop walks the tree with a
+// worklist, taking each node out of its container with vec_take/map_take so the
+// taken pointer is the caller's owner to free. Pushing the root into the work list
+// borrows it; the take below forges the owner (take asserts ownership, it does not
+// verify provenance), which is exactly what a hand written tree free needs and what
+// the recursive spelling cannot express, since a parameter borrows.
+//
+// After the drop, every block in the tree is on the free list with a bumped
+// generation. The guarded probe reads the root's kind through json_kind, whose
+// `match *j` derefs the freed root, and the generation backstop turns that stale
+// read into a named fault: `use of a freed or stale pointer at examples/jsonfree.dusk`.
+// The fault is the proof (design R7): the golden pins reclamation through the fault,
+// not through allocator counters, because the collector path is what took the tree.
+//
+// The local free is named json_drop, not json_free, on purpose: 1.8.1 ships a
+// std.json json_free with this exact body, root files are not privatize renamed, and
+// two json_free definitions in the merged module would collide.
+@paradigm procedural
+
+@import std.json
+@import std.string
+@import std.vector
+@import std.map
+
+// The worklist deep free. Contract: root is a fully heap tree (every json_parse
+// result is), and json_drop consumes it: every node, string payload, object key,
+// and backing buffer is freed, and no pointer into the tree is valid afterward.
+func json_drop(root: *Json) -> void {
+    work: *Vector<*Json> = alloc(vec_new())
+    vec_push(work, root)
+    while vec_len(work) > 0 {
+        t: *Json = vec_take(work, vec_len(work) - 1)
+        match *t {
+            JNull => {}
+            JBool(b) => {}
+            JNum(n) => {}
+            JStr(s) => free(s),
+            JArr(items) => {
+                while vec_len(items) > 0 {
+                    vec_push(work, vec_take(items, vec_len(items) - 1))
+                }
+                vec_free(items)
+                free(items)
+            }
+            JObj(fields) => {
+                keys: *Vector<string> = map_keys(fields)
+                while vec_len(keys) > 0 {
+                    k: string = vec_take(keys, vec_len(keys) - 1)
+                    vec_push(work, map_take(fields, k))
+                    free(k)
+                }
+                vec_free(keys)
+                free(keys)
+                map_free(fields)
+                free(fields)
+            }
+        }
+        free(t)
+    }
+    vec_free(work)
+    free(work)
+}
+
+// Read the root's tag. Used only by the post-free probe: after json_drop the root
+// block is freed, so this deref faults named rather than reading stale bytes.
+func json_kind(j: *Json) -> int64 {
+    match *j {
+        JNull => { return 0 }
+        JBool(b) => { return 1 }
+        JNum(n) => { return 2 }
+        JStr(s) => { return 3 }
+        JArr(items) => { return 4 }
+        JObj(fields) => { return 5 }
+    }
+    return -1
+}
+
+func main() -> int32 {
+    doc: string = "{ \"n\": null, \"b\": true, \"i\": 42, \"s\": \"hi\", \"a\": [1, \"two\", null, { \"deep\": false }] }"
+    v, e := json_parse(doc)
+    if e.exists() {
+        println("parse error:")
+        println(e.message)
+        return 1
+    }
+    out: string = json_emit(v)
+    println(out)
+    free(out)
+    json_drop(v)
+    // The tree is gone. This deref of the freed root faults named; the abort here,
+    // not a clean exit, is the proof json_drop reclaimed the blocks.
+    println(json_kind(v))
+    return 0
+}

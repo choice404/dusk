@@ -1,0 +1,34 @@
+@paradigm procedural
+@import std.vector
+
+// Matching the same owned node twice binds an owner to the same payload in both arms.
+// The static rule accepts each free in isolation, because each is a legal owner free
+// of the block the subject owns; but the block is one, so the second free is a double
+// free. D24's generation backstop carries it to a named fault rather than silent
+// corruption. The proof the checker permits an owned-subject binder free is that the
+// program builds and runs; the proof of the misuse is the fault.
+enum Tree {
+    Leaf,
+    Node(payload: *Vector<int64>),
+}
+
+func main() -> int32 {
+    inner: *Vector<int64> = alloc(vec_new())
+    vec_push(inner, 7)
+    t: *Tree = alloc(Tree.Node(inner))
+    match *t {
+        Leaf => {}
+        Node(p) => {
+            println(vec_len(p))
+            free(p)
+        }
+    }
+    match *t {
+        Leaf => {}
+        Node(p) => {
+            free(p)
+        }
+    }
+    free(t)
+    return 0
+}

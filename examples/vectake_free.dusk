@@ -1,0 +1,23 @@
+@paradigm procedural
+@import std.vector
+
+// A taken managed element is the caller's to free. vec_take blesses its result as an
+// owner, so both a direct free of the take and a free of an annotated owner binding
+// are legal, and the vector keeps working after each removal.
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, alloc(10))
+    vec_push(v, alloc(20))
+    vec_push(v, alloc(30))
+    free(vec_take(v, 0))
+    println(vec_len(v))
+    t: *int64 = vec_take(v, 0)
+    println(*t)
+    free(t)
+    s: *int64 = vec_take(v, 0)
+    println(*s)
+    free(s)
+    vec_free(v)
+    free(v)
+    return 0
+}

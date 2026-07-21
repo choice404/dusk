@@ -70,6 +70,31 @@ export func vec_pop<T>(v: *Vector<T>) -> void {
     }
 }
 
+// Removes the element at index i and hands it back to the caller as its own value.
+// Bounds checked exactly as vec_get: a negative index and one at or past the length
+// both fault through vec_bounds_fault. The survivors keep their order, so every
+// element after i shifts down one slot, a plain copy loop with no memmove; taking
+// the last index shifts nothing. The returned value is the same fat pointer the
+// vector held, so a managed element's owner is now the caller, free it when done.
+// Iterating forward over a vector being taken from skips the shifted successor;
+// drain from the back with `while vec_len(v) > 0 { vec_take(v, vec_len(v) - 1) }`.
+export func vec_take<T>(v: *Vector<T>, i: int64) -> T {
+    if i < 0 {
+        vec_bounds_fault()
+    }
+    if i >= (*v).len {
+        vec_bounds_fault()
+    }
+    out: T = (*v).data[i]
+    mut j: int64 = i
+    while j + 1 < (*v).len {
+        (*v).data[j] = (*v).data[j + 1]
+        j = j + 1
+    }
+    (*v).len = (*v).len - 1
+    return out
+}
+
 export func vec_len<T>(v: *Vector<T>) -> int64 {
     return (*v).len
 }

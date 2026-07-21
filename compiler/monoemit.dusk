@@ -36,6 +36,7 @@ export struct Mono {
     gfuncs: *Map<string, int64>,
     gstructs: *Map<string, int64>,
     genums: *Map<string, int64>,
+    nenums: *Map<string, int64>,
     ifaces: *Map<string, int64>,
     nfuncs: *Map<string, int64>,
     requested: *Map<string, int64>,
@@ -54,6 +55,7 @@ export func mono_new(a: *Ast, tyarena: *TyArena, muts: *Map<string, MutTupleEntr
     gfuncs: *Map<string, int64> = alloc(map_new())
     gstructs: *Map<string, int64> = alloc(map_new())
     genums: *Map<string, int64> = alloc(map_new())
+    nenums: *Map<string, int64> = alloc(map_new())
     ifaces: *Map<string, int64> = alloc(map_new())
     nfuncs: *Map<string, int64> = alloc(map_new())
     requested: *Map<string, int64> = alloc(map_new())
@@ -81,6 +83,8 @@ export func mono_new(a: *Ast, tyarena: *TyArena, muts: *Map<string, MutTupleEntr
             e: EnumNode = vec_get((*a).enums, it.id)
             if e.generics_len > 0 {
                 map_put(genums, ast_name(a, e.name), it.id)
+            } else {
+                map_put(nenums, ast_name(a, e.name), it.id)
             }
         } else if it.kind == ik_interface() {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)
@@ -94,6 +98,7 @@ export func mono_new(a: *Ast, tyarena: *TyArena, muts: *Map<string, MutTupleEntr
         gfuncs: gfuncs,
         gstructs: gstructs,
         genums: genums,
+        nenums: nenums,
         ifaces: ifaces,
         nfuncs: nfuncs,
         requested: requested,
@@ -115,6 +120,7 @@ export func mono_diag(m: *Mono, msg: string, lo: int64, hi: int64) -> void {
 // declared return pins the element type.
 export func m_gstructs(m: *Mono) -> *Map<string, int64> { return (*m).gstructs }
 export func m_genums(m: *Mono) -> *Map<string, int64> { return (*m).genums }
+export func m_nenums(m: *Mono) -> *Map<string, int64> { return (*m).nenums }
 export func m_gfuncs(m: *Mono) -> *Map<string, int64> { return (*m).gfuncs }
 export func m_nfuncs(m: *Mono) -> *Map<string, int64> { return (*m).nfuncs }
 export func m_ifaces(m: *Mono) -> *Map<string, int64> { return (*m).ifaces }

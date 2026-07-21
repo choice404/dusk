@@ -1,0 +1,30 @@
+@paradigm procedural
+@import std.vector
+
+// Under a borrowed subject, a managed payload binder borrows; only its owner frees
+// it. drop matches through a borrowed parameter t, so the deref subject `*t` is not
+// an owned identifier and the binder p borrows the payload the caller still owns.
+// Freeing p is refused with the existing borrowed-pointer message. The raw binder and
+// its annotated rebind now agree: both borrow, both reject free (hole C closed).
+enum Tree {
+    Leaf,
+    Node(payload: *Vector<int64>),
+}
+
+func drop(t: *Tree) -> void {
+    match *t {
+        Leaf => {}
+        Node(p) => {
+            vec_free(p)
+            free(p)
+        }
+    }
+}
+
+func main() -> int32 {
+    inner: *Vector<int64> = alloc(vec_new())
+    t: *Tree = alloc(Tree.Node(inner))
+    drop(t)
+    free(t)
+    return 0
+}

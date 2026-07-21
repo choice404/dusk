@@ -93,9 +93,52 @@ export func mark_errs_in(tc: *TypeChecker, expr_id: int64) -> void {
     mark_errs_in_rec(tc, expr_id)
 }
 
+// Whether a call expression is a blessed owning container removal: a direct call of
+// the stdlib intrinsic vec_take or map_take, which removes an element and hands it
+// back as the caller's own value. The guard is deliberately narrow so a user's
+// same-named private helper (privatize-suffixed, hence a different name) or a local
+// binding shadowing the name never matches: the callee is a bare identifier of the
+// exact name, the name binds a non-local top-level function, and its signature has
+// the intrinsic's shape (two parameters, the first a *Vector or *Map, and for
+// vec_take the second an integer index, so a user's two-parameter *Vector function
+// that takes something other than an index cannot be mistaken for the intrinsic). A
+// blessed result classifies as an owner; every other call keeps its classification.
+export func is_owning_take_call(tc: *TypeChecker, e: ExprNode) -> bool {
+    if e.kind != xk_call() { return false }
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind != xk_ident() { return false }
+    name: string = ast_name(a, callee.a)
+    mut want: string = ""
+    if str_eq(name, "vec_take") {
+        want = "Vector"
+    } else if str_eq(name, "map_take") {
+        want = "Map"
+    } else {
+        return false
+    }
+    if is_local(tc, name) { return false }
+    if !sig_has_fn((*tc).sigtab, name) { return false }
+    fn: FnSig = sig_fn((*tc).sigtab, name)
+    if fn.raw_params.len != 2 { return false }
+    p0: int64 = sig_ty_at((*tc).sigtab, fn.raw_params, 0)
+    pn: TyNode = ty_get((*tc).ty, p0)
+    if pn.kind != tyk_ptr() { return false }
+    inner: TyNode = ty_get((*tc).ty, pn.a)
+    if inner.kind != tyk_named() { return false }
+    if !str_eq(ty_name((*tc).ty, pn.a), want) { return false }
+    if str_eq(name, "vec_take") {
+        p1: int64 = sig_ty_at((*tc).sigtab, fn.raw_params, 1)
+        p1n: TyNode = ty_get((*tc).ty, p1)
+        if p1n.kind != tyk_int() { return false }
+    }
+    return true
+}
+
 export func binding_own(tc: *TypeChecker, stmt: StmtNode, value: ExprNode, vt: int64) -> int64 {
     if (stmt.d & 2) != 0 { return own_borrow() }
     if value.kind == xk_call() {
+        if is_owning_take_call(tc, value) { return own_owner() }
         if is_managed_ty(tc, vt) { return own_owner() }
         return own_borrow()
     }

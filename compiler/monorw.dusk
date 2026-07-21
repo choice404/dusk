@@ -255,8 +255,18 @@ func bind_pattern(m: *Mono, patid: int64, scrut_ty: int64, subst: *Map<string, i
         sn: TypeNode = vec_get((*a).types, scrut_ty)
         if sn.kind != tk_named() { return }
         g: string = ast_name(a, sn.a)
-        if !map_has(m_genums(m), g) { return }
-        geid: int64 = unwrap_or(map_get(m_genums(m), g), -1)
+        // A generic enum resolves through genums and substitutes its type args
+        // into the payload; a non-generic enum resolves through nenums with no
+        // args, so its payload field types bind straight through (a *Vector<T>
+        // payload on a non-generic enum, as Json's JArr carries, becomes a
+        // usable typed binder instead of an unknown that stalls inference).
+        mut geid: int64 = -1
+        if map_has(m_genums(m), g) {
+            geid = unwrap_or(map_get(m_genums(m), g), -1)
+        } else if map_has(m_nenums(m), g) {
+            geid = unwrap_or(map_get(m_nenums(m), g), -1)
+        }
+        if geid < 0 { return }
         ge: EnumNode = vec_get((*a).enums, geid)
         eargs: *Vector<int64> = named_targs(a, scrut_ty)
         vsubst: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, eargs)

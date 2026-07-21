@@ -1,0 +1,26 @@
+@paradigm procedural
+@paradigm oop
+@import std.vector
+
+// A container read reached through a method is refused the same as the direct
+// spelling. get returns an element read out of self's vector, so its result still
+// lives inside the container; freeing it would double free a live element. The
+// method's computed summary reports the read-back, so free(b.get(0)) is caught with
+// one voice with free(vec_get(...)). A method reached by interface dynamic dispatch,
+// with no static summary, stays accepted; take is the sanctioned owning removal.
+struct Box {
+    items: *Vector<*int64>,
+}
+
+impl Box {
+    func get(i: int64) -> *int64 {
+        return vec_get(self.items, i)
+    }
+}
+
+func main() -> int32 {
+    b: *Box = alloc(Box { items: alloc(vec_new()) })
+    vec_push((*b).items, alloc(10))
+    free(b.get(0))
+    return 0
+}

@@ -13,6 +13,15 @@
 @import std.functional.maybe
 @import std.vector
 
+foreign "C" {
+    func abort() -> void
+}
+
+func map_take_fault() -> void {
+    printerr("fatal: map_take of a missing key")
+    abort()
+}
+
 export struct Map<K, V> {
     used: *raw bool,
     keys: *raw K,
@@ -171,6 +180,30 @@ export func map_remove<K, V>(m: *Map<K, V>, k: K) -> bool {
         }
     }
     return false
+}
+
+// Removes the entry for k and hands its value back to the caller as its own. Probes
+// for k the same way map_get does; on a hit it captures the value, then reuses
+// map_remove verbatim for the slot clear, cluster repair, and insertion-order forget,
+// and returns the captured value. A managed value's owner is now the caller. The
+// stored key K is dropped from the table and the order vector, but its heap bytes (a
+// string key) are untouched: they belong to whoever else holds the string. On a miss
+// it faults through map_take_fault; probe with map_has first when a key may be absent.
+export func map_take<K, V>(m: *Map<K, V>, k: K) -> V {
+    mut idx: int64 = map_slot(m, k)
+    while (*m).used[idx] {
+        if (*m).keys[idx] == k {
+            out: V = (*m).vals[idx]
+            map_remove(m, k)
+            return out
+        }
+        idx = idx + 1
+        if idx == (*m).cap {
+            idx = 0
+        }
+    }
+    map_take_fault()
+    return (*m).vals[idx]
 }
 
 export func map_get<K, V>(m: *Map<K, V>, k: K) -> Maybe<V> {
