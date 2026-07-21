@@ -1,0 +1,458 @@
+/** std.flags: a small command line flag parser built as register then parse. A
+ *  program declares its flags up front with flag_bool, flag_str, and flag_int,
+ *  then hands the whole argv to flags_parse, which fills the flag values and
+ *  collects the leftover positional words in order. There are no short flags and
+ *  no grouping: a flag is always its long name matched as "--" + name. Bad input
+ *  on the command line is an error value the caller must handle, so the library
+ *  never prints and never exits on a user's typo; a misuse of the library itself
+ *  (a duplicate registration, a getter on the wrong kind, an out of range
+ *  positional) is a fault that aborts, since those are program bugs, not input. */
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+foreign "C" {
+    func abort() -> void
+}
+
+// The three value shapes a flag can carry, kept as small integer tags so a spec's
+// kind compares with == and needs no match. A bool flag holds no value on the
+// command line, a str flag binds the next token or an =value as text, and an int
+// flag binds it as a base ten signed integer.
+func flag_kind_bool() -> int64 {
+    return 0
+}
+
+func flag_kind_str() -> int64 {
+    return 1
+}
+
+func flag_kind_int() -> int64 {
+    return 2
+}
+
+/** One registered flag. name is stored without the leading dashes, since parse
+ *  matches "--" + name and the getters look it up by the same bare name. Only the
+ *  field for the flag's kind is meaningful: bval for a bool, sval for a str, ival
+ *  for an int; the others hold their zero values. seen is set true the first time
+ *  the flag appears on the command line and stays true across a repeat. The string
+ *  fields are borrows of the caller's own literals and are never freed here. */
+export struct FlagSpec {
+    name: string,
+    help: string,
+    kind: int64,
+    sval: string,
+    ival: int64,
+    bval: bool,
+    seen: bool,
+}
+
+/** A parser and its results in one value. specs holds the registered flags in
+ *  registration order, which is also the order flags_usage prints them; pos holds
+ *  the positional words in the order they appeared. prog and about are the program
+ *  name and one line summary flags_usage prints. Build one on the heap with
+ *  alloc(flags_new(...)) and pass it by pointer so registration and parsing
+ *  persist. Flags stores only borrows: the caller's literals and the argv strings,
+ *  both of process lifetime, so flags_free releases the two vectors and nothing
+ *  else, and the caller frees the Flags allocation itself. */
+export struct Flags {
+    specs: *Vector<FlagSpec>,
+    pos: *Vector<string>,
+    prog: string,
+    about: string,
+}
+
+/** A fresh parser that knows the program name and a one line about text for its
+ *  usage output and has no flags registered yet.
+ *  @param prog the program name printed on the usage line
+ *  @param about a one line summary printed under the usage line
+ *  @return an empty Flags to register flags into and then parse with */
+export func flags_new(prog: string, about: string) -> Flags {
+    sv: *Vector<FlagSpec> = alloc(vec_new())
+    pv: *Vector<string> = alloc(vec_new())
+    return Flags { specs: sv, pos: pv, prog: prog, about: about }
+}
+
+// The index of the flag registered under name, or -1 when none is. A plain linear
+// scan; a flag set is small and register-then-parse touches it a handful of times.
+func flags_find(f: *Flags, name: string) -> int64 {
+    specs: *Vector<FlagSpec> = (*f).specs
+    mut i: int64 = 0
+    while i < vec_len(specs) {
+        s: FlagSpec = vec_get(specs, i)
+        if str_eq(s.name, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Builds a "fatal: flags: ..." line naming a flag and aborts. Registration and
+// getter faults are program bugs, so they abort with no location, the same
+// contract vec_get's bounds fault follows.
+func flags_fault(prefix: string, name: string, suffix: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push(b, name)
+    sb_push(b, suffix)
+    printerr(sb_cstr(b))
+    abort()
+}
+
+// Aborts when name is already registered, so a double registration is caught at
+// build-out rather than silently overwriting the first spec.
+func flags_check_dup(f: *Flags, name: string) -> void {
+    if flags_find(f, name) >= 0 {
+        flags_fault("fatal: flags: flag '--", name, "' already registered")
+    }
+}
+
+/** Registers a boolean flag under name. On the command line the bare "--name" sets
+ *  it true; "--name=x" is an error, since a bool flag takes no value. Duplicate
+ *  registration aborts.
+ *  @param f the parser to register into
+ *  @param name the flag name, without the leading dashes
+ *  @param help the one line description flags_usage prints */
+export func flag_bool(f: *Flags, name: string, help: string) -> void {
+    flags_check_dup(f, name)
+    vec_push((*f).specs, FlagSpec { name: name, help: help, kind: flag_kind_bool(), sval: "", ival: 0, bval: false, seen: false })
+}
+
+/** Registers a string flag under name with a default. "--name value" and
+ *  "--name=value" both bind it. Duplicate registration aborts.
+ *  @param f the parser to register into
+ *  @param name the flag name, without the leading dashes
+ *  @param def the value flag_get_str returns when the flag never appears
+ *  @param help the one line description flags_usage prints */
+export func flag_str(f: *Flags, name: string, def: string, help: string) -> void {
+    flags_check_dup(f, name)
+    vec_push((*f).specs, FlagSpec { name: name, help: help, kind: flag_kind_str(), sval: def, ival: 0, bval: false, seen: false })
+}
+
+/** Registers an integer flag under name with a default. "--name value" and
+ *  "--name=value" both bind it, parsed as a base ten signed integer; a value that
+ *  is not an integer is a parse error. Duplicate registration aborts.
+ *  @param f the parser to register into
+ *  @param name the flag name, without the leading dashes
+ *  @param def the value flag_get_int returns when the flag never appears
+ *  @param help the one line description flags_usage prints */
+export func flag_int(f: *Flags, name: string, def: int64, help: string) -> void {
+    flags_check_dup(f, name)
+    vec_push((*f).specs, FlagSpec { name: name, help: help, kind: flag_kind_int(), sval: "", ival: def, bval: false, seen: false })
+}
+
+// Builds a flag input error message from up to five parts, most passed the empty
+// string. The message is a fresh heap string the returned error owns; the caller
+// reads e.message and frees nothing extra, the same shape every std error carries.
+func flags_error(p0: string, p1: string, p2: string, p3: string, p4: string) -> error {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, p0)
+    sb_push(sb, p1)
+    sb_push(sb, p2)
+    sb_push(sb, p3)
+    sb_push(sb, p4)
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return error { message: out }
+}
+
+// Rewrites the spec at index i with seen set true and one value field updated,
+// returning a fresh spec the caller stores back with vec_set. The vector holds
+// specs by value, so an update is a whole-struct rewrite, never an in place poke.
+func flags_spec_seen(s: FlagSpec, sval: string, ival: int64, bval: bool) -> FlagSpec {
+    return FlagSpec { name: s.name, help: s.help, kind: s.kind, sval: sval, ival: ival, bval: bval, seen: true }
+}
+
+// Binds the value string val into the flag at index idx, returning an error only
+// when an int flag's value does not parse. val is read, never taken: a str flag
+// stores a fresh owned copy of it, so the caller keeps ownership of whatever it
+// passed and a seen str flag's sval is always a heap copy the set owns. A repeat
+// frees the prior owned copy before storing the next, so last-wins never leaks; an
+// int flag stores only the parsed number and keeps no string.
+func flags_bind_value(f: *Flags, idx: int64, name: string, val: string) -> error {
+    s: FlagSpec = vec_get((*f).specs, idx)
+    if s.kind == flag_kind_str() {
+        if s.seen {
+            free(s.sval)
+        }
+        owned: string = substring(val, 0, str_len(val))
+        vec_set((*f).specs, idx, flags_spec_seen(s, owned, 0, false))
+        return error {}
+    }
+    n, e := parse_int(val)
+    if e.exists() {
+        return flags_error("flag '--", name, "' needs an integer, got '", val, "'")
+    }
+    vec_set((*f).specs, idx, flags_spec_seen(s, "", n, false))
+    return error {}
+}
+
+// Handles one "--..." flag token, returning how many argv tokens it consumed (one,
+// or two for a spaced value) and an error. tok is the whole flag token; next is the
+// following token, meaningful only when has_next, used as a spaced value. Every
+// temporary this allocates, the "--" stripped rest, the flag name, and an inline
+// "=value" copy, is freed before it returns on every path; the only owned string
+// that survives is the copy a str flag stores as its sval, which flags_free
+// releases. On a bad flag the returned error's message is built before any
+// temporary is freed, so it never reads freed bytes.
+func flags_handle_flag(f: *Flags, tok: string, next: string, has_next: bool) -> (int64, error) {
+    rest: string = substring(tok, 2, str_len(tok))
+    eq: int64 = str_find(rest, "=")
+    mut fname: string = ""
+    mut inlineval: string = ""
+    mut has_eq: bool = false
+    if eq >= 0 {
+        fname = substring(rest, 0, eq)
+        inlineval = substring(rest, eq + 1, str_len(rest))
+        has_eq = true
+    } else {
+        fname = substring(rest, 0, str_len(rest))
+    }
+    free(rest)
+
+    mut adv: int64 = 1
+    mut result: error = error {}
+    idx: int64 = flags_find(f, fname)
+    if idx < 0 {
+        result = flags_error("unknown flag '--", fname, "'", "", "")
+    } else {
+        spec: FlagSpec = vec_get((*f).specs, idx)
+        if spec.kind == flag_kind_bool() {
+            if has_eq {
+                result = flags_error("flag '--", fname, "' takes no value", "", "")
+            } else {
+                vec_set((*f).specs, idx, flags_spec_seen(spec, "", 0, true))
+            }
+        } else if has_eq {
+            result = flags_bind_value(f, idx, fname, inlineval)
+        } else if !has_next {
+            result = flags_error("flag '--", fname, "' needs a value", "", "")
+        } else {
+            result = flags_bind_value(f, idx, fname, next)
+            adv = 2
+        }
+    }
+    free(fname)
+    if has_eq {
+        free(inlineval)
+    }
+    return (adv, result)
+}
+
+/** Parses argv from index start, filling the registered flags and collecting the
+ *  positional words. A lone "--" ends flag parsing, so every token after it is
+ *  positional even when it begins with a dash. A "--name" token names a flag:
+ *  "--name=value" binds inline, "--name value" binds the next token, a bool flag
+ *  takes no value and "--name=x" on one is an error, and an unknown "--name" is an
+ *  error. Any token not beginning with "--", including a single-dash word or a
+ *  negative number, is a positional and keeps its order. A repeated flag is
+ *  last-wins with seen left true. The returned error must be handled: on a bad
+ *  command line the caller prints its message and flags_usage and exits itself,
+ *  since the library never prints and never exits.
+ *  @param f the parser holding the registered flags
+ *  @param argv the whole argument vector
+ *  @param start the first index to parse, commonly 1 to skip the program name
+ *  @return an error naming the first bad token, or a clean error when all parsed */
+export func flags_parse(f: *Flags, argv: string[], start: int64) -> error {
+    mut i: int64 = start
+    mut only_pos: bool = false
+    while i < argv.len {
+        tok: string = argv[i]
+        if only_pos {
+            vec_push((*f).pos, tok)
+            i = i + 1
+        } else if str_eq(tok, "--") {
+            only_pos = true
+            i = i + 1
+        } else if !starts_with(tok, "--") {
+            vec_push((*f).pos, tok)
+            i = i + 1
+        } else {
+            mut nexttok: string = ""
+            mut has_next: bool = false
+            if i + 1 < argv.len {
+                nexttok = argv[i + 1]
+                has_next = true
+            }
+            adv, e := flags_handle_flag(f, tok, nexttok, has_next)
+            if e.exists() {
+                return e
+            }
+            i = i + adv
+        }
+    }
+    return error {}
+}
+
+// Aborts naming name as not a registered flag of the wanted kind. Every typed
+// getter routes an unregistered name or a kind mismatch here, so a getter bug
+// stops the program with a clear cause instead of returning a zero value.
+func flags_getter_fault(name: string, kind: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "fatal: flags: no ")
+    sb_push(b, kind)
+    sb_push(b, " flag named '--")
+    sb_push(b, name)
+    sb_push(b, "'")
+    printerr(sb_cstr(b))
+    abort()
+}
+
+// Finds the flag at name and asserts it was registered with the wanted kind,
+// aborting otherwise, and returns its spec. The one lookup the three typed getters
+// and flag_seen share.
+func flags_require(f: *Flags, name: string, kind: int64, kindword: string) -> FlagSpec {
+    idx: int64 = flags_find(f, name)
+    if idx < 0 {
+        flags_getter_fault(name, kindword)
+    }
+    s: FlagSpec = vec_get((*f).specs, idx)
+    if s.kind != kind {
+        flags_getter_fault(name, kindword)
+    }
+    return s
+}
+
+/** The value of the bool flag name, false when it never appeared. Aborts when name
+ *  is not a registered bool flag.
+ *  @param f the parsed flag set
+ *  @param name the flag name, without the leading dashes
+ *  @return the flag's boolean value */
+export func flag_get_bool(f: *Flags, name: string) -> bool {
+    s: FlagSpec = flags_require(f, name, flag_kind_bool(), "bool")
+    return s.bval
+}
+
+/** The value of the string flag name, its default when it never appeared. Aborts
+ *  when name is not a registered string flag.
+ *  @param f the parsed flag set
+ *  @param name the flag name, without the leading dashes
+ *  @return the flag's string value, borrowed from the caller's literal or argv */
+export func flag_get_str(f: *Flags, name: string) -> string {
+    s: FlagSpec = flags_require(f, name, flag_kind_str(), "string")
+    return s.sval
+}
+
+/** The value of the integer flag name, its default when it never appeared. Aborts
+ *  when name is not a registered integer flag.
+ *  @param f the parsed flag set
+ *  @param name the flag name, without the leading dashes
+ *  @return the flag's integer value */
+export func flag_get_int(f: *Flags, name: string) -> int64 {
+    s: FlagSpec = flags_require(f, name, flag_kind_int(), "int")
+    return s.ival
+}
+
+/** Whether the flag name appeared on the command line at least once, across any
+ *  kind. Aborts when name is not a registered flag.
+ *  @param f the parsed flag set
+ *  @param name the flag name, without the leading dashes
+ *  @return true when the flag was seen during parsing */
+export func flag_seen(f: *Flags, name: string) -> bool {
+    idx: int64 = flags_find(f, name)
+    if idx < 0 {
+        flags_getter_fault(name, "registered")
+    }
+    s: FlagSpec = vec_get((*f).specs, idx)
+    return s.seen
+}
+
+/** The number of positional words collected during parsing.
+ *  @param f the parsed flag set
+ *  @return the count of positional arguments */
+export func flags_pos_len(f: *Flags) -> int64 {
+    p: *Vector<string> = (*f).pos
+    return vec_len(p)
+}
+
+/** The positional word at index i, in the order the words appeared. Aborts when i
+ *  is negative or at or past the count, the same bounds contract vec_get follows.
+ *  @param f the parsed flag set
+ *  @param i the positional index
+ *  @return the positional word, borrowed from argv */
+export func flags_pos_at(f: *Flags, i: int64) -> string {
+    p: *Vector<string> = (*f).pos
+    if i < 0 {
+        printerr("fatal: flags: positional index out of bounds")
+        abort()
+    }
+    if i >= vec_len(p) {
+        printerr("fatal: flags: positional index out of bounds")
+        abort()
+    }
+    return vec_get(p, i)
+}
+
+/** A fresh heap usage string the caller owns and frees: the usage line, the about
+ *  line, then one line per registered flag in registration order. A str flag is
+ *  marked "<str>" and an int flag "<int>" after its name, and both print their
+ *  default; a bool flag prints neither. The output is deterministic, a pure
+ *  function of the registered flags, so a golden can pin it byte for byte.
+ *  @param f the flag set to describe
+ *  @return the multi-line usage text, owned by the caller */
+export func flags_usage(f: *Flags) -> string {
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push(sb, "usage: ")
+    sb_push(sb, (*f).prog)
+    sb_push(sb, " [options]\n")
+    sb_push(sb, (*f).about)
+    sb_push(sb, "\n")
+    specs: *Vector<FlagSpec> = (*f).specs
+    mut i: int64 = 0
+    while i < vec_len(specs) {
+        s: FlagSpec = vec_get(specs, i)
+        sb_push(sb, "  --")
+        sb_push(sb, s.name)
+        if s.kind == flag_kind_str() {
+            sb_push(sb, " <str>")
+        } else if s.kind == flag_kind_int() {
+            sb_push(sb, " <int>")
+        }
+        sb_push(sb, "  ")
+        sb_push(sb, s.help)
+        if s.kind == flag_kind_str() {
+            sb_push(sb, " (default: ")
+            sb_push(sb, s.sval)
+            sb_push(sb, ")")
+        } else if s.kind == flag_kind_int() {
+            sb_push(sb, " (default: ")
+            sb_push_int(sb, s.ival)
+            sb_push(sb, ")")
+        }
+        sb_push(sb, "\n")
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+/** Frees the two vectors a Flags owns, its specs and its positionals, along with
+ *  the owned value copy of each string flag that was set during parsing. A str
+ *  flag that was never seen still holds the registration default, a borrowed
+ *  literal, which is not freed; every other stored name, help text, and positional
+ *  word is a borrow and is left alone. The caller frees the Flags allocation itself
+ *  after this returns.
+ *  @param f the flag set to release */
+export func flags_free(f: *Flags) -> void {
+    sv: *Vector<FlagSpec> = (*f).specs
+    pv: *Vector<string> = (*f).pos
+    mut i: int64 = 0
+    while i < vec_len(sv) {
+        s: FlagSpec = vec_get(sv, i)
+        if s.kind == flag_kind_str() {
+            if s.seen {
+                free(s.sval)
+            }
+        }
+        i = i + 1
+    }
+    vec_free(sv)
+    free(sv)
+    vec_free(pv)
+    free(pv)
+}

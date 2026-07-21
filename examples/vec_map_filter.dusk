@@ -1,0 +1,39 @@
+// std.vector's vec_filter and vec_map compose in ordinary procedural code.
+// The source numbers are filtered to values divisible by three, then mapped
+// through int_to_string, so the final vector owns heap strings "3", "6", and
+// "9" in the same order they appeared. The unannotated filtered binding proves
+// generic inference flows through vec_filter before vec_map.
+@paradigm procedural
+
+@import std.vector
+@import std.string
+
+func main() -> int32 {
+    nums: *Vector<int64> = alloc(vec_new())
+    vec_push(nums, 1)
+    vec_push(nums, 3)
+    vec_push(nums, 4)
+    vec_push(nums, 6)
+    vec_push(nums, 9)
+
+    filtered := vec_filter(nums, lambda (x: int64) -> bool { return x % 3 == 0 })
+    texts: *Vector<string> = vec_map(filtered, lambda (x: int64) -> string { return int_to_string(x) })
+
+    mut i: int64 = 0
+    while i < vec_len(texts) {
+        println(vec_get(texts, i))
+        i = i + 1
+    }
+
+    while vec_len(texts) > 0 {
+        s: string = vec_take(texts, vec_len(texts) - 1)
+        free(s)
+    }
+    vec_free(texts)
+    free(texts)
+    vec_free(filtered)
+    free(filtered)
+    vec_free(nums)
+    free(nums)
+    return 0
+}

@@ -1,0 +1,33 @@
+// A regression golden for json_free over a document with a duplicate object key.
+// The JSON object grammar admits a repeated key. The field map keeps its first key
+// and overwrites that key's value in place, so a naive build would orphan the first
+// value's whole subtree and the repeat key string, and json_free, walking only the
+// surviving tree, would never reclaim them: a silent leak. jp_member closes it, so
+// on a repeat key it frees the previous value's subtree and the redundant repeat
+// key before overwriting, leaving the tree with exactly one owned key and value per
+// member.
+//
+// This parses {"a":1,"a":2}, emits it (the later value wins, so {"a":2}), deep frees
+// the tree through std.json's json_free with no fault, and exits 0. The clean exit
+// is the guard: if the dedup freed a shared or already-stored block, json_free would
+// fault named at exit 134 instead.
+@paradigm procedural
+
+@import std.json
+@import std.string
+
+func main() -> int32 {
+    doc: string = "{ \"a\": 1, \"a\": 2 }"
+    v, e := json_parse(doc)
+    if e.exists() {
+        println("parse error:")
+        println(e.message)
+        return 1
+    }
+    out: string = json_emit(v)
+    println(out)
+    free(out)
+    json_free(v)
+    println("freed clean")
+    return 0
+}

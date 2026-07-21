@@ -1,0 +1,50 @@
+// The 1.8.1 acceptance for std json_free: parse a document into a heap tree, emit
+// it, deep free it through the std.json json_free, then prove the tree actually
+// retired. This is the first in-tree caller of the blessed vec_take/map_take: the
+// std export keeps its name through privatize, so the blessing survives the import
+// path and json_free's `match *t` owner binders check exactly as they do inside
+// the library.
+//
+// After json_free returns, every block in the tree is on the free list with a
+// bumped generation. The guarded probe reads the root's tag through json_kind,
+// whose `match *j` derefs the freed root, and the generation backstop turns that
+// stale read into a named fault: `use of a freed or stale pointer at
+// examples/json_free_std.dusk`. The abort here, not a clean exit, is the proof
+// json_free reclaimed the blocks (design R7): reclamation is pinned through the
+// fault, not through allocator counters.
+@paradigm procedural
+
+@import std.json
+@import std.string
+
+// Read the root's tag. Used only by the post-free probe: after json_free the root
+// block is freed, so this deref faults named rather than reading stale bytes.
+func json_kind(j: *Json) -> int64 {
+    match *j {
+        JNull => { return 0 }
+        JBool(b) => { return 1 }
+        JNum(n) => { return 2 }
+        JStr(s) => { return 3 }
+        JArr(items) => { return 4 }
+        JObj(fields) => { return 5 }
+    }
+    return -1
+}
+
+func main() -> int32 {
+    doc: string = "{ \"n\": null, \"b\": true, \"i\": 42, \"s\": \"hi\", \"a\": [1, \"two\", null, { \"deep\": false }] }"
+    v, e := json_parse(doc)
+    if e.exists() {
+        println("parse error:")
+        println(e.message)
+        return 1
+    }
+    out: string = json_emit(v)
+    println(out)
+    free(out)
+    json_free(v)
+    // The tree is gone. This deref of the freed root faults named; the abort here,
+    // not a clean exit, is the proof json_free reclaimed the blocks.
+    println(json_kind(v))
+    return 0
+}

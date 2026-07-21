@@ -253,6 +253,8 @@ A growable array, generic over its element type. The buffer lives on the heap an
 | `vec_sort<T>(v: *Vector<T>, cmp: (T, T) -> int32) -> void` | Sort `v` in place, stable, by `cmp`. |
 | `vec_contains<T>(v: *Vector<T>, x: T) -> bool` | Whether `x` appears anywhere in `v`, by `==`. |
 | `vec_index_of<T>(v: *Vector<T>, x: T) -> int64` | The index of the first `x` in `v` by `==`, or `-1`. |
+| `vec_map<T, U>(v: *Vector<T>, f: (T) -> U) -> *Vector<U>` | A fresh owned vector of `f` applied to each element in order. |
+| `vec_filter<T>(v: *Vector<T>, p: (T) -> bool) -> *Vector<T>` | A fresh owned vector of the elements for which `p` is true, in order. |
 
 ```text
 @import std.vector
@@ -298,6 +300,33 @@ free(v)
 
 `vec_contains` and `vec_index_of`, also added in 1.4.2, are a linear scan by `==`, legal only for a `T` that `==` itself accepts, a scalar or a string, never a pointer, dusk's own comparison rule; a `Vector<T>` of a pointer typed `T` rejects both at the ground types the same way any other illegal `==` does.
 
+`vec_map` and `vec_filter`, added in 1.8.1, are the functional pair. Each returns a fresh heap vector the caller owns and frees, leaves the source vector and its elements untouched, and calls the closure exactly once per element in index order. `vec_map` applies `f` and collects the results, and the result element type `U` is inferred from the closure, so a `Vector<int64>` maps to a `Vector<string>` when `f` returns a string. `vec_filter` copies through the elements for which `p` answers true. Both take a capturing lambda or a named function, exactly as `vec_sort` does, and neither is gated by a paradigm, since a standard library generic never reaches the bare `map` and `filter` builtins the functional paradigm gates. `vec_sort` already takes its comparator as a closure, so there is no separate `vec_sort_by`.
+
+```text
+@import std.vector
+@import std.string
+
+v: *Vector<int64> = alloc(vec_new())
+vec_push(v, 1)
+vec_push(v, 2)
+vec_push(v, 3)
+
+evens := vec_filter(v, lambda (x: int64) -> bool { return x % 2 == 0 })
+println(vec_len(evens))     // 1
+
+labels := vec_map(v, lambda (x: int64) -> string { return int_to_string(x) })
+println(vec_get(labels, 2)) // "3"
+
+vec_free(evens)
+free(evens)
+vec_free(labels)
+free(labels)
+vec_free(v)
+free(v)
+```
+
+`vec_filter` copies element values, so when `T` is a managed pointer type the returned vector holds the same pointers as the source and both vectors alias the pointed to objects. Freeing an element reachable through both is a double free the ownership checker does not catch across `vec_filter`, and the runtime generational free check is the backstop that faults the stale read rather than corrupting silently. `vec_map`'s results belong to whatever the closure returned: an allocating closure hands the caller owners, which you drain with `vec_take` before you free the outer vector, while plain values and borrowed pointers need only the outer `vec_free` and `free`.
+
 ## std.map
 
 A hash map generic over both its key type K and its value type V. A key is any hashable type: an integer of any width, a `char`, a `rune`, or a `string`. Keys hash through the `hash` builtin and compare with `==`, so a string key hashes and compares by its content and a scalar key by its value; a struct, pointer, or float key is rejected by name, `cannot hash <type>; a map key is an integer, char, rune, or string`. The map uses open addressing with linear probing over heap buffers that double and rehash once the table is half full. Pass the map by pointer so inserts and growth persist across calls.
@@ -334,6 +363,48 @@ println(unwrap_or(map_get(byid, 42), "?"))  // answer
 `map_get` returns a `Maybe<V>`, so import `std.functional.maybe` to unwrap it. Capacity starts at 8 and doubles each time the map fills to half. The map stores keys by value: a scalar key carries no lifetime, and a string key is the caller's pointer, which must outlive the map; `map_free` releases the buffers, never a key string. `map_keys` returns the keys in the order they were first inserted, so iteration is a pure function of the insert sequence rather than the hash layout. A key appears once, at its first insertion; an overwrite does not move it and a grow rehashes without disturbing it. The returned vector is a fresh copy the caller owns and frees with `vec_free` and `free`, independent of the map, so there is no shared owner. Import `std.vector` to walk it with `vec_len` and `vec_get`.
 
 One inference note: a map read whose map argument is a struct field, nested directly inside another generic call such as `unwrap_or`, may fail to pin K, `cannot infer the type parameter 'K' for 'map_get'`. Rebind the field to a locally annotated variable first, `mm: *Map<string, V> = (*s).field`, then call through `mm`; a map held in a local or a parameter infers directly.
+
+## std.set
+
+Added in 1.8.1. An unordered set generic over its element type, a thin wrap over `std.map` keyed by the element with a `bool` value that is always true. The wrap is a real type rather than an alias, so a `*Set<string>` parameter cannot take a map by mistake, and it seals the value channel: membership is exactly key presence, and there is no way to hold an element that is present but false. Build a set on the heap with `alloc(set_new())` and pass it by pointer so inserts persist.
+
+```text
+struct Set<T> {
+    m: *Map<T, bool>,
+}
+```
+
+| Function                                    | Description                                                     |
+| ------------------------------------------- | --------------------------------------------------------------- |
+| `set_new<T>() -> Set<T>`                    | A new empty set.                                                |
+| `set_add<T>(s: *Set<T>, x: T) -> bool`      | Add `x`; true when it was newly added, false when already present. |
+| `set_has<T>(s: *Set<T>, x: T) -> bool`      | Whether `x` is a member.                                        |
+| `set_remove<T>(s: *Set<T>, x: T) -> bool`   | Remove `x`; true when it was present.                          |
+| `set_len<T>(s: *Set<T>) -> int64`           | The member count.                                              |
+| `set_items<T>(s: *Set<T>) -> *Vector<T>`    | The members in first insertion order, a fresh owned vector.    |
+| `set_free<T>(s: *Set<T>) -> void`           | Free the backing map's buffers and the map allocation.        |
+
+```text
+@import std.set
+@import std.vector
+
+s: *Set<string> = alloc(set_new())
+println(set_add(s, "a"))    // true
+println(set_add(s, "a"))    // false, already present
+println(set_add(s, "b"))    // true
+println(set_len(s))         // 2
+println(set_has(s, "a"))    // true
+
+items := set_items(s)       // a fresh vector, "a" then "b"
+println(vec_len(items))     // 2
+vec_free(items)
+free(items)
+
+set_free(s)
+free(s)
+```
+
+`set_add` and `set_remove` report whether the call changed the set, so a repeat of an existing element neither grows the set nor disturbs its first insertion order. `set_items` returns the members in that insertion order as a fresh vector the caller owns and frees with `vec_free` and `free`, the `map_keys` contract verbatim, independent of the set. The element contract is the map key contract verbatim: an element is any hashable type compared with `==`, so a scalar or a string is legal and a pointer element is rejected through the backing map's own hash and `==` restriction. A string element is borrowed and must outlive the set. `set_free` releases the backing map's buffers and the map allocation only; the elements themselves are never freed, and the caller frees the `Set` allocation itself after it returns.
 
 ## std.os
 
@@ -384,6 +455,60 @@ println(code)  // 0
 ```
 
 `proc_open` opens `cmd` through `popen(cmd, "r")`, POSIX shell semantics (`/bin/sh -c`); a failure to open reports `strerror`'s text through the returned `error` and hands back a zeroed `Proc` that is never valid to read from or close. `proc_read_line` reassembles a line across as many internal reads as it takes when a line outruns the 4096 byte read chunk, so no line length silently truncates; a hard read error reports the same `false` as a clean end of stream, since the function carries no error channel of its own. `proc_close` decodes `pclose`'s wait status the way `std.os`'s `run` decodes `system`'s: the low 7 bits name a terminating signal, reported as 128 plus the signal number, and a normal exit reports the shifted down exit code; `pclose` failing outright, a bad handle or a wait failure, reports through the returned `error` instead of a decoded status. `run_capture` is the convenience wrapper over all three: it opens, reads every line into one newline joined string, closes, and hands back the output alongside the decoded exit code, reporting an open failure immediately with a `-1` exit code and no output.
+
+## std.flags
+
+Added in 1.8.1. A small command line flag parser built as register then parse. A program declares its flags up front, then hands the whole `argv` to `flags_parse`, which fills the flag values and collects the leftover positional words in order. There are no short flags and no grouping: a flag is always its long name matched as `--` followed by the registered name, stored without the dashes. Build a `Flags` on the heap with `alloc(flags_new(...))` and pass it by pointer so registration and parsing persist.
+
+| Function                                                        | Description                                                     |
+| --------------------------------------------------------------- | --------------------------------------------------------------- |
+| `flags_new(prog: string, about: string) -> Flags`              | A fresh parser with no flags registered.                        |
+| `flag_bool(f: *Flags, name: string, help: string) -> void`     | Register a boolean flag; `--name` sets it true, `--name=x` is an error. |
+| `flag_str(f: *Flags, name: string, def: string, help: string) -> void` | Register a string flag with a default.                  |
+| `flag_int(f: *Flags, name: string, def: int64, help: string) -> void`  | Register a base 10 integer flag with a default.         |
+| `flags_parse(f: *Flags, argv: string[], start: int64) -> error` | Parse `argv` from index `start`; the error names the first bad token. |
+| `flag_get_bool(f: *Flags, name: string) -> bool`               | The bool flag's value, false when it never appeared.            |
+| `flag_get_str(f: *Flags, name: string) -> string`             | The string flag's value, its default when it never appeared.    |
+| `flag_get_int(f: *Flags, name: string) -> int64`              | The integer flag's value, its default when it never appeared.   |
+| `flag_seen(f: *Flags, name: string) -> bool`                  | Whether the flag appeared on the command line at least once.    |
+| `flags_pos_len(f: *Flags) -> int64`                           | The count of positional words collected.                        |
+| `flags_pos_at(f: *Flags, i: int64) -> string`                 | The positional word at index `i`, in order.                     |
+| `flags_usage(f: *Flags) -> string`                            | A fresh owned usage string, deterministic in the registered flags. |
+| `flags_free(f: *Flags) -> void`                               | Free the parser's two vectors; the caller frees the `Flags`.    |
+
+```text
+@paradigm procedural
+@import std.flags
+
+func main(argv: string[]) -> int32 {
+    f: *Flags = alloc(flags_new("greet", "print a greeting"))
+    flag_bool(f, "loud", "shout the greeting")
+    flag_str(f, "name", "world", "who to greet")
+    flag_int(f, "times", 1, "how many times")
+
+    e := flags_parse(f, argv, 1)
+    if e.exists() {
+        println(e.message)
+        print(flags_usage(f))
+        return 1
+    }
+
+    who := flag_get_str(f, "name")
+    n := flag_get_int(f, "times")
+    println("hello {} x{}, loud={}", who, n, flag_get_bool(f, "loud"))
+    println(flags_pos_len(f))     // count of leftover positional words
+
+    flags_free(f)
+    free(f)
+    return 0
+}
+```
+
+The grammar reads `argv` from `start`, the index that skips the program name; a subcommand tool passes 2. A lone `--` ends flag parsing, so every token after it is positional even when it begins with a dash. A `--name=value` binds inline and a `--name value` binds the following token; a bool flag takes no value, so `--name` alone sets it true and `--name=x` is an error. Any token that does not begin with `--`, a single dash word or a negative number included, is a positional and keeps its order. A repeated flag is last wins, and `flag_seen` stays true across the repeat.
+
+Bad input on the command line is an error value the caller must handle, not a fault, so the library never prints and never exits on a user's typo. `flags_parse` returns an `error` naming the first bad token, one of `unknown flag '--frob'`, `flag '--timeout' needs a value`, `flag '--timeout' needs an integer, got 'abc'`, or `flag '--verbose' takes no value`, and the caller prints the message beside `flags_usage` and exits itself. A misuse of the library itself is a fault that aborts with a `fatal: flags:` prefix and no source location, the same contract `vec_get`'s bounds fault follows: a duplicate registration, `fatal: flags: flag '--verbose' already registered`; a getter on an unregistered name or the wrong kind, `fatal: flags: no int flag named '--verbose'`; and a positional index out of range, `fatal: flags: positional index out of bounds`.
+
+`flags_usage` returns a fresh heap string the caller owns and frees, the usage line, the about line, then one line per flag in registration order with a `<str>` or `<int>` marker and the flag's default. It is a pure function of the registered flags, so its output is deterministic and a golden pins it byte for byte. `Flags` stores only borrows, the caller's own literals and the `argv` strings, both of process lifetime, so `flags_free` releases the two vectors alone and the caller frees the `Flags` allocation itself.
 
 ## std.math
 
@@ -504,6 +629,8 @@ Added in 1.4.1. Wall clock reads paired with a pure dusk proleptic Gregorian civ
 | `civil_from_unix(secs: int64) -> Civil`        | The UTC calendar reading of a Unix timestamp.                 |
 | `unix_from_civil(c: Civil) -> int64`           | The Unix timestamp of a UTC calendar reading.                 |
 | `format_iso8601(c: Civil) -> string`           | Renders `c` as `"YYYY-MM-DDTHH:MM:SSZ"`.                       |
+| `weekday(c: Civil) -> int64`                   | The day of week, 0 Sunday through 6 Saturday.                  |
+| `parse_iso8601(s: string) -> (Civil, error)`   | Parse an ISO 8601 UTC string, the strict inverse of `format_iso8601`. |
 
 `Civil` is a plain struct, one `int64` field per component: `year` (proleptic Gregorian, so a year before 1 is zero or negative), `month` in `[1, 12]`, `day` in `[1, the month's length]`, and `hour`, `minute`, `second` in their ordinary ranges. There is no sub-second field; `now_ns` and `now_ms` carry finer precision on their own.
 
@@ -518,6 +645,26 @@ println(unix_from_civil(c) == secs)        // true
 ```
 
 `now_ns` is the only foreign call in the module, a shim over `clock_gettime(CLOCK_REALTIME)`; `now_ms` and `now_unix` are ordinary arithmetic on top of it. `civil_from_unix` and `unix_from_civil` are Howard Hinnant's `days_from_civil`/`civil_from_days` calendar arithmetic ported to dusk, correct proleptically over the whole `int64` range with no lookup table. `unix_from_civil` does not reject an out of range field, a month past 12 or a day past its month's length; it rolls forward the same way the day count arithmetic always does, the way most civil calendar libraries treat an out of range field as a relative offset rather than a fault.
+
+Added in 1.8.1, `weekday` and `parse_iso8601` extend the calendar. `weekday(c)` returns the day of week for a `Civil` value, 0 for Sunday through 6 for Saturday, the `tm_wday` convention. It shares `days_from_civil` with `unix_from_civil` and does no validation of its own, so an out of range month or day rolls forward through the same arithmetic; `1970-01-01` counts zero days and returns 4, Thursday, and a date before the epoch resolves correctly through the flooring modulo.
+
+```text
+@import std.time
+
+c: Civil = Civil { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
+println(weekday(c))                        // 4, Thursday
+
+p, e := parse_iso8601("2000-02-29T12:30:00Z")
+e.ignore()
+println(p.month)                           // 2
+println(p.day)                             // 29, the leap day
+println(format_iso8601(p))                 // 2000-02-29T12:30:00Z, the same text back
+
+bad, be := parse_iso8601("2100-02-29T00:00:00Z")
+println(be.exists())                       // true, 2100 is not a leap year
+```
+
+`parse_iso8601(s)` returns `(Civil, error)` and is the strict inverse of `format_iso8601`. It reads exactly `[-]Y{4,}-MM-DDTHH:MM:SSZ`, at least four ASCII digits of year with an optional leading `-`, two digits for every other field, an uppercase `T` and `Z`, and nothing after the `Z`. It accepts no fractional seconds, no timezone offset, and no lowercase spelling, since those are shapes `format_iso8601` never emits. As an input boundary it validates: the month is 1 to 12, the day is checked by round tripping through `civil_from_days(days_from_civil(y, m, d))` so a leap day is exact with no month length table, the hour is 0 to 23, and the minute and second are 0 to 59, so a literal leap second `:60` is rejected. A structural mismatch returns `iso8601: malformed timestamp` and an out of range field returns `iso8601: field out of range`. The law is `parse_iso8601(format_iso8601(c)) == c` for every representable `Civil`, negative and wider than four digit years included.
 
 ## std.memory.allocator
 
@@ -634,6 +781,7 @@ enum Json {
 | --------------------------------------------- | -------------------------------------------------------- |
 | `json_parse(s: string) -> (*Json, error)`     | Parse one JSON document into a heap tree, or an error.   |
 | `json_emit(j: *Json) -> string`               | Emit a tree as compact JSON, a fresh owned string.       |
+| `json_free(root: *Json) -> void`              | Deep free a heap tree: every node, payload, key, and buffer. |
 
 ```text
 @import std.json
@@ -649,19 +797,18 @@ if e.exists() {
 }
 ```
 
-`json_parse` reads the whole grammar: `null`, `true`, `false`; a number with an optional sign, an integer part, an optional fraction, and an optional exponent; a string with the escapes `\" \\ \/ \b \f \n \r \t` and `\uXXXX`, where a `\uD800..\uDBFF` high surrogate pairs with a following `\uDC00..\uDFFF` low surrogate into one scalar above the basic plane; arrays; objects; arbitrary nesting; and insignificant whitespace between tokens. On any malformed input, an unterminated string, a number out of grammar, an unbalanced bracket, a bad literal, or trailing content after the value, it returns an error whose message names the fault, and the returned pointer is a throwaway the caller must not read, so test the error first. On success the error does not exist and the pointer roots a tree the caller owns.
+`json_parse` reads the whole grammar: `null`, `true`, `false`; a number with an optional sign, an integer part, an optional fraction, and an optional exponent; a string with the escapes `\" \\ \/ \b \f \n \r \t` and `\uXXXX`, where a `\uD800..\uDBFF` high surrogate pairs with a following `\uDC00..\uDFFF` low surrogate into one scalar above the basic plane; arrays; objects; arbitrary nesting; and insignificant whitespace between tokens. On any malformed input, an unterminated string, a number out of grammar, an unbalanced bracket, a bad literal, or trailing content after the value, it returns an error whose message names the fault, and the returned pointer is a throwaway the caller must not read, so test the error first. On success the error does not exist and the pointer roots a tree the caller owns. A repeated object key keeps the later value, and the earlier value's subtree and the repeat key's bytes are reclaimed during the parse, so `json_free` of the result frees every allocation the document produced.
 
 `json_emit` re-escapes the quote, the backslash, and the control bytes below `0x20`, formats numbers through `%.17g`, and writes object keys in the field map's insertion order, so the same tree always emits the same bytes. A byte at or above `0x20` passes through unchanged, so a multibyte UTF-8 scalar survives a parse and emit round trip intact.
 
-Build a tree by hand with `alloc` and the qualified constructors, `alloc(Json.JNum(3.5))` for a leaf and `alloc(Json.JArr(items))` for a branch. One inference note when you walk a parsed tree: a `match` arm that binds a `JArr` or `JObj` payload must rebind it to a locally annotated variable before calling any `vec_*` or `map_*`, since the generic pointer payload does not on its own pin the element type.
+Build a tree by hand with `alloc` and the qualified constructors, `alloc(Json.JNum(3.5))` for a leaf and `alloc(Json.JArr(items))` for a branch. A `match` arm that binds a `JArr` or `JObj` payload is typed from the variant since 1.8.0, so `vec_len`, `vec_get`, and the `map_*` calls infer directly on the binder with no rebinding.
 
 ```text
 match *j {
     JArr(items) => {
-        xs: *Vector<*Json> = items      // rebind so vec_len/vec_get infer the element type
         mut i: int64 = 0
-        while i < vec_len(xs) {
-            emit_value(sb, vec_get(xs, i))
+        while i < vec_len(items) {
+            emit_value(sb, vec_get(items, i))
             i = i + 1
         }
     }
@@ -671,7 +818,23 @@ match *j {
 
 `json_parse` is safe on adversarial input. It bounds array and object nesting at a fixed depth, well above any real document, and returns a `nesting is too deep` error past it rather than recursing until the stack overflows. It refuses a number whose magnitude overflows a `float64`, `1e400` among them, with a `number out of range` error rather than parsing it to an infinity that would emit as `inf`, which is not JSON and would not reparse.
 
-A parsed tree is a set of managed heap allocations. This release has no `json_free`: a value read out of a `match` arm is a borrow, so a recursive walk cannot free a tree it does not own, and a tree is reclaimed when the process exits rather than by an explicit call. A program that parses many documents across one long run holds them until it exits.
+A parsed tree is a set of managed heap allocations, and `json_free`, added in 1.8.1, reclaims one. It consumes `root`, freeing every node, every string payload, every object key, and every backing buffer, so no pointer into the tree is valid after it returns and a later dereference of any freed block faults named through the generational check. It requires a fully heap allocated tree, which every `json_parse` result is; a hand built tree carrying a literal string payload frees that payload into undefined behavior at its `free`, since a literal is not a heap allocation. A subtree reachable from two parents double frees, and the second free faults named rather than corrupting silently.
+
+```text
+@import std.json
+
+v, e := json_parse("{\"xs\":[1,2,3],\"ok\":true}")
+if e.exists() {
+    println(e.message)
+} else {
+    out := json_emit(v)
+    println(out)
+    free(out)
+    json_free(v)     // the whole tree, node by node
+}
+```
+
+`json_free` is a worklist walk rather than a recursion, because the recursive spelling is inexpressible: a `*Json` parameter borrows, so a payload pointer freed through a recursive call rejects as a borrowed free. It pushes `root` onto a work vector, then repeatedly takes a node out with `vec_take`, which hands back the removed element as its owner, frees the node's own payload, and pushes each child onto the work vector by taking it out of its array vector or field map with `vec_take` and `map_take`. This is the first standard library code to call the owning takes 1.8.0 introduced, so a program that parses many documents across one long run can now free each as it finishes instead of holding them until the process exits. A tree you would rather not track at all can still simply never free, which leaks nothing the process end does not reclaim.
 
 ## std.functional.maybe
 

@@ -1,0 +1,38 @@
+// Exercises std.flags across its three flag kinds and the positional channel. The
+// argv is a plain string array so the run is deterministic: it mixes an =value, a
+// spaced value, a bare bool, a lone "--" terminator, and positional words that
+// keep their order, including a "--dashy" that rides through as a positional only
+// because it follows the terminator.
+@paradigm procedural
+
+@import std.flags
+
+func main() -> int32 {
+    argv: string[] = ["--verbose", "--name=alice", "--count", "7", "one", "--", "two", "--dashy"]
+    f: *Flags = alloc(flags_new("greet", "a greeting demo"))
+    flag_bool(f, "verbose", "print more")
+    flag_str(f, "name", "world", "who to greet")
+    flag_int(f, "count", 1, "how many times")
+
+    e: error = flags_parse(f, argv, 0)
+    if e.exists() {
+        println(e.message)
+        return 1
+    }
+
+    println(flag_get_bool(f, "verbose"))
+    println(flag_get_str(f, "name"))
+    println(flag_get_int(f, "count"))
+    println(flag_seen(f, "verbose"))
+    println(flag_seen(f, "name"))
+
+    mut i: int64 = 0
+    while i < flags_pos_len(f) {
+        println(flags_pos_at(f, i))
+        i = i + 1
+    }
+
+    flags_free(f)
+    free(f)
+    return 0
+}

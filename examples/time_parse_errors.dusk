@@ -1,0 +1,26 @@
+// std.time's parse_iso8601 separates malformed text from out of range fields.
+// The bad separators, trailing byte, and lowercase z fail the strict formatter
+// shape, while the non-leap day, hour 24, and second 60 pass shape first and
+// then report the ordered field range error as ordinary error values.
+@paradigm procedural
+
+@import std.time
+
+func show(s: string) -> void {
+    c, e := parse_iso8601(s)
+    if c.year != 0 {
+        println(c.year)
+    }
+    println(e.message)
+    e.ignore()
+}
+
+func main() -> int32 {
+    show("2024/01-01T00:00:00Z")
+    show("2100-02-29T00:00:00Z")
+    show("2024-01-01T24:00:00Z")
+    show("2024-01-01T00:00:60Z")
+    show("2024-01-01T00:00:00Zx")
+    show("2024-01-01T00:00:00z")
+    return 0
+}

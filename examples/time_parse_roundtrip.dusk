@@ -1,0 +1,35 @@
+// std.time's parse_iso8601 is the strict inverse of format_iso8601. The five
+// fixed civil readings cover the epoch, a century boundary, a leap day, a
+// negative year, and a five digit year; each prints the formatted text followed
+// by true after every field survives parsing unchanged and no error exists.
+@paradigm procedural
+
+@import std.time
+
+func matches(a: Civil, b: Civil) -> bool {
+    if a.year != b.year { return false }
+    if a.month != b.month { return false }
+    if a.day != b.day { return false }
+    if a.hour != b.hour { return false }
+    if a.minute != b.minute { return false }
+    if a.second != b.second { return false }
+    return true
+}
+
+func show(c: Civil) -> void {
+    text := format_iso8601(c)
+    println(text)
+    parsed, e := parse_iso8601(text)
+    println(matches(c, parsed) && !e.exists())
+    e.ignore()
+    free(text)
+}
+
+func main() -> int32 {
+    show(Civil { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 })
+    show(Civil { year: 1999, month: 12, day: 31, hour: 23, minute: 59, second: 59 })
+    show(Civil { year: 2000, month: 2, day: 29, hour: 12, minute: 34, second: 56 })
+    show(Civil { year: -50, month: 3, day: 1, hour: 4, minute: 5, second: 6 })
+    show(Civil { year: 12345, month: 6, day: 7, hour: 8, minute: 9, second: 10 })
+    return 0
+}

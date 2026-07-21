@@ -1,0 +1,34 @@
+// Drives std.flags into each of its four command-line errors and prints the
+// message the caller is handed. Bad input is an error value, never a fault, so the
+// program keeps running and prints all four in order. Each parse uses a fresh flag
+// set so one error never colors the next.
+@paradigm procedural
+
+@import std.flags
+
+func try_parse(argv: string[]) -> void {
+    f: *Flags = alloc(flags_new("greet", "a greeting demo"))
+    flag_bool(f, "verbose", "print more")
+    flag_str(f, "name", "world", "who to greet")
+    flag_int(f, "count", 1, "how many times")
+    e: error = flags_parse(f, argv, 0)
+    if e.exists() {
+        println(e.message)
+    } else {
+        println("(ok)")
+    }
+    flags_free(f)
+    free(f)
+}
+
+func main() -> int32 {
+    unknown: string[] = ["--frob"]
+    novalue: string[] = ["--name"]
+    notint: string[] = ["--count", "abc"]
+    boolval: string[] = ["--verbose=x"]
+    try_parse(unknown)
+    try_parse(novalue)
+    try_parse(notint)
+    try_parse(boolval)
+    return 0
+}

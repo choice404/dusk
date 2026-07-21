@@ -3062,7 +3062,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.8.0\n
+out dusk 1.8.1\n
 argv version
 code 0
 ---
@@ -4108,4 +4108,108 @@ test callrecv_free_fail
 mode check_fail
 file examples/callrecv_free_fail.dusk
 err_has cannot free a call result that may alias its arguments
+---
+test flags_basic
+mode run
+file examples/flags_basic.dusk
+out 1\nalice\n7\n1\n1\none\ntwo\n--dashy\n
+---
+test flags_usage
+mode run
+file examples/flags_usage.dusk
+out usage: greet [options]\na greeting demo\n  --verbose  print more\n  --name <str>  who to greet (default: world)\n  --count <int>  how many times (default: 1)\n
+---
+test flags_errors
+mode run
+file examples/flags_errors.dusk
+out unknown flag '--frob'\nflag '--name' needs a value\nflag '--count' needs an integer, got 'abc'\nflag '--verbose' takes no value\n
+---
+test flags_dup_fault
+mode run_raw
+file examples/flags_dup_fault.dusk
+ok false
+err_has fatal: flags: flag '--verbose' already registered
+---
+test flags_getter_fault
+mode run_raw
+file examples/flags_getter_fault.dusk
+ok false
+err_has fatal: flags: no int flag named '--verbose'
+---
+test flags_unhandled_fail
+mode check_fail
+file examples/flags_unhandled_fail.dusk
+err_has this expression's error result is ignored
+---
+test set_basic
+mode run
+file examples/set_basic.dusk
+out 1\n1\n0\n1\n0\n2\n1\n0\n1\nb\n
+---
+test set_dedup
+mode run
+file examples/set_dedup.dusk
+out 4\nbanana\napple\ncherry\ndate\n
+---
+test set_ptr_elem_fail
+mode check_fail
+file examples/set_ptr_elem_fail.dusk
+err_has cannot hash a managed pointer; a map key is an integer, char, rune, or string
+---
+test vec_map_filter
+mode run
+file examples/vec_map_filter.dusk
+out 3\n6\n9\n
+---
+test vec_hof_capture
+mode run
+file examples/vec_hof_capture.dusk
+out 30\n40\n
+---
+test vec_map_narrow
+mode run
+file examples/vec_map_narrow.dusk
+out 7\n42\n1024\n
+---
+test vec_map_struct
+mode run
+file examples/vec_map_struct.dusk
+out 2 4\n5 10\n8 16\n
+---
+test time_parse_roundtrip
+mode run
+file examples/time_parse_roundtrip.dusk
+out 1970-01-01T00:00:00Z\n1\n1999-12-31T23:59:59Z\n1\n2000-02-29T12:34:56Z\n1\n-0050-03-01T04:05:06Z\n1\n12345-06-07T08:09:10Z\n1\n
+---
+test time_weekday
+mode run
+file examples/time_weekday.dusk
+out 4\n6\n3\n4\n
+---
+test time_parse_errors
+mode run
+file examples/time_parse_errors.dusk
+out iso8601: malformed timestamp\niso8601: field out of range\niso8601: field out of range\niso8601: field out of range\niso8601: malformed timestamp\niso8601: malformed timestamp\n
+---
+test json_free_std
+mode run_raw
+file examples/json_free_std.dusk
+out {"n":null,"b":true,"i":42,"s":"hi","a":[1,"two",null,{"deep":false}]}\n
+ok false
+err_has fatal: use of a freed or stale pointer at examples/json_free_std.dusk:23
+---
+test json_free_handbuilt
+mode run
+file examples/json_free_handbuilt.dusk
+out {"name":"dusk","nums":[1,2]}\nfreed clean\n
+---
+test time_parse_negzero
+mode run
+file examples/time_parse_negzero.dusk
+out iso8601: malformed timestamp\n0000-01-01T00:00:00Z\n
+---
+test json_dupkey
+mode run
+file examples/json_dupkey.dusk
+out {"a":2}\nfreed clean\n
 ---

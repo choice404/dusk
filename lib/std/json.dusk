@@ -395,7 +395,13 @@ func jp_array(p: *JParser) -> *Json {
 }
 
 // Parse one "key": value member into fields, advancing past the pair. Records a
-// fault when a key is not a string or the colon is missing.
+// fault when a key is not a string or the colon is missing. A repeated key needs
+// care: the map keeps its first key and overwrites the value in place, so a naive
+// put would orphan the previous value's whole subtree and this repeat key string,
+// and json_free, walking only the surviving tree, would never reclaim them. On a
+// duplicate key this frees the previous value's subtree and this now-redundant
+// repeat key, then overwrites, so the tree carries exactly one owned key and value
+// per member and a later json_free frees each exactly once.
 func jp_member(p: *JParser, fields: *Map<string, *Json>) -> void {
     if jp_peek(p) != 34 {
         jp_fail(p, "expected a string key in object")
@@ -414,6 +420,16 @@ func jp_member(p: *JParser, fields: *Map<string, *Json>) -> void {
     jp_skip_ws(p)
     v: *Json = jp_value(p)
     if jp_has_err(p) {
+        return
+    }
+    if map_has(fields, key) {
+        old: Maybe<*Json> = map_get(fields, key)
+        match old {
+            Some(ov) => json_free(ov),
+            None => {}
+        }
+        map_put(fields, key, v)
+        free(key)
         return
     }
     map_put(fields, key, v)
@@ -695,4 +711,56 @@ export func json_emit(j: *Json) -> string {
     sb_free(sb)
     free(sb)
     return out
+}
+
+// Deep free a heap Json tree, freeing every node, string payload, object key,
+// and backing buffer, so json_free consumes root and no pointer into the tree is
+// valid afterward: a later deref of any freed block faults named through the
+// generation backstop. The tree must be fully heap allocated, which every
+// json_parse result is; a hand built tree carrying a literal string payload is
+// undefined behavior at that string's free, since free of a never allocated
+// pointer is out of contract. A subtree reachable from two parents double frees,
+// and the second free faults named rather than corrupting silently.
+//
+// The walk uses a worklist rather than recursion because a recursive spelling
+// cannot express it: a *Json parameter borrows, so a payload pointer freed
+// through a recursive call would reject as a borrowed free. vec_take and map_take
+// remove each child from its container and hand back the owner, so the taken
+// pointer is this frame's to free; pushing root into the work list borrows it,
+// and the take below forges the owner, which is exactly what a hand written tree
+// free needs.
+export func json_free(root: *Json) -> void {
+    work: *Vector<*Json> = alloc(vec_new())
+    vec_push(work, root)
+    while vec_len(work) > 0 {
+        t: *Json = vec_take(work, vec_len(work) - 1)
+        match *t {
+            JNull => {}
+            JBool(b) => {}
+            JNum(n) => {}
+            JStr(s) => free(s),
+            JArr(items) => {
+                while vec_len(items) > 0 {
+                    vec_push(work, vec_take(items, vec_len(items) - 1))
+                }
+                vec_free(items)
+                free(items)
+            }
+            JObj(fields) => {
+                keys: *Vector<string> = map_keys(fields)
+                while vec_len(keys) > 0 {
+                    k: string = vec_take(keys, vec_len(keys) - 1)
+                    vec_push(work, map_take(fields, k))
+                    free(k)
+                }
+                vec_free(keys)
+                free(keys)
+                map_free(fields)
+                free(fields)
+            }
+        }
+        free(t)
+    }
+    vec_free(work)
+    free(work)
 }

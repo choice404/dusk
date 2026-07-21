@@ -1,0 +1,22 @@
+@paradigm procedural
+
+// The parser is format_iso8601's exact inverse, and the format never emits a
+// negative zero year: year 0 prints as 0000 with no sign. A minus sign on a
+// zero year is therefore malformed text, not an alternate spelling of year 0,
+// and accepting it would let text parse that no format call can produce.
+@import std.time
+
+func main() -> int64 {
+    c, e := parse_iso8601("-0000-01-01T00:00:00Z")
+    if c.year != 0 {
+        println(c.year)
+    }
+    println(e.message)
+    e.ignore()
+    c2, e2 := parse_iso8601("0000-01-01T00:00:00Z")
+    if !e2.exists() {
+        println(format_iso8601(c2))
+    }
+    e2.ignore()
+    return 0
+}

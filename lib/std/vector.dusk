@@ -213,3 +213,43 @@ export func vec_index_of<T>(v: *Vector<T>, x: T) -> int64 {
     }
     return -1
 }
+
+// Applies f once to each element of v, in index order, and collects the
+// results into a fresh heap vector the caller owns. The source vector and
+// its elements are not mutated or freed. Result ownership is exactly what f
+// returned: if f allocates owning pointers, drain those elements, for example
+// with vec_take in a loop, before vec_free and free of the outer vector. Plain
+// values and borrowed pointers need no special handling beyond freeing the
+// outer vector.
+export func vec_map<T, U>(v: *Vector<T>, f: (T) -> U) -> *Vector<U> {
+    out: *Vector<U> = alloc(vec_new())
+    mut i: int64 = 0
+    n: int64 = (*v).len
+    while i < n {
+        vec_push(out, f((*v).data[i]))
+        i = i + 1
+    }
+    return out
+}
+
+// Calls p once on each element of v, in index order, and copies every value
+// for which p returns true into a fresh heap vector the caller owns. The
+// source vector is not mutated or freed, and the selected element values are
+// copied as values. If T is a managed pointer type, the new vector holds the
+// same pointers as the source vector, so both vectors alias the pointed to
+// objects. Freeing an element reachable through both vectors is a double free;
+// dusk's ownership checker does not prevent this across vec_filter, and the
+// runtime generational free check is the backstop that faults stale reads.
+export func vec_filter<T>(v: *Vector<T>, p: (T) -> bool) -> *Vector<T> {
+    out: *Vector<T> = alloc(vec_new())
+    mut i: int64 = 0
+    n: int64 = (*v).len
+    while i < n {
+        x: T = (*v).data[i]
+        if p(x) {
+            vec_push(out, x)
+        }
+        i = i + 1
+    }
+    return out
+}

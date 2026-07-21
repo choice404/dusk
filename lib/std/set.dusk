@@ -1,0 +1,85 @@
+/** std.set: an unordered set generic over its element type, a thin wrap over
+ *  std.map keyed by the element with a bool value that is always true. The wrap is
+ *  a real type, not an alias, so a *Set<string> parameter cannot take a map by
+ *  mistake, and it seals the value channel: membership is exactly key presence, so
+ *  there is no way to hold an element that is present but false. The element
+ *  contract is the map key contract verbatim: an element is any hashable type
+ *  compared with ==, and a string element is borrowed and must outlive the set.
+ *  set_free releases the backing map's buffers and the map allocation only; the
+ *  elements themselves are never freed here, and the caller frees the Set. */
+@paradigm procedural
+
+@import std.map
+@import std.vector
+
+/** A set as its backing map. m maps each present element to true; the value is a
+ *  placeholder that carries no information, since presence is the whole of
+ *  membership. The set owns the map allocation and set_free releases it. */
+export struct Set<T> {
+    m: *Map<T, bool>,
+}
+
+/** A fresh empty set. Build one on the heap with alloc(set_new()) and pass it by
+ *  pointer so inserts persist.
+ *  @return an empty set with no elements */
+export func set_new<T>() -> Set<T> {
+    return Set { m: alloc(map_new()) }
+}
+
+/** Adds x to s, returning true when it was newly added and false when it was
+ *  already present. Probes membership first, so a repeat of an existing element
+ *  neither grows the set nor disturbs its first-insertion order.
+ *  @param s the set to add into
+ *  @param x the element to add
+ *  @return true when x was not already in s */
+export func set_add<T>(s: *Set<T>, x: T) -> bool {
+    if map_has((*s).m, x) {
+        return false
+    }
+    map_put((*s).m, x, true)
+    return true
+}
+
+/** Whether x is a member of s.
+ *  @param s the set to test
+ *  @param x the element to look for
+ *  @return true when x is present */
+export func set_has<T>(s: *Set<T>, x: T) -> bool {
+    return map_has((*s).m, x)
+}
+
+/** Removes x from s, returning true when it was present and false when it was not.
+ *  @param s the set to remove from
+ *  @param x the element to remove
+ *  @return true when x was a member before this call */
+export func set_remove<T>(s: *Set<T>, x: T) -> bool {
+    return map_remove((*s).m, x)
+}
+
+/** The number of elements in s.
+ *  @param s the set to measure
+ *  @return the member count */
+export func set_len<T>(s: *Set<T>) -> int64 {
+    return map_len((*s).m)
+}
+
+/** The members of s in first-insertion order, as a fresh vector the caller owns
+ *  and frees with vec_free and free. Each element is copied out of the backing
+ *  map's own order record, so the returned vector is independent of the set:
+ *  freeing it never touches the set, and set_free never touches it. For a string
+ *  element the copy is the same borrowed string the set holds, so freeing the
+ *  returned vector releases its buffer only.
+ *  @param s the set to enumerate
+ *  @return a fresh caller-owned vector of the members, in insertion order */
+export func set_items<T>(s: *Set<T>) -> *Vector<T> {
+    return map_keys((*s).m)
+}
+
+/** Frees the backing map's buffers and the map allocation, and nothing else. The
+ *  elements are borrowed, so none is freed here; the caller frees the Set
+ *  allocation itself after this returns.
+ *  @param s the set to release */
+export func set_free<T>(s: *Set<T>) -> void {
+    map_free((*s).m)
+    free((*s).m)
+}

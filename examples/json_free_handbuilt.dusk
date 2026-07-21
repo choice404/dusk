@@ -1,0 +1,46 @@
+// The clean-exit twin of json_free_std: a Json tree built by hand instead of
+// parsed, then deep freed through std.json's json_free with no fault. json_free's
+// contract is a fully heap tree, so every string this example puts in the tree,
+// both the object keys and the string payload, is a fresh heap string made with
+// substring, exactly the heap strings json_parse would have produced. Every node
+// is alloc'd. With no literal-string payload and no shared subtree, json_free
+// walks the tree, frees each block, key, and buffer, and returns; main prints its
+// proof line and exits 0.
+//
+// The point of the twin: json_free's legality is not special to parser output. A
+// hand built tree that honors the heap-string contract frees just as cleanly, and
+// this example is the standing demonstration of how to honor it (substring for
+// every key and payload string).
+@paradigm procedural
+
+@import std.json
+@import std.string
+@import std.vector
+@import std.map
+
+func main() -> int32 {
+    // A heap tree, built by hand: { "name": "dusk", "nums": [1, 2] }. Every key and
+    // payload string is a fresh heap string (substring copies into a new buffer), so
+    // the whole tree honors json_free's heap-string contract.
+    fields: *Map<string, *Json> = alloc(map_new())
+
+    name_key: string = substring("name", 0, 4)
+    name_val: string = substring("dusk", 0, 4)
+    map_put(fields, name_key, alloc(Json.JStr(name_val)))
+
+    items: *Vector<*Json> = alloc(vec_new())
+    vec_push(items, alloc(Json.JNum(1.0)))
+    vec_push(items, alloc(Json.JNum(2.0)))
+    nums_key: string = substring("nums", 0, 4)
+    map_put(fields, nums_key, alloc(Json.JArr(items)))
+
+    root: *Json = alloc(Json.JObj(fields))
+
+    out: string = json_emit(root)
+    println(out)
+    free(out)
+
+    json_free(root)
+    println("freed clean")
+    return 0
+}

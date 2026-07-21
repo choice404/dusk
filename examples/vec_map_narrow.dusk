@@ -1,0 +1,28 @@
+// std.vector's vec_map can infer a result type narrower than the source type.
+// Each int64 value is explicitly cast to int32 inside the mapping closure, so
+// the result vector is Vector<int32> and the printed values prove the narrowed
+// elements codegen as ordinary vector contents.
+@paradigm procedural
+
+@import std.vector
+
+func main() -> int32 {
+    nums: *Vector<int64> = alloc(vec_new())
+    vec_push(nums, 7)
+    vec_push(nums, 42)
+    vec_push(nums, 1024)
+
+    narrowed: *Vector<int32> = vec_map(nums, lambda (x: int64) -> int32 { return int32(x) })
+
+    mut i: int64 = 0
+    while i < vec_len(narrowed) {
+        println(vec_get(narrowed, i))
+        i = i + 1
+    }
+
+    vec_free(narrowed)
+    free(narrowed)
+    vec_free(nums)
+    free(nums)
+    return 0
+}
