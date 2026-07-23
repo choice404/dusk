@@ -83,6 +83,21 @@ func match_binder_sig(tc: *TypeChecker, st: int64, vname: string, arity: int64) 
     return vs
 }
 
+func no_variant_msg(en: string, v: string) -> string {
+    disp: string = base_type_name(en)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, disp)
+    sb_push(b, "' has no variant '")
+    sb_push(b, v)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(disp)
+    return out
+}
+
 func pattern_arity_msg(v: string, got: int64, want: int64) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "variant pattern '")
@@ -105,8 +120,9 @@ func pattern_arity_msg(v: string, got: int64, want: int64) -> string {
 // arity check and under the same ungated convention (the surface pass owns the
 // non-generic report; a generic enum stays unresolved at surface and its ground
 // copy owns the report post-mono), so the count mismatch reads as a real
-// diagnostic. Only a resolved enum whose named variant exists is checked; an
-// unknown scrutinee, a non-enum, or an unknown variant keeps its own report.
+// diagnostic. A resolved enum whose named variant does not exist is refused here
+// too (a pattern naming a variant the scrutinee enum lacks used to bind silently
+// then die at codegen); an unknown scrutinee or a non-enum keeps its own report.
 func check_pattern_arity(tc: *TypeChecker, p: PatternNode, st: int64, lo: int64, hi: int64) -> void {
     if p.kind != pk_variant() { return }
     n: TyNode = ty_get((*tc).ty, st)
@@ -117,7 +133,10 @@ func check_pattern_arity(tc: *TypeChecker, p: PatternNode, st: int64, lo: int64,
     a: *Ast = (*tc).ast
     vname: string = ast_name(a, p.a)
     es: EnumSig = unwrap_or(map_get(enums, ename), EnumSig { off: 0, len: 0 })
-    if !variant_in_enum(tc, es, vname) { return }
+    if !variant_in_enum(tc, es, vname) {
+        tc_emit(tc, no_variant_msg(ename, vname), lo, hi)
+        return
+    }
     vs: VariantSig = sig_variant_for_enum((*tc).sigtab, ename, vname)
     if p.c != vs.len {
         tc_emit(tc, pattern_arity_msg(vname, p.c, vs.len), lo, hi)
@@ -132,7 +151,7 @@ func check_pattern_arity(tc: *TypeChecker, p: PatternNode, st: int64, lo: int64,
 // and its annotated alias reject free with one voice. Kept intentionally narrow: the
 // deref-of-owned-ident shape is the only place single ownership is provable through
 // a match, and D24's generation backstop faults every misuse the static rule misses.
-func match_subject_own(tc: *TypeChecker, subject_id: int64) -> int64 {
+export func match_subject_own(tc: *TypeChecker, subject_id: int64) -> int64 {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, subject_id)
     if e.kind == xk_unary() && e.a == uop_deref() {

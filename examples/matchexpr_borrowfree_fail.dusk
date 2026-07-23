@@ -1,0 +1,20 @@
+// W4: a borrowed match subject yields a borrow through every extraction spelling. t
+// is a parameter, so *t is a borrowed Node the caller owns; the Leaf arm binds q to a
+// pointer that still lives inside that Node. Binding it to x makes x a borrow, and
+// freeing a borrow double frees the caller's allocation, so the free is refused.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+}
+
+func drop_leaf(t: *Node) -> void {
+    x: *int64 = match *t {
+        Leaf(q) => q,
+    }
+    free(x)
+}
+
+func main() -> int32 {
+    return 0
+}

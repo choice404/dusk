@@ -40,6 +40,35 @@ func arg_wrong_msg(i: int64) -> string {
     return out
 }
 
+func free_ground_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "free takes a heap pointer, not ")
+    sb_push(b, rendered)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The argument type an argument check should compare, correcting the one shape that
+// reaches the check untyped: a field access. infer_expr leaves a struct field's type
+// unknown, and compat wildcards unknown against every parameter, so a field of the
+// wrong type slipped past the check and died in clang (str_eq(n.name, "x") with an
+// int64 field). When the base is a concrete struct the field type is known; resolve it
+// through the ownership chain resolver and check against it, exactly as a named local
+// is checked. A generic or otherwise unresolved field stays unknown and permissive.
+func field_arg_ty(tc: *TypeChecker, arg_id: int64, av: int64) -> int64 {
+    an: TyNode = ty_get((*tc).ty, av)
+    if an.kind != tyk_unknown() { return av }
+    a: *Ast = (*tc).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind != xk_field() { return av }
+    ft: int64 = own_chain_ty(tc, arg_id)
+    fn: TyNode = ty_get((*tc).ty, ft)
+    if fn.kind == tyk_unknown() { return av }
+    return ft
+}
+
 func func_builtin_ret(tc: *TypeChecker, name: string) -> int64 {
     t: *TyArena = (*tc).ty
     if str_eq(name, "read_file") || str_eq(name, "read_line") || str_eq(name, "read_all") {
@@ -196,6 +225,21 @@ func ctor_arity_msg(en: string, v: string, want: int64, got: int64) -> string {
     return out
 }
 
+func no_variant_msg(en: string, v: string) -> string {
+    disp: string = base_type_name(en)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, disp)
+    sb_push(b, "' has no variant '")
+    sb_push(b, v)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(disp)
+    return out
+}
+
 func ctor_arg_msg(en: string, v: string, i: int64) -> string {
     disp: string = base_type_name(en)
     b: *StringBuilder = alloc(sb_new())
@@ -214,7 +258,15 @@ func ctor_arg_msg(en: string, v: string, i: int64) -> string {
 }
 
 func check_variant_ctor_args(tc: *TypeChecker, en: string, v: string, arg_off: int64, arg_len: int64, arg_tys: *Vector<int64>, span_lo: int64, span_hi: int64) -> void {
-    if !enum_contains_variant(tc, en, v) { return }
+    // A qualified constructor naming a variant the enum lacks (Maybe.Just) used to
+    // early-return here and then die at codegen with an unsupported field expression.
+    // Report it in the arity check's voice, gated the same way (both passes; the
+    // surface pass owns the non-generic report, a generic enum stays unresolved at
+    // surface and its ground copy owns it post-mono).
+    if !enum_contains_variant(tc, en, v) {
+        tc_emit(tc, no_variant_msg(en, v), span_lo, span_hi)
+        return
+    }
     vs: VariantSig = sig_variant_for_enum((*tc).sigtab, en, v)
     if vs.len != arg_len {
         tc_emit(tc, ctor_arity_msg(en, v, vs.len, arg_len), span_lo, span_hi)
@@ -224,9 +276,9 @@ func check_variant_ctor_args(tc: *TypeChecker, en: string, v: string, arg_off: i
     mut i: int64 = 0
     while i < vs.len {
         p: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
-        av: int64 = vec_get(arg_tys, i)
         arg_id: int64 = vec_get((*a).kids, arg_off + i)
         arg: ExprNode = vec_get((*a).exprs, arg_id)
+        av: int64 = field_arg_ty(tc, arg_id, vec_get(arg_tys, i))
         pn: TyNode = ty_get((*tc).ty, p)
         mut skip_plain: bool = false
         if pn.kind == tyk_named() {
@@ -839,13 +891,14 @@ func check_callback_arg(tc: *TypeChecker, cbty: int64, av: int64, arg_id: int64,
 // backstopped forgery: move hands its argument straight back, alloc boxes a pointer
 // into a fresh cell, a passthrough returns what it was given; none of these leaves a
 // live element behind, so returns_alias never condemns and no builtin whitelist is
-// needed. An owning intrinsic (vec_take, map_take) is exempt outright. A method
+// needed. An owning call (a func head marked owning, or the vec_take/map_take
+// intrinsic) is exempt outright. A method
 // callee is judged by the resolved receiver type's computed summary; with no static
 // summary (interface dynamic dispatch, an unknown receiver) it stays accepted. An
 // opaque plain callee and a callee that reads nothing back stay accepted, so free of
 // a fresh-pointer-returning call, direct or through a method, stays legal.
 func free_call_arg_aliases(tc: *TypeChecker, e: ExprNode) -> bool {
-    if is_owning_take_call(tc, e) { return false }
+    if is_owning_call(tc, e) { return false }
     a: *Ast = (*tc).ast
     callee: ExprNode = vec_get((*a).exprs, e.a)
     if callee.kind == xk_field() {
@@ -1098,9 +1151,14 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
             }
             if str_eq(name, "move") {
                 if arg_len > 0 {
-                    mt: int64 = infer_expr(tc, vec_get((*a).kids, arg_off))
+                    arg0_id: int64 = vec_get((*a).kids, arg_off)
+                    arg0: ExprNode = vec_get((*a).exprs, arg0_id)
+                    // A move argument is a managed context, so a match argument earns the
+                    // verdict even when its arms are unresolved generic payload binders that
+                    // resolve managed only at ground. walk_match_expr captures and clears it.
+                    if !(*tc).types_only && arg0.kind == xk_match() { (*tc).match_ctx = 1 }
+                    mt: int64 = infer_expr(tc, arg0_id)
                     mn: TyNode = ty_get((*tc).ty, mt)
-                    arg0: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, arg_off))
                     if mn.kind == tyk_collector() {
                         tc_emit(tc, "a collected value is not owned; copy it directly", arg0.lo, arg0.hi)
                         return mt
@@ -1115,6 +1173,13 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                         if !(*tc).types_only && free_call_arg_aliases(tc, arg0) {
                             tc_emit(tc, alias_result_msg("move"), arg0.lo, arg0.hi)
                         }
+                    } else if arg0.kind == xk_match() {
+                        // Moving a match expression whose arms borrow moves a pointer the
+                        // subject still owns; the verdict walk_match_expr stored rejects it
+                        // with the same voice a borrowed identifier earns.
+                        if !(*tc).types_only && match_own_of(tc, arg0_id) == own_borrow() {
+                            tc_emit(tc, "cannot move a borrowed pointer; only its owner can be moved", arg0.lo, arg0.hi)
+                        }
                     }
                     return mt
                 }
@@ -1122,9 +1187,28 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
             }
             if str_eq(name, "free") {
                 if arg_len > 0 {
-                    ft: int64 = infer_expr(tc, vec_get((*a).kids, arg_off))
+                    farg_id: int64 = vec_get((*a).kids, arg_off)
+                    farg: ExprNode = vec_get((*a).exprs, farg_id)
+                    // A free argument is a managed context, so a match argument earns the
+                    // verdict even when its arms are unresolved generic payload binders.
+                    if !(*tc).types_only && farg.kind == xk_match() { (*tc).match_ctx = 1 }
+                    ft: int64 = infer_expr(tc, farg_id)
                     fnode: TyNode = ty_get((*tc).ty, ft)
-                    farg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, arg_off))
+                    // The heap-type validation compares an effective type: a field access
+                    // infers unknown, so its concrete field type is resolved through
+                    // field_arg_ty and the field is checked in both passes (a scalar field
+                    // freed dies in clang no matter the pass); a generic binder resolves
+                    // only once mono grounds it, so the plain operand is checked at ground.
+                    // A managed *T, raw pointer, or string is heap; unknown stays accepted
+                    // so an un-ground shape never false-rejects; a collector keeps its own
+                    // message below.
+                    mut eff: int64 = ft
+                    is_field: bool = farg.kind == xk_field()
+                    if is_field { eff = field_arg_ty(tc, farg_id, ft) }
+                    effnode: TyNode = ty_get((*tc).ty, eff)
+                    if (is_field || (*tc).types_only) && effnode.kind != tyk_ptr() && effnode.kind != tyk_rawptr() && effnode.kind != tyk_str() && effnode.kind != tyk_unknown() && effnode.kind != tyk_collector() {
+                        tc_emit(tc, free_ground_msg(ty_render((*tc).ty, eff)), farg.lo, farg.hi)
+                    }
                     if fnode.kind == tyk_collector() {
                         tc_emit(tc, "a collected value is not freed; the collector reclaims it", farg.lo, farg.hi)
                     } else if farg.kind == xk_ident() {
@@ -1139,6 +1223,12 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                     } else if farg.kind == xk_call() {
                         if !(*tc).types_only && free_call_arg_aliases(tc, farg) {
                             tc_emit(tc, alias_result_msg("free"), farg.lo, farg.hi)
+                        }
+                    } else if farg.kind == xk_match() {
+                        // Freeing a match expression whose arms borrow frees a pointer the
+                        // subject still owns; the stored verdict rejects the double free.
+                        if !(*tc).types_only && match_own_of(tc, farg_id) == own_borrow() {
+                            tc_emit(tc, "cannot free a borrowed pointer; only its owner frees it", farg.lo, farg.hi)
                         }
                     }
                 }
@@ -1192,9 +1282,9 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
             mut i: int64 = 0
             while i < cn.len {
                 p: int64 = vec_get((*(*tc).ty).kids, cn.off + i)
-                av: int64 = vec_get(arg_tys_generic, i)
                 arg_id: int64 = vec_get((*a).kids, arg_off + i)
                 arg: ExprNode = vec_get((*a).exprs, arg_id)
+                av: int64 = field_arg_ty(tc, arg_id, vec_get(arg_tys_generic, i))
                 pn: TyNode = ty_get((*tc).ty, p)
                 an: TyNode = ty_get((*tc).ty, av)
                 if pn.kind == tyk_error() && an.kind == tyk_error() && arg.kind == xk_ident() {

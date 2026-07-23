@@ -1,0 +1,21 @@
+// 1.9.0 fix round: a match expression whose arms yield different integer widths used to
+// compile, sizing the result slot from the first resolvable arm and truncating the wider
+// arm's value (5000000000 stored through an i32 slot came back as 705032704). The ground
+// type pass now requires every value-yielding arm to agree on type, so the mismatch is a
+// check-time fault and the take-first result slot rests on that guarantee.
+@paradigm procedural
+
+enum Flag { A, B }
+
+func small() -> int32 { return 5 }
+
+func main() -> int64 {
+    f: Flag = Flag.B
+    big: int64 = 5000000000
+    x: int64 = match f {
+        A => small(),
+        B => big,
+    }
+    print(x)
+    return 0
+}

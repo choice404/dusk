@@ -1,0 +1,22 @@
+// W3: every arm of this match allocates, so the result is a managed pointer. The
+// new static call walk types alloc(e) as a pointer to the static type of e, so the
+// result slot is sized fat and each arm stores a { ptr, gen } value. The taken
+// arm's allocation is freed once.
+@paradigm procedural
+
+enum Choice {
+    Big,
+    Small,
+}
+
+func main() -> int32 {
+    c := Choice.Small
+    n := 7
+    x: *int64 = match c {
+        Big => alloc(n),
+        Small => alloc(n + 1),
+    }
+    println(*x)
+    free(x)
+    return 0
+}

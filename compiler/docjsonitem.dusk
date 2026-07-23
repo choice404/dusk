@@ -32,6 +32,9 @@ func push_func_fields(b: *StringBuilder, level: int64, a: *Ast, src: string, n: 
         push_key(b, level, "async")
         push_bool(b, f.is_async)
         sb_push(b, ",\n")
+        push_key(b, level, "owning")
+        push_bool(b, f.owning)
+        sb_push(b, ",\n")
     }
     push_key(b, level, "generics")
     push_name_array(b, level, a, f.generics_off, f.generics_len)
@@ -235,6 +238,105 @@ func push_impl(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, 
     sb_push_char(b, 125)
 }
 
+// A foreign function entry, `{name, span, params, return, variadic, signature, doc}`.
+// A foreign function carries no generics and no export or async flag; variadic is its
+// own boolean, and span is the name token's byte extent.
+func push_foreign_func(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, ffid: int64) -> void {
+    ff: ForeignFuncNode = vec_get((*a).foreign_funcs, ffid)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "name")
+    push_str(b, ast_name(a, ff.name))
+    sb_push(b, ",\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, ff.lo, ff.hi)
+    sb_push(b, ",\n")
+    push_key(b, l, "params")
+    push_params(b, l, a, ff.params_off, ff.params_len)
+    sb_push(b, ",\n")
+    ret: string = docty_type(a, ff.ret)
+    push_key(b, l, "return")
+    push_str(b, ret)
+    free(ret)
+    sb_push(b, ",\n")
+    push_key(b, l, "variadic")
+    push_bool(b, ff.variadic)
+    sb_push(b, ",\n")
+    sig: string = docty_foreign_sig(a, ffid)
+    push_key(b, l, "signature")
+    push_str(b, sig)
+    free(sig)
+    sb_push(b, ",\n")
+    push_key(b, l, "doc")
+    push_doc(b, l, a, src, n, dk_foreign_func(), ffid)
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+// A foreign block entry, `{abi, span, funcs}`. abi is the calling convention string,
+// span is the foreign head's byte extent, and funcs lists the block's functions in
+// source order. A foreign block has no doc capture point of its own, so it carries no
+// doc field; a doc before the block dangles and each function inside carries its own.
+func push_foreign(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, fnid: int64) -> void {
+    fn: ForeignNode = vec_get((*a).foreigns, fnid)
+    l: int64 = level + 1
+    sb_push(b, "{\n")
+    push_key(b, l, "abi")
+    push_str(b, ast_name(a, fn.abi))
+    sb_push(b, ",\n")
+    push_key(b, l, "span")
+    push_span(b, src, n, fn.lo, fn.hi)
+    sb_push(b, ",\n")
+    push_key(b, l, "funcs")
+    if fn.funcs_len == 0 {
+        sb_push(b, "[]")
+    } else {
+        sb_push(b, "[\n")
+        mut i: int64 = 0
+        while i < fn.funcs_len {
+            ffid: int64 = vec_get((*a).kids, fn.funcs_off + i)
+            ind(b, l + 1)
+            push_foreign_func(b, l + 1, a, src, n, ffid)
+            if i + 1 < fn.funcs_len { sb_push_char(b, 44) }
+            sb_push_char(b, 10)
+            i = i + 1
+        }
+        ind(b, l)
+        sb_push_char(b, 93)
+    }
+    sb_push_char(b, 10)
+    ind(b, level)
+    sb_push_char(b, 125)
+}
+
+// Appends the top level `foreigns` array, one object per foreign block in source
+// order.
+func push_foreign_array(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64) -> void {
+    total: int64 = count_kind(a, ik_foreign())
+    if total == 0 {
+        sb_push(b, "[]")
+        return
+    }
+    sb_push(b, "[\n")
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    mut seen: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_foreign() {
+            ind(b, level + 1)
+            push_foreign(b, level + 1, a, src, n, it.id)
+            seen = seen + 1
+            if seen < total { sb_push_char(b, 44) }
+            sb_push_char(b, 10)
+        }
+        i = i + 1
+    }
+    ind(b, level)
+    sb_push_char(b, 93)
+}
+
 func count_kind(a: *Ast, kind: int64) -> int64 {
     items: *Vector<ItemNode> = (*a).items
     mut c: int64 = 0
@@ -318,6 +420,13 @@ export func doc_json(a: *Ast, src: string, n: int64, stem: string, path: string)
     sb_push(b, ",\n")
     push_key(b, 1, "impls")
     push_item_array(b, 1, a, src, n, ik_impl())
+    // The foreigns array is additive and appears only when the module declares a
+    // foreign block, so a module with none renders byte-identically to before.
+    if count_kind(a, ik_foreign()) > 0 {
+        sb_push(b, ",\n")
+        push_key(b, 1, "foreigns")
+        push_foreign_array(b, 1, a, src, n)
+    }
     sb_push_char(b, 10)
     sb_push_char(b, 125)
     sb_push_char(b, 10)

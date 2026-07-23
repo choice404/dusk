@@ -1,0 +1,25 @@
+// 1.9.0 fix round: freeing a match whose arms are generic payload binders is a managed
+// context, so the free position now sets the verdict hint and the match earns its ownership
+// verdict even though a generic binder resolves managed only at ground. The subject b is a
+// by-value enum, so each arm hands back a borrow of the pointer b still holds; freeing that
+// borrow, then extracting and freeing it again, would double free. The first free is refused.
+@paradigm procedural
+
+enum Box<T> {
+    Full(v: T),
+    Backup(w: T),
+}
+
+func main() -> int64 {
+    p: *int64 = alloc(7)
+    b: Box<*int64> = Box.Full(move(p))
+    free(match b {
+        Full(v2) => v2,
+        Backup(w2) => w2,
+    })
+    free(match b {
+        Full(v3) => v3,
+        Backup(w3) => w3,
+    })
+    return 0
+}

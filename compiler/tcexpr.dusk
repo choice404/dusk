@@ -338,11 +338,58 @@ func infer_lambda_sig(tc: *TypeChecker, e: ExprNode) -> int64 {
     return infer_lambda_with_borrows(tc, e, borrowed)
 }
 
-func walk_match_expr(tc: *TypeChecker, e: ExprNode) -> void {
+// A match expression arm that yields a lambda literal is refused: codegen cannot
+// lower a lambda into the match result slot, and there is no name to bind it to. The
+// binding-position ownership verdict lives in binding_own; this only rejects the one
+// tail shape that has no legal lowering, on the surface pass.
+func check_match_arm_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < e.c {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
+        tail_id: int64 = match_arm_tail(a, arm.body)
+        if tail_id >= 0 {
+            tail: ExprNode = vec_get((*a).exprs, tail_id)
+            if tail.kind == xk_lambda() {
+                tc_emit(tc, "a match arm cannot yield a lambda; bind the function to a name outside the match", tail.lo, tail.hi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Walk a match expression's arms and, with each arm scope live, derive its two
+// per-arm judgments. On the ground pass (types_only) the arm tails must agree on
+// type: their inferred types are compared pairwise, and a width- or kind-mismatched
+// arm faults, which retires the first-resolvable-arm-wins result-typing miscompile at
+// check time so codegen's take-first result slot rests on a checker guarantee. On the
+// surface pass the managed-pointer arms produce the ownership verdict (Algorithm M 5-6),
+// judged here rather than after the scopes pop so an arm-local fresh owner classifies as
+// the move out it is; the aggregate lands in match_own keyed by the match expr id for the
+// binding, destructure, free/move, and return-position checks to read. The tail type is
+// re-inferred under suppress so the second walk adds no diagnostic and no fresh fault.
+func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
+    ctx: int64 = (*tc).match_ctx
+    (*tc).match_ctx = 0
     st: int64 = infer_expr(tc, e.a)
     scrut_esc: EscPair = value_escape(tc, e.a)
     a: *Ast = (*tc).ast
     (*tc).branch_depth = (*tc).branch_depth + 1
+    mut subj_own: int64 = own_borrow()
+    if !(*tc).types_only { subj_own = match_subject_own(tc, e.a) }
+    mut ref_ty: int64 = -1
+    mut disagreed: bool = false
+    // Ownership judgments are collected per value-yielding arm with the arm scope live,
+    // then finalized after the loop once the match is confirmed managed: the copy fault
+    // and the aggregate verdict emit only for a managed-pointer match, so a scalar match
+    // never fabricates a spurious ownership fault. any_managed is the managed evidence
+    // (a resolvable managed arm); ctx == 1 is the managed binding context hint that also
+    // covers a single unresolved payload arm bound to a managed annotation.
+    own_vals: *Vector<int64> = alloc(vec_new())
+    copy_faults: *Vector<int64> = alloc(vec_new())
+    own_tails: *Vector<int64> = alloc(vec_new())
+    mut any_managed: bool = false
     mut i: int64 = 0
     while i < e.c {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
@@ -350,11 +397,87 @@ func walk_match_expr(tc: *TypeChecker, e: ExprNode) -> void {
         bind_match_arm(tc, arm.pat, st, e.a)
         bind_match_arm_escape(tc, arm.pat, e.a, scrut_esc)
         check_block_no_scope(tc, arm.body)
+        if !(*tc).types_only && arm_ends_in_match_stmt(a, arm.body) {
+            ab: BlockNode = vec_get((*a).blocks, arm.body)
+            sm: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, ab.off + ab.len - 1))
+            smscrut: ExprNode = vec_get((*a).exprs, sm.a)
+            tc_emit(tc, "a match arm cannot yield a bare match; bind the inner match to a name and yield that name", smscrut.lo, smscrut.hi)
+        }
+        tail_id: int64 = match_arm_tail(a, arm.body)
+        if tail_id >= 0 {
+            (*tc).suppress = (*tc).suppress + 1
+            at: int64 = infer_expr(tc, tail_id)
+            (*tc).suppress = (*tc).suppress - 1
+            if (*tc).types_only {
+                atn: TyNode = ty_get((*tc).ty, at)
+                if atn.kind != tyk_unknown() && !disagreed {
+                    if ref_ty < 0 {
+                        ref_ty = at
+                    } else if !compat((*tc).ty, ref_ty, at) {
+                        tailx: ExprNode = vec_get((*a).exprs, tail_id)
+                        tc_emit(tc, "the arms of a match expression must agree on type", tailx.lo, tailx.hi)
+                        disagreed = true
+                    }
+                }
+            } else {
+                if arm_tail_managed(tc, e.a, arm.pat, tail_id, at) { any_managed = true }
+                vec_push(own_vals, arm_own_value(tc, arm.pat, tail_id, subj_own, at))
+                vec_push(copy_faults, arm_copy_fault(tc, arm.pat, tail_id, subj_own))
+                vec_push(own_tails, tail_id)
+            }
+        }
         pop_scope(tc)
         i = i + 1
     }
     (*tc).branch_depth = (*tc).branch_depth - 1
+    check_match_arm_lambdas(tc, e)
     check_match_scrutinee(tc, st, e.a, e.b, e.c)
+    if !(*tc).types_only && (ctx == 1 || any_managed) {
+        finalize_match_own(tc, id, own_vals, copy_faults, own_tails)
+    }
+    // On the ground pass the arms have concrete types, so a match yields the type they
+    // agreed on rather than the surface wildcard. This lets a match used as another match's
+    // arm tail enter the outer agreement check, and a match bound or passed against an
+    // annotation get the same width and type comparison any other value does. A surface
+    // match, or a ground match whose arms disagreed, stays unknown so the disagreement is
+    // reported once and nothing downstream cascades on it.
+    if (*tc).types_only && !disagreed && ref_ty >= 0 { return ref_ty }
+    return ty_unknown((*tc).ty)
+}
+
+// Emit the deferred ownership faults of a confirmed-managed match and store its verdict.
+// Each recorded copy fault becomes the standard owner-copy diagnostic; the arms must agree
+// on ownership, faulting the first arm that disagrees with the running verdict; the
+// aggregate (owner if every arm owns, borrow if every arm borrows, else the first) lands in
+// match_own for the binding, destructure, free/move, and return checks to read.
+func finalize_match_own(tc: *TypeChecker, id: int64, own_vals: *Vector<int64>, copy_faults: *Vector<int64>, own_tails: *Vector<int64>) -> void {
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < vec_len(copy_faults) {
+        cf: int64 = vec_get(copy_faults, i)
+        if cf >= 0 {
+            ce: ExprNode = vec_get((*a).exprs, cf)
+            tc_emit(tc, "cannot copy an owning pointer; bind a `ref` alias or `move` it", ce.lo, ce.hi)
+        }
+        i = i + 1
+    }
+    mut verdict: int64 = -1
+    mut mixed: bool = false
+    mut j: int64 = 0
+    while j < vec_len(own_vals) {
+        v: int64 = vec_get(own_vals, j)
+        if verdict < 0 {
+            verdict = v
+        } else if v != verdict && !mixed {
+            mixed = true
+            me: ExprNode = vec_get((*a).exprs, vec_get(own_tails, j))
+            tc_emit(tc, "the arms of a match expression must agree on ownership of its result", me.lo, me.hi)
+        }
+        j = j + 1
+    }
+    mut vv: int64 = own_owner()
+    if verdict >= 0 { vv = verdict }
+    set_match_own(tc, id, vv)
 }
 
 export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
@@ -519,8 +642,7 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
     }
     if e.kind == xk_lambda() { return infer_lambda_sig(tc, e) }
     if e.kind == xk_match() {
-        walk_match_expr(tc, e)
-        return ty_unknown((*tc).ty)
+        return walk_match_expr(tc, id, e)
     }
     if e.kind == xk_do() {
         mut i: int64 = 0

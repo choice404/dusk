@@ -145,7 +145,7 @@ func parse_item(p: *Parser) -> void {
         }
     }
     if p_kw(p, "func") {
-        fid: int64 = parse_func(p, exported, abi_c, false)
+        fid: int64 = parse_func(p, exported, abi_c, false, false)
         ast_item(p_ast(p), ik_func(), fid)
         return
     }
@@ -155,10 +155,23 @@ func parse_item(p: *Parser) -> void {
         }
         p_bump(p)
         if p_kw(p, "func") {
-            fid2: int64 = parse_func(p, exported, false, true)
+            fid2: int64 = parse_func(p, exported, false, true, false)
             ast_item(p_ast(p), ik_func(), fid2)
         } else {
             p_error(p, "expected 'func' after 'async'")
+        }
+        return
+    }
+    if p_ident_text_is(p, "owning") {
+        if abi_c {
+            p_error(p, "an owning func cannot be an exported C function")
+        }
+        p_bump(p)
+        if p_kw(p, "func") {
+            fid4: int64 = parse_func(p, exported, false, false, true)
+            ast_item(p_ast(p), ik_func(), fid4)
+        } else {
+            p_error(p, "expected 'func' after 'owning'")
         }
         return
     }
@@ -202,7 +215,7 @@ func parse_item(p: *Parser) -> void {
     p_bump(p)
 }
 
-export func parse_func(p: *Parser, exported: bool, abi_c: bool, is_async: bool) -> int64 {
+export func parse_func(p: *Parser, exported: bool, abi_c: bool, is_async: bool, owning: bool) -> int64 {
     p_expect_kw(p, "func")
     name_lo: int64 = p_lo(p)
     name_hi: int64 = p_hi(p)
@@ -221,6 +234,7 @@ export func parse_func(p: *Parser, exported: bool, abi_c: bool, is_async: bool) 
         exported: exported,
         abi_export: abi_c,
         is_async: is_async,
+        owning: owning,
         name: name,
         lo: name_lo,
         hi: name_hi,
@@ -371,13 +385,20 @@ func parse_foreign_item(p: *Parser) -> int64 {
             reading = false
         } else {
             before: int64 = (*p).pos
+            dlo, dhi := p_take_doc(p)
             p_expect_kw(p, "func")
+            name_lo: int64 = p_lo(p)
+            name_hi: int64 = p_hi(p)
             name: int64 = p_ident(p)
             params, variadic := parse_foreign_params(p)
             p_expect(p, k_arrow())
             ret: int64 = parse_type(p)
             p_eat(p, k_semi())
-            vec_push(funcs, ast_foreign_func(p_ast(p), name, params, ret, variadic))
+            ffid: int64 = ast_foreign_func(p_ast(p), name, name_lo, name_hi, params, ret, variadic)
+            vec_push(funcs, ffid)
+            if dlo >= 0 {
+                ast_doc(p_ast(p), dk_foreign_func(), ffid, dlo, dhi)
+            }
             p_guard_progress(p, before, "unexpected token in foreign block")
         }
     }
@@ -408,7 +429,7 @@ func parse_impl_item(p: *Parser) -> int64 {
             before: int64 = (*p).pos
             dlo, dhi := p_take_doc(p)
             if p_kw(p, "func") {
-                mfid: int64 = parse_func(p, false, false, false)
+                mfid: int64 = parse_func(p, false, false, false, false)
                 vec_push(methods, mfid)
                 if dlo >= 0 {
                     ast_doc(p_ast(p), dk_func(), mfid, dlo, dhi)
@@ -417,10 +438,20 @@ func parse_impl_item(p: *Parser) -> int64 {
                 p_error(p, "a method cannot be async")
                 p_bump(p)
                 if p_kw(p, "func") {
-                    mfid2: int64 = parse_func(p, false, false, false)
+                    mfid2: int64 = parse_func(p, false, false, false, false)
                     vec_push(methods, mfid2)
                     if dlo >= 0 {
                         ast_doc(p_ast(p), dk_func(), mfid2, dlo, dhi)
+                    }
+                }
+            } else if p_ident_text_is(p, "owning") {
+                p_error(p, "a method cannot be owning; owning marks a top level func")
+                p_bump(p)
+                if p_kw(p, "func") {
+                    mfid3: int64 = parse_func(p, false, false, false, false)
+                    vec_push(methods, mfid3)
+                    if dlo >= 0 {
+                        ast_doc(p_ast(p), dk_func(), mfid3, dlo, dhi)
                     }
                 }
             } else {
@@ -465,7 +496,7 @@ func parse_monad_block(p: *Parser) -> void {
             dlo, dhi := p_take_doc(p)
             exported: bool = p_eat_kw(p, "export")
             if p_kw(p, "func") {
-                fid: int64 = parse_func(p, exported, false, false)
+                fid: int64 = parse_func(p, exported, false, false, false)
                 funcs: *Vector<FuncNode> = (*p_ast(p)).funcs
                 mut f: FuncNode = vec_get(funcs, fid)
                 mname: string = ast_name(p_ast(p), f.name)

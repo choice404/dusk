@@ -252,6 +252,55 @@ func render_impl(b: *StringBuilder, a: *Ast, src: string, n: int64, imid: int64)
     }
 }
 
+func render_foreign_func(b: *StringBuilder, a: *Ast, src: string, n: int64, ffid: int64) -> void {
+    ff: ForeignFuncNode = vec_get((*a).foreign_funcs, ffid)
+    push_heading(b, "###", ast_name(a, ff.name))
+    sig: string = docty_foreign_sig(a, ffid)
+    push_fence(b, sig)
+    free(sig)
+    render_bound(b, a, src, n, dk_foreign_func(), ffid)
+}
+
+// The total number of foreign functions across every foreign block, so an all empty
+// set omits the section the same way an item kind with no members does.
+func count_foreign_funcs(a: *Ast) -> int64 {
+    items: *Vector<ItemNode> = (*a).items
+    mut c: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_foreign() {
+            fn: ForeignNode = vec_get((*a).foreigns, it.id)
+            c = c + fn.funcs_len
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// Emits the Foreign Functions section: every foreign function across every foreign
+// block, in source order, each with its signature and any bound doc. The section is
+// omitted when the module declares no foreign function.
+func render_foreign_section(b: *StringBuilder, a: *Ast, src: string, n: int64) -> void {
+    if count_foreign_funcs(a) == 0 { return }
+    push_heading(b, "##", "Foreign Functions")
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_foreign() {
+            fn: ForeignNode = vec_get((*a).foreigns, it.id)
+            mut j: int64 = 0
+            while j < fn.funcs_len {
+                ffid: int64 = vec_get((*a).kids, fn.funcs_off + j)
+                render_foreign_func(b, a, src, n, ffid)
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
 // Emits a section header and its items when at least one item of the kind exists.
 func render_section(b: *StringBuilder, a: *Ast, src: string, n: int64, kind: int64, title: string) -> void {
     if count_kind(a, kind) == 0 { return }
@@ -312,6 +361,7 @@ export func doc_markdown(a: *Ast, src: string, n: int64, stem: string) -> string
     render_section(b, a, src, n, ik_enum(), "Enums")
     render_section(b, a, src, n, ik_interface(), "Interfaces")
     render_section(b, a, src, n, ik_impl(), "Impls")
+    render_foreign_section(b, a, src, n)
     raw: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
     free(b)

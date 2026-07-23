@@ -42,6 +42,29 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
             if bn2.kind == ctyk_rawptr() { return bn2.a }
         }
     }
+    // A call's static type: the two builtins that flow a value type through
+    // (move is identity, alloc wraps its argument in a managed pointer) plus a
+    // plain top-level func whose return type genctx already carries. The callee
+    // must be a bare name not shadowed by a local; anything else stays unknown.
+    if e.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_ident() {
+            locals: *Map<string, LocalVal> = (*s).locals
+            cname: string = ast_name(a, callee.a)
+            if !map_has(locals, cname) {
+                if str_eq(cname, "move") && e.c > 0 {
+                    return static_expr_ty(s, vec_get((*a).kids, e.b))
+                }
+                if str_eq(cname, "alloc") && e.c == 1 {
+                    return cty_intern(c, ctyk_ptr(), static_expr_ty(s, vec_get((*a).kids, e.b)), 0, "")
+                }
+                if genctx_has_fn((*s).ctx, cname) {
+                    sig: GenFnSig = genctx_fn((*s).ctx, cname)
+                    return sig.ret
+                }
+            }
+        }
+    }
     return cty_void(c)
 }
 

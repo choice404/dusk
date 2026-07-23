@@ -1,0 +1,24 @@
+// W3: a match expression that hands an owned payload back through move sizes its
+// result slot as the payload pointer, not the historical i64 fallback that made
+// clang reject the fat pointer store. The deref subject *t yields a Node value;
+// the Leaf arm moves its owned *int64 out, the Empty arm allocates a fresh one.
+// The moved pointer is freed once through x, the container once through t.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int32 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    x: *int64 = match *t {
+        Leaf(q) => move(q),
+        Empty => alloc(0),
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

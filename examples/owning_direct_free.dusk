@@ -1,0 +1,23 @@
+@paradigm procedural
+@import std.vector
+
+// An owning call result is the caller's own value both when freed directly and when
+// moved. free(grab(...)) frees the taken element inline, and move(grab(...)) hands the
+// result to a fresh binding the caller then frees; the owning blessing exempts each
+// from the alias condemnation.
+owning func grab(pool: *Vector<*int64>, i: int64) -> *int64 {
+    return vec_take(pool, i)
+}
+
+func main() -> int32 {
+    pool: *Vector<*int64> = alloc(vec_new())
+    vec_push(pool, alloc(1))
+    vec_push(pool, alloc(2))
+    free(grab(pool, 0))
+    p: *int64 = move(grab(pool, 0))
+    println(*p)
+    free(p)
+    vec_free(pool)
+    free(pool)
+    return 0
+}

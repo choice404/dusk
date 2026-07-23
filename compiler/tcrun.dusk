@@ -305,6 +305,19 @@ export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
             tc_emit(tc, "returning an interface value is not supported; return the concrete type or a pointer to it", f.lo, f.hi)
         }
     }
+    if f.owning && !(*tc).types_only {
+        own_ret: TyNode = ty_get((*tc).ty, tc_type(tc, f.ret))
+        if own_ret.kind == tyk_unit() {
+            tc_emit(tc, "an owning func returns the one value it hands over; it cannot return void", f.lo, f.hi)
+        } else if own_ret.kind == tyk_tuple() {
+            tc_emit(tc, "an owning func returns the one value it hands over; it returns one value, not a tuple", f.lo, f.hi)
+        } else if own_ret.kind == tyk_rawptr() {
+            tc_emit(tc, "an owning func returns a managed value; a raw pointer carries no generation to check", f.lo, f.hi)
+        }
+        if str_eq(ast_name((*tc).ast, f.name), "main") {
+            tc_emit(tc, "main cannot be owning; nothing calls main to take its result", f.lo, f.hi)
+        }
+    }
     push_scope(tc)
     if str_len(self_ty) > 0 {
         declare(tc, "self", named_ty((*tc).ty, self_ty))

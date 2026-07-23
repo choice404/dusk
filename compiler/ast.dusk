@@ -16,6 +16,7 @@ export struct FuncNode {
     exported: bool,
     abi_export: bool,
     is_async: bool,
+    owning: bool,
     name: int64,
     lo: int64,
     hi: int64,
@@ -32,7 +33,7 @@ export struct BindNode { name: int64, ty: int64 }
 export struct ArmNode { pat: int64, body: int64 }
 export struct VariantNode { name: int64, fields_off: int64, fields_len: int64 }
 export struct MethodSigNode { name: int64, lo: int64, hi: int64, params_off: int64, params_len: int64, ret: int64 }
-export struct ForeignFuncNode { name: int64, params_off: int64, params_len: int64, ret: int64, variadic: bool }
+export struct ForeignFuncNode { name: int64, lo: int64, hi: int64, params_off: int64, params_len: int64, ret: int64, variadic: bool }
 export struct StructNode { exported: bool, name: int64, lo: int64, hi: int64, generics_off: int64, generics_len: int64, fields_off: int64, fields_len: int64 }
 export struct EnumNode { exported: bool, name: int64, lo: int64, hi: int64, generics_off: int64, generics_len: int64, variants_off: int64, variants_len: int64 }
 export struct InterfaceNode { exported: bool, name: int64, lo: int64, hi: int64, generics_off: int64, generics_len: int64, methods_off: int64, methods_len: int64 }
@@ -45,11 +46,11 @@ export struct MonadNode { name: int64, lo: int64, hi: int64 }
 
 // A documentation block bound to a declaration. kind selects which arena id keys the
 // binding: dk_func/dk_struct/dk_enum/dk_interface key the corresponding node id,
-// dk_method_sig keys a MethodSigNode id, dk_impl keys an ImplNode id, and dk_module
-// keys the module itself (id 0). An impl or monad method is keyed by its FuncNode id
-// under dk_func. lo and hi are the doc block's full byte span, delimiters included.
-// The dump never prints docs; only `dusk doc` consumes them, and only for a single
-// unmerged file.
+// dk_method_sig keys a MethodSigNode id, dk_impl keys an ImplNode id, dk_foreign_func
+// keys a ForeignFuncNode id, and dk_module keys the module itself (id 0). An impl or
+// monad method is keyed by its FuncNode id under dk_func. lo and hi are the doc block's
+// full byte span, delimiters included. The dump never prints docs; only `dusk doc`
+// consumes them, and only for a single unmerged file.
 export struct DocNode { kind: int64, id: int64, lo: int64, hi: int64 }
 
 export struct Ast {
@@ -146,6 +147,7 @@ export func dk_interface() -> int64 { return 3 }
 export func dk_method_sig() -> int64 { return 4 }
 export func dk_module() -> int64 { return 5 }
 export func dk_impl() -> int64 { return 6 }
+export func dk_foreign_func() -> int64 { return 7 }
 
 export func uop_deref() -> int64 { return 0 }
 export func uop_neg() -> int64 { return 1 }
@@ -301,11 +303,11 @@ export func ast_method_sig(a: *Ast, name: int64, lo: int64, hi: int64, params: *
     return id
 }
 
-export func ast_foreign_func(a: *Ast, name: int64, params: *Vector<int64>, ret: int64, variadic: bool) -> int64 {
+export func ast_foreign_func(a: *Ast, name: int64, lo: int64, hi: int64, params: *Vector<int64>, ret: int64, variadic: bool) -> int64 {
     off, len := ast_kids(a, params)
     v: *Vector<ForeignFuncNode> = (*a).foreign_funcs
     id: int64 = vec_len(v)
-    vec_push(v, ForeignFuncNode { name: name, params_off: off, params_len: len, ret: ret, variadic: variadic })
+    vec_push(v, ForeignFuncNode { name: name, lo: lo, hi: hi, params_off: off, params_len: len, ret: ret, variadic: variadic })
     return id
 }
 

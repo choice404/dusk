@@ -76,7 +76,21 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
     if e.kind == xk_await() {
         t = infer_await_operand(tc, e)
     } else {
+        // A managed return type hints the match verdict the same way a managed binding does,
+        // so a returned match extraction over a locally allocated subject still classifies.
+        if !(*tc).types_only && e.kind == xk_match() && is_managed_ty(tc, (*tc).cur_ret) { (*tc).match_ctx = 1 }
         t = infer_expr(tc, expr_id)
+        (*tc).match_ctx = 0
+    }
+    // Returning a match expression whose arms agreed on a borrow hands the caller a
+    // pointer the subject still owns: the return position would launder the borrow into
+    // the caller's owner exactly as the copy spelling does in binding position. The
+    // verdict walk_match_expr stored gates on a managed return type, so a scalar match
+    // return is untouched.
+    if !(*tc).types_only && e.kind == xk_match() && is_managed_ty(tc, (*tc).cur_ret) {
+        if match_own_of(tc, expr_id) == own_borrow() {
+            tc_emit(tc, "cannot return a borrowed match result; move the payload or return an owning call", e.lo, e.hi)
+        }
     }
     if !compat((*tc).ty, (*tc).cur_ret, t) {
         rn: TyNode = ty_get((*tc).ty, (*tc).cur_raw_ret)

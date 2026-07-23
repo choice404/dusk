@@ -1,0 +1,23 @@
+// W4: a match expression whose arms disagree on ownership. The subject *t is a
+// borrowed pointer (t is a parameter), so the Leaf arm hands back a borrow of the
+// payload the caller still owns, while the Empty arm allocates a fresh owner. The
+// result cannot be uniformly freed or left alone, so the binding verdict refuses the
+// match and names the odd arm: the arms must agree on ownership of the result.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func first(t: *Node) -> *int64 {
+    x: *int64 = match *t {
+        Leaf(q) => q,
+        Empty => alloc(0),
+    }
+    return x
+}
+
+func main() -> int32 {
+    return 0
+}

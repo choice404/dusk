@@ -1,0 +1,43 @@
+// W5: unqualified variant patterns naming variants the enum has stay legal in every
+// shape the checker sees. This exercises the five the unknown-variant tightening must
+// not disturb: a statement match, an expression match, a match on a dereferenced
+// subject, a match over a generic enum at a second element type, and a match inside a
+// generic helper. All use bare Some/None over the standard library Maybe and run.
+@paradigm procedural
+
+@import std.functional.maybe
+
+func label<T>(m: Maybe<T>, yes: string, no: string) -> string {
+    match m {
+        Some(v) => return yes,
+        None => return no,
+    }
+    return no
+}
+
+func main() -> int32 {
+    a: Maybe<int64> = Maybe.Some(1)
+    match a {
+        Some(v) => println("stmt-some"),
+        None => println("stmt-none"),
+    }
+    b: Maybe<int64> = Maybe.None
+    x: int64 = match b {
+        Some(v) => v,
+        None => 42,
+    }
+    println(x)
+    c: *Maybe<int64> = alloc(Maybe.Some(7))
+    match *c {
+        Some(v) => println("deref-some"),
+        None => println("deref-none"),
+    }
+    free(c)
+    d: Maybe<string> = Maybe.Some("hi")
+    match d {
+        Some(v) => println("genenum-some"),
+        None => println("genenum-none"),
+    }
+    println(label(a, "helper-some", "helper-none"))
+    return 0
+}

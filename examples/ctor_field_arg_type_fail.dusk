@@ -1,0 +1,23 @@
+// W5: the field-access argument leak also reached the variant constructor check. A
+// struct field infers no type at the surface, so Box.Has(n.name) with an int64 field
+// where Has holds a string passed the checker and stored an i64 into a ptr slot, which
+// clang rejects. The constructor check now resolves the concrete field type and
+// compares it, exactly as it does for a named local.
+@paradigm procedural
+
+struct Node {
+    name: int64,
+}
+
+enum Box {
+    Has(v: string),
+}
+
+func main() -> int32 {
+    n: Node = Node { name: 5 }
+    b: Box = Box.Has(n.name)
+    match b {
+        Has(v) => { return 0 }
+    }
+    return 0
+}

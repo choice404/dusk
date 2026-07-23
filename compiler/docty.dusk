@@ -141,6 +141,7 @@ export func docty_func_sig(a: *Ast, fid: int64) -> string {
         if f.abi_export { sb_push(b, "\"C\" ") }
     }
     if f.is_async { sb_push(b, "async ") }
+    if f.owning { sb_push(b, "owning ") }
     sb_push(b, "func ")
     sb_push(b, ast_name(a, f.name))
     push_generics(b, a, f.generics_off, f.generics_len)
@@ -161,6 +162,40 @@ export func docty_method_sig(a: *Ast, msid: int64) -> string {
     push_params(b, a, m.params_off, m.params_len)
     sb_push(b, " -> ")
     push_type(b, a, m.ret)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Appends a parenthesized foreign parameter list, appending a trailing `...` when the
+// function is variadic. A variadic function with no named parameters spells `(...)`.
+func push_foreign_params(b: *StringBuilder, a: *Ast, off: int64, len: int64, variadic: bool) -> void {
+    sb_push_char(b, 40)
+    mut i: int64 = 0
+    while i < len {
+        if i > 0 { sb_push(b, ", ") }
+        push_param(b, a, vec_get((*a).kids, off + i))
+        i = i + 1
+    }
+    if variadic {
+        if len > 0 { sb_push(b, ", ") }
+        sb_push(b, "...")
+    }
+    sb_push_char(b, 41)
+}
+
+// The signature of a foreign function as it reads inside a foreign block,
+// `func name(...) -> ret`. A foreign function carries no generics and no export or
+// async marker; the variadic tail renders as a `...` last parameter.
+export func docty_foreign_sig(a: *Ast, ffid: int64) -> string {
+    ff: ForeignFuncNode = vec_get((*a).foreign_funcs, ffid)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "func ")
+    sb_push(b, ast_name(a, ff.name))
+    push_foreign_params(b, a, ff.params_off, ff.params_len, ff.variadic)
+    sb_push(b, " -> ")
+    push_type(b, a, ff.ret)
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
     free(b)

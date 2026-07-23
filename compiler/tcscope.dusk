@@ -326,6 +326,19 @@ export func own_of(tc: *TypeChecker, name: string) -> int64 {
     return 0
 }
 
+// Whether a name is owned in the innermost live scope. A match arm tail that names a
+// fresh owner declared inside the arm hands that owner out as the match result: the
+// arm's scope ends after the tail, so it is a move out, not a copy of a value that
+// outlives the extraction. This distinguishes an arm local owner (top scope, a legal
+// handoff) from an outer owner named in the tail (a copy that leaks). Only meaningful
+// while the arm scope is the top scope, which is exactly when the verdict runs.
+export func owns_top_scope(tc: *TypeChecker, name: string) -> bool {
+    owns: *Vector<*Map<string, int64>> = (*tc).owns
+    if vec_len(owns) == 0 { return false }
+    m: *Map<string, int64> = vec_get(owns, vec_len(owns) - 1)
+    return map_has(m, name)
+}
+
 export func set_moved(tc: *TypeChecker, name: string) -> void {
     if (*tc).types_only { return }
     owns: *Vector<*Map<string, int64>> = (*tc).owns

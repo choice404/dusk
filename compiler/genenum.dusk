@@ -210,20 +210,116 @@ func ge_bind_payload(s: *GenFuncState, ename: string, pat: PatternNode, addr: st
     free(ll)
 }
 
-func ge_result_ty(s: *GenFuncState, off: int64, len: int64) -> int64 {
+// The payload cty of a named binder inside a variant pattern, mirroring
+// ge_bind_payload's per-field type computation without touching locals. The enum
+// name comes from the scrutinee cty; returns -1 when the pattern binds nothing of
+// that name, so ge_result_ty can fall through to its static walk.
+func ge_pat_binder_ty(s: *GenFuncState, ename: string, pat: PatternNode, binder: string) -> int64 {
+    if pat.kind != pk_variant() { return -1 }
+    if pat.c == 0 { return -1 }
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
+    eid: int64 = ge_enum(a, ename)
+    vid, tag := ge_variant(a, eid, ast_name(a, pat.a))
+    if vid < 0 || tag < 0 { return -1 }
+    v: VariantNode = vec_get((*a).variants, vid)
+    mut i: int64 = 0
+    while i < pat.c {
+        if i < v.fields_len {
+            bid: int64 = vec_get((*a).kids, pat.b + i)
+            if str_eq(ast_name(a, bid), binder) {
+                fid: int64 = vec_get((*a).kids, v.fields_off + i)
+                f: FieldNode = vec_get((*a).fields, fid)
+                return cty_lower_ast(c, a, f.ty)
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// The cty of an arm-block local named by the arm's tail, resolved from the block's own let
+// statement before gen_block has populated locals. A single let binding of that name types
+// to its annotation; an inferred binding whose value is the arm's payload binder resolves
+// through ge_pat_binder_ty (the binder is not in locals yet either), and otherwise to the
+// static type of its value. This gives the result slot the arm-local value's type, and it
+// is consulted before the general static walk so a block-local shadows an outer name of the
+// same identifier. A repeated let of one name in a scope is a checker error, so the first
+// matching let is the only one. Returns cty_void when the name is not a single let local of
+// the block.
+func ge_block_local_ty(s: *GenFuncState, block_id: int64, ename: string, pat: PatternNode, name: string) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    blk: BlockNode = vec_get((*a).blocks, block_id)
+    mut i: int64 = 0
+    while i < blk.len {
+        sid: int64 = vec_get((*a).kids, blk.off + i)
+        st: StmtNode = vec_get((*a).stmts, sid)
+        if st.kind == sk_let() && st.b == 1 {
+            bid: int64 = vec_get((*a).kids, st.a)
+            b: BindNode = vec_get((*a).binds, bid)
+            if str_eq(ast_name(a, b.name), name) {
+                if b.ty >= 0 { return cty_lower_ast(c, a, b.ty) }
+                rhs: ExprNode = vec_get((*a).exprs, st.c)
+                if rhs.kind == xk_ident() && !str_eq(ename, "") {
+                    bt: int64 = ge_pat_binder_ty(s, ename, pat, ast_name(a, rhs.a))
+                    if bt >= 0 { return bt }
+                }
+                return static_expr_ty(s, st.c)
+            }
+        }
+        i = i + 1
+    }
+    return cty_void(c)
+}
+
+// The static type of a match expression's result slot. An arm tail that names a
+// pattern binder (bare, or through move) types to that binder's payload cty even
+// though ge_bind_payload has not run yet; a tail that names an arm-local binding
+// resolves through that block's let; the fat pointer thus lands in a correctly sized
+// slot instead of the historical i64 fallback that clang rejected.
+func ge_result_ty(s: *GenFuncState, scrut: int64, off: int64, len: int64) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    scrut_ty: int64 = static_expr_ty(s, scrut)
+    sn: CTyNode = vec_get(cty_nodes(c), scrut_ty)
+    mut ename: string = ""
+    if sn.kind == ctyk_enum() { ename = sn.text }
     mut i: int64 = 0
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        pat: PatternNode = vec_get((*a).patterns, arm.pat)
         block: BlockNode = vec_get((*a).blocks, arm.body)
         if block.len > 0 {
             sid: int64 = vec_get((*a).kids, block.off + block.len - 1)
             st: StmtNode = vec_get((*a).stmts, sid)
             if st.kind == sk_expr() {
+                if !str_eq(ename, "") {
+                    tail: ExprNode = vec_get((*a).exprs, st.a)
+                    mut binder: string = ""
+                    if tail.kind == xk_ident() { binder = ast_name(a, tail.a) }
+                    if tail.kind == xk_call() {
+                        ce: ExprNode = vec_get((*a).exprs, tail.a)
+                        if ce.kind == xk_ident() && str_eq(ast_name(a, ce.a), "move") && tail.c > 0 {
+                            arg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, tail.b))
+                            if arg.kind == xk_ident() { binder = ast_name(a, arg.a) }
+                        }
+                    }
+                    if !str_eq(binder, "") {
+                        bt: int64 = ge_pat_binder_ty(s, ename, pat, binder)
+                        if bt >= 0 { return bt }
+                    }
+                }
+                ex: ExprNode = vec_get((*a).exprs, st.a)
+                // An arm-local binding shadows any outer name and is not in locals yet, so
+                // an ident tail resolves through the block's own let before the general
+                // static walk, which would otherwise find an outer binding of the same name.
+                if ex.kind == xk_ident() {
+                    bl: int64 = ge_block_local_ty(s, arm.body, ename, pat, ast_name(a, ex.a))
+                    if vec_get(cty_nodes(c), bl).kind != ctyk_void() { return bl }
+                }
                 ty: int64 = static_expr_ty(s, st.a)
                 if vec_get(cty_nodes(c), ty).kind != ctyk_void() { return ty }
-                ex: ExprNode = vec_get((*a).exprs, st.a)
                 if ex.kind == xk_int() { return cty_int(c, 64) }
                 if ex.kind == xk_bool() { return cty_bool(c) }
                 if ex.kind == xk_str() { return cty_rawptr(c, cty_char(c)) }
@@ -381,7 +477,7 @@ export func gen_match(s: *GenFuncState, scrut: int64, arms_off: int64, arms_len:
 }
 
 export func gen_match_expr(s: *GenFuncState, e: ExprNode) -> Val {
-    ty: int64 = ge_result_ty(s, e.b, e.c)
+    ty: int64 = ge_result_ty(s, e.a, e.b, e.c)
     slot: string = gen_alloca(s, ty)
     gen_match(s, e.a, e.b, e.c, ty, slot)
     return Val { ty: ty, op: gen_load_slot(s, ty, slot) }

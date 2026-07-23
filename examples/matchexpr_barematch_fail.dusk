@@ -1,0 +1,24 @@
+// 1.9.0 fix round: a match written as the value of a match arm is parsed as a statement,
+// not an expression, so it stores nothing into the outer result slot and the outer match
+// used to return an uninitialized slot, a string arm read back as 0 through an int slot.
+// The inner match must be bound to a name and that name yielded, the same shape a nested
+// match already takes wherever its value is used.
+@paradigm procedural
+
+enum Flag { On, Off }
+
+func main() -> int64 {
+    a: Flag = Flag.On
+    b: Flag = Flag.Off
+    r: int64 = match a {
+        On => {
+            match b {
+                On => "yes",
+                Off => "no",
+            }
+        },
+        Off => 5,
+    }
+    println(r)
+    return 0
+}

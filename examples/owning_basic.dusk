@@ -1,0 +1,28 @@
+@paradigm procedural
+@import std.vector
+
+// A user owning func generalizes the take blessing (D35). pool_take removes an element
+// and its head declares the result the caller's own value, so the caller frees the
+// taken pointer and the pool keeps working. Without the marker the checker would
+// condemn the free as a possible container alias; the marker blesses it exactly as
+// vec_take is blessed, and the free is legal.
+owning func pool_take(pool: *Vector<*int64>, i: int64) -> *int64 {
+    return vec_take(pool, i)
+}
+
+func main() -> int32 {
+    pool: *Vector<*int64> = alloc(vec_new())
+    vec_push(pool, alloc(10))
+    vec_push(pool, alloc(20))
+    vec_push(pool, alloc(30))
+    a: *int64 = pool_take(pool, 0)
+    println(*a)
+    free(a)
+    b: *int64 = pool_take(pool, 0)
+    println(*b)
+    free(b)
+    println(vec_len(pool))
+    vec_free(pool)
+    free(pool)
+    return 0
+}

@@ -1,0 +1,22 @@
+@paradigm procedural
+@import std.vector
+
+// A lying owning func. The head declares its result the caller's own value, but the
+// body returns vec_get, a borrow that still lives inside the vector. owning is a
+// declared contract (D24): the checker trusts the marker, so the caller frees the
+// borrowed element. D24's generation backstop carries the lie to a named fault: the
+// later read of the still-live slot faults instead of corrupting silently.
+owning func bad_take(v: *Vector<*int64>, i: int64) -> *int64 {
+    return vec_get(v, i)
+}
+
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, alloc(7))
+    p: *int64 = bad_take(v, 0)
+    println(*p)
+    free(p)
+    q: *int64 = vec_get(v, 0)
+    println(*q)
+    return 0
+}

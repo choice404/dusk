@@ -1,0 +1,22 @@
+// 1.9.0 fix round: freeing a match expression directly frees the pointer its arms yield.
+// The subject t is a borrowed parameter, so both arms hand back a borrow (the payload the
+// caller still owns, and a borrowed spare), and freeing a borrow double frees the caller's
+// allocation. The free consumer reads the match's ownership verdict and refuses it in the
+// same voice a borrowed identifier earns.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func drop_leaf(t: *Node, spare: *int64) -> void {
+    free(match *t {
+        Leaf(q) => q,
+        Empty => spare,
+    })
+}
+
+func main() -> int64 {
+    return 0
+}

@@ -1,0 +1,32 @@
+// 1.9.0 fix round: an arm-local binding whose value is the arm's own payload binder types
+// the result slot from the binder's payload, not the i64 fallback. Each arm binds y to a
+// slice (the payload binder xs2, or a fresh range slice) and yields y; the result slot
+// resolves the arm-local's binder-valued let through the pattern payload, so the fat slice
+// lands in a correctly sized slot. Returns the third element of the taken arm's slice.
+@paradigm procedural
+
+enum Pack {
+    Data(xs: int64[]),
+    Nope,
+}
+
+func pick(p: Pack, arr: int64[]) -> int64 {
+    r: int64[] = match p {
+        Data(xs2) => {
+            y := xs2
+            y
+        },
+        Nope => {
+            y := arr[0..1]
+            y
+        },
+    }
+    return r[2]
+}
+
+func main() -> int64 {
+    a: int64[3] = [10, 20, 30]
+    p: Pack = Pack.Data(a[0..3])
+    println(pick(p, a[0..3]))
+    return 0
+}

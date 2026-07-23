@@ -1,0 +1,25 @@
+// 1.9.0 fix round: a match used as another match's arm value now carries a concrete type
+// on the ground pass instead of a wildcard, so a nested match enters the outer arm-type
+// agreement check. Here the bound inner match yields a string while the other outer arm
+// yields an integer, a disagreement that once passed check and stored a string through an
+// integer slot; it is now a check-time fault.
+@paradigm procedural
+
+enum Flag { On, Off }
+
+func main() -> int64 {
+    a: Flag = Flag.On
+    b: Flag = Flag.Off
+    r: int64 = match a {
+        On => {
+            inner := match b {
+                On => "yes",
+                Off => "no",
+            }
+            inner
+        },
+        Off => 5,
+    }
+    println(r)
+    return 0
+}

@@ -1,0 +1,29 @@
+// 1.9.0 fix round: every arm allocates a fresh owner into an arm-local binding and hands
+// it out as the arm tail. Because the arm scope ends after the tail, the handoff is a move
+// out, not a copy, so the match owns its result and it is freed once. The ownership verdict
+// is now judged with each arm scope live, which is what lets the arm-local owner classify as
+// an owner instead of the borrow the after-the-scope judgment used to report.
+@paradigm procedural
+
+enum Tree {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    t: *Tree = alloc(Tree.Empty)
+    x: *int64 = match *t {
+        Leaf(q) => {
+            z: *int64 = alloc(1)
+            z
+        },
+        Empty => {
+            w: *int64 = alloc(5)
+            w
+        },
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

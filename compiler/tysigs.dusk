@@ -10,7 +10,7 @@
 @import ty
 
 export struct TyList { off: int64, len: int64 }
-export struct FnSig { params: TyList, raw_params: TyList, ret: int64, raw_ret: int64, is_async: bool }
+export struct FnSig { params: TyList, raw_params: TyList, ret: int64, raw_ret: int64, is_async: bool, owning: bool }
 export struct FieldSig { name: string, ty: int64, raw: int64 }
 export struct StructSig { is_gen: bool, off: int64, len: int64 }
 export struct VariantSig { owner: string, off: int64, len: int64 }
@@ -98,7 +98,7 @@ export func empty_tylist() -> TyList {
 
 export func empty_fnsig(t: *TyArena) -> FnSig {
     e: TyList = empty_tylist()
-    return FnSig { params: e, raw_params: e, ret: ty_unknown(t), raw_ret: ty_unknown(t), is_async: false }
+    return FnSig { params: e, raw_params: e, ret: ty_unknown(t), raw_ret: ty_unknown(t), is_async: false, owning: false }
 }
 
 export func empty_struct_sig() -> StructSig {
@@ -306,7 +306,7 @@ func collect_func_sig(s: *TypeSigs, f: FuncNode) -> void {
         ret = ty_future((*s).ty, ret)
     }
     map_put((*s).raw_sigs, name, raw_params)
-    map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: f.is_async })
+    map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: f.is_async, owning: f.owning })
 }
 
 func collect_struct(s: *TypeSigs, id: int64) -> void {
@@ -331,7 +331,7 @@ func collect_foreign(s: *TypeSigs, id: int64) -> void {
         params: TyList = push_params(s, ff.params_off, ff.params_len, gens, true, false)
         raw_ret: int64 = lower((*s).ty, a, ff.ret, gens)
         ret: int64 = fix(s, raw_ret)
-        map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: false })
+        map_put((*s).fns, name, FnSig { params: params, raw_params: raw_params, ret: ret, raw_ret: raw_ret, is_async: false, owning: false })
         map_put((*s).raw_sigs, name, raw_params)
         map_put((*s).foreigns, name, 1)
         if ff.variadic {

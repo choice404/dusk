@@ -1,0 +1,15 @@
+// 1.9.0 fix round: free applied to a struct field used to slip past the heap-type check. A
+// field access infers no type at the surface, and free accepted the unknown, then codegen
+// emitted a free on an integer and died in clang. The free check now resolves a concrete
+// field's type and refuses a scalar field the same way it refuses a scalar local.
+@paradigm procedural
+
+struct Node {
+    count: int64,
+}
+
+func main() -> int64 {
+    n: Node = Node { count: 5 }
+    free(n.count)
+    return 0
+}

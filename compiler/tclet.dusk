@@ -280,7 +280,7 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     }
     declare_one(tc, b, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
     if is_managed_ty(tc, tyid) {
-        declare_own(tc, ast_name(a, b.name), binding_own(tc, stmt, value, vt))
+        declare_own(tc, ast_name(a, b.name), binding_own(tc, stmt, value, vt, tyid))
     }
     record_enum_bind(tc, ast_name(a, b.name), stmt.c)
     record_mut_tuple(tc, stmt, b, tyid)
@@ -337,7 +337,19 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         }
         declare_one(tc, b, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
         if is_managed_ty(tc, tyid) {
-            declare_own(tc, ast_name(a, b.name), own_owner())
+            // A tuple member that is a match expression takes the ownership verdict its
+            // arms agreed on, not an unconditional owner: a borrowed extraction laundered
+            // through a destructure keeps its borrow so the freed member rejects.
+            mut own_v: int64 = own_owner()
+            if value.kind == xk_tuple() && value.b == stmt.b {
+                member_id: int64 = vec_get((*a).kids, value.a + m)
+                mem: ExprNode = vec_get((*a).exprs, member_id)
+                if mem.kind == xk_match() {
+                    mv: int64 = match_own_of(tc, member_id)
+                    if mv >= 0 { own_v = mv }
+                }
+            }
+            declare_own(tc, ast_name(a, b.name), own_v)
         }
         m = m + 1
     }
@@ -381,7 +393,16 @@ export func check_let(tc: *TypeChecker, stmt: StmtNode) -> void {
         }
         return
     }
+    // A managed-typed single binding hints the match verdict: a match value bound to a
+    // managed annotation is ownership-relevant even when no arm resolves managed on its own
+    // (a single unresolved payload binder over a locally allocated subject), so the copy
+    // spelling of an extraction still rejects. walk_match_expr captures and clears the hint.
+    if stmt.b == 1 && !(*tc).types_only && value.kind == xk_match() {
+        b_hint: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a))
+        if b_hint.ty >= 0 && is_managed_ty(tc, tc_type(tc, b_hint.ty)) { (*tc).match_ctx = 1 }
+    }
     vt: int64 = infer_expr(tc, stmt.c)
+    (*tc).match_ctx = 0
     vn: TyNode = ty_get((*tc).ty, vt)
     if (stmt.d & 2) != 0 && vn.kind == tyk_collector() {
         tc_emit(tc, "a collected value is not borrowed with ref; copy it directly", value.lo, value.hi)

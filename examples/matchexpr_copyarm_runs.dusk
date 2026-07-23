@@ -1,0 +1,24 @@
+// W4: the bare-binder copy spelling of the extraction. The match subject *t is an
+// owned deref, so the Leaf arm hands back a pointer the container still owns; copying
+// it out without move would let both x and t free the same allocation. The binding
+// verdict rejects the copy with the standard owner-copy message, leaving move as the
+// one legal owner spelling (see matchexpr_move_owner). This golden pins that reject.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int32 {
+    p := alloc(99)
+    t := alloc(Node.Leaf(p))
+    x: *int64 = match *t {
+        Leaf(q) => q,
+        Empty => alloc(0),
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

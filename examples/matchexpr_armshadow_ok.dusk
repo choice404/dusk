@@ -1,0 +1,31 @@
+// 1.9.0 fix round: an arm-local binding shadows an outer local of the same name, and the
+// match result slot must be typed from the arm-local, not the outer binding. Here an outer
+// int64 z is in scope, and each arm binds a fresh *int64 z it hands out; the result slot
+// resolves through the arm's own let before the general static walk, so it is sized as the
+// pointer the arms store rather than the outer int64. The outer z is read before the match.
+@paradigm procedural
+
+enum Tree {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    t: *Tree = alloc(Tree.Empty)
+    z: int64 = 7
+    println(z)
+    x: *int64 = match *t {
+        Leaf(q) => {
+            z: *int64 = alloc(1)
+            z
+        },
+        Empty => {
+            z: *int64 = alloc(5)
+            z
+        },
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}
