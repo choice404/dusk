@@ -1,0 +1,16 @@
+@paradigm procedural
+@import std.vector
+
+// The paired twin of spoof_unblessed_fail: the same direct-free shape, but over the
+// real std vec_take. In 1.9.1 vec_take carries the `owning` marker, so the checker
+// still classifies its result as the caller's own value and the direct free is legal.
+// The marker reproduces the name-table verdict the deleted table used to grant, and
+// it rides the import path: a std owning func blesses in user code exactly as before.
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(vec_new())
+    vec_push(v, alloc(7))
+    free(vec_take(v, 0))
+    vec_free(v)
+    free(v)
+    return 0
+}

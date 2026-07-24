@@ -2,6 +2,21 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.9.1
+
+The adoption. dusk closes the owning func ratchet and gains one vector helper: the standard library's `vec_take` and `map_take` now carry the `owning` marker themselves, the name and shape table that recognized them by name is deleted, and `std.vector` gains `vec_fold`. No new surface and no runtime change; the blessing a taken value carries is now the one declared mechanism every owning func uses, reproducing the name table's verdict on every existing take exactly.
+
+The adoption.
+
+- The standard takes carry the marker. `vec_take` and `map_take` are declared `owning func`, so they bless through the declared marker 1.9.0 shipped, and the checker's name and shape table, the by name recognition that blessed them since 1.8.0, is deleted along with its shape guard. The blessing on every existing take is the verdict the table gave, byte for byte, the full take suite green untouched, and the marker rides the import path into user code exactly as the table did. The one behavioral change is the spoof class: a user's own function named `vec_take` or `map_take` that is not marked `owning` is no longer blessed by its name, so a direct free of a container read through such a call is now rejected like any other unmarked func's, `cannot free a call result that may alias its arguments; vec_take or map_take removes an element as its owner`. A program that leaned on the old by name blessing marks the func `owning` to restore it; the flip is raise-only, named ahead of it in the 1.9.0 residuals and landed here.
+- `std.vector` gains `vec_fold(v, init, f)`. It reduces a vector to a single value, folding `f` left to right over the elements from `init`, the accumulator its first argument and the current element its second, each call's result the next accumulator and the final one returned. An empty vector returns `init` with `f` uncalled, the source is neither mutated nor freed, and the accumulator type is independent of the element type, so a vector of one type folds into a value of another, a running sum, a joined string, or a built structure. It closes the 1.8.1 open note beside `vec_map` and `vec_filter`.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 848 records, 4 new since 1.9.0: the unmarked same-name take now rejecting a direct free with its legal twin proving the standard takes still bless through the import path, and the two vec_fold records covering the accumulator type independent of the element type and a capturing combiner.
+- The stage ladder re-fixed with the `v1.9.0` release binary as seed: stage1, stage2, and stage3 share one binary sha256 (4d2e6b30afbfe124391737d847f876c838ed64bdca86e2cd20457515257bd301) and one compiler IR sha256 (c04596568cfacfb503c5b29c7ee53315da985791d06b157ce389c2d0b5638631), the collapse, fixpoint, and determinism checks all green, 848/848 under the ladder's own suite runs. The comment differential holds at 790 byte-equal comparisons over 842 files with zero failures. The ratchet holds: the `v1.9.0` release binary builds the 1.9.1 source, marker-bearing stdlib included, and the freshly built compiler passes the full suite. dawn stays byte compatible, 10 of 10 offline checks green.
+- The ratchet holds: the `v1.9.0` release binary builds the 1.9.1 source and the freshly built compiler passes the full suite. The standard library now declares owning funcs, and the previous release builds them because 1.9.0 shipped the marker path unioned with the name table it now deletes. dawn stays byte compatible, 10 of 10 offline checks green.
+
 ## 1.9.0
 
 The owning func and the debt sweep. dusk gains the declared ownership marker and pays the 1.8.0 debt list in the same release: an `owning func` head declares its call result the caller's own value and the checker blesses it exactly as it blesses `vec_take`, a `match` used as an expression now types its result and judges its arms with one voice, and a batch of checker gaps that reached `clang` or the generation backstop close. No runtime value representation changes; the marker is checker only, and the one class of emitted IR that moves is the match expression result the fix deliberately re-types.

@@ -1,0 +1,24 @@
+@paradigm procedural
+
+// The R2 spoof, un-blessed. A user function with vec_take's exact name and shape
+// but no `owning` marker used to be blessed by the compiler's name-and-shape table:
+// through 1.9.0 a direct free of its result was accepted as if it were the stdlib
+// intrinsic. 1.9.1 deleted the table, so ownership is granted only by the declared
+// `owning` marker. This vec_take carries no marker, its result reads back through
+// its argument, and a direct free of it is now condemned as a possible container
+// alias, exactly as any other unmarked container-removal helper is.
+struct Vector<T> {
+    only: T,
+    len: int64,
+}
+
+export func vec_take<T>(v: *Vector<T>, i: int64) -> T {
+    return (*v).only
+}
+
+func main() -> int32 {
+    v: *Vector<*int64> = alloc(Vector { only: alloc(7), len: 1 })
+    free(vec_take(v, 0))
+    free(v)
+    return 0
+}

@@ -3062,7 +3062,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.9.0\n
+out dusk 1.9.1\n
 argv version
 code 0
 ---
@@ -4143,7 +4143,7 @@ mode check_fail
 file examples/callrecv_free_fail.dusk
 err_has cannot free a call result that may alias its arguments
 ---
-# owning func (1.9.0 W1+W2, D35): a func head may declare `owning`, marking its call
+# owning func (1.9.0): a func head may declare `owning`, marking its call
 # result the caller's own value. The checker classifies and exempts on the marker
 # exactly as it does on the vec_take/map_take table, the two unioned for the 1.9.0
 # ratchet bridge. A pointer result blesses as an owner (freed, moved, direct-freed); a
@@ -4442,4 +4442,31 @@ test owning_main_fail
 mode check_fail
 file examples/owning_main_fail.dusk
 err_has main cannot be owning; nothing calls main to take its result
+---
+# 1.9.1: the stdlib takes adopt the owning marker, the vec_take/map_take name
+# table and its shape guard are deleted, and the R2 spoof residual flips. A user func
+# with vec_take's name and shape but no marker is no longer blessed, so a direct free
+# of its result is condemned as a possible container alias (raise-only); the real std
+# vec_take carries the marker and still blesses through the import path.
+test spoof_unblessed_fail
+mode check_fail
+file examples/spoof_unblessed_fail.dusk
+err_has cannot free a call result that may alias its arguments
+---
+test std_take_still_blessed
+mode check_ok
+file examples/std_take_still_blessed.dusk
+---
+# 1.9.1: vec_fold reduces a vector left to right from an initial accumulator, the
+# accumulator type independent of the element type; a capturing closure combiner
+# threads its environment through the generic call.
+test vec_fold_basic
+mode run
+file examples/vec_fold_basic.dusk
+out 10\nabc\n
+---
+test vec_fold_capture
+mode run
+file examples/vec_fold_capture.dusk
+out 106\n60\n
 ---

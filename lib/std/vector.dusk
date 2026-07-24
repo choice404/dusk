@@ -78,7 +78,10 @@ export func vec_pop<T>(v: *Vector<T>) -> void {
 // vector held, so a managed element's owner is now the caller, free it when done.
 // Iterating forward over a vector being taken from skips the shifted successor;
 // drain from the back with `while vec_len(v) > 0 { vec_take(v, vec_len(v) - 1) }`.
-export func vec_take<T>(v: *Vector<T>, i: int64) -> T {
+// The head declares `owning`, so the checker classifies the result as the
+// caller's own value and exempts it from the container-alias condemnation, so a
+// direct free of the take, or a free of an owner binding of it, is legal.
+export owning func vec_take<T>(v: *Vector<T>, i: int64) -> T {
     if i < 0 {
         vec_bounds_fault()
     }
@@ -252,4 +255,23 @@ export func vec_filter<T>(v: *Vector<T>, p: (T) -> bool) -> *Vector<T> {
         i = i + 1
     }
     return out
+}
+
+// Reduces v to a single value by folding f left to right over its elements in
+// index order, starting from init. f is called exactly once per element, its
+// first argument the accumulator so far and its second the current element, and
+// its result becomes the next accumulator; the final accumulator is returned.
+// An empty vector returns init unchanged, f uncalled. The source vector is not
+// mutated or freed. The accumulator type A is independent of the element type T,
+// so a vector of one type folds into a value of another, a running sum, a joined
+// string, a built structure.
+export func vec_fold<T, A>(v: *Vector<T>, init: A, f: (A, T) -> A) -> A {
+    mut acc: A = init
+    mut i: int64 = 0
+    n: int64 = (*v).len
+    while i < n {
+        acc = f(acc, (*v).data[i])
+        i = i + 1
+    }
+    return acc
 }

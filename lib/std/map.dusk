@@ -189,7 +189,10 @@ export func map_remove<K, V>(m: *Map<K, V>, k: K) -> bool {
 // stored key K is dropped from the table and the order vector, but its heap bytes (a
 // string key) are untouched: they belong to whoever else holds the string. On a miss
 // it faults through map_take_fault; probe with map_has first when a key may be absent.
-export func map_take<K, V>(m: *Map<K, V>, k: K) -> V {
+// The head declares `owning`, so the checker classifies the removed value as the
+// caller's own and exempts it from the container-alias condemnation, so a direct free
+// of the take, or a free of an owner binding of it, is legal.
+export owning func map_take<K, V>(m: *Map<K, V>, k: K) -> V {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
         if (*m).keys[idx] == k {

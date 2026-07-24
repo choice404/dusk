@@ -255,6 +255,8 @@ A growable array, generic over its element type. The buffer lives on the heap an
 | `vec_index_of<T>(v: *Vector<T>, x: T) -> int64` | The index of the first `x` in `v` by `==`, or `-1`. |
 | `vec_map<T, U>(v: *Vector<T>, f: (T) -> U) -> *Vector<U>` | A fresh owned vector of `f` applied to each element in order. |
 | `vec_filter<T>(v: *Vector<T>, p: (T) -> bool) -> *Vector<T>` | A fresh owned vector of the elements for which `p` is true, in order. |
+| `vec_fold<T, A>(v: *Vector<T>, init: A, f: (A, T) -> A) -> A` | Fold `f` left to right from `init` to one value. |
+| `vec_take<T>(v: *Vector<T>, i: int64) -> T` | Remove the element at `i` and hand it back as the caller's own value. |
 
 ```text
 @import std.vector
@@ -327,6 +329,10 @@ free(v)
 
 `vec_filter` copies element values, so when `T` is a managed pointer type the returned vector holds the same pointers as the source and both vectors alias the pointed to objects. Freeing an element reachable through both is a double free the ownership checker does not catch across `vec_filter`, and the runtime generational free check is the backstop that faults the stale read rather than corrupting silently. `vec_map`'s results belong to whatever the closure returned: an allocating closure hands the caller owners, which you drain with `vec_take` before you free the outer vector, while plain values and borrowed pointers need only the outer `vec_free` and `free`.
 
+`vec_fold`, added in 1.9.1, reduces a vector to one value. It folds `f` left to right over the elements from `init`, passing the accumulator so far as the first argument and the current element as the second, and each call's result is the next accumulator with the final one returned. An empty vector returns `init` with `f` uncalled, and the source vector is neither mutated nor freed. The accumulator type `A` is independent of the element type `T`, so a `Vector<T>` folds into a value of another type, a running sum, a joined string, or a built structure.
+
+`vec_take` and `map_take`, added in 1.8.0, remove an element and hand it back as the caller's own value: `vec_take(v, i)` removes the element at index `i`, shifting the survivors down to keep their order, and `map_take(m, k)` removes the entry for `k` and returns its value, faulting on a miss so probe with `map_has` first when a key may be absent. The returned value is the same pointer the container held, so a managed element's owner is now the caller and freeing it is legal where freeing a `vec_get` read is not. Both heads declare `owning`, which is what tells the checker the result is the caller's own value rather than a borrow into the container.
+
 ## std.map
 
 A hash map generic over both its key type K and its value type V. A key is any hashable type: an integer of any width, a `char`, a `rune`, or a `string`. Keys hash through the `hash` builtin and compare with `==`, so a string key hashes and compares by its content and a scalar key by its value; a struct, pointer, or float key is rejected by name, `cannot hash <type>; a map key is an integer, char, rune, or string`. The map uses open addressing with linear probing over heap buffers that double and rehash once the table is half full. Pass the map by pointer so inserts and growth persist across calls.
@@ -338,6 +344,7 @@ A hash map generic over both its key type K and its value type V. A key is any h
 | `map_get<K, V>(m: *Map<K, V>, k: K) -> Maybe<V>`        | The value for a key, or `None` when absent. |
 | `map_has<K, V>(m: *Map<K, V>, k: K) -> bool`            | True when the key is present.            |
 | `map_remove<K, V>(m: *Map<K, V>, k: K) -> bool`         | Remove a key, true when it was present.  |
+| `map_take<K, V>(m: *Map<K, V>, k: K) -> V`              | Remove a key and hand its value back as the caller's own; fault on a miss. |
 | `map_len<K, V>(m: *Map<K, V>) -> int64`                 | The entry count.                         |
 | `map_keys<K, V>(m: *Map<K, V>) -> *Vector<K>`           | The keys in insertion order, a fresh owned vector. |
 | `map_free<K, V>(m: *Map<K, V>) -> void`                 | Free the backing buffers.                |
