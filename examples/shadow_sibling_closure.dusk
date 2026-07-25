@@ -1,0 +1,21 @@
+// Sibling closure-shadow dispatch: a closure local named greet shadows a
+// top-level function greet inside an if-block. After the block, a bare greet()
+// must dispatch to the top-level function. Before the scope chain the flat
+// locals map still held the closure-typed sibling after the block, so gen_call
+// misdispatched the call as a closure call against the dead local. Per-block
+// scopes retire the closure binding at the branch end, so greet() reaches the
+// top-level function and prints 42.
+@paradigm procedural
+
+func greet() -> int64 { return 42 }
+
+func main() -> int64 {
+    c: bool = true
+    if c {
+        greet: () -> int64 = lambda () -> int64 { return 7 }
+        println(greet())
+    }
+    r: int64 = greet()
+    println(r)
+    return 0
+}

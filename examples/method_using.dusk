@@ -1,0 +1,28 @@
+// A method takes a `using` allocator like a free function does. fill's `using a:
+// Arena` makes bare alloc inside the method draw from the arena, so after one
+// alloc(8) the arena's used counter is 8. Before the method lowering scanned its
+// params for `using`, the allocator stayed unset and alloc fell to the default
+// heap, leaving used at 0.
+@paradigm procedural
+@paradigm oop
+
+@import std.memory.arena
+
+struct Box { v: int64 }
+
+impl Box {
+    func fill(using a: Arena) -> int64 {
+        p: *int64 = alloc(8)
+        *p = 1
+        return a.used
+    }
+}
+
+func main() -> int32 {
+    ar: *Arena = alloc(arena_new(64))
+    b := Box { v: 0 }
+    println(b.fill(*ar))
+    arena_destroy(ar)
+    free(ar)
+    return 0
+}

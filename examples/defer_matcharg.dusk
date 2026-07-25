@@ -1,0 +1,16 @@
+// A deferred expression may open its own scopes. The defer's argument is a match
+// whose arm binds v; when the defer flushes at the return, that arm scope is
+// pushed during replay and must resolve, while the defer's free names still
+// resolve in the function frame. The replay consults the scopes the deferred
+// expression opens and the function frame, skipping the scopes live at the flush,
+// so `A(v) => v + 100` yields 105 and main prints 1 then 105.
+@paradigm procedural
+
+enum E { A(v: int64), B }
+
+func main() -> int32 {
+    e := E.A(5)
+    defer println(match e { A(v) => v + 100, B => 0 })
+    println(1)
+    return 0
+}

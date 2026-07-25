@@ -1,0 +1,23 @@
+// A lambda-internal sibling shadow no longer under-captures. An if-block inside
+// the lambda binds its own x = 3, then a later `return x` names the outer x = 10
+// the lambda must capture. Before the scoped capture walk the collector's flat
+// bound set still held the block's x when it reached the return, decided x was
+// locally bound, captured nothing, and the lambda died at ident lowering with
+// "unsupported identifier expression". Cloning the bound set per nested block
+// confines the block's x, so the return captures the outer x: prints 3 then 10.
+@paradigm procedural
+
+func apply(g: () -> int64) -> int64 { return g() }
+
+func main() -> int64 {
+    x: int64 = 10
+    r: int64 = apply(lambda () -> int64 {
+        if true {
+            x: int64 = 3
+            println(x)
+        }
+        return x
+    })
+    println(r)
+    return 0
+}

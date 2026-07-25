@@ -1,0 +1,19 @@
+// Lambda capture after a shadow: an inner x=2 shadows an outer x=1 inside an
+// if-block, then a lambda after the block captures x. The lambda must capture the
+// outer x (1), so x + 1 is 2. Before the scope chain the flat locals map still
+// held the inner binding when the lambda resolved its capture by name, capturing
+// the stale inner slot; per-block scopes restore the outer x, so both prints are 2.
+@paradigm procedural
+
+func apply(f: () -> int64) -> int64 { return f() }
+
+func main() -> int64 {
+    x: int64 = 1
+    if true {
+        x: int64 = 2
+        println(x)
+    }
+    r: int64 = apply(lambda () -> int64 { return x + 1 })
+    println(r)
+    return 0
+}

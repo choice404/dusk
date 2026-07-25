@@ -10,6 +10,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import genexpr
 @import genptr
 
@@ -20,9 +21,9 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
     c: *CTyArena = genctx_ctys((*s).ctx)
     e: ExprNode = vec_get((*a).exprs, id)
     if e.kind == xk_ident() {
-        locals: *Map<string, LocalVal> = (*s).locals
         name: string = ast_name(a, e.a)
-        if map_has(locals, name) { return unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") }).ty }
+        ok, lv := gs_lookup(s, name)
+        if ok { return lv.ty }
     }
     if e.kind == xk_field() {
         bt: int64 = static_expr_ty(s, e.a)
@@ -49,9 +50,8 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
     if e.kind == xk_call() {
         callee: ExprNode = vec_get((*a).exprs, e.a)
         if callee.kind == xk_ident() {
-            locals: *Map<string, LocalVal> = (*s).locals
             cname: string = ast_name(a, callee.a)
-            if !map_has(locals, cname) {
+            if !gs_has(s, cname) {
                 if str_eq(cname, "move") && e.c > 0 {
                     return static_expr_ty(s, vec_get((*a).kids, e.b))
                 }
@@ -207,9 +207,8 @@ export func gen_place(s: *GenFuncState, id: int64) -> Place {
     e: ExprNode = vec_get((*a).exprs, id)
     if e.kind == xk_ident() {
         name: string = ast_name(a, e.a)
-        locals: *Map<string, LocalVal> = (*s).locals
-        if map_has(locals, name) {
-            lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        ok, lv := gs_lookup(s, name)
+        if ok {
             return Place { ok: true, ty: lv.ty, ptr: lv.op }
         }
     }

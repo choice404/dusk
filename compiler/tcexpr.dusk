@@ -294,6 +294,9 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
     mut i: int64 = 0
     while i < e.b {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
+        if p.is_using {
+            tc_emit(tc, "a lambda cannot take a using parameter; a lambda body has no ambient allocator, so allocate in the enclosing function or use the default heap", e.lo, e.hi)
+        }
         vec_push(ps, tc_type(tc, p.ty))
         i = i + 1
     }
@@ -301,10 +304,17 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
     saved_raw_ret: int64 = (*tc).cur_raw_ret
     saved_depth: int64 = (*tc).branch_depth
     saved_loops: int64 = (*tc).loop_depth
+    // A lambda lowers to its own function with no `using` parameter, so it has no
+    // ambient allocator: bare alloc and free in its body use the default heap, not
+    // the enclosing function's allocator. Clearing the allocator name here lets a
+    // lambda body bind or take a parameter named like the outer allocator without a
+    // false shadow reject, and restores it when the lambda closes.
+    saved_alloc: string = (*tc).cur_allocator
     (*tc).cur_ret = tc_raw_type(tc, e.c)
     (*tc).cur_raw_ret = tc_raw_type(tc, e.c)
     (*tc).branch_depth = 0
     (*tc).loop_depth = 0
+    (*tc).cur_allocator = ""
     push_scope(tc)
     mut j: int64 = 0
     while j < e.b {
@@ -330,6 +340,7 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
     (*tc).cur_raw_ret = saved_raw_ret
     (*tc).branch_depth = saved_depth
     (*tc).loop_depth = saved_loops
+    (*tc).cur_allocator = saved_alloc
     return ty_func((*tc).ty, ps, ret)
 }
 

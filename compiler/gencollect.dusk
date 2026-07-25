@@ -12,6 +12,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import genagg
 @import genclos
 @import genptr
@@ -110,8 +111,9 @@ func gc_closure(s: *GenFuncState, arg: int64) -> Val {
     mut li: int64 = 0
     while li < vec_len(caps) {
         cap0: LocalVal = vec_get(caps, li)
-        slocals: *Map<string, LocalVal> = (*s).locals
-        lv0: LocalVal = unwrap_or(map_get(slocals, cap0.op), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        found0, got0 := gs_lookup(s, cap0.op)
+        mut lv0: LocalVal = got0
+        if !found0 { lv0 = LocalVal { ty: cty_void(c), op: gs_copy("") } }
         vec_push(loaded, Val { ty: cap0.ty, op: gen_load_slot(s, lv0.ty, lv0.op) })
         li = li + 1
     }

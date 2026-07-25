@@ -55,6 +55,10 @@ export struct TypeChecker {
     cur_generics: *Map<string, int64>,
     cur_ret: int64,
     cur_raw_ret: int64,
+    // The name the current function's `using` allocator parameter binds, empty
+    // when the function has none. Bare alloc and free resolve the ambient
+    // allocator through this name, so a binding that rebinds it is refused.
+    cur_allocator: string,
     future_elems: *Map<string, int64>,
     types_only: bool,
     summaries: *Map<string, SummaryHandle>,
@@ -160,6 +164,7 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
         cur_generics: cur_generics,
         cur_ret: ty_unit(ta),
         cur_raw_ret: ty_unit(ta),
+        cur_allocator: "",
         future_elems: future_elems,
         types_only: types_only,
         summaries: summaries,
@@ -191,6 +196,25 @@ export func tc_emit(tc: *TypeChecker, msg: string, lo: int64, hi: int64) -> void
         return
     }
     vec_push((*tc).errors, span_diag(lo, hi, msg))
+}
+
+// Refuses a binding that shadows the ambient allocator a `using` parameter binds.
+// Inside a function with a `using` allocator the bare alloc and free resolve
+// through that parameter's name; a binding of the same name, whether at the top
+// level or in a nested block, would redirect allocation to an unrelated value: a
+// segfault when it is not an allocator, a silently wrong allocator when it is.
+// The name is reserved for the whole function body, so any rebinding stops here.
+export func reject_alloc_shadow(tc: *TypeChecker, name: string, lo: int64, hi: int64) -> void {
+    if str_len((*tc).cur_allocator) == 0 { return }
+    if !str_eq(name, (*tc).cur_allocator) { return }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot shadow the allocator parameter '")
+    sb_push(b, name)
+    sb_push(b, "'; alloc and free in this function resolve through it, so rename this binding")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    tc_emit(tc, out, lo, hi)
 }
 
 export func span_key(lo: int64, hi: int64) -> string {

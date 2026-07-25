@@ -1,0 +1,49 @@
+// The same-type shadow of the allocator parameter is rejected too. Here the
+// if-block rebinds a to a second Bump, so bare alloc in the block would silently
+// draw from the wrong arena: the outer arena's used counter never advances and the
+// return reads a stale value. Rebinding the allocator name is refused regardless
+// of the shadow's type.
+@paradigm procedural
+@paradigm oop
+
+interface Allocator {
+    alloc(size: int64, align: int64) -> *void
+    free(p: *void) -> void
+}
+
+struct Bump {
+    base: *raw int8,
+    used: int64,
+}
+
+impl Allocator for Bump {
+    func alloc(size: int64, align: int64) -> *void {
+        off := self.used
+        p := ptr_add(self.base, off)
+        self.used = off + size
+        return p
+    }
+    func free(p: *void) -> void {
+    }
+}
+
+func fill(using a: Bump, buf2: *raw int8) -> int64 {
+    t: bool = true
+    if t {
+        mut a := Bump { base: buf2, used: 0 }
+        p: *int64 = alloc(8)
+        *p = 1
+        println(a.used)
+    }
+    q: *int64 = alloc(8)
+    *q = 2
+    return a.used
+}
+
+func main() -> int32 {
+    buf: *raw int8 = alloc_bytes(64)
+    buf2: *raw int8 = alloc_bytes(64)
+    mut b := Bump { base: buf, used: 0 }
+    println(fill(b, buf2))
+    return 0
+}

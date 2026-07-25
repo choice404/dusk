@@ -16,6 +16,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import gencall
 @import genagg
 @import bytes
@@ -368,9 +369,8 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
     }
     if e.kind == xk_ident() {
         name: string = ast_name(a, e.a)
-        locals: *Map<string, LocalVal> = (*s).locals
-        if map_has(locals, name) {
-            lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+        ok, lv := gs_lookup(s, name)
+        if ok {
             loaded: string = gen_load_slot(s, lv.ty, lv.op)
             return Val { ty: lv.ty, op: loaded }
         }

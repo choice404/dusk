@@ -16,6 +16,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import genprint
 @import genptr
 @import genagg
@@ -725,9 +726,8 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
         return Val { ty: cty_void(c), op: gs_copy("") }
     }
     name: string = ast_name(a, callee.a)
-    locals: *Map<string, LocalVal> = (*s).locals
-    if map_has(locals, name) {
-        lv: LocalVal = unwrap_or(map_get(locals, name), LocalVal { ty: cty_void(c), op: gs_copy("") })
+    ok, lv := gs_lookup(s, name)
+    if ok {
         ln: CTyNode = vec_get(cty_nodes(c), lv.ty)
         if ln.kind == ctyk_closure() {
             return gen_closure_call(s, gen_expr(s, callee_id), args_off, args_len)

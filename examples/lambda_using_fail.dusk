@@ -1,0 +1,20 @@
+// A lambda cannot take a `using` allocator. A lambda lowers to its own function
+// with no ambient allocator, so bare alloc in its body uses the default heap; the
+// `using` parameter was accepted and then dropped, a silent no-op. The checker now
+// refuses it so the writer allocates in the enclosing function instead.
+@paradigm procedural
+
+@import std.memory.arena
+
+func main() -> int32 {
+    ar: *Arena = alloc(arena_new(64))
+    f := lambda (using a: Arena) -> int64 {
+        p: *int64 = alloc(8)
+        *p = 5
+        return a.used
+    }
+    println(f(*ar))
+    arena_destroy(ar)
+    free(ar)
+    return 0
+}

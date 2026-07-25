@@ -1,0 +1,102 @@
+// genscope: local scope stack accessors for codegen.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import cty
+@import genctx
+@import genstate
+
+func gs_new_frame() -> *Map<string, LocalVal> { return alloc(map_new()) }
+
+export func gs_scope_push(s: *GenFuncState) -> void {
+    vec_push((*s).scopes, gs_new_frame())
+}
+
+export func gs_scope_pop(s: *GenFuncState) -> void {
+    scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
+    n: int64 = vec_len(scopes) - 1
+    frame: *Map<string, LocalVal> = vec_take(scopes, n)
+    map_free(frame)
+    free(frame)
+}
+
+export func gs_bind(s: *GenFuncState, name: string, lv: LocalVal) -> void {
+    scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
+    frame: *Map<string, LocalVal> = vec_get(scopes, vec_len(scopes) - 1)
+    map_put(frame, name, lv)
+}
+
+export func gs_lookup(s: *GenFuncState, name: string) -> (bool, LocalVal) {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    missing: LocalVal = LocalVal { ty: cty_void(c), op: gs_copy("") }
+    scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
+    if (*s).defer_replay {
+        // Walk only the scopes the deferred expression opened (indices >=
+        // replay_base), innermost first, then fall to the function frame. The
+        // scopes between, live at the return that flushed the defer, are skipped:
+        // the defer registered at the top level, so its free names resolve in the
+        // function frame, never a shadow that happens to be live at the flush.
+        mut r: int64 = vec_len(scopes) - 1
+        while r >= (*s).replay_base {
+            frame: *Map<string, LocalVal> = vec_get(scopes, r)
+            if map_has(frame, name) {
+                return (true, unwrap_or(map_get(frame, name), missing))
+            }
+            r = r - 1
+        }
+        frame0: *Map<string, LocalVal> = vec_get(scopes, 0)
+        if map_has(frame0, name) {
+            return (true, unwrap_or(map_get(frame0, name), missing))
+        }
+        return (false, missing)
+    }
+    mut i: int64 = vec_len(scopes) - 1
+    while i >= 0 {
+        frame: *Map<string, LocalVal> = vec_get(scopes, i)
+        if map_has(frame, name) {
+            return (true, unwrap_or(map_get(frame, name), missing))
+        }
+        i = i - 1
+    }
+    return (false, missing)
+}
+
+// Resolves a name in the function frame (frame 0) only, never an inner scope.
+// The ambient allocator a `using` parameter names is bound at frame 0 by
+// construction, and a nested binding that shadows that name must not hijack
+// alloc/free dispatch through an unrelated slot. The checker rejects such a
+// shadow outright; this frame-0-only resolution is the codegen backstop that
+// keeps allocator dispatch pinned to the parameter even if one slips through.
+export func gs_lookup_frame0(s: *GenFuncState, name: string) -> (bool, LocalVal) {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    missing: LocalVal = LocalVal { ty: cty_void(c), op: gs_copy("") }
+    scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
+    frame: *Map<string, LocalVal> = vec_get(scopes, 0)
+    if map_has(frame, name) {
+        return (true, unwrap_or(map_get(frame, name), missing))
+    }
+    return (false, missing)
+}
+
+export func gs_has(s: *GenFuncState, name: string) -> bool {
+    scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
+    if (*s).defer_replay {
+        mut r: int64 = vec_len(scopes) - 1
+        while r >= (*s).replay_base {
+            if map_has(vec_get(scopes, r), name) { return true }
+            r = r - 1
+        }
+        return map_has(vec_get(scopes, 0), name)
+    }
+    mut i: int64 = vec_len(scopes) - 1
+    while i >= 0 {
+        frame: *Map<string, LocalVal> = vec_get(scopes, i)
+        if map_has(frame, name) { return true }
+        i = i - 1
+    }
+    return false
+}

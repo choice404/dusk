@@ -12,6 +12,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import genstmt
 @import frame
 
@@ -107,7 +108,7 @@ func bind_params(s: *GenFuncState, f: FuncNode) -> void {
         free(b)
         ptr: string = gen_alloca(s, ty)
         gen_store_slot(s, ty, op, ptr)
-        map_put((*s).locals, gf_copy(ast_name(a, p.name)), LocalVal { ty: ty, op: ptr })
+        gs_bind(s, gf_copy(ast_name(a, p.name)), LocalVal { ty: ty, op: ptr })
         i = i + 1
     }
 }
@@ -157,12 +158,13 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     if f.abi_export {
         call_void(fb, "@cool_lib_init()")
     }
-    locals: *Map<string, LocalVal> = alloc(map_new())
+    scopes: *Vector<*Map<string, LocalVal>> = alloc(vec_new())
+    vec_push(scopes, alloc(map_new()))
     defers: *Vector<int64> = alloc(vec_new())
     dummy: FramePrefix = frame_prefix(0, 1, alloc(vec_new()), alloc(vec_new()))
     lc: *Vector<string> = alloc(vec_new())
     lb: *Vector<string> = alloc(vec_new())
-    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, scopes: scopes, defer_replay: false, replay_base: 0, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
     bind_params(st, f)
     mut ui: int64 = 0
     while ui < f.params_len {
@@ -219,13 +221,14 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
  free(sb)
     ret_ll: string = cty_ll(c, ret_ty)
     fb: *FuncBuilder = func_new(ret_ll, name, sig)
-    locals: *Map<string, LocalVal> = alloc(map_new())
-    map_put(locals, gf_copy("self"), LocalVal { ty: cty_intern(c, ctyk_struct(), 0, 0, owner), op: gf_copy("%a0") })
+    scopes: *Vector<*Map<string, LocalVal>> = alloc(vec_new())
+    vec_push(scopes, alloc(map_new()))
     defers: *Vector<int64> = alloc(vec_new())
     dummy: FramePrefix = frame_prefix(0, 1, alloc(vec_new()), alloc(vec_new()))
     lc: *Vector<string> = alloc(vec_new())
     lb: *Vector<string> = alloc(vec_new())
-    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, locals: locals, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
+    st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, scopes: scopes, defer_replay: false, replay_base: 0, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
+    gs_bind(st, gf_copy("self"), LocalVal { ty: cty_intern(c, ctyk_struct(), 0, 0, owner), op: gf_copy("%a0") })
     mut j: int64 = 0
     while j < f.params_len {
         pid2: int64 = vec_get((*a).kids, f.params_off + j)
@@ -239,8 +242,20 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
  free(opb)
         ptr: string = gen_alloca(st, ty)
  gen_store_slot(st, ty, op, ptr)
-        map_put(locals, gf_copy(ast_name(a, p2.name)), LocalVal { ty: ty, op: ptr })
+        gs_bind(st, gf_copy(ast_name(a, p2.name)), LocalVal { ty: ty, op: ptr })
         j = j + 1
+    }
+    // A method takes a `using` allocator like a free function does; without this
+    // scan the parameter binds but the ambient allocator stays unset, and bare
+    // alloc silently falls to the default heap.
+    mut mu: int64 = 0
+    while mu < f.params_len {
+        mup: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + mu))
+        if mup.is_using {
+            (*st).allocator_name = gf_copy(ast_name(a, mup.name))
+            (*st).allocator_ty = cty_lower_ast(c, a, mup.ty)
+        }
+        mu = mu + 1
     }
     block: BlockNode = vec_get((*a).blocks, f.body)
     mut k: int64 = 0

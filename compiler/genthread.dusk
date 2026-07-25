@@ -12,6 +12,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import genclos
 @import genptr
 
@@ -66,8 +67,9 @@ func gt_task_env(s: *GenFuncState, e: ExprNode) -> (string, string) {
         mut i: int64 = 0
         while i < vec_len(caps) {
             cap: LocalVal = vec_get(caps, i)
-            slocals: *Map<string, LocalVal> = (*s).locals
-            lv: LocalVal = unwrap_or(map_get(slocals, cap.op), LocalVal { ty: cty_void(c), op: gs_copy("") })
+            found, lv0 := gs_lookup(s, cap.op)
+            mut lv: LocalVal = lv0
+            if !found { lv = LocalVal { ty: cty_void(c), op: gs_copy("") } }
             v: string = gen_load_slot(s, lv.ty, lv.op)
             slot: string = next_tmp((*s).fb)
             gb: *StringBuilder = alloc(sb_new())

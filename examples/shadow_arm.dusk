@@ -1,0 +1,22 @@
+// Match-arm binder shadow: an arm binds a payload name q that shadows an outer
+// local q. Before the scope chain the arm binder clobbered the outer slot in the
+// flat map, so the print after the match read the arm's payload (5) instead of
+// the outer 100. Each arm now runs in its own scope, so the outer q prints 100
+// after the match.
+@paradigm procedural
+
+enum E {
+    A(v: int64),
+    B,
+}
+
+func main() -> int64 {
+    q: int64 = 100
+    e: E = E.A(5)
+    match e {
+        A(q) => { println(q) }
+        B => { println(0) }
+    }
+    println(q)
+    return 0
+}

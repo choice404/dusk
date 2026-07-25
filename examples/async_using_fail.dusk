@@ -1,0 +1,28 @@
+// An async func cannot take a `using` allocator yet. The async substrate
+// re-materializes parameters into a heap task frame that a poll function reads
+// across suspensions, and dispatching an ambient allocator through that frame is
+// not wired, so the allocator was silently dropped and alloc fell to the default
+// heap. A loud reject replaces the silent drop until the feature lands.
+@paradigm procedural
+
+@import std.memory.arena
+@import std.async.future
+@import std.async.loop
+
+async func fill(using a: Arena) -> int64 {
+    p: *int64 = alloc(8)
+    *p = 1
+    return a.used
+}
+
+func main() -> int32 {
+    ar: *Arena = alloc(arena_new(64))
+    le := loop_init()
+    le.ignore()
+    r := async_run(fill(*ar))
+    loop_free()
+    println(r)
+    arena_destroy(ar)
+    free(ar)
+    return 0
+}

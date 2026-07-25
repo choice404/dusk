@@ -14,6 +14,7 @@
 @import emit
 @import genctx
 @import genstate
+@import genscope
 @import genexpr
 @import genagg
 @import genptr
@@ -80,7 +81,7 @@ export func gen_let(s: *GenFuncState, sid: int64) -> void {
             av0: Val = adapt(s, Val { ty: ety, op: d }, dty)
             dp: string = gen_alloca(s, dty)
             gen_store_slot(s, dty, av0.op, dp)
-            map_put((*s).locals, gs_copy(ast_name(a, db.name)), LocalVal { ty: dty, op: dp })
+            gs_bind(s, gs_copy(ast_name(a, db.name)), LocalVal { ty: dty, op: dp })
             di = di + 1
         }
         return
@@ -115,7 +116,7 @@ export func gen_let(s: *GenFuncState, sid: int64) -> void {
             // `s: char[N] = "lit"` copies the literal's bytes into the slot.
             ptr0: string = gen_alloca(s, ty)
             gl_char_lit_copy(s, ptr0, tn.b, init)
-            map_put((*s).locals, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: ptr0 })
+            gs_bind(s, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: ptr0 })
             return
         } else { v = gen_expr(s, st.c) }
     } else {
@@ -129,7 +130,7 @@ export func gen_let(s: *GenFuncState, sid: int64) -> void {
     out: string = adapt(s, v, ty).op
     ptr: string = gen_alloca(s, ty)
     gen_store_slot(s, ty, out, ptr)
-    map_put((*s).locals, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: ptr })
+    gs_bind(s, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: ptr })
 }
 
 // Lowers `name = expr` for scalar locals; other places remain aggregate-owned.

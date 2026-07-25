@@ -1,0 +1,23 @@
+// Defer replay resolves in the function frame, not a live shadow. g registers
+// `defer println(x)` while x is the int64 7, then an if-block shadows x with the
+// string "inner" and returns from inside that block. The defer flushes at that
+// return; before the scope chain the flat locals map still held the inner string
+// slot, so the defer printed "inner" again. Frame-0-only replay restores the
+// registration environment: the block prints "inner", the defer prints 7.
+@paradigm procedural
+
+func g(c: bool) -> int64 {
+    x: int64 = 7
+    defer println(x)
+    if c {
+        x: string = "inner"
+        println(x)
+        return 1
+    }
+    return 0
+}
+
+func main() -> int64 {
+    g(true)
+    return 0
+}

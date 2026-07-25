@@ -1,8 +1,9 @@
 // genstate: shared function-lowering state for dusk scalar codegen.
 //
-// The statement, expression, call, and print lowerers all need the same locals,
-// return type, defer stack, and scalar cast rules. Keeping those facts here avoids
-// cyclic imports while preserving the byte shape established by function lowering.
+// The statement, expression, call, and print lowerers all need the same local
+// scope stack, return type, defer stack, and scalar cast rules. Keeping those
+// facts here avoids cyclic imports while preserving the byte shape established
+// by function lowering.
 
 @paradigm procedural
 
@@ -26,7 +27,14 @@ export struct GenFuncState {
     ctx: *GenCtx,
     fb: *FuncBuilder,
     ret: int64,
-    locals: *Map<string, LocalVal>,
+    scopes: *Vector<*Map<string, LocalVal>>,
+    defer_replay: bool,
+    // The scope-stack depth captured when a defer replay begins. During replay a
+    // lookup consults the scopes pushed by the deferred expression itself (indices
+    // >= replay_base) and the function frame (0), but skips the intermediate scopes
+    // live at the flushing return, so a shadow there cannot capture the defer while
+    // a match arm or block the deferred expression opens still resolves normally.
+    replay_base: int64,
     defers: *Vector<int64>,
     allocator_name: string,
     allocator_ty: int64,

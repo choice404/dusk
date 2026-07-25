@@ -1,0 +1,26 @@
+// A lambda-internal shadow of a name that also exists as a top-level function no
+// longer under-captures into a call to the global. main binds x to a lambda, then
+// a second lambda f shadows x with an int inside an if-block and later calls x().
+// Before the scoped capture walk, the block's int x masked the capture, so x()
+// resolved to the top-level func x (9); the scoped walk captures the outer lambda,
+// so f() calls it and yields 5. The block still prints its own x (1).
+@paradigm procedural
+@paradigm functional
+
+func x() -> int64 {
+    return 9
+}
+
+func main() -> int32 {
+    x := lambda () -> int64 { return 5 }
+    f := lambda () -> int64 {
+        t: bool = true
+        if t {
+            x: int64 = 1
+            println(x)
+        }
+        return x()
+    }
+    println(f())
+    return 0
+}

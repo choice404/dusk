@@ -11,6 +11,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import genexpr
 @import genplace
 @import genstmt
@@ -203,7 +204,7 @@ func ge_bind_payload(s: *GenFuncState, ename: string, pat: PatternNode, addr: st
             slot: string = gen_alloca(s, fty)
             gen_store_slot(s, fty, val, slot)
             bid: int64 = vec_get((*a).kids, pat.b + i)
-            map_put((*s).locals, gs_copy(ast_name(a, bid)), LocalVal { ty: fty, op: slot })
+            gs_bind(s, gs_copy(ast_name(a, bid)), LocalVal { ty: fty, op: slot })
         }
         i = i + 1
     }
@@ -462,12 +463,14 @@ export func gen_match(s: *GenFuncState, scrut: int64, arms_off: int64, arms_len:
         pat3: PatternNode = vec_get((*a).patterns, arm3.pat)
         place_label((*s).fb, vec_get(labels, k))
         (*s).terminated = false
+        gs_scope_push(s)
         ge_bind_payload(s, n.text, pat3, slot, sv.ty)
         if pat3.kind == pk_ident() {
             vid3, tag3 := ge_variant(a, ge_enum(a, n.text), ast_name(a, pat3.a))
-            if vid3 < 0 || tag3 < 0 { map_put((*s).locals, gs_copy(ast_name(a, pat3.a)), LocalVal { ty: sv.ty, op: slot }) }
+            if vid3 < 0 || tag3 < 0 { gs_bind(s, gs_copy(ast_name(a, pat3.a)), LocalVal { ty: sv.ty, op: slot }) }
         }
         ge_arm_body(s, arm3.body, result_ty, result_slot)
+        gs_scope_pop(s)
         if !(*s).terminated { br((*s).fb, branch_label(end)) }
         k = k + 1
     }

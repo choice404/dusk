@@ -1,0 +1,21 @@
+// A nested lambda's parameter must not leak into the enclosing capture walk. The
+// inner lambda g names its parameter n, the same name as the outer local n = 42
+// the outer lambda captures and reads after building g. Before the capture walk
+// scoped the nested lambda's parameters, g's n masked the outer n, so the outer
+// lambda under-captured and n resolved wrong; now g's n stays confined and the
+// outer lambda captures n = 42, so the result is 42 + g(1) = 44.
+@paradigm procedural
+
+func apply(f: (int64) -> int64, x: int64) -> int64 { return f(x) }
+func call0(f: () -> int64) -> int64 { return f() }
+
+func main() -> int32 {
+    n: int64 = 42
+    outer := lambda () -> int64 {
+        g := lambda (n: int64) -> int64 { return n + 1 }
+        h := apply(g, 1)
+        return n + h
+    }
+    println(call0(outer))
+    return 0
+}

@@ -840,6 +840,9 @@ export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
     mut i: int64 = 0
     while i < f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+        if p.is_using {
+            tc_emit(tc, "an async func cannot take a using parameter yet; allocate before the call or use the default heap", f.lo, f.hi)
+        }
         raw: int64 = tc_raw_type(tc, p.ty)
         seen: *Map<string, int64> = alloc(map_new())
         reason: int64 = async_cross_reason(tc, raw, seen)

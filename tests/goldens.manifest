@@ -3062,7 +3062,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.9.1\n
+out dusk 1.10.0\n
 argv version
 code 0
 ---
@@ -4469,4 +4469,132 @@ test vec_fold_capture
 mode run
 file examples/vec_fold_capture.dusk
 out 106\n60\n
+---
+# 1.10.0 W2: the per-block scope chain repairs the shadow-clobber class. Each
+# golden pins the correct output of a program that, before scoping, printed a
+# wrong value, misdispatched a call, or died in clang after a clean check.
+test shadow_if_clobber
+mode run
+file examples/shadow_if_clobber.dusk
+out 2\n1\n
+---
+test shadow_if_type
+mode run
+file examples/shadow_if_type.dusk
+out inner\n8\n
+---
+test shadow_for
+mode run
+file examples/shadow_for.dusk
+out 1\n2\n3\n50\n
+---
+test shadow_arm
+mode run
+file examples/shadow_arm.dusk
+out 5\n100\n
+---
+test shadow_lambda
+mode run
+file examples/shadow_lambda.dusk
+out 2\n2\n
+---
+test shadow_sibling_closure
+mode run
+file examples/shadow_sibling_closure.dusk
+out 7\n42\n
+---
+# The scope chain composes with the async state machine: an if-block shadow whose
+# binding crosses an await is retired at the branch end, so the outer read is
+# correct. Frame slots stay distinct; the repair is orthogonal to async.
+test shadow_if_async
+mode run
+file examples/shadow_if_async.dusk
+out 2\n1\n
+---
+# Defer replay resolves the registration environment, the function frame, not a
+# shadow that is live at the flushing return. Before the frame-0-only replay the
+# defer reprinted the inner "inner"; now the block prints inner and the defer 7.
+test defer_shadow
+mode run
+file examples/defer_shadow.dusk
+out inner\n7\n
+---
+# The frame-0-only defer rule is per-state, so it composes with a lambda's own
+# frame: the lambda's defer resolves the lambda frame's n (3), not the if-block's
+# shadow (30), when it flushes from inside that block.
+test defer_lambda_shadow
+mode run
+file examples/defer_lambda_shadow.dusk
+out 30\n3\n1\n
+---
+# The lambda capture walk scopes its bound-name set per nested block, so an
+# if-block binding of x no longer masks a later `return x` that names the outer x.
+# Before the fix this under-captured and died with "unsupported identifier
+# expression"; now it captures the outer x and runs.
+test lambda_sibling_shadow
+mode run
+file examples/lambda_sibling_shadow.dusk
+out 3\n10\n
+---
+# The same under-capture, but the masked name also exists as a top-level function:
+# before the scoped capture walk the block's int x masked the capture and `x()`
+# resolved to the global func x (9); now it captures the outer lambda and calls it.
+test lambda_mask_call
+mode run
+file examples/lambda_mask_call.dusk
+out 1\n5\n
+---
+# A binding that shadows the `using` allocator parameter is refused: bare alloc and
+# free resolve the ambient allocator through the parameter name, so rebinding it
+# would redirect allocation. The cross-type shadow crashed at runtime before.
+test alloc_shadow_fail
+mode check_fail
+file examples/alloc_shadow_fail.dusk
+err_has cannot shadow the allocator parameter
+---
+# The same reject covers a same-type shadow, which silently drew from the wrong
+# arena before rather than crashing.
+test alloc_shadow_same_fail
+mode check_fail
+file examples/alloc_shadow_same_fail.dusk
+err_has cannot shadow the allocator parameter
+---
+# A method honors a `using` allocator like a free function: bare alloc inside the
+# method draws from the arena, so its used counter reaches 8. Before the method
+# lowering scanned for `using`, alloc fell to the default heap and used stayed 0.
+test method_using
+mode run
+file examples/method_using.dusk
+out 8\n
+---
+# An async func with a `using` allocator is rejected, not silently dropped: the
+# ambient allocator is not wired through the task frame the poll function reads.
+test async_using_fail
+mode check_fail
+file examples/async_using_fail.dusk
+err_has an async func cannot take a using parameter
+---
+# A lambda with a `using` allocator is rejected: a lambda body has no ambient
+# allocator, so the parameter was a silent no-op before.
+test lambda_using_fail
+mode check_fail
+file examples/lambda_using_fail.dusk
+err_has a lambda cannot take a using parameter
+---
+# A deferred expression may open its own scopes. The defer's match arm binds v and
+# is pushed during replay; the replay resolves the scopes the deferred expression
+# opens and the function frame, skipping the scopes live at the flush, so the arm
+# binder resolves and `A(v) => v + 100` yields 105.
+test defer_matcharg
+mode run
+file examples/defer_matcharg.dusk
+out 1\n105\n
+---
+# A nested lambda's parameter no longer leaks into the enclosing capture walk. The
+# inner lambda's parameter n shares the outer local n's name; the scoped capture
+# walk confines it, so the outer lambda captures n = 42 and yields 42 + g(1) = 44.
+test nested_lambda_pollute
+mode run
+file examples/nested_lambda_pollute.dusk
+out 44\n
 ---

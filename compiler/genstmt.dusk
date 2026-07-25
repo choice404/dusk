@@ -12,6 +12,7 @@
 @import emitfb
 @import genctx
 @import genstate
+@import genscope
 @import genexpr
 @import genlet
 @import genplace
@@ -112,7 +113,8 @@ func gen_for(s: *GenFuncState, st: StmtNode) -> void {
     len_slot: string = gen_alloca(s, cty_int(c, 64))
     gen_store_slot(s, cty_int(c, 64), len, len_slot)
     slot: string = gen_alloca(s, elem)
-    map_put((*s).locals, gs_copy(ast_name(a, st.a)), LocalVal { ty: elem, op: slot })
+    gs_scope_push(s)
+    gs_bind(s, gs_copy(ast_name(a, st.a)), LocalVal { ty: elem, op: slot })
     idx: string = gen_alloca(s, cty_int(c, 64))
     gen_store_slot(s, cty_int(c, 64), "0", idx)
     cond: int64 = fresh_label((*s).fb)
@@ -171,6 +173,7 @@ func gen_for(s: *GenFuncState, st: StmtNode) -> void {
     br((*s).fb, cl)
     place_label((*s).fb, done)
     (*s).terminated = false
+    gs_scope_pop(s)
 }
 
 export func gen_block(s: *GenFuncState, block_id: int64) -> void {
@@ -189,6 +192,16 @@ export func gen_emit_defers(s: *GenFuncState) -> void {
     // A fault inside a deferred expression names the defer's own line, not
     // the return that flushed it.
     saved: int64 = (*s).cur_lo
+    // A defer registers at the top level of the function frame, so a name a
+    // deferred expression reads resolves in that frame, never a shadowing inner
+    // scope that happens to be live at the return flushing it. The frame-0-only
+    // lookup mode is licensed by the checker's top-level-only defer rule: the
+    // function frame is the only scope a registered defer's environment names.
+    saved_replay: bool = (*s).defer_replay
+    saved_base: int64 = (*s).replay_base
+    dscopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
+    (*s).defer_replay = true
+    (*s).replay_base = vec_len(dscopes)
     mut i: int64 = vec_len(ds) - 1
     while i >= 0 {
         did: int64 = vec_get(ds, i)
@@ -197,6 +210,8 @@ export func gen_emit_defers(s: *GenFuncState) -> void {
         gen_expr(s, did)
         i = i - 1
     }
+    (*s).defer_replay = saved_replay
+    (*s).replay_base = saved_base
     (*s).cur_lo = saved
 }
 
@@ -262,12 +277,16 @@ func gen_if(s: *GenFuncState, st: StmtNode) -> void {
     endl: string = branch_label(end_l)
     br_cond((*s).fb, cond, tl, el)
     place_label((*s).fb, then_l)
+    gs_scope_push(s)
     gen_block(s, st.b)
+    gs_scope_pop(s)
     if !(*s).terminated { br((*s).fb, endl) }
     if st.c >= 0 {
         place_label((*s).fb, else_l)
         (*s).terminated = false
+        gs_scope_push(s)
         gen_block(s, st.c)
+        gs_scope_pop(s)
         if !(*s).terminated { br((*s).fb, endl) }
     }
     place_label((*s).fb, end_l)
@@ -288,7 +307,9 @@ func gen_while(s: *GenFuncState, st: StmtNode) -> void {
     if st.c != 0 {
         br((*s).fb, bl)
         place_label((*s).fb, body_l)
+        gs_scope_push(s)
         gen_block(s, st.b)
+        gs_scope_pop(s)
         if !(*s).terminated { br((*s).fb, cl) }
         place_label((*s).fb, cond_l)
         (*s).terminated = false
@@ -302,7 +323,9 @@ func gen_while(s: *GenFuncState, st: StmtNode) -> void {
         cond2: string = coerce(s, cv2.ty, cv2.op, cty_bool(genctx_ctys((*s).ctx)))
         br_cond((*s).fb, cond2, bl, el)
         place_label((*s).fb, body_l)
+        gs_scope_push(s)
         gen_block(s, st.b)
+        gs_scope_pop(s)
         if !(*s).terminated { br((*s).fb, cl) }
     }
     vec_pop(wconts)

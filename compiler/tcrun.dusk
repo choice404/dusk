@@ -172,6 +172,7 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
             declare_iface_bind(tc, ast_name(a, p.name), ty_name((*tc).ty, raw))
         }
         declare(tc, ast_name(a, p.name), tyid)
+        if p.is_using { (*tc).cur_allocator = ast_name(a, p.name) }
         map_put((*tc).cur_params, ast_name(a, p.name), 1)
         map_put((*tc).cur_param_index, ast_name(a, p.name), i)
         set_esc(tc, ast_name(a, p.name), false, false)
@@ -288,6 +289,7 @@ export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
     (*tc).cur_raw_ret = tc_raw_type(tc, f.ret)
     (*tc).branch_depth = 0
     (*tc).loop_depth = 0
+    (*tc).cur_allocator = ""
     (*tc).in_async = f.is_async
     (*tc).in_method = str_len(self_ty) > 0
     reject_iface_targ_annot(tc, f.ret, f.lo, f.hi)

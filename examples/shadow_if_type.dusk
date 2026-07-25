@@ -1,0 +1,18 @@
+// Cross-type block shadow: an inner string x shadows an outer int64 x inside an
+// if-block. This program checks clean, but before the scope chain the flat
+// locals map left the string slot in scope after the block, so `x + 1` lowered
+// against a string operand and clang rejected the emitted IR. A legal program
+// that could not build. Per-block scopes restore the outer int64 x after the
+// branch, so it builds and runs.
+@paradigm procedural
+
+func main() -> int64 {
+    x: int64 = 7
+    if true {
+        x: string = "inner"
+        println(x)
+    }
+    y: int64 = x + 1
+    println(y)
+    return 0
+}

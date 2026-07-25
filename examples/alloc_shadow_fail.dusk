@@ -1,0 +1,47 @@
+// A binding that shadows the `using` allocator parameter is rejected. fill takes
+// `using a: Bump`, so bare alloc inside fill dispatches through a. An if-block that
+// rebinds a to an int64 would, before this reject, redirect that block's alloc to
+// a non-allocator and crash. The name a is reserved for the whole function body.
+@paradigm procedural
+@paradigm oop
+
+interface Allocator {
+    alloc(size: int64, align: int64) -> *void
+    free(p: *void) -> void
+}
+
+struct Bump {
+    base: *raw int8,
+    used: int64,
+}
+
+impl Allocator for Bump {
+    func alloc(size: int64, align: int64) -> *void {
+        off := self.used
+        p := ptr_add(self.base, off)
+        self.used = off + size
+        return p
+    }
+    func free(p: *void) -> void {
+    }
+}
+
+func fill(using a: Bump) -> int64 {
+    t: bool = true
+    if t {
+        a: int64 = 7
+        p: *int64 = alloc(8)
+        *p = 1
+        println(a)
+    }
+    q: *int64 = alloc(8)
+    *q = 2
+    return a.used
+}
+
+func main() -> int32 {
+    buf: *raw int8 = alloc_bytes(64)
+    mut b := Bump { base: buf, used: 0 }
+    println(fill(b))
+    return 0
+}
