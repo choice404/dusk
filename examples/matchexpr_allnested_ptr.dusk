@@ -1,0 +1,30 @@
+// 1.10.1 X2: every arm of a match expression is itself a match yielding a managed pointer.
+// ge_result_ty once fell to the i64 default for a match tail and sized the fat pointer
+// result as an integer, which clang rejected; it now recurses into the nested match's arms
+// and sizes the result as the pointer the arms move out. The moved pointer is freed once
+// through x, the container once through t.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    x: *int64 = match *t {
+        Leaf(q) => match *t {
+            Leaf(w) => move(w),
+            Empty => alloc(0),
+        },
+        Empty => match *t {
+            Leaf(w2) => move(w2),
+            Empty => alloc(1),
+        },
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

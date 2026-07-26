@@ -1,0 +1,26 @@
+// 1.10.1 review fix 3 (HIGH): a tuple destructure member that is a borrowing match must keep
+// its borrow verdict even when its member type is an inferred hole. The destructure now
+// consults the match ownership verdict outside the is_managed_ty gate, mirroring the single
+// binding path, so freeing the laundered borrow is refused.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    ref rt := t
+    ref b := p
+    x, k := (match *rt {
+        Leaf(w) => w,
+        Empty => b,
+    }, 5)
+    println(*x)
+    println(k)
+    free(x)
+    free(t)
+    return 0
+}

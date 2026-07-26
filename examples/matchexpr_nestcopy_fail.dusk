@@ -1,0 +1,25 @@
+// 1.10.1 X1: extracting an owned payload bare through a nested match copies an owning
+// pointer. The subject *t is owned, so the inner Leaf(r) => r bare extraction is a copy of
+// the owner and is refused at the inner walk before any laundering can reach the outer arm.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    x := match *t {
+        Leaf(q) => match *t {
+            Leaf(r) => r,
+            Empty => alloc(0),
+        },
+        Empty => alloc(1),
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

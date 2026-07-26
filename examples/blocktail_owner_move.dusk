@@ -1,0 +1,28 @@
+// 1.10.1 X3: a managed payload moved out through a block-tail match. The A arm runs a
+// statement then yields a nested match that moves the owned *int64 out; the result is an
+// owner freed once through x, the container freed once through t. No leak, no double free.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    x: *int64 = match *t {
+        Leaf(q) => {
+            println(1000)
+            match *t {
+                Leaf(w) => move(w),
+                Empty => alloc(0),
+            }
+        },
+        Empty => alloc(1),
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

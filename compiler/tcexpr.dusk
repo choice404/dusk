@@ -370,6 +370,63 @@ func check_match_arm_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
     }
 }
 
+// Whether a value-yielding match arm whose block has no expression tail nonetheless
+// leaves the match legally: it returns, or its last statement is a loop break/continue.
+// Every other tail-less arm falls off the end without storing a result, so it reads an
+// uninitialized result slot; the every-arm-yields check rejects it.
+// Whether a statement guarantees the arm never falls through to its end: a return, a loop
+// break or continue, an if whose branches all diverge, or a statement match whose arms all
+// diverge. Mirrors stmt_returns but treats break/continue as divergence, so a value-less arm
+// that ends in one of these legally yields nothing into the result slot.
+func stmt_diverges(a: *Ast, sid: int64) -> bool {
+    s: StmtNode = vec_get((*a).stmts, sid)
+    if s.kind == sk_return() || s.kind == sk_break() || s.kind == sk_continue() { return true }
+    if s.kind == sk_if() {
+        if s.c < 0 { return false }
+        return block_diverges(a, s.b) && block_diverges(a, s.c)
+    }
+    if s.kind == sk_match() {
+        if s.c == 0 { return false }
+        mut i: int64 = 0
+        while i < s.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
+            if !block_diverges(a, arm.body) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    return false
+}
+
+func block_diverges(a: *Ast, bid: int64) -> bool {
+    b: BlockNode = vec_get((*a).blocks, bid)
+    mut i: int64 = 0
+    while i < b.len {
+        if stmt_diverges(a, vec_get((*a).kids, b.off + i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func arm_diverges(a: *Ast, block_id: int64) -> bool {
+    return block_diverges(a, block_id)
+}
+
+// A representative expr id inside an arm's last statement, to carry the every-arm-yields
+// caret; -1 when the last statement holds no expression (an empty block), in which case
+// the caller falls back to the scrutinee.
+func arm_tail_span_expr(a: *Ast, block_id: int64) -> int64 {
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    if b.len == 0 { return -1 }
+    s: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, b.off + b.len - 1))
+    if s.kind == sk_if() || s.kind == sk_while() || s.kind == sk_expr() { return s.a }
+    if s.kind == sk_return() || s.kind == sk_defer() || s.kind == sk_match() { return s.a }
+    if s.kind == sk_assign() { return s.a }
+    if s.kind == sk_for() || s.kind == sk_assign_op() { return s.b }
+    if s.kind == sk_let() { return s.c }
+    return -1
+}
+
 // Walk a match expression's arms and, with each arm scope live, derive its two
 // per-arm judgments. On the ground pass (types_only) the arm tails must agree on
 // type: their inferred types are compared pairwise, and a width- or kind-mismatched
@@ -407,18 +464,37 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
         push_scope(tc)
         bind_match_arm(tc, arm.pat, st, e.a)
         bind_match_arm_escape(tc, arm.pat, e.a, scrut_esc)
-        check_block_no_scope(tc, arm.body)
-        if !(*tc).types_only && arm_ends_in_match_stmt(a, arm.body) {
-            ab: BlockNode = vec_get((*a).blocks, arm.body)
-            sm: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, ab.off + ab.len - 1))
-            smscrut: ExprNode = vec_get((*a).exprs, sm.a)
-            tc_emit(tc, "a match arm cannot yield a bare match; bind the inner match to a name and yield that name", smscrut.lo, smscrut.hi)
+        // A nested match tail in a managed context (a managed annotation, ctx == 1, or an
+        // owned subject) must run its own ownership judgment so a verdict is recorded even
+        // when its tails name an outer payload binder or its payload type is a generic hole on
+        // the surface pass; without the hint the inner match records nothing and a borrow or an
+        // owner copy launders outward. The hint is set around the diagnostic walk so the inner
+        // copy fault emits, and around the suppressed re-infer so the verdict is recorded even
+        // if a leading match statement consumed the first hint.
+        mut nest_hint: bool = false
+        if !(*tc).types_only && (ctx == 1 || subj_own == own_owner()) {
+            pk: int64 = match_arm_tail(a, arm.body)
+            if pk >= 0 {
+                pkx: ExprNode = vec_get((*a).exprs, pk)
+                if pkx.kind == xk_match() { nest_hint = true }
+            }
         }
+        if nest_hint { (*tc).match_ctx = 1 }
+        check_block_no_scope(tc, arm.body)
+        if nest_hint { (*tc).match_ctx = 0 }
         tail_id: int64 = match_arm_tail(a, arm.body)
+        if tail_id < 0 && !(*tc).types_only && !arm_diverges(a, arm.body) {
+            mut sp: int64 = arm_tail_span_expr(a, arm.body)
+            if sp < 0 { sp = e.a }
+            spx: ExprNode = vec_get((*a).exprs, sp)
+            tc_emit(tc, "every arm of a match expression must yield a value or return", spx.lo, spx.hi)
+        }
         if tail_id >= 0 {
+            if nest_hint { (*tc).match_ctx = 1 }
             (*tc).suppress = (*tc).suppress + 1
             at: int64 = infer_expr(tc, tail_id)
             (*tc).suppress = (*tc).suppress - 1
+            if nest_hint { (*tc).match_ctx = 0 }
             if (*tc).types_only {
                 atn: TyNode = ty_get((*tc).ty, at)
                 if atn.kind != tyk_unknown() && !disagreed {

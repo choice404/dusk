@@ -1,0 +1,40 @@
+// 1.10.1 review fix 2 (HIGH): a nested match over a managed subject whose payload type is a
+// generic hole on the surface pass must still run its ownership judgment. The managed
+// annotation hints the inner match to record its borrow verdict, which propagates out so
+// freeing the borrowed result is refused rather than laundering the caller's pointer.
+@paradigm procedural
+
+enum Box<T> {
+    Full(v: T),
+    Spare(w: T),
+}
+
+enum Pick { Yes, No }
+
+func steal(b: *Box<*int64>, p: Pick) -> void {
+    x: *int64 = match p {
+        Yes => {
+            match *b {
+                Full(v) => v,
+                Spare(w) => w,
+            }
+        }
+        No => {
+            match *b {
+                Full(v) => v,
+                Spare(w) => w,
+            }
+        }
+    }
+    free(x)
+}
+
+func main() -> int64 {
+    n: *int64 = alloc(7)
+    b: *Box<*int64> = alloc(Box.Full(n))
+    steal(b, Pick.Yes)
+    println(*n)
+    free(b)
+    free(n)
+    return 0
+}

@@ -279,7 +279,130 @@ func ge_block_local_ty(s: *GenFuncState, block_id: int64, ename: string, pat: Pa
 // though ge_bind_payload has not run yet; a tail that names an arm-local binding
 // resolves through that block's let; the fat pointer thus lands in a correctly sized
 // slot instead of the historical i64 fallback that clang rejected.
-func ge_result_ty(s: *GenFuncState, scrut: int64, off: int64, len: int64) -> int64 {
+// One enclosing arm frame for result-type resolution: the arm's match enum name, its
+// pattern, and its body block. A name in a nested match's tail can resolve to a payload
+// binder or an arm-local let of any enclosing arm, so the recursion carries the frame chain.
+struct GeArmFrame { ename: string, pat: int64, body: int64 }
+
+// A new chain with one frame appended (immutable: the caller's chain is never mutated, so a
+// sibling arm's recursion never sees a frame a prior arm pushed).
+func ge_chain_push(chain: *Vector<GeArmFrame>, ename: string, pat: int64, body: int64) -> *Vector<GeArmFrame> {
+    nc: *Vector<GeArmFrame> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(chain) {
+        vec_push(nc, vec_get(chain, i))
+        i = i + 1
+    }
+    vec_push(nc, GeArmFrame { ename: ename, pat: pat, body: body })
+    return nc
+}
+
+// A payload binder of one frame's pattern, or -1. Gated on a real enum name.
+func ge_frame_binder(s: *GenFuncState, name: string, ename: string, pat_id: int64) -> int64 {
+    if str_eq(ename, "") { return -1 }
+    a: *Ast = (*(*s).ctx).ast
+    return ge_pat_binder_ty(s, ename, vec_get((*a).patterns, pat_id), name)
+}
+
+// A payload binder or an arm-local let of one frame, or -1. Mirrors the ident resolution
+// order the flat result walk used: the pattern binder first, then the block's own let.
+func ge_frame_local(s: *GenFuncState, name: string, ename: string, pat_id: int64, body_id: int64) -> int64 {
+    bt: int64 = ge_frame_binder(s, name, ename, pat_id)
+    if bt >= 0 { return bt }
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    bl: int64 = ge_block_local_ty(s, body_id, ename, vec_get((*a).patterns, pat_id), name)
+    if vec_get(cty_nodes(c), bl).kind != ctyk_void() { return bl }
+    return -1
+}
+
+// Resolve a payload binder across the current frame then the enclosing chain, innermost
+// first so an inner binder shadows an outer one. Used for a `move(binder)` tail.
+func ge_chain_binder(s: *GenFuncState, name: string, ename: string, pat_id: int64, chain: *Vector<GeArmFrame>) -> int64 {
+    r: int64 = ge_frame_binder(s, name, ename, pat_id)
+    if r >= 0 { return r }
+    mut j: int64 = vec_len(chain) - 1
+    while j >= 0 {
+        f: GeArmFrame = vec_get(chain, j)
+        rr: int64 = ge_frame_binder(s, name, f.ename, f.pat)
+        if rr >= 0 { return rr }
+        j = j - 1
+    }
+    return -1
+}
+
+// Resolve a binder-or-arm-local across the current frame then the enclosing chain. Used for
+// a bare ident tail.
+func ge_chain_local(s: *GenFuncState, name: string, ename: string, pat_id: int64, body_id: int64, chain: *Vector<GeArmFrame>) -> int64 {
+    r: int64 = ge_frame_local(s, name, ename, pat_id, body_id)
+    if r >= 0 { return r }
+    mut j: int64 = vec_len(chain) - 1
+    while j >= 0 {
+        f: GeArmFrame = vec_get(chain, j)
+        rr: int64 = ge_frame_local(s, name, f.ename, f.pat, f.body)
+        if rr >= 0 { return rr }
+        j = j - 1
+    }
+    return -1
+}
+
+// The result cty of one arm's expression tail, or -1 when it cannot be resolved from this
+// arm (so ge_match_ty falls to the next arm rather than to the i64 default). A nested match
+// tail recurses with this arm pushed onto the chain, so an inner tail naming an outer payload
+// binder or arm-local is sized correctly instead of collapsing to i64 and truncating a wider
+// value through the too-narrow slot.
+func ge_tail_ty(s: *GenFuncState, tail_id: int64, ename: string, pat_id: int64, body_id: int64, chain: *Vector<GeArmFrame>) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    ex: ExprNode = vec_get((*a).exprs, tail_id)
+    if ex.kind == xk_call() {
+        ce: ExprNode = vec_get((*a).exprs, ex.a)
+        if ce.kind == xk_ident() && str_eq(ast_name(a, ce.a), "move") && ex.c > 0 {
+            arg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, ex.b))
+            if arg.kind == xk_ident() {
+                bt: int64 = ge_chain_binder(s, ast_name(a, arg.a), ename, pat_id, chain)
+                if bt >= 0 { return bt }
+            }
+        }
+    }
+    if ex.kind == xk_ident() {
+        bl: int64 = ge_chain_local(s, ast_name(a, ex.a), ename, pat_id, body_id, chain)
+        if bl >= 0 { return bl }
+    }
+    if ex.kind == xk_match() {
+        nc: *Vector<GeArmFrame> = ge_chain_push(chain, ename, pat_id, body_id)
+        return ge_match_ty(s, ex.a, ex.b, ex.c, nc)
+    }
+    ty: int64 = static_expr_ty(s, tail_id)
+    if vec_get(cty_nodes(c), ty).kind != ctyk_void() { return ty }
+    if ex.kind == xk_int() { return cty_int(c, 64) }
+    if ex.kind == xk_bool() { return cty_bool(c) }
+    if ex.kind == xk_str() { return cty_rawptr(c, cty_char(c)) }
+    if ex.kind == xk_char() { return cty_char(c) }
+    if ex.kind == xk_rune() { return cty_int(c, 32) }
+    if ex.kind == xk_field() {
+        bt: int64 = static_expr_ty(s, ex.a)
+        if vec_get(cty_nodes(c), bt).kind == ctyk_error() {
+            if str_eq(ast_name(a, ex.b), "message") { return cty_rawptr(c, cty_char(c)) }
+        }
+    }
+    if ex.kind == xk_call() {
+        ce: ExprNode = vec_get((*a).exprs, ex.a)
+        if ce.kind == xk_field() {
+            bt2: int64 = static_expr_ty(s, ce.a)
+            if vec_get(cty_nodes(c), bt2).kind == ctyk_error() {
+                if str_eq(ast_name(a, ce.b), "toString") { return cty_rawptr(c, cty_char(c)) }
+            }
+        }
+    }
+    return -1
+}
+
+// The result cty of a match, taken from the first value-yielding arm whose tail resolves, or
+// -1 when no arm resolves. Fallible so a first arm that cannot be typed (a nested match over
+// a scalar enum whose tails name an outer binder, before the chain reaches it) does not pin
+// the result to i64 and lose a later arm's concrete type.
+func ge_match_ty(s: *GenFuncState, scrut: int64, off: int64, len: int64, chain: *Vector<GeArmFrame>) -> int64 {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     scrut_ty: int64 = static_expr_ty(s, scrut)
@@ -289,62 +412,25 @@ func ge_result_ty(s: *GenFuncState, scrut: int64, off: int64, len: int64) -> int
     mut i: int64 = 0
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
-        pat: PatternNode = vec_get((*a).patterns, arm.pat)
         block: BlockNode = vec_get((*a).blocks, arm.body)
         if block.len > 0 {
             sid: int64 = vec_get((*a).kids, block.off + block.len - 1)
             st: StmtNode = vec_get((*a).stmts, sid)
             if st.kind == sk_expr() {
-                if !str_eq(ename, "") {
-                    tail: ExprNode = vec_get((*a).exprs, st.a)
-                    mut binder: string = ""
-                    if tail.kind == xk_ident() { binder = ast_name(a, tail.a) }
-                    if tail.kind == xk_call() {
-                        ce: ExprNode = vec_get((*a).exprs, tail.a)
-                        if ce.kind == xk_ident() && str_eq(ast_name(a, ce.a), "move") && tail.c > 0 {
-                            arg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, tail.b))
-                            if arg.kind == xk_ident() { binder = ast_name(a, arg.a) }
-                        }
-                    }
-                    if !str_eq(binder, "") {
-                        bt: int64 = ge_pat_binder_ty(s, ename, pat, binder)
-                        if bt >= 0 { return bt }
-                    }
-                }
-                ex: ExprNode = vec_get((*a).exprs, st.a)
-                // An arm-local binding shadows any outer name and is not in locals yet, so
-                // an ident tail resolves through the block's own let before the general
-                // static walk, which would otherwise find an outer binding of the same name.
-                if ex.kind == xk_ident() {
-                    bl: int64 = ge_block_local_ty(s, arm.body, ename, pat, ast_name(a, ex.a))
-                    if vec_get(cty_nodes(c), bl).kind != ctyk_void() { return bl }
-                }
-                ty: int64 = static_expr_ty(s, st.a)
-                if vec_get(cty_nodes(c), ty).kind != ctyk_void() { return ty }
-                if ex.kind == xk_int() { return cty_int(c, 64) }
-                if ex.kind == xk_bool() { return cty_bool(c) }
-                if ex.kind == xk_str() { return cty_rawptr(c, cty_char(c)) }
-                if ex.kind == xk_char() { return cty_char(c) }
-                if ex.kind == xk_rune() { return cty_int(c, 32) }
-                if ex.kind == xk_field() {
-                    bt: int64 = static_expr_ty(s, ex.a)
-                    if vec_get(cty_nodes(c), bt).kind == ctyk_error() {
-                        if str_eq(ast_name(a, ex.b), "message") { return cty_rawptr(c, cty_char(c)) }
-                    }
-                }
-                if ex.kind == xk_call() {
-                    ce: ExprNode = vec_get((*a).exprs, ex.a)
-                    if ce.kind == xk_field() {
-                        bt2: int64 = static_expr_ty(s, ce.a)
-                        if vec_get(cty_nodes(c), bt2).kind == ctyk_error() {
-                            if str_eq(ast_name(a, ce.b), "toString") { return cty_rawptr(c, cty_char(c)) }
-                        }
-                    }
-                }
+                t: int64 = ge_tail_ty(s, st.a, ename, arm.pat, arm.body, chain)
+                if t >= 0 { return t }
             }
         }
         i = i + 1
     }
+    return -1
+}
+
+func ge_result_ty(s: *GenFuncState, scrut: int64, off: int64, len: int64) -> int64 {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    chain: *Vector<GeArmFrame> = alloc(vec_new())
+    r: int64 = ge_match_ty(s, scrut, off, len, chain)
+    if r >= 0 { return r }
     return cty_int(c, 64)
 }
 

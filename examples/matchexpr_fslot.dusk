@@ -1,0 +1,28 @@
+// 1.10.1 review fix 1 (CRIT): a nested match tail names an outer payload binder, so the
+// result slot must be sized from the outer Leaf's float64 field, not the i64 default the flat
+// recursion fell to, which truncated 2.5 to 2 through the too-narrow slot. ge_result_ty now
+// threads the enclosing arm frames so the outer binder resolves and the slot is a float64.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: float64),
+    Empty,
+}
+
+enum C { Y, N }
+
+func main() -> int64 {
+    t: Node = Node.Leaf(2.5)
+    c: C = C.Y
+    x: float64 = match t {
+        Leaf(q) => {
+            match c {
+                Y => q,
+                N => q,
+            }
+        },
+        Empty => 9.0,
+    }
+    println(x)
+    return 0
+}

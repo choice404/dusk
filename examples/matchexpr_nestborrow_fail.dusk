@@ -1,0 +1,31 @@
+// 1.10.1 X1: ownership must not launder through a nested match. Each outer arm yields an
+// inner match whose arms all borrow, so the inner verdict is borrow; the outer verdict
+// consults the stored inner verdict rather than assuming an owner, propagating the borrow
+// outward so freeing the laundered result is refused.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    ref rt := t
+    ref b := p
+    x := match *rt {
+        Leaf(q) => match *rt {
+            Leaf(w) => w,
+            Empty => b,
+        },
+        Empty => match *rt {
+            Leaf(w2) => w2,
+            Empty => b,
+        },
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

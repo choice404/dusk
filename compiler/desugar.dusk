@@ -167,6 +167,78 @@ func rewrite_block(a: *Ast, id: int64) -> int64 {
     return ast_block(a, ids)
 }
 
+// The high span for a synthesized match expression: the last arm's expression tail, floored
+// by the scrutinee's high so a diverging or empty last arm never yields a span below the
+// scrutinee's.
+func value_ize_last_hi(a: *Ast, off: int64, len: int64, floor_hi: int64) -> int64 {
+    if len == 0 { return floor_hi }
+    arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + len - 1))
+    b: BlockNode = vec_get((*a).blocks, arm.body)
+    if b.len == 0 { return floor_hi }
+    s: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, b.off + b.len - 1))
+    if s.kind == sk_expr() {
+        te: ExprNode = vec_get((*a).exprs, s.a)
+        if te.hi > floor_hi { return te.hi }
+    }
+    return floor_hi
+}
+
+// Value-ize an already-rewritten block: if its last statement is a bare match, replace that
+// statement with an expression statement wrapping a fresh match expression built from the
+// statement's scrutinee and arms, recursing into the match's own arm blocks. A block whose
+// last statement is anything else is returned unchanged, so an ordinary arm body and a
+// diverging arm are untouched. The synthesized match's span runs from the scrutinee's low to
+// the last arm tail's high.
+func value_ize_block(a: *Ast, block_id: int64) -> int64 {
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    if b.len == 0 { return block_id }
+    last_sid: int64 = vec_get((*a).kids, b.off + b.len - 1)
+    last: StmtNode = vec_get((*a).stmts, last_sid)
+    if last.kind != sk_match() { return block_id }
+    voff, vlen := value_ize_arms(a, last.b, last.c)
+    scrut_e: ExprNode = vec_get((*a).exprs, last.a)
+    hi: int64 = value_ize_last_hi(a, voff, vlen, scrut_e.hi)
+    mx: int64 = ast_expr(a, xk_match(), scrut_e.lo, hi, last.a, voff, vlen, 0)
+    new_stmt: int64 = ast_stmt(a, sk_expr(), mx, 0, 0, 0)
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < b.len - 1 {
+        vec_push(ids, vec_get((*a).kids, b.off + i))
+        i = i + 1
+    }
+    vec_push(ids, new_stmt)
+    return ast_block(a, ids)
+}
+
+// Value-ize each arm body of an already-rewritten arm list. The patterns are already
+// cloned, so they are reused; only the bodies are rethreaded through value_ize_block.
+func value_ize_arms(a: *Ast, off: int64, len: int64) -> (int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        vec_push(ids, ast_arm(a, arm.pat, value_ize_block(a, arm.body)))
+        i = i + 1
+    }
+    return ast_kids(a, ids)
+}
+
+// The value-position variant of rewrite_match: a match used as an expression may have an arm
+// body that ends in a bare match, which value-izes into the enclosing match. Each arm body is
+// rewritten as usual and then value-ized; a body with no trailing match is left byte-identical
+// to the plain rewrite, so an ordinary match expression's desugar is unchanged.
+func rewrite_match_value(a: *Ast, scrut: int64, off: int64, len: int64) -> (int64, int64, int64) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < len {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
+        vec_push(ids, ast_arm(a, clone_pattern(a, arm.pat), value_ize_block(a, rewrite_block(a, arm.body))))
+        i = i + 1
+    }
+    aoff, alen := ast_kids(a, ids)
+    return (rewrite_expr(a, scrut), aoff, alen)
+}
+
 func rewrite_stmt(a: *Ast, id: int64) -> int64 {
     s0: StmtNode = vec_get((*a).stmts, id)
     if s0.kind == sk_break() || s0.kind == sk_continue() {
@@ -251,7 +323,7 @@ func rewrite_expr(a: *Ast, id: int64) -> int64 {
         return ast_expr(a, xk_lambda(), e.lo, e.hi, poff, plen, clone_type(a, e.c), rewrite_block(a, e.d))
     }
     if e.kind == xk_match() {
-        scrut, off5, len5 := rewrite_match(a, e.a, e.b, e.c)
+        scrut, off5, len5 := rewrite_match_value(a, e.a, e.b, e.c)
         return ast_expr(a, xk_match(), e.lo, e.hi, scrut, off5, len5, 0)
     }
     if e.kind == xk_do() {

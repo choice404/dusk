@@ -1,0 +1,31 @@
+// 1.10.1 review fix 1/2: a nested match over a scalar enum names q, the outer payload binder
+// of an owned subject. The owned subject hints the inner match to run its ownership judgment,
+// so the borrowed view q records a borrow that disagrees with the sibling alloc owner arm;
+// before the fix the inner recorded nothing, the result fell to i64, and clang rejected the
+// fat pointer store while the ownership laundered.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+enum C { Y, N }
+
+func main() -> int64 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    c: C = C.Y
+    x: *int64 = match *t {
+        Leaf(q) => match c {
+            Y => q,
+            N => q,
+        },
+        Empty => alloc(0),
+    }
+    println(*x)
+    free(x)
+    println(*p)
+    free(t)
+    return 0
+}

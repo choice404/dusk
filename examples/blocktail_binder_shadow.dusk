@@ -1,0 +1,25 @@
+// 1.10.1 X3: an inner arm binder shadows an outer arm binder of the same name, riding the
+// 1.10.0 scope chain. The outer v binds 5 from e; the inner v binds 9 from f and shadows it,
+// so the A/A path yields 109, while the inner B arm still reads the outer v as 5.
+@paradigm procedural
+
+enum E {
+    A(v: int64),
+    B,
+}
+
+func main() -> int64 {
+    e: E = E.A(5)
+    f: E = E.A(9)
+    x: int64 = match e {
+        A(v) => {
+            match f {
+                A(v) => v + 100,
+                B => v,
+            }
+        },
+        B => 1,
+    }
+    println(x)
+    return 0
+}

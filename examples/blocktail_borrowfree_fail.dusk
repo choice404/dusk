@@ -1,0 +1,33 @@
+// 1.10.1 X3 twin: a block-tail match whose arms all borrow yields a borrow. Freeing the
+// result double frees the pointer the subject still owns, so the free is refused; the borrow
+// verdict propagates through both the block-tail value-ization and the nested consultation.
+@paradigm procedural
+
+enum Node {
+    Leaf(v: *int64),
+    Empty,
+}
+
+func main() -> int64 {
+    p := alloc(42)
+    t := alloc(Node.Leaf(p))
+    ref rt := t
+    ref b := p
+    x := match *rt {
+        Leaf(q) => {
+            println(0)
+            match *rt {
+                Leaf(w) => w,
+                Empty => b,
+            }
+        },
+        Empty => match *rt {
+            Leaf(w2) => w2,
+            Empty => b,
+        },
+    }
+    println(*x)
+    free(x)
+    free(t)
+    return 0
+}

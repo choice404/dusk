@@ -1,0 +1,31 @@
+// 1.10.1 X3: block-tail value-ization recurses. Two arm bodies each run a statement then
+// yield a bare match, nested two deep; the desugar rewrites each trailing match statement
+// into an expression tail so every level lands its value in its own slot.
+@paradigm procedural
+
+enum E {
+    A(v: int64),
+    B,
+}
+
+func main() -> int64 {
+    e: E = E.A(5)
+    x: int64 = match e {
+        A(v) => {
+            a: int64 = v + 1
+            match e {
+                A(w) => {
+                    b: int64 = w + a
+                    match e {
+                        A(u) => u + b,
+                        B => 1,
+                    }
+                },
+                B => 2,
+            }
+        },
+        B => 3,
+    }
+    println(x)
+    return 0
+}

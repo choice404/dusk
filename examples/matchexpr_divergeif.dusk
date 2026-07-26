@@ -1,0 +1,29 @@
+// 1.10.1 review fix 4 (MED): an arm whose block ends in an if with both branches diverging
+// (here break and continue) yields nothing but never falls through, so the every-arm-yields
+// check accepts it. arm_diverges recurses through if and statement-match tails, break/continue
+// aware, instead of only testing the last statement directly.
+@paradigm procedural
+
+enum Pick { Yes, No }
+
+func main() -> int64 {
+    mut total: int64 = 0
+    mut i: int64 = 0
+    while i < 3 {
+        p: Pick = Pick.Yes
+        x: int64 = match p {
+            Yes => {
+                if total > 100 {
+                    break
+                } else {
+                    break
+                }
+            }
+            No => 1,
+        }
+        total = total + x
+        i = i + 1
+    }
+    println(total)
+    return 0
+}

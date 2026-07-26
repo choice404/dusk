@@ -152,21 +152,6 @@ export func match_arm_tail(a: *Ast, block_id: int64) -> int64 {
     return st.a
 }
 
-// Whether an arm block ends in a bare statement match. The parser lowers a `match` in
-// statement position to a statement node, not an expression, so a `match` written as the
-// value of a match arm yields nothing into the result slot and codegen leaves the slot
-// uninitialized. The arm-tail type and ownership machinery skip a non-expression tail, so
-// this shape used to pass check and return garbage; a value-position match arm rejects it
-// and the inner match must be bound to a name first, the same shape a nested match already
-// takes when its value is used.
-export func arm_ends_in_match_stmt(a: *Ast, block_id: int64) -> bool {
-    b: BlockNode = vec_get((*a).blocks, block_id)
-    if b.len == 0 { return false }
-    sid: int64 = vec_get((*a).kids, b.off + b.len - 1)
-    last: StmtNode = vec_get((*a).stmts, sid)
-    return last.kind == sk_match()
-}
-
 // Whether a name is one of a variant pattern's payload binders.
 func pat_binds_name(a: *Ast, pat_id: int64, name: string) -> bool {
     p: PatternNode = vec_get((*a).patterns, pat_id)
@@ -217,6 +202,16 @@ export func arm_own_value(tc: *TypeChecker, pat_id: int64, tail_id: int64, subj_
         if is_owning_call(tc, tail) { return own_owner() }
         if is_managed_ty(tc, tail_ty) { return own_owner() }
         return own_borrow()
+    }
+    // A nested match tail owns exactly what its own arms agreed on: the inner walk
+    // stored its aggregate verdict under the inner match's expr id, so the outer
+    // verdict consults it rather than assuming an owner. A borrow that flows out of
+    // the inner match therefore propagates outward and the free/move/return consumers
+    // see it; a missing entry means the inner match was not a managed-pointer match.
+    if tail.kind == xk_match() {
+        v: int64 = match_own_of(tc, tail_id)
+        if v >= 0 { return v }
+        return own_owner()
     }
     return own_owner()
 }
@@ -303,6 +298,12 @@ export func arm_tail_managed(tc: *TypeChecker, subj_id: int64, pat_id: int64, ta
     }
     if str_len(binder) > 0 {
         return is_managed_ty(tc, binder_payload_ty(tc, subj_id, pat_id, binder))
+    }
+    // A nested match tail's inferred type is a surface hole, so its managed status reads
+    // from the verdict the inner walk stored: a present match_own entry is the evidence
+    // that the inner match was itself a managed-pointer match and this arm carries one.
+    if tail.kind == xk_match() {
+        return match_own_of(tc, tail_id) >= 0
     }
     return is_managed_ty(tc, tail_ty)
 }
