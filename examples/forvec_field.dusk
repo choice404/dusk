@@ -1,0 +1,24 @@
+@paradigm procedural
+@import std.vector
+
+// A container held in a struct field iterates. A struct field read infers a wildcard
+// on the surface, so the classifier recovers the field's container type from the
+// struct definition; without it this loop reaches codegen unrewritten.
+struct Holder {
+    v: *Vector<int64>,
+}
+
+func main() -> int64 {
+    v: *Vector<int64> = alloc(vec_new())
+    vec_push(v, 8)
+    vec_push(v, 9)
+    h: Holder = Holder { v: v }
+    mut s: int64 = 0
+    for x in h.v {
+        s = s + x
+    }
+    println(s)
+    vec_free(v)
+    free(v)
+    return 0
+}

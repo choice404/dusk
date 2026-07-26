@@ -1,0 +1,26 @@
+@paradigm procedural
+@import std.vector
+
+// A vector of managed pointers. The binder is a borrow the vector still owns, so
+// mutating through it is legal but freeing it is not: the elements are drained and
+// freed with vec_take after the loop, the owning idiom.
+struct Cell { n: int64 }
+
+func main() -> int64 {
+    v: *Vector<*Cell> = alloc(vec_new())
+    vec_push(v, alloc(Cell { n: 1 }))
+    vec_push(v, alloc(Cell { n: 2 }))
+    for c in v {
+        (*c).n = (*c).n * 10
+    }
+    for c in v {
+        println((*c).n)
+    }
+    while vec_len(v) > 0 {
+        c: *Cell = vec_take(v, vec_len(v) - 1)
+        free(c)
+    }
+    vec_free(v)
+    free(v)
+    return 0
+}

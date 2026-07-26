@@ -241,6 +241,42 @@ export func map_len<K, V>(m: *Map<K, V>) -> int64 {
     return (*m).len
 }
 
+// The key at insertion-order position i, read straight from the map's own order
+// record. Position i runs from 0 to map_len minus 1, the same range map_len
+// bounds, and visits every live key exactly once in the order the keys first
+// entered the map. The returned key is a borrow of the value the map still holds:
+// for a string key that is the string the map owns, so do not free it. Bounds
+// checked through vec_get, so an i outside the range faults rather than reads a
+// stale slot. Pair with map_len to walk a map without allocating the copy
+// map_keys returns.
+export func map_key_at<K, V>(m: *Map<K, V>, i: int64) -> K {
+    return vec_get((*m).order, i)
+}
+
+// The value stored for the key at insertion-order position i. It reads that key
+// from the order record, then probes the table for its slot exactly as map_get
+// does and returns the value there. The returned value is a borrow the map still
+// owns; drain with map_take when you need the value as your own. Under the map's
+// order invariant every recorded key is live in the table, so the probe always
+// hits and the miss branch below is unreachable; it faults through map_take_fault
+// rather than return a garbage slot, matching map_take's miss discipline, so a
+// corrupted order record faults loudly instead of reading uninitialized memory.
+export func map_val_at<K, V>(m: *Map<K, V>, i: int64) -> V {
+    k: K = vec_get((*m).order, i)
+    mut idx: int64 = map_slot(m, k)
+    while (*m).used[idx] {
+        if (*m).keys[idx] == k {
+            return (*m).vals[idx]
+        }
+        idx = idx + 1
+        if idx == (*m).cap {
+            idx = 0
+        }
+    }
+    map_take_fault()
+    return (*m).vals[idx]
+}
+
 // The keys in insertion order, as a fresh vector the caller owns and frees with
 // vec_free and free. Each key is copied out of the map's own order record, so the
 // returned vector is independent of the map: freeing it never touches the map,

@@ -1,0 +1,17 @@
+@paradigm procedural
+@import std.vector
+
+// The borrow cannot be laundered into an owner: moving the container binder to a new
+// name is rejected at the move, because move only takes an owner and the binder is a
+// borrow the vector still owns.
+struct Cell { n: int64 }
+
+func main() -> int64 {
+    v: *Vector<*Cell> = alloc(vec_new())
+    vec_push(v, alloc(Cell { n: 1 }))
+    for c in v {
+        q := move(c)
+        free(q)
+    }
+    return 0
+}

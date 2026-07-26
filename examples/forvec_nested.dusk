@@ -1,0 +1,33 @@
+@paradigm procedural
+@import std.vector
+
+// Nested container loops: a vector of vectors. The inner binder row is a borrow the
+// outer vector owns, and the inner for iterates it. Names are uniquified by stmt id
+// so the two loops never collide.
+func main() -> int64 {
+    outer: *Vector<*Vector<int64>> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < 3 {
+        inner: *Vector<int64> = alloc(vec_new())
+        mut j: int64 = 0
+        while j <= i {
+            vec_push(inner, i * 10 + j)
+            j = j + 1
+        }
+        vec_push(outer, inner)
+        i = i + 1
+    }
+    for row in outer {
+        for x in row {
+            println(x)
+        }
+    }
+    while vec_len(outer) > 0 {
+        row: *Vector<int64> = vec_take(outer, vec_len(outer) - 1)
+        vec_free(row)
+        free(row)
+    }
+    vec_free(outer)
+    free(outer)
+    return 0
+}

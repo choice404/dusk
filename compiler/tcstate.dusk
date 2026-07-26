@@ -46,6 +46,11 @@ export struct TypeChecker {
     iface_binds: *Vector<*Map<string, string>>,
     enum_binds: *Vector<*Map<string, string>>,
     slice_iface_elem: *Vector<*Map<string, int64>>,
+    // Per-scope name to AST type id, recorded for annotated bindings and params.
+    // The surface arena erases a named type's generic args (Vector and Map keep
+    // theirs only in the AST), so a container for over a binder needs the binder's
+    // AST type to recover its element type and classify a nested container loop.
+    binding_ast_ty: *Vector<*Map<string, int64>>,
     alias_edges: *Vector<*Map<string, string>>,
     branch_depth: int64,
     loop_depth: int64,
@@ -78,6 +83,16 @@ export struct TypeChecker {
     flow_prov: *Map<string, FlowProv>,
     mut_tuple_types: *Map<string, MutTupleEntry>,
     match_own: *Map<int64, int64>,
+    // Records which for statements iterate a std container: the sk_for stmt id maps
+    // to its class (1 vector, 2 map keys, 3 map key/value pairs). The surface pass
+    // classifies and records; the pre-mono rewrite consumes it. Empty on a module
+    // that iterates no container.
+    for_iters: *Map<int64, int64>,
+    // For each classified container for whose iterand AST type was recovered, the
+    // sk_for stmt id maps to that iterand AST type id. The rewrite annotates the
+    // container binding with it so mono can instantiate the accessor generics when
+    // the iterand is a struct field or a call whose type mono cannot re-infer.
+    for_iter_asts: *Map<int64, int64>,
     match_ctx: int64,
     summary: SummaryHandle,
     sum_tables: *SumTables,
@@ -113,6 +128,7 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
     iface_binds: *Vector<*Map<string, string>> = alloc(vec_new())
     enum_binds: *Vector<*Map<string, string>> = alloc(vec_new())
     slice_iface_elem: *Vector<*Map<string, int64>> = alloc(vec_new())
+    binding_ast_ty: *Vector<*Map<string, int64>> = alloc(vec_new())
     alias_edges: *Vector<*Map<string, string>> = alloc(vec_new())
     summaries: *Map<string, SummaryHandle> = alloc(map_new())
     method_summaries: *Map<string, SummaryHandle> = alloc(map_new())
@@ -129,6 +145,8 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
     flow_prov: *Map<string, FlowProv> = alloc(map_new())
     mut_tuple_types: *Map<string, MutTupleEntry> = alloc(map_new())
     match_own: *Map<int64, int64> = alloc(map_new())
+    for_iters: *Map<int64, int64> = alloc(map_new())
+    for_iter_asts: *Map<int64, int64> = alloc(map_new())
     cur_generics: *Map<string, int64> = alloc(map_new())
     errors: *Vector<SpanDiagnostic> = alloc(vec_new())
     return alloc(TypeChecker {
@@ -155,6 +173,7 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
         iface_binds: iface_binds,
         enum_binds: enum_binds,
         slice_iface_elem: slice_iface_elem,
+        binding_ast_ty: binding_ast_ty,
         alias_edges: alias_edges,
         branch_depth: 0,
         loop_depth: 0,
@@ -184,6 +203,8 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
         flow_prov: flow_prov,
         mut_tuple_types: mut_tuple_types,
         match_own: match_own,
+        for_iters: for_iters,
+        for_iter_asts: for_iter_asts,
         match_ctx: 0,
         summary: SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" },
         sum_tables: sum_tables_new(a),

@@ -22,6 +22,7 @@
 @import astdump
 @import loader
 @import desugar
+@import foriter
 @import resolve
 @import tcrun
 @import sumfix
@@ -326,6 +327,10 @@ func run_check_spine(path: string, prog: string) -> CheckOutcome {
     // width, argument, and exhaustiveness class over the mono-expanded module,
     // recovering exactly the class a generic do wildcarded on the surface. Mono
     // and ground both contribute even when mono has diagnostics, matching sema::check.
+    // The container-for rewrite runs after the clean surface pass and before mono, so
+    // mono instantiates the spliced accessor generics and the ground pass re-checks
+    // the rewritten types; a module that iterates no container is left untouched.
+    foriter(p.module, (*tc).for_iters, (*tc).for_iter_asts)
     m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
     mono_errs: *Vector<SpanDiagnostic> = (*m).diags
     ground_errs: *Vector<SpanDiagnostic> = collect_ground_pass(m, mono_errs)
@@ -438,6 +443,7 @@ export func cmd_mono(path: string, prog: string) -> int32 {
     if vec_len(type_errs) > 0 {
         return 1
     }
+    foriter(p.module, (*tc).for_iters, (*tc).for_iter_asts)
     m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
     mono_errs: *Vector<SpanDiagnostic> = (*m).diags
     emit_span_errors(p.files, mono_errs)
@@ -481,6 +487,7 @@ export func compile_ir_text(path: string, prog: string, target: string) -> CliIr
     if vec_len(type_errs) > 0 {
         return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
     }
+    foriter(p.module, (*tc).for_iters, (*tc).for_iter_asts)
     m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
     mono_errs: *Vector<SpanDiagnostic> = (*m).diags
     emit_span_errors(p.files, mono_errs)

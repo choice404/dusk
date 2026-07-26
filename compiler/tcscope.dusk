@@ -26,6 +26,7 @@ export func push_scope(tc: *TypeChecker) -> void {
     vec_push((*tc).iface_binds, new_str_map())
     vec_push((*tc).enum_binds, new_str_map())
     vec_push((*tc).slice_iface_elem, new_ty_map())
+    vec_push((*tc).binding_ast_ty, new_ty_map())
     vec_push((*tc).alias_edges, new_alias_map())
     vec_push((*tc).ptr_param_borrows, new_ty_map())
     vec_push((*tc).lambda_sink_binds, new_sink_map())
@@ -41,6 +42,7 @@ export func pop_scope(tc: *TypeChecker) -> void {
     iface_binds: *Vector<*Map<string, string>> = (*tc).iface_binds
     enum_binds: *Vector<*Map<string, string>> = (*tc).enum_binds
     slice_iface_elem: *Vector<*Map<string, int64>> = (*tc).slice_iface_elem
+    binding_ast_ty: *Vector<*Map<string, int64>> = (*tc).binding_ast_ty
     esc_slices: *Vector<*Map<string, int64>> = (*tc).esc_slices
     esc_closures: *Vector<*Map<string, int64>> = (*tc).esc_closures
     alias_edges: *Vector<*Map<string, string>> = (*tc).alias_edges
@@ -53,6 +55,7 @@ export func pop_scope(tc: *TypeChecker) -> void {
     (*iface_binds).len = n
     (*enum_binds).len = n
     (*slice_iface_elem).len = n
+    (*binding_ast_ty).len = n
     (*esc_slices).len = n
     (*esc_closures).len = n
     (*alias_edges).len = n
@@ -225,6 +228,28 @@ export func slice_iface_of(tc: *TypeChecker, name: string) -> int64 {
     while i >= 0 {
         m: *Map<string, int64> = vec_get(slice_iface_elem, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), ty_unknown((*tc).ty)) }
+        i = i - 1
+    }
+    return -1
+}
+
+// Records the AST type id a binding was declared with, so a later container for
+// over the binding can recover its element type from the un-erased AST.
+export func declare_binding_ast(tc: *TypeChecker, name: string, astty: int64) -> void {
+    binding_ast_ty: *Vector<*Map<string, int64>> = (*tc).binding_ast_ty
+    if vec_len(binding_ast_ty) == 0 { return }
+    m: *Map<string, int64> = vec_get(binding_ast_ty, vec_len(binding_ast_ty) - 1)
+    map_put(m, name, astty)
+}
+
+// The AST type id a binding was declared with, or -1 when none was recorded (an
+// inferred binding, or one out of scope).
+export func binding_ast_of(tc: *TypeChecker, name: string) -> int64 {
+    binding_ast_ty: *Vector<*Map<string, int64>> = (*tc).binding_ast_ty
+    mut i: int64 = vec_len(binding_ast_ty) - 1
+    while i >= 0 {
+        m: *Map<string, int64> = vec_get(binding_ast_ty, i)
+        if map_has(m, name) { return unwrap_or(map_get(m, name), -1) }
         i = i - 1
     }
     return -1

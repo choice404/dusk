@@ -300,7 +300,12 @@ func copy_stmt(dst: *Ast, src: *Ast, id: int64) -> int64 {
         return ast_stmt(dst, sk_while(), copy_expr(dst, src, s.a), copy_block(dst, src, s.b), s.c, 0)
     }
     if s.kind == sk_for() {
-        return ast_stmt(dst, sk_for(), copy_name(dst, src, s.a), copy_expr(dst, src, s.b), copy_block(dst, src, s.c), 0)
+        // d carries the optional second binder as an interned name plus one (0 when
+        // absent); re-intern it into dst so an imported `for k, v in m` keeps its
+        // value binder instead of losing it to an undefined-name error.
+        mut second: int64 = 0
+        if s.d != 0 { second = copy_name(dst, src, s.d - 1) + 1 }
+        return ast_stmt(dst, sk_for(), copy_name(dst, src, s.a), copy_expr(dst, src, s.b), copy_block(dst, src, s.c), second)
     }
     if s.kind == sk_match() {
         off2, len2 := copy_arm_list(dst, src, s.b, s.c)

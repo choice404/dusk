@@ -1,0 +1,18 @@
+@paradigm procedural
+@import std.vector
+
+// Freeing the container mid-loop does not read a stale snapshot: the next
+// iteration's vec_len derefs the freed fat pointer and the generation check faults
+// loudly. The first element prints, then the fault aborts.
+func main() -> int64 {
+    v: *Vector<int64> = alloc(vec_new())
+    vec_push(v, 1)
+    vec_push(v, 2)
+    vec_push(v, 3)
+    for x in v {
+        println(x)
+        vec_free(v)
+        free(v)
+    }
+    return 0
+}

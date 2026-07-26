@@ -1,0 +1,15 @@
+@paradigm procedural
+
+// A for binder over a slice of pointers is a borrow: it views an element the
+// slice's array still owns, so freeing it through the binder rejects, exactly as
+// freeing the result of a vec_get does. Drain the owner instead.
+struct Cell { n: int64 }
+
+func main() -> int64 {
+    c: *Cell = alloc(Cell { n: 7 })
+    arr: (*Cell)[1] = [c]
+    for p in arr[0..1] {
+        free(p)
+    }
+    return 0
+}

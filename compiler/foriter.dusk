@@ -1,0 +1,438 @@
+// foriter: the pre-mono container-for rewrite. The surface type pass classifies a
+// `for` whose iterand is a *Vector<T> or *Map<K, V> and records its class in the
+// checker's for_iters table (stmt id -> 1 vector, 2 map-keys, 3 map-pairs). This
+// pass runs after a clean surface pass and before mono, replacing each classified
+// loop in its parent block with the exact index loop a user would write against
+// vec_len/vec_get (or map_len plus the two positional map accessors), so container
+// layout stays in dusk source and codegen never learns it. The synthesized calls
+// ride mono's ordinary worklist and the ground double pass re-checks their types.
+//
+// The splice for `for x in v` (class vec), all synthesized spans the for header:
+//     __fit$N := v
+//     mut __fi$N := 0
+//     while __fi$N < vec_len(__fit$N) {
+//         x := vec_get(__fit$N, __fi$N)
+//         __fi$N = __fi$N + 1
+//         if true { <original body> }
+//     }
+// The iterand evaluates exactly once (bound to __fit$N). The index advances before
+// the body, so a `continue` (which jumps to the while condition) has already moved
+// past the current element; the wrong placement infinite-loops on the first
+// continue. The length re-reads every iteration, so growth is visited and shrinkage
+// terminates early. The `if true` wrapper preserves the body's own scope, so a
+// binder the body shadows nests legally instead of colliding in the while scope.
+// map-keys binds `k := map_key_at(...)`; map-pairs adds `v := map_val_at(...)` and
+// uses map_len. Names are uniquified by the for's stmt id, so nested and sibling
+// container loops never collide.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import intern
+
+// The two side tables the rewrite consumes, keyed by sk_for stmt id: classes maps a
+// classified for to its class (1 vector, 2 map-keys, 3 map-pairs); asts maps it to
+// the iterand's AST type id when the surface pass recovered one, so the container
+// binding is annotated and mono can pin the accessor generics for a field or call
+// iterand it cannot re-infer.
+struct ForCtx { classes: *Map<int64, int64>, asts: *Map<int64, int64> }
+
+// The class values mirror tcstmt's fc_vec/fc_mapkeys/fc_mappairs.
+func fic_vec() -> int64 { return 1 }
+func fic_mappairs() -> int64 { return 3 }
+
+// A synthesized local name uniquified by the for's stmt id, so every rewritten loop
+// owns a distinct __fit$N / __fi$N pair and nested loops never alias.
+func fi_gen_name(a: *Ast, prefix: string, n: int64) -> int64 {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push_int(b, n)
+    s: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return intern_owned((*a).interner, s)
+}
+
+func fi_ident(a: *Ast, name: int64, lo: int64, hi: int64) -> int64 {
+    return ast_expr(a, xk_ident(), lo, hi, name, 0, 0, 0)
+}
+
+func fi_call1(a: *Ast, fname: int64, arg: int64, lo: int64, hi: int64) -> int64 {
+    callee: int64 = fi_ident(a, fname, lo, hi)
+    args: *Vector<int64> = alloc(vec_new())
+    vec_push(args, arg)
+    off, len := ast_kids(a, args)
+    return ast_expr(a, xk_call(), lo, hi, callee, off, len, 0)
+}
+
+func fi_call2(a: *Ast, fname: int64, a0: int64, a1: int64, lo: int64, hi: int64) -> int64 {
+    callee: int64 = fi_ident(a, fname, lo, hi)
+    args: *Vector<int64> = alloc(vec_new())
+    vec_push(args, a0)
+    vec_push(args, a1)
+    off, len := ast_kids(a, args)
+    return ast_expr(a, xk_call(), lo, hi, callee, off, len, 0)
+}
+
+// A single-name let. flags carry the sk_let bit field: 1 mut, 4 inferred (`:=`).
+func fi_let(a: *Ast, name: int64, value: int64, flags: int64) -> int64 {
+    binds: *Vector<int64> = alloc(vec_new())
+    vec_push(binds, ast_bind(a, name, -1))
+    off, len := ast_kids(a, binds)
+    return ast_stmt(a, sk_let(), off, len, value, flags)
+}
+
+// Splices the index loop for a classified for statement into out, the parent
+// block's statement list under construction. The for's body is recursively
+// rewritten first, so a nested container loop inside it is spliced too.
+func fi_splice(a: *Ast, fc: ForCtx, sid: int64, cls: int64, out: *Vector<int64>) -> void {
+    s: StmtNode = vec_get((*a).stmts, sid)
+    iter_e: ExprNode = vec_get((*a).exprs, s.b)
+    lo: int64 = iter_e.lo
+    hi: int64 = iter_e.hi
+    fit: int64 = fi_gen_name(a, "__fit$", sid)
+    fidx: int64 = fi_gen_name(a, "__fi$", sid)
+
+    // __fit$N := <iter>   (single evaluation). The iterand is itself rewritten first,
+    // so a container for nested inside the iterand expression (in a lambda argument,
+    // say) is spliced too. When the surface pass recovered the iterand's AST type it
+    // annotates the binding, so mono can instantiate the accessors for a field or call
+    // iterand whose type it cannot re-infer; otherwise the binding is inferred.
+    asts: *Map<int64, int64> = fc.asts
+    fit_ty: int64 = unwrap_or(map_get(asts, sid), -1)
+    fit_val: int64 = fi_expr(a, fc, s.b)
+    mut fit_flags: int64 = 4
+    if fit_ty >= 0 { fit_flags = 0 }
+    fit_binds: *Vector<int64> = alloc(vec_new())
+    vec_push(fit_binds, ast_bind(a, fit, fit_ty))
+    boff, blen := ast_kids(a, fit_binds)
+    vec_push(out, ast_stmt(a, sk_let(), boff, blen, fit_val, fit_flags))
+    // mut __fi$N := 0
+    zero: int64 = ast_expr(a, xk_int(), lo, hi, 0, -1, 0, 0)
+    vec_push(out, fi_let(a, fidx, zero, 5))
+
+    mut len_fn: int64 = ast_intern(a, "vec_len")
+    mut get_fn: int64 = ast_intern(a, "vec_get")
+    if cls != fic_vec() {
+        len_fn = ast_intern(a, "map_len")
+        get_fn = ast_intern(a, "map_key_at")
+    }
+
+    // while __fi$N < LEN(__fit$N)
+    len_call: int64 = fi_call1(a, len_fn, fi_ident(a, fit, lo, hi), lo, hi)
+    cond: int64 = ast_expr(a, xk_binary(), lo, hi, bop_lt(), fi_ident(a, fidx, lo, hi), len_call, 0)
+
+    body_ids: *Vector<int64> = alloc(vec_new())
+    // bind the element / key at the current index
+    get_call: int64 = fi_call2(a, get_fn, fi_ident(a, fit, lo, hi), fi_ident(a, fidx, lo, hi), lo, hi)
+    vec_push(body_ids, fi_let(a, s.a, get_call, 4))
+    // map-pairs: bind the value at the same index before the index advances
+    if cls == fic_mappairs() {
+        val_call: int64 = fi_call2(a, ast_intern(a, "map_val_at"), fi_ident(a, fit, lo, hi), fi_ident(a, fidx, lo, hi), lo, hi)
+        vec_push(body_ids, fi_let(a, s.d - 1, val_call, 4))
+    }
+    // __fi$N = __fi$N + 1   (before the body: continue lands on the while condition)
+    one: int64 = ast_expr(a, xk_int(), lo, hi, 1, -1, 0, 0)
+    add: int64 = ast_expr(a, xk_binary(), lo, hi, bop_add(), fi_ident(a, fidx, lo, hi), one, 0)
+    vec_push(body_ids, ast_stmt(a, sk_assign(), fi_ident(a, fidx, lo, hi), add, 0, 0))
+    // if true { <original body, recursively rewritten> }
+    nested: int64 = fi_block(a, fc, s.c)
+    tru: int64 = ast_expr(a, xk_bool(), lo, hi, 1, 0, 0, 0)
+    vec_push(body_ids, ast_stmt(a, sk_if(), tru, nested, -1, 0))
+
+    while_body: int64 = ast_block(a, body_ids)
+    vec_push(out, ast_stmt(a, sk_while(), cond, while_body, 0, 0))
+}
+
+// Rewrites a block, returning the original id when nothing inside changed so the
+// mono dump is minimal for the parts a container loop never touches. A classified
+// for is spliced; every other statement is rewritten in place.
+func fi_block(a: *Ast, fc: ForCtx, bid: int64) -> int64 {
+    b: BlockNode = vec_get((*a).blocks, bid)
+    ids: *Vector<int64> = alloc(vec_new())
+    mut changed: bool = false
+    mut i: int64 = 0
+    while i < b.len {
+        sid: int64 = vec_get((*a).kids, b.off + i)
+        classes: *Map<int64, int64> = fc.classes
+        if map_has(classes, sid) {
+            cls: int64 = unwrap_or(map_get(classes, sid), 0)
+            fi_splice(a, fc, sid, cls, ids)
+            changed = true
+        } else {
+            nsid: int64 = fi_stmt(a, fc, sid)
+            if nsid != sid { changed = true }
+            vec_push(ids, nsid)
+        }
+        i = i + 1
+    }
+    if !changed { return bid }
+    return ast_block(a, ids)
+}
+
+func fi_arms(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut changed: bool = false
+    mut i: int64 = 0
+    while i < len {
+        armid: int64 = vec_get((*a).kids, off + i)
+        arm: ArmNode = vec_get((*a).arms, armid)
+        nbody: int64 = fi_block(a, fc, arm.body)
+        if nbody == arm.body {
+            vec_push(ids, armid)
+        } else {
+            vec_push(ids, ast_arm(a, arm.pat, nbody))
+            changed = true
+        }
+        i = i + 1
+    }
+    if !changed { return (off, len, false) }
+    noff, nlen := ast_kids(a, ids)
+    return (noff, nlen, true)
+}
+
+func fi_stmt(a: *Ast, fc: ForCtx, sid: int64) -> int64 {
+    s: StmtNode = vec_get((*a).stmts, sid)
+    if s.kind == sk_let() {
+        nv: int64 = fi_expr(a, fc, s.c)
+        if nv == s.c { return sid }
+        return ast_stmt(a, sk_let(), s.a, s.b, nv, s.d)
+    }
+    if s.kind == sk_assign() {
+        na: int64 = fi_expr(a, fc, s.a)
+        nb: int64 = fi_expr(a, fc, s.b)
+        if na == s.a && nb == s.b { return sid }
+        return ast_stmt(a, sk_assign(), na, nb, 0, 0)
+    }
+    if s.kind == sk_assign_op() {
+        nb: int64 = fi_expr(a, fc, s.b)
+        nc: int64 = fi_expr(a, fc, s.c)
+        if nb == s.b && nc == s.c { return sid }
+        return ast_stmt(a, sk_assign_op(), s.a, nb, nc, 0)
+    }
+    if s.kind == sk_return() {
+        if s.a < 0 { return sid }
+        ne: int64 = fi_expr(a, fc, s.a)
+        if ne == s.a { return sid }
+        return ast_stmt(a, sk_return(), ne, 0, 0, 0)
+    }
+    if s.kind == sk_defer() {
+        ne: int64 = fi_expr(a, fc, s.a)
+        if ne == s.a { return sid }
+        return ast_stmt(a, sk_defer(), ne, 0, 0, 0)
+    }
+    if s.kind == sk_if() {
+        nc: int64 = fi_expr(a, fc, s.a)
+        nb: int64 = fi_block(a, fc, s.b)
+        mut ne: int64 = s.c
+        if s.c >= 0 { ne = fi_block(a, fc, s.c) }
+        if nc == s.a && nb == s.b && ne == s.c { return sid }
+        return ast_stmt(a, sk_if(), nc, nb, ne, 0)
+    }
+    if s.kind == sk_while() {
+        nc: int64 = fi_expr(a, fc, s.a)
+        nb: int64 = fi_block(a, fc, s.b)
+        if nc == s.a && nb == s.b { return sid }
+        return ast_stmt(a, sk_while(), nc, nb, s.c, 0)
+    }
+    if s.kind == sk_for() {
+        // A non-container for: container fors are spliced in fi_block and never reach
+        // here. Rewrite the iterand and body for nested container loops.
+        ni: int64 = fi_expr(a, fc, s.b)
+        nb: int64 = fi_block(a, fc, s.c)
+        if ni == s.b && nb == s.c { return sid }
+        return ast_stmt(a, sk_for(), s.a, ni, nb, s.d)
+    }
+    if s.kind == sk_match() {
+        nscrut: int64 = fi_expr(a, fc, s.a)
+        noff, nlen, chg := fi_arms(a, fc, s.b, s.c)
+        if nscrut == s.a && !chg { return sid }
+        return ast_stmt(a, sk_match(), nscrut, noff, nlen, 0)
+    }
+    if s.kind == sk_expr() {
+        ne: int64 = fi_expr(a, fc, s.a)
+        if ne == s.a { return sid }
+        return ast_stmt(a, sk_expr(), ne, 0, 0, 0)
+    }
+    // sk_break, sk_continue carry no rewritable child.
+    return sid
+}
+
+func fi_expr_list(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut changed: bool = false
+    mut i: int64 = 0
+    while i < len {
+        cid: int64 = vec_get((*a).kids, off + i)
+        ncid: int64 = fi_expr(a, fc, cid)
+        if ncid != cid { changed = true }
+        vec_push(ids, ncid)
+        i = i + 1
+    }
+    if !changed { return (off, len, false) }
+    noff, nlen := ast_kids(a, ids)
+    return (noff, nlen, true)
+}
+
+// Struct-literal field kids alternate a field-name id and its value expr, so only
+// the odd slot is an expression to rewrite.
+func fi_field_pairs(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool) {
+    ids: *Vector<int64> = alloc(vec_new())
+    mut changed: bool = false
+    mut i: int64 = 0
+    while i < len {
+        name_kid: int64 = vec_get((*a).kids, off + i)
+        expr_kid: int64 = vec_get((*a).kids, off + i + 1)
+        nexpr: int64 = fi_expr(a, fc, expr_kid)
+        if nexpr != expr_kid { changed = true }
+        vec_push(ids, name_kid)
+        vec_push(ids, nexpr)
+        i = i + 2
+    }
+    if !changed { return (off, len, false) }
+    noff, nlen := ast_kids(a, ids)
+    return (noff, nlen, true)
+}
+
+// Rewrites an expression, recursing into every child so a lambda body anywhere in
+// the tree is reached. Only a lambda body (a block) can carry a container for, so
+// every other kind rebuilds solely to thread a changed child; a subtree with no
+// container loop returns its original id unchanged.
+func fi_expr(a: *Ast, fc: ForCtx, eid: int64) -> int64 {
+    e: ExprNode = vec_get((*a).exprs, eid)
+    if e.kind == xk_unary() {
+        nb: int64 = fi_expr(a, fc, e.b)
+        if nb == e.b { return eid }
+        return ast_expr(a, xk_unary(), e.lo, e.hi, e.a, nb, 0, 0)
+    }
+    if e.kind == xk_binary() {
+        nb: int64 = fi_expr(a, fc, e.b)
+        nc: int64 = fi_expr(a, fc, e.c)
+        if nb == e.b && nc == e.c { return eid }
+        return ast_expr(a, xk_binary(), e.lo, e.hi, e.a, nb, nc, 0)
+    }
+    if e.kind == xk_call() {
+        na: int64 = fi_expr(a, fc, e.a)
+        noff, nlen, chg := fi_expr_list(a, fc, e.b, e.c)
+        if na == e.a && !chg { return eid }
+        return ast_expr(a, xk_call(), e.lo, e.hi, na, noff, nlen, 0)
+    }
+    if e.kind == xk_field() {
+        na: int64 = fi_expr(a, fc, e.a)
+        if na == e.a { return eid }
+        return ast_expr(a, xk_field(), e.lo, e.hi, na, e.b, 0, 0)
+    }
+    if e.kind == xk_index() {
+        na: int64 = fi_expr(a, fc, e.a)
+        nb: int64 = fi_expr(a, fc, e.b)
+        if na == e.a && nb == e.b { return eid }
+        return ast_expr(a, xk_index(), e.lo, e.hi, na, nb, 0, 0)
+    }
+    if e.kind == xk_range() {
+        na: int64 = fi_expr(a, fc, e.a)
+        nb: int64 = fi_expr(a, fc, e.b)
+        if na == e.a && nb == e.b { return eid }
+        return ast_expr(a, xk_range(), e.lo, e.hi, na, nb, e.c, 0)
+    }
+    if e.kind == xk_tuple() {
+        noff, nlen, chg := fi_expr_list(a, fc, e.a, e.b)
+        if !chg { return eid }
+        return ast_expr(a, xk_tuple(), e.lo, e.hi, noff, nlen, 0, 0)
+    }
+    if e.kind == xk_array() {
+        noff, nlen, chg := fi_expr_list(a, fc, e.a, e.b)
+        if !chg { return eid }
+        return ast_expr(a, xk_array(), e.lo, e.hi, noff, nlen, 0, 0)
+    }
+    if e.kind == xk_struct_lit() {
+        noff, nlen, chg := fi_field_pairs(a, fc, e.b, e.c)
+        if !chg { return eid }
+        return ast_expr(a, xk_struct_lit(), e.lo, e.hi, e.a, noff, nlen, 0)
+    }
+    if e.kind == xk_lambda() {
+        nbody: int64 = fi_block(a, fc, e.d)
+        if nbody == e.d { return eid }
+        return ast_expr(a, xk_lambda(), e.lo, e.hi, e.a, e.b, e.c, nbody)
+    }
+    if e.kind == xk_match() {
+        nscrut: int64 = fi_expr(a, fc, e.a)
+        noff, nlen, chg := fi_arms(a, fc, e.b, e.c)
+        if nscrut == e.a && !chg { return eid }
+        return ast_expr(a, xk_match(), e.lo, e.hi, nscrut, noff, nlen, 0)
+    }
+    if e.kind == xk_await() {
+        na: int64 = fi_expr(a, fc, e.a)
+        if na == e.a { return eid }
+        return ast_expr(a, xk_await(), e.lo, e.hi, na, e.b, 0, 0)
+    }
+    if e.kind == xk_collect() {
+        nb: int64 = fi_expr(a, fc, e.b)
+        if nb == e.b { return eid }
+        return ast_expr(a, xk_collect(), e.lo, e.hi, e.a, nb, 0, 0)
+    }
+    return eid
+}
+
+func fi_func(a: *Ast, fc: ForCtx, id: int64) -> int64 {
+    f: FuncNode = vec_get((*a).funcs, id)
+    nbody: int64 = fi_block(a, fc, f.body)
+    if nbody == f.body { return id }
+    return ast_func(a, FuncNode {
+        exported: f.exported,
+        abi_export: f.abi_export,
+        is_async: f.is_async,
+        owning: f.owning,
+        name: f.name,
+        lo: f.lo,
+        hi: f.hi,
+        generics_off: f.generics_off,
+        generics_len: f.generics_len,
+        params_off: f.params_off,
+        params_len: f.params_len,
+        ret: f.ret,
+        body: nbody,
+    })
+}
+
+func fi_impl(a: *Ast, fc: ForCtx, id: int64) -> int64 {
+    im: ImplNode = vec_get((*a).impls, id)
+    methods: *Vector<int64> = alloc(vec_new())
+    mut changed: bool = false
+    mut i: int64 = 0
+    while i < im.methods_len {
+        mid: int64 = vec_get((*a).kids, im.methods_off + i)
+        nmid: int64 = fi_func(a, fc, mid)
+        if nmid != mid { changed = true }
+        vec_push(methods, nmid)
+        i = i + 1
+    }
+    if !changed { return id }
+    return ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)
+}
+
+// Rewrites every classified container for in the module into its index loop. A
+// no-op when the table is empty, so a program that iterates no container is left
+// byte-identical and its emitted IR unchanged.
+export func foriter(a: *Ast, for_iters: *Map<int64, int64>, for_iter_asts: *Map<int64, int64>) -> void {
+    if map_len(for_iters) == 0 { return }
+    fc: ForCtx = ForCtx { classes: for_iters, asts: for_iter_asts }
+    old_items: *Vector<ItemNode> = (*a).items
+    new_items: *Vector<ItemNode> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(old_items) {
+        it: ItemNode = vec_get(old_items, i)
+        if it.kind == ik_func() {
+            vec_push(new_items, ItemNode { kind: ik_func(), id: fi_func(a, fc, it.id) })
+        } else if it.kind == ik_impl() {
+            vec_push(new_items, ItemNode { kind: ik_impl(), id: fi_impl(a, fc, it.id) })
+        } else {
+            vec_push(new_items, it)
+        }
+        i = i + 1
+    }
+    (*a).items = new_items
+}

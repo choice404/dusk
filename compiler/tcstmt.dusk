@@ -40,11 +40,184 @@ func cannot_iterate_msg(rendered: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "cannot iterate ")
     sb_push(b, rendered)
-    sb_push(b, "; a for loop takes an array, a slice, or a string")
+    sb_push(b, "; a for loop takes an array, a slice, a string, a *Vector, or a *Map")
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
     free(b)
     return out
+}
+
+// The for-iterand classes recorded in for_iters. 0 (none) and -1 (a teach reject
+// was emitted) are control values the caller reads; 1/2/3 are the recorded class.
+func fc_none() -> int64 { return 0 }
+func fc_vec() -> int64 { return 1 }
+func fc_mapkeys() -> int64 { return 2 }
+func fc_mappairs() -> int64 { return 3 }
+func fc_teach() -> int64 { return -1 }
+
+// Classifies a for iterand as one of the two stdlib containers, or judges the two
+// container-shape rejects. Returns fc_vec/fc_mapkeys/fc_mappairs for a pointer to
+// a std Vector or Map whose positional-access generics are loaded, which the
+// caller records for the pre-mono rewrite. Returns fc_teach after emitting a teach
+// reject: a by-value container (the loop needs the fat pointer to re-read length
+// and element each iteration), or two binders on an iterand that is not a map (the
+// pair form binds a map's key and value). Returns fc_none for everything else,
+// which takes the existing element path. The container type names are the protocol
+// and the accessor-presence guard keeps a user Vector without std.vector on today's
+// clean cannot-iterate reject; a name collision is already the loader's duplicate
+// definition error. A types-only run suppresses the emits, matching the surface
+// origin of the classification.
+func classify_container_for(tc: *TypeChecker, it: int64, has_second: bool, lo: int64, hi: int64) -> int64 {
+    // The surface pass owns container classification and the pre-mono rewrite consumes
+    // it; the ground pass runs types-only over the already-rewritten module, so no
+    // container for reaches it. Declining to classify on the ground pass keeps a
+    // leftover container for (a for the surface pass could not classify) a loud
+    // cannot-iterate reject rather than a silent pass-through to codegen, and closes
+    // the class where a generic accessor name surviving to the ground module would
+    // coincidentally classify a for the rewrite never touched.
+    if (*tc).types_only { return fc_none() }
+    itn: TyNode = ty_get((*tc).ty, it)
+    sigs: *Map<string, FnSig> = (*tc).sigs
+    if itn.kind == tyk_named() {
+        nm: string = ty_name((*tc).ty, it)
+        if (str_eq(nm, "Vector") && map_has(sigs, "vec_len")) || (str_eq(nm, "Map") && map_has(sigs, "map_len")) {
+            tc_emit(tc, "iterate the container through a pointer, as in v: *Vector<T>", lo, hi)
+            return fc_teach()
+        }
+    }
+    if itn.kind == tyk_ptr() {
+        inner: TyNode = ty_get((*tc).ty, itn.a)
+        if inner.kind == tyk_named() {
+            nm2: string = ty_name((*tc).ty, itn.a)
+            if str_eq(nm2, "Vector") && map_has(sigs, "vec_len") && map_has(sigs, "vec_get") {
+                if has_second {
+                    tc_emit(tc, "two loop names bind a map's key and value; this iterand has only elements", lo, hi)
+                    return fc_teach()
+                }
+                return fc_vec()
+            }
+            if str_eq(nm2, "Map") && map_has(sigs, "map_len") && map_has(sigs, "map_key_at") {
+                if has_second {
+                    // The pair form needs the value accessor; without it the loop would
+                    // silently fall to key-only iteration leaving the value binder
+                    // unbound, so refuse rather than under-bind.
+                    if map_has(sigs, "map_val_at") { return fc_mappairs() }
+                    tc_emit(tc, "the map pair form needs map_val_at in scope; import std.map to iterate key and value", lo, hi)
+                    return fc_teach()
+                }
+                return fc_mapkeys()
+            }
+        }
+    }
+    // A second binder on a known non-container iterand is the pair-form misuse. On an
+    // unknown iterand (a generic, or a shape the surface could not ground) stay
+    // permissive: the iterand may ground to a map, and a leftover for is judged then.
+    if has_second {
+        if itn.kind == tyk_unknown() { return fc_none() }
+        tc_emit(tc, "two loop names bind a map's key and value; this iterand has only elements", lo, hi)
+        return fc_teach()
+    }
+    return fc_none()
+}
+
+// The AST type of a classified container iterand's idx-th type argument, read from
+// the un-erased AST where a named type keeps its generic args: *Vector<T> arg 0 is
+// T, *Map<K, V> arg 0 is K and arg 1 is V. Returns -1 when the AST type is not a
+// pointer to a named type with that arg, so the binder falls back to the wildcard.
+func container_elem_ast(a: *Ast, ptr_ast: int64, idx: int64) -> int64 {
+    if ptr_ast < 0 { return -1 }
+    pn: TypeNode = vec_get((*a).types, ptr_ast)
+    if pn.kind != tk_ptr() { return -1 }
+    inner: TypeNode = vec_get((*a).types, pn.a)
+    if inner.kind != tk_named() { return -1 }
+    if idx >= inner.c { return -1 }
+    return vec_get((*a).kids, inner.b + idx)
+}
+
+// The AST type id of a struct field, found by scanning the struct definitions for the
+// base AST type's name (dereferencing a pointer to the struct first). Returns -1 when
+// the base is not a known struct or the field is absent. A generic struct still yields
+// its field's AST type, so a container field classifies by name; the caller guards the
+// element it derives from a field, since that names the struct's own type parameter.
+func struct_field_ast(tc: *TypeChecker, struct_ast: int64, field: string) -> int64 {
+    a: *Ast = (*tc).ast
+    if struct_ast < 0 { return -1 }
+    sn: TypeNode = vec_get((*a).types, struct_ast)
+    mut named: TypeNode = sn
+    if sn.kind == tk_ptr() { named = vec_get((*a).types, sn.a) }
+    if named.kind != tk_named() { return -1 }
+    sname: string = ast_name(a, named.a)
+    structs: *Vector<StructNode> = (*a).structs
+    mut i: int64 = 0
+    while i < vec_len(structs) {
+        st: StructNode = vec_get(structs, i)
+        if str_eq(ast_name(a, st.name), sname) {
+            mut j: int64 = 0
+            while j < st.fields_len {
+                fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + j))
+                if str_eq(ast_name(a, fld.name), field) { return fld.ty }
+                j = j + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// The AST return type id of a non-generic top-level function, for classifying and
+// typing a for over a call's result. A generic function returns -1 (its return names
+// a type parameter the surface pass cannot ground here); the ground pass recovers it.
+func func_ret_ast(tc: *TypeChecker, fname: string) -> int64 {
+    a: *Ast = (*tc).ast
+    funcs: *Vector<FuncNode> = (*a).funcs
+    mut i: int64 = 0
+    while i < vec_len(funcs) {
+        f: FuncNode = vec_get(funcs, i)
+        if str_eq(ast_name(a, f.name), fname) {
+            if f.generics_len > 0 { return -1 }
+            return f.ret
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// The AST type id of a for iterand, recovered from the un-erased AST so a container
+// held in a binding, a struct field, or a call result classifies even though the
+// surface arena erased its generic args. Handles a plain name, a field chain, and a
+// direct call; anything else returns -1 and the iterand falls back to inference.
+func iterand_ast_ty(tc: *TypeChecker, expr_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr_id)
+    if e.kind == xk_ident() { return binding_ast_of(tc, ast_name(a, e.a)) }
+    if e.kind == xk_field() {
+        base_ast: int64 = iterand_ast_ty(tc, e.a)
+        return struct_field_ast(tc, base_ast, ast_name(a, e.b))
+    }
+    if e.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_ident() { return func_ret_ast(tc, ast_name(a, callee.a)) }
+    }
+    return -1
+}
+
+// Whether a recovered element arena type is safe to declare as the binder type: any
+// non-named type, or a named type that resolves to a known struct, enum, interface,
+// or container. An unresolved named type is a generic parameter the surface pass
+// cannot ground, so the binder stays a wildcard and the ground pass recovers it.
+func elem_ty_safe(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind != tyk_named() { return true }
+    nm: string = ty_name((*tc).ty, tyid)
+    if str_eq(nm, "Vector") || str_eq(nm, "Map") { return true }
+    structs: *Map<string, StructSig> = (*tc).structs
+    if map_has(structs, nm) { return true }
+    enums: *Map<string, EnumSig> = (*tc).enums
+    if map_has(enums, nm) { return true }
+    ifaces: *Map<string, int64> = (*tc).ifaces
+    if map_has(ifaces, nm) { return true }
+    return false
 }
 
 func infer_await_operand(tc: *TypeChecker, await_expr: ExprNode) -> int64 {
@@ -289,30 +462,102 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         loop_body_fixpoint(tc, s.b)
     } else if s.kind == sk_for() {
         it: int64 = infer_expr(tc, s.b)
-        // A for iterand must have an element: an array, a slice, or a string
-        // (bytes as chars). A ground iterand with no element is rejected here;
-        // a generic or unresolved one stays permissive on the surface pass and
-        // the ground pass re-checks it once mono makes it concrete. A types
-        // only rule, so both passes run it.
+        for_iter: ExprNode = vec_get((*a).exprs, s.b)
+        // The AST type of the iterand, un-erased, recovered from a binding, a struct
+        // field, or a call result. A struct field read of a container infers unknown
+        // on the surface, so the container type is recovered here to classify it;
+        // without this a field-held container reaches codegen unrewritten and crashes.
+        iter_ast: int64 = iterand_ast_ty(tc, s.b)
+        mut it_for_class: int64 = it
+        if ty_get((*tc).ty, it).kind == tyk_unknown() && iter_ast >= 0 {
+            it_for_class = tc_type(tc, iter_ast)
+        }
+        // Classify the two stdlib containers and record the class for the pre-mono
+        // rewrite, and judge the two container-shape rejects (a by-value container,
+        // two binders on a non-map). fc_teach means a teach reject already fired, so
+        // the generic reject is suppressed to leave the one precise message.
+        forclass: int64 = classify_container_for(tc, it_for_class, s.d != 0, for_iter.lo, for_iter.hi)
+        if forclass == fc_vec() || forclass == fc_mapkeys() || forclass == fc_mappairs() {
+            map_put((*tc).for_iters, id, forclass)
+            // Record the iterand's AST type so the rewrite can annotate the container
+            // binding: mono re-infers a plain name and a call result, but not a struct
+            // field, so without the annotation vec_len/map_len cannot pin their args.
+            if iter_ast >= 0 { map_put((*tc).for_iter_asts, id, iter_ast) }
+        }
+        // A for iterand must have an element: an array, a slice, a string (bytes as
+        // chars), or one of the two classified std containers. A ground iterand with
+        // no element and no container class is rejected here; a generic or unresolved
+        // one stays permissive on the surface pass and the ground pass re-checks it
+        // once mono makes it concrete. fc_teach already emitted its own precise
+        // message, and a container class is lowered by the pre-mono rewrite, so both
+        // suppress this generic reject. A types only rule, so both passes run it.
         itn: TyNode = ty_get((*tc).ty, it)
         mut ground: bool = itn.kind != tyk_unknown()
         if itn.kind == tyk_named() {
             gmap: *Map<string, int64> = (*tc).cur_generics
             if map_has(gmap, ty_name((*tc).ty, it)) { ground = false }
         }
-        if ground {
+        if ground && forclass == fc_none() {
             eln: TyNode = ty_get((*tc).ty, elem_of((*tc).ty, it))
             if eln.kind == tyk_unknown() {
-                iter_e: ExprNode = vec_get((*a).exprs, s.b)
-                tc_emit(tc, cannot_iterate_msg(ty_render((*tc).ty, it)), iter_e.lo, iter_e.hi)
+                tc_emit(tc, cannot_iterate_msg(ty_render((*tc).ty, it)), for_iter.lo, for_iter.hi)
             }
         }
         push_scope(tc)
-        for_iter: ExprNode = vec_get((*a).exprs, s.b)
         reject_alloc_shadow(tc, ast_name(a, s.a), for_iter.lo, for_iter.hi)
-        declare(tc, ast_name(a, s.a), ty_unknown((*tc).ty))
+        // The binder carries its element type, not the permissive wildcard the for
+        // loop used to declare. For an array, slice, or string that is elem_of; for a
+        // container it is the classifier's type argument, T for a vector and K for a
+        // map's key. A width or type mismatch that used to slip through now raises
+        // here, and a managed element makes the binder a borrow so freeing or moving
+        // it rejects: the binder is a view into the iterand, which keeps its owner.
+        // A container's element type is erased in the surface arena (Vector and Map
+        // keep their args only in the AST), so the binder type is recovered from the
+        // iterand's recorded AST type when the iterand is a binding: the *Vector<T>
+        // element, or the *Map<K, V> key and value, lowered for the binder. That is
+        // what lets a nested container loop over the binder classify. When the iterand
+        // is not a recorded binding the binder falls back to the wildcard and the
+        // ground pass recovers its width from the rewritten vec_get/map_key_at let.
+        // Ownership is surface-only, so the container binder is a borrow by its class:
+        // vec_get, map_key_at, and map_val_at are all non-owning views the container
+        // still owns, so freeing or moving the binder rejects.
+        mut elem: int64 = elem_of((*tc).ty, it)
+        mut second: int64 = ty_unknown((*tc).ty)
+        is_container: bool = forclass == fc_vec() || forclass == fc_mapkeys() || forclass == fc_mappairs()
+        // Recover the binder element types from the iterand's AST type (a binding,
+        // field, or call result), so a nested container loop over the binder classifies
+        // and the binder width-checks on the surface. A recovered element that names a
+        // struct's own type parameter is not ground here, so elem_ty_safe keeps the
+        // binder a wildcard for it and the ground pass recovers the width.
+        mut key_ast: int64 = -1
+        mut val_ast: int64 = -1
+        if is_container && iter_ast >= 0 {
+            key_ast = container_elem_ast(a, iter_ast, 0)
+            if forclass == fc_mappairs() { val_ast = container_elem_ast(a, iter_ast, 1) }
+        }
+        if key_ast >= 0 {
+            kt: int64 = tc_type(tc, key_ast)
+            if !elem_ty_safe(tc, kt) { key_ast = -1 } else { elem = kt }
+        }
+        if val_ast >= 0 {
+            vt2: int64 = tc_type(tc, val_ast)
+            if !elem_ty_safe(tc, vt2) { val_ast = -1 } else { second = vt2 }
+        }
+        declare(tc, ast_name(a, s.a), elem)
+        if key_ast >= 0 { declare_binding_ast(tc, ast_name(a, s.a), key_ast) }
         set_esc(tc, ast_name(a, s.a), false, false)
-        elem: int64 = elem_of((*tc).ty, it)
+        if is_container || is_managed_ty(tc, elem) { declare_own(tc, ast_name(a, s.a), own_borrow()) }
+        // The optional second binder is the map-pair form's value, typed V when the
+        // iterand's AST type is known and a borrow for the same reason the key is:
+        // map_val_at hands back a view the map still owns. It is only reachable
+        // through the map-pair rewrite; every other two-binder iterand is rejected
+        // above, where it stays a plain wildcard so its uses still resolve.
+        if s.d != 0 {
+            declare(tc, ast_name(a, s.d - 1), second)
+            if val_ast >= 0 { declare_binding_ast(tc, ast_name(a, s.d - 1), val_ast) }
+            set_esc(tc, ast_name(a, s.d - 1), false, false)
+            if forclass == fc_mappairs() || is_managed_ty(tc, second) { declare_own(tc, ast_name(a, s.d - 1), own_borrow()) }
+        }
         if member_carries_view(tc, elem) {
             esc3: EscPair = value_escape(tc, s.b)
             set_esc(tc, ast_name(a, s.a), esc3.slice, esc3.closure)

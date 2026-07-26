@@ -555,10 +555,18 @@ func parse_while_stmt(p: *Parser) -> int64 {
 func parse_for_stmt(p: *Parser) -> int64 {
     p_expect_kw(p, "for")
     var: int64 = p_ident(p)
+    // An optional second binder, `for k, v in m`, binds a map's value alongside
+    // its key. Encoded in d as the interned name plus one so a plain single-name
+    // loop keeps d at 0. The checker judges which iterands the pair form is legal
+    // for; the grammar takes it unconditionally.
+    mut second: int64 = 0
+    if p_eat(p, k_comma()) {
+        second = p_ident(p) + 1
+    }
     p_expect_kw(p, "in")
     iter: int64 = parse_expr_no_struct(p)
     body: int64 = parse_block(p)
-    return ast_stmt(p_ast(p), sk_for(), var, iter, body, 0)
+    return ast_stmt(p_ast(p), sk_for(), var, iter, body, second)
 }
 
 func parse_match_parts(p: *Parser) -> (int64, int64, int64, int64) {

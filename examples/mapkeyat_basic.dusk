@@ -1,0 +1,43 @@
+@paradigm procedural
+@import std.map
+
+// Walks a map by insertion-order position with map_len plus the two positional
+// accessors, no allocation. The first map proves an overwrite keeps a key in
+// place and a remove compacts the order around it; the second forces a grow past
+// the initial capacity of eight and shows the order survives the rehash.
+func main() -> int64 {
+    m: *Map<string, int64> = alloc(map_new())
+    map_put(m, "a", 1)
+    map_put(m, "b", 2)
+    map_put(m, "c", 3)
+    map_put(m, "b", 20)
+    map_remove(m, "a")
+    mut i: int64 = 0
+    while i < map_len(m) {
+        k: string = map_key_at(m, i)
+        v: int64 = map_val_at(m, i)
+        println("{}={}", k, v)
+        i = i + 1
+    }
+    map_free(m)
+    free(m)
+
+    g: *Map<string, int64> = alloc(map_new())
+    map_put(g, "k1", 1)
+    map_put(g, "k2", 2)
+    map_put(g, "k3", 3)
+    map_put(g, "k4", 4)
+    map_put(g, "k5", 5)
+    map_put(g, "k6", 6)
+    map_put(g, "k7", 7)
+    map_put(g, "k8", 8)
+    map_put(g, "k9", 9)
+    mut j: int64 = 0
+    while j < map_len(g) {
+        println("{}", map_key_at(g, j))
+        j = j + 1
+    }
+    map_free(g)
+    free(g)
+    return 0
+}

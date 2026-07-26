@@ -1,0 +1,16 @@
+@paradigm procedural
+@import std.vector
+
+// The binder of a container for is a borrow the vector still owns: vec_get hands
+// back a view, not ownership. Freeing it through the binder would double free when
+// the vector is freed, so it rejects. Drain with vec_take to free an element.
+struct Cell { n: int64 }
+
+func main() -> int64 {
+    v: *Vector<*Cell> = alloc(vec_new())
+    vec_push(v, alloc(Cell { n: 1 }))
+    for c in v {
+        free(c)
+    }
+    return 0
+}

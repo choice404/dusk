@@ -406,6 +406,11 @@ func resolve_stmt(r: *Resolver, id: int64) -> void {
         resolve_expr(r, s.b)
         push_scope(r)
         declare(r, ast_name(a, s.a), false, false, iter.lo, iter.hi)
+        // The optional second binder (d = name + 1) is bound over the body too, so
+        // a map-pair loop body resolves its value name.
+        if s.d != 0 {
+            declare(r, ast_name(a, s.d - 1), false, false, iter.lo, iter.hi)
+        }
         resolve_block(r, s.c)
         pop_scope(r)
     } else if s.kind == sk_match() {
