@@ -1,8 +1,8 @@
-// std.memory.arena: a bump allocator over one backing buffer. Allocations carve
-// forward from the buffer; individual frees are a no op, the whole arena is reset
-// or destroyed at once. Pass the arena by pointer so the bump offset persists.
-// Arena also implements Allocator, so it can be passed with `using`. Exhausting
-// the buffer aborts rather than handing out memory past its end.
+/** std.memory.arena: a bump allocator over one backing buffer. Allocations carve
+ *  forward from the buffer; individual frees are a no op, the whole arena is reset
+ *  or destroyed at once. Pass the arena by pointer so the bump offset persists.
+ *  Arena also implements Allocator, so it can be passed with `using`. Exhausting
+ *  the buffer aborts rather than handing out memory past its end. */
 
 @paradigm procedural
 @paradigm oop
@@ -25,17 +25,38 @@ func arena_exhausted() -> void {
     abort()
 }
 
+/** A bump allocator's state: base is the backing buffer, cap its length, and used
+ *  the offset of the next allocation. Hold and pass it by pointer so the offset
+ *  advances across calls. */
 export struct Arena {
     base: *raw int8,
     cap: int64,
     used: int64,
 }
 
+/** Allocates the backing buffer and returns an empty arena over it. Exhausting
+ *  the buffer later aborts, so size it for the whole batch up front; free the
+ *  buffer with arena_destroy.
+ *  @param cap the backing buffer length in bytes
+ *  @return an arena positioned at the start of a fresh cap byte buffer
+ *  @example
+ *  a: *Arena = alloc(arena_new(4096))
+ *  p := arena_alloc(a, 64)
+ *  q := arena_alloc(a, 64)
+ *  arena_reset(a)
+ *  r := arena_alloc(a, 128)
+ *  arena_destroy(a)
+ *  free(a) */
 export func arena_new(cap: int64) -> Arena {
     b: *raw int8 = alloc_bytes(cap)
     return Arena { base: b, cap: cap, used: 0 }
 }
 
+/** Carves size bytes forward from the arena, aligned to 8, and advances the bump
+ *  offset. Aborts when the request would run past the buffer's end.
+ *  @param a the arena to allocate from, passed by pointer so its offset advances
+ *  @param size the byte count to carve
+ *  @return a pointer to size bytes inside the backing buffer */
 export func arena_alloc(a: *Arena, size: int64) -> *void {
     off := align_up((*a).used, 8)
     if off + size > (*a).cap {
@@ -46,10 +67,17 @@ export func arena_alloc(a: *Arena, size: int64) -> *void {
     return p
 }
 
+/** Rewinds the arena to empty, reclaiming every prior allocation at once. The
+ *  buffer is kept, so the arena is ready to hand out the same bytes again; any
+ *  pointer from before the reset now dangles.
+ *  @param a the arena to rewind */
 export func arena_reset(a: *Arena) -> void {
     (*a).used = 0
 }
 
+/** Frees the backing buffer. Every pointer the arena handed out dangles after
+ *  this, so destroy the arena only once nothing reads from it.
+ *  @param a the arena whose buffer is freed */
 export func arena_destroy(a: *Arena) -> void {
     free((*a).base)
 }

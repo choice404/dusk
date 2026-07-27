@@ -1,0 +1,29 @@
+// Borrow-side family: returning a match that extracts a borrowed payload from a generic
+// enum launders the borrow into the caller's owner. The return type is the bare type
+// parameter T, which the surface pass consults through its written node, so the borrowed
+// match result rejects here just as it does when the return type is a concrete managed
+// pointer.
+@paradigm procedural
+
+struct Box { v: int64 }
+
+enum Cell<T> {
+    Has(p: T),
+}
+
+func get<T>(c: *Cell<T>) -> T {
+    return match *c {
+        Has(p) => p,
+    }
+}
+
+func main() -> int32 {
+    b: *Box = alloc(Box { v: 3 })
+    c: *Cell<*Box> = alloc(Cell.Has(b))
+    x := get(c)
+    free(x)
+    free(b)
+    free(c)
+    println("done")
+    return 0
+}

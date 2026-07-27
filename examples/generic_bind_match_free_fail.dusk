@@ -1,0 +1,29 @@
+// Borrow-side family: binding a match that extracts a borrowed payload from a generic enum
+// records a borrow verdict, so a later free of the binding rejects. Without the verdict the
+// bound name defaults to an owner and the free double frees a pointer the subject still
+// owns. The subject *c is a generic enum instantiated with the function's type parameter,
+// which is what marks the payload unprovably managed on the surface pass.
+@paradigm procedural
+
+struct Box { v: int64 }
+
+enum Cell<T> {
+    Has(p: T),
+}
+
+func peek<T>(c: *Cell<T>) -> void {
+    x := match *c {
+        Has(p) => p,
+    }
+    free(x)
+}
+
+func main() -> int32 {
+    b: *Box = alloc(Box { v: 3 })
+    c: *Cell<*Box> = alloc(Cell.Has(b))
+    peek(c)
+    free(b)
+    free(c)
+    println("done")
+    return 0
+}

@@ -1,25 +1,35 @@
-// std.unicode: strict UTF-8 decode and encode over the NUL terminated string
-// view. Every function here is total: no fault, no unbounded read, an invalid
-// byte or scalar resyncs to the standard replacement character U+FFFD.
+/** std.unicode: strict UTF-8 decode and encode over the NUL terminated string view.
+ *  Every function here is total: no fault, no unbounded read, an invalid byte or scalar
+ *  resyncs to the standard replacement character U+FFFD. */
 
 @paradigm procedural
 
 @import std.string
 
-// Decode one scalar at byte offset i, in s, returning the scalar and its
-// encoded width in bytes. (0, 0) at the terminating NUL. Any malformed
-// sequence, a bad lead, a bad continuation, a truncated tail, an overlong
-// encoding, a surrogate, or a scalar above 0x10FFFF, yields (0xFFFD, 1) so the
-// caller resyncs at the very next byte. Every continuation range checked below
-// starts above 0, so a NUL in a continuation position always fails its check
-// immediately: the function never reads a byte past the terminator.
-//
-// Precondition: i must lie in [0, str_len(s)]. Inside that range the read is
-// bounded, and at i == str_len(s) the first byte is the NUL and the result is
-// (0, 0). A string is a NUL terminated raw view, so an out of range i indexes
-// s[i] as an unchecked wild read, exactly as str_len would on the same view.
-// Callers step by the returned width from a valid start, so a normal decode
-// walk never leaves the range; only a caller supplying an arbitrary offset can.
+/** Decodes one scalar at byte offset i in s, returning the scalar and its encoded width
+ *  in bytes; the pair is (0, 0) at the terminating NUL. Any malformed sequence, a bad
+ *  lead, a bad continuation, a truncated tail, an overlong encoding, a surrogate, or a
+ *  scalar above 0x10FFFF, yields (0xFFFD, 1) so the caller resyncs at the very next
+ *  byte. Every continuation range starts above 0, so a NUL in a continuation position
+ *  always fails its check immediately and the function never reads past the terminator.
+ *  s is borrowed and not freed here.
+ *
+ *  i must lie in [0, str_len(s)]. Inside that range the read is bounded, and at
+ *  i == str_len(s) the first byte is the NUL and the result is (0, 0). A string is a NUL
+ *  terminated raw view, so an out of range i indexes s[i] as an unchecked wild read,
+ *  undefined behavior exactly as str_len would hit on the same view. Callers step by the
+ *  returned width from a valid start, so a normal decode walk never leaves the range;
+ *  only a caller supplying an arbitrary offset can.
+ *  @param s the string to decode from
+ *  @param i the byte offset of the scalar to decode
+ *  @return the decoded scalar and its width in bytes, (0, 0) at the terminating NUL, or
+ *  (0xFFFD, 1) on any malformed sequence
+ *  @example
+ *  mut i: int64 = 0
+ *  while s[i] != 0 {
+ *      r, w := decode_rune(s, i)
+ *      i = i + w
+ *  } */
 export func decode_rune(s: string, i: int64) -> (rune, int64) {
     b0: int64 = s[i]
     if b0 == 0 {
@@ -133,10 +143,14 @@ func decode4(s: string, i: int64, b0: int64, lo: int64, hi: int64) -> (rune, int
     return (r, 4)
 }
 
-// Encodes one scalar as 1 to 4 UTF-8 bytes into buf, which the caller must
-// size to at least 4, returning the byte count. A scalar the encoding cannot
-// carry, negative, a surrogate D800..DFFF, or above the 0x10FFFF maximum,
-// writes the 3 byte encoding of U+FFFD (EF BF BD) and returns 3.
+/** Encodes one scalar as 1 to 4 UTF-8 bytes into buf, returning the byte count. buf is
+ *  borrowed and the caller must size it to at least 4 bytes; a shorter buffer is an out
+ *  of bounds write, undefined behavior. A scalar the encoding cannot carry, negative, a
+ *  surrogate D800 through DFFF, or above the 0x10FFFF maximum, writes the 3 byte encoding
+ *  of U+FFFD, the bytes EF BF BD, and returns 3.
+ *  @param r the scalar to encode
+ *  @param buf the destination buffer, at least 4 bytes, that the caller owns
+ *  @return the number of bytes written, 1 to 4, or 3 for the U+FFFD replacement */
 export func encode_rune(r: rune, buf: *raw char) -> int64 {
     v: int64 = r
     mut invalid: bool = false
@@ -179,8 +193,11 @@ export func encode_rune(r: rune, buf: *raw char) -> int64 {
     return 4
 }
 
-// The encoded width of a scalar, 1 to 4; an invalid scalar reports 3, the
-// width of the U+FFFD replacement encode_rune writes for it.
+/** The encoded width of a scalar in UTF-8 bytes, 1 to 4, computed without writing
+ *  anything. An invalid scalar reports 3, the width of the U+FFFD replacement encode_rune
+ *  writes for it, so rune_len always agrees with the byte count encode_rune produces.
+ *  @param r the scalar to measure
+ *  @return the encoded width in bytes, 1 to 4, or 3 for an invalid scalar */
 export func rune_len(r: rune) -> int64 {
     v: int64 = r
     if v < 0 {
@@ -214,8 +231,11 @@ func width_only(r: rune, w: int64) -> int64 {
     return w
 }
 
-// The scalar count of a NUL terminated string; each malformed byte counts as
-// one scalar, so a count never desyncs from decode_rune's resync.
+/** The scalar count of a NUL terminated string, walking it one decoded unit at a time.
+ *  Each malformed byte counts as one scalar, since decode_rune resyncs a byte at a time,
+ *  so the count never desyncs from that resync. s is borrowed and not freed here.
+ *  @param s the string to count
+ *  @return the number of scalars, counting each malformed byte as one */
 export func rune_count(s: string) -> int64 {
     mut i: int64 = 0
     mut n: int64 = 0
@@ -227,10 +247,12 @@ export func rune_count(s: string) -> int64 {
     return n
 }
 
-// Whether s is strict, well formed UTF-8. Runs the same decode loop as
-// decode_rune; the only invalid signature is width 1 paired with the U+FFFD
-// scalar, since a genuine encoded U+FFFD is always 3 bytes wide, so this
-// cannot drift from what decode_rune actually accepts.
+/** Whether s is strict, well formed UTF-8. It runs the same decode loop as decode_rune;
+ *  the only invalid signature is width 1 paired with the U+FFFD scalar, since a genuine
+ *  encoded U+FFFD is always 3 bytes wide, so this cannot drift from what decode_rune
+ *  actually accepts. s is borrowed and not freed here.
+ *  @param s the string to validate
+ *  @return true when every byte of s is part of a well formed UTF-8 sequence */
 export func utf8_valid(s: string) -> bool {
     mut i: int64 = 0
     while s[i] != 0 {
@@ -245,8 +267,11 @@ export func utf8_valid(s: string) -> bool {
     return true
 }
 
-// Appends one scalar to sb as its encoded UTF-8 bytes; an invalid scalar
-// appends U+FFFD, the same as encode_rune.
+/** Appends one scalar to sb as its encoded UTF-8 bytes. An invalid scalar appends
+ *  U+FFFD, the same replacement encode_rune writes. sb is borrowed and mutated in place;
+ *  the caller still owns it.
+ *  @param sb the builder to append to
+ *  @param r the scalar to encode and append */
 export func sb_push_rune(sb: *StringBuilder, r: rune) -> void {
     buf: *raw char = alloc_bytes(4)
     n: int64 = encode_rune(r, buf)

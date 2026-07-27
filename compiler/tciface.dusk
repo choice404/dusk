@@ -832,6 +832,49 @@ func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>
     return cross_ok()
 }
 
+// Whether a declared return type embeds an interface value anywhere: bare, in a tuple, an
+// array element, or a struct field, at any depth. An interface value is a fat pointer to
+// the boxed concrete value, and when that concrete value is a frame local the view dangles
+// once the frame is reclaimed. The bare case already rejects; this catches the aggregate
+// case (S1 gave tuples with interface members a cty_to_ast arm, so an interface in a tuple
+// now builds and would read a dead frame slot rather than dying loud). Only the interface
+// shape is walked here; a slice or closure in a return is the escape walk's job, and a
+// heap-backed one of those returns fine, so reusing async_cross_reason's slice/func arm
+// would wrongly reject them.
+export func ret_embeds_iface(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if tc_has_iface(tc, name) { return true }
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        if tc_has_embed(tc, name) {
+            embeds: *Map<string, TyList> = (*tc).embed_fields
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if ret_embeds_iface(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
+                j = j + 1
+            }
+        }
+        return false
+    }
+    if n.kind == tyk_array() { return ret_embeds_iface(tc, n.a, seen) }
+    // A pointer to an interface returns a heap box whose fat-interface data field still
+    // points at the returning frame's boxed value, so `-> *Shape` dangles the same way a
+    // bare interface return does. Walked at the return position only (this runs solely on
+    // the declared return type); raise-only, since no sound *interface return exists today.
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() { return ret_embeds_iface(tc, n.a, seen) }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if ret_embeds_iface(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+            i = i + 1
+        }
+    }
+    return false
+}
+
 export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
     a: *Ast = (*tc).ast
     if f.generics_len > 0 {
@@ -840,9 +883,6 @@ export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
     mut i: int64 = 0
     while i < f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
-        if p.is_using {
-            tc_emit(tc, "an async func cannot take a using parameter yet; allocate before the call or use the default heap", f.lo, f.hi)
-        }
         raw: int64 = tc_raw_type(tc, p.ty)
         seen: *Map<string, int64> = alloc(map_new())
         reason: int64 = async_cross_reason(tc, raw, seen)

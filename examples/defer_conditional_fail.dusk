@@ -1,0 +1,16 @@
+// A defer must register at the top level of a function, never inside a conditional or
+// loop. The diagnostic caret points at the `defer` keyword, the misplaced statement, not
+// at the deferred expression: the keyword span rides in the statement's fields from the
+// parser through the loader and desugar.
+@paradigm procedural
+
+struct Box { v: int64 }
+
+func main() -> int32 {
+    b: *Box = alloc(Box { v: 1 })
+    if (*b).v > 0 {
+        defer free(b)
+    }
+    free(b)
+    return 0
+}

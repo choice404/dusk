@@ -1,12 +1,19 @@
-// std.functional.maybe: an optional value, Some or None.
+/** std.functional.maybe: an optional value, Some or None. The helpers below map
+ *  and chain over the Some case and short-circuit on None, and the monad threads
+ *  the same way through `do Maybe { ... }`. */
 
 @paradigm functional
 
+/** An optional value: Some carries a T, None carries nothing. The mapping and
+ *  chaining helpers act on a Some value and pass a None straight through. */
 export enum Maybe<T> {
     Some(v: T),
     None,
 }
 
+/** Whether m is the Some case.
+ *  @param m the value to test
+ *  @return true when m is Some, false when it is None */
 export func is_some<T>(m: Maybe<T>) -> bool {
     match m {
         Some(v) => return true,
@@ -14,6 +21,10 @@ export func is_some<T>(m: Maybe<T>) -> bool {
     }
 }
 
+/** The contained value, or fallback when m is None.
+ *  @param m the value to inspect
+ *  @param fallback the T returned when m is None
+ *  @return m's value, or fallback */
 export func unwrap_or<T>(m: Maybe<T>, fallback: T) -> T {
     match m {
         Some(v) => return v,
@@ -22,20 +33,29 @@ export func unwrap_or<T>(m: Maybe<T>, fallback: T) -> T {
 }
 
 // The Maybe monad: `do Maybe { ... }` threads Some values and short-circuits on
-// the first None. bind runs the continuation on a present value and passes None
-// straight through; unit lifts a plain value into Some.
+// the first None.
 monad Maybe {
+    /** Runs the continuation on a present value; a None passes straight through.
+     *  @param m the source Maybe
+     *  @param f the continuation, run on a Some value to yield the next Maybe
+     *  @return f(a) when m is Some, else None */
     export func bind<A, B>(m: Maybe<A>, f: (A) -> Maybe<B>) -> Maybe<B> {
         match m {
             Some(a) => return f(a),
             None => return Maybe.None,
         }
     }
+    /** Lifts a plain value into Some.
+     *  @param x the value to lift
+     *  @return Some(x) */
     export func unit<A>(x: A) -> Maybe<A> {
         return Maybe.Some(x)
     }
 }
 
+/** Whether m is the None case.
+ *  @param m the value to test
+ *  @return true when m is None, false when it is Some */
 export func is_none<T>(m: Maybe<T>) -> bool {
     match m {
         Some(v) => return false,
@@ -43,6 +63,10 @@ export func is_none<T>(m: Maybe<T>) -> bool {
     }
 }
 
+/** Maps f over the contained value, passing None through unchanged.
+ *  @param m the source Maybe
+ *  @param f applied to a Some value to produce the new value
+ *  @return Some(f(a)) when m is Some, else None */
 export func maybe_map<A, B>(m: Maybe<A>, f: (A) -> B) -> Maybe<B> {
     match m {
         Some(a) => return Maybe.Some(f(a)),
@@ -50,6 +74,16 @@ export func maybe_map<A, B>(m: Maybe<A>, f: (A) -> B) -> Maybe<B> {
     }
 }
 
+/** Chains f, which itself returns a Maybe, onto the contained value; a None passes
+ *  through. This is the monadic bind under a plain name.
+ *  @param m the source Maybe
+ *  @param f applied to a Some value to produce the next Maybe
+ *  @return f(a) when m is Some, else None
+ *  @example
+ *  r := maybe_and_then(find(users, id), lambda (u: User) -> Maybe<string> {
+ *      return Maybe.Some(u.name)
+ *  })
+ *  name := unwrap_or(r, "unknown") */
 export func maybe_and_then<A, B>(m: Maybe<A>, f: (A) -> Maybe<B>) -> Maybe<B> {
     match m {
         Some(a) => return f(a),
@@ -57,6 +91,10 @@ export func maybe_and_then<A, B>(m: Maybe<A>, f: (A) -> Maybe<B>) -> Maybe<B> {
     }
 }
 
+/** Recovers from a None by running f; a Some passes through unchanged.
+ *  @param m the source Maybe
+ *  @param f run when m is None to produce a replacement Maybe
+ *  @return the original Some, else f() */
 export func maybe_or_else<A>(m: Maybe<A>, f: () -> Maybe<A>) -> Maybe<A> {
     match m {
         Some(a) => return Maybe.Some(a),

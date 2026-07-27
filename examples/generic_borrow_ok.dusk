@@ -1,0 +1,27 @@
+// Borrow-side family, the legal side: the pessimism only restricts free, move, and
+// reassignment of a type-parameter value. A scalar T copied and used in arithmetic, and a
+// managed T passed straight through and returned as a borrow the caller still frees, are
+// both untouched. dup(5) exercises the scalar instantiation; peek(bx) exercises the
+// pointer passthrough where main keeps ownership and frees once.
+@paradigm procedural
+
+struct Box { v: int64 }
+
+func dup<T>(x: T) -> T {
+    return x
+}
+
+func peek<T>(p: T) -> T {
+    return p
+}
+
+func main() -> int32 {
+    a := dup(5)
+    b := dup(7)
+    println("{}", a + b + 1)
+    bx: *Box = alloc(Box { v: 9 })
+    c := peek(bx)
+    println("{}", (*c).v)
+    free(bx)
+    return 0
+}

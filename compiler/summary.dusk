@@ -1,10 +1,10 @@
-// summary: native interprocedural escape summaries for dusk, S4. This file holds
-// the immutable name and type tables the summary walk reads, the parameter-set
-// bitmask primitives, the view and managed-pointer classification of surface AST
-// types, the audited builtin summaries, and the canonical dump renderer. The
-// per-function abstract walk lives in sumwalk/sumplace/sumhof, and the fixpoint
-// driver plus collection pass in sumfix. Every message and dump line mirrors
-// the archived Rust summary pass exactly, since the esc dump is a byte-for-byte gate.
+/** summary: native interprocedural escape summaries for dusk, S4. This file holds
+ *  the immutable name and type tables the summary walk reads, the parameter-set
+ *  bitmask primitives, the view and managed-pointer classification of surface AST
+ *  types, the audited builtin summaries, and the canonical dump renderer. The
+ *  per-function abstract walk lives in sumwalk/sumplace/sumhof, and the fixpoint
+ *  driver plus collection pass in sumfix. Every message and dump line mirrors
+ *  the archived Rust summary pass exactly, since the esc dump is a byte-for-byte gate. */
 
 @paradigm procedural
 
@@ -15,23 +15,23 @@
 @import ast
 @import tcstate
 
-// The abstract value of a place during the walk: whether it may hold a
-// frame-local view (frame), which parameters' views it may alias (origins), and
-// which parameters it was read back through or that it is (reads). origins and
-// reads are int64 bitmasks over parameter indices.
+/** The abstract value of a place during the walk: whether it may hold a
+ *  frame-local view (frame), which parameters' views it may alias (origins), and
+ *  which parameters it was read back through or that it is (reads). origins and
+ *  reads are int64 bitmasks over parameter indices. */
 export struct SumVal { origins: int64, reads: int64, frame: bool }
 
-// One unique lambda literal span, kept in recording order (first-wins per span)
-// so the dump can order lambda lines by (lo, hi) numerically.
+/** One unique lambda literal span, kept in recording order (first-wins per span)
+ *  so the dump can order lambda lines by (lo, hi) numerically. */
 export struct SpanKey { lo: int64, hi: int64 }
 
-// One captured-store edge of a lambda: the lambda parameter index whose view was
-// stored through a captured binding, and that binding's name.
+/** One captured-store edge of a lambda: the lambda parameter index whose view was
+ *  stored through a captured binding, and that binding's name. */
 export struct CapFlow { idx: int64, name: string }
 
-// The immutable tables the summary walk reads: interface names, struct and enum
-// and variant node indices by name, and the module function name set. Field and
-// generic lists are read back out of the AST arenas through these indices.
+/** The immutable tables the summary walk reads: interface names, struct and enum
+ *  and variant node indices by name, and the module function name set. Field and
+ *  generic lists are read back out of the AST arenas through these indices. */
 export struct SumTables {
     ast: *Ast,
     ifaces: *Map<string, int64>,
@@ -42,11 +42,11 @@ export struct SumTables {
     infer_ty: int64,
 }
 
-// The escape info the enforcement step reads. summaries and method_summaries are
-// the per-function and per-method fixpoint results; the lambda tables are keyed by
-// the "lo:hi" span string; lambda_spans keeps the unique spans in first-seen order
-// for deterministic rendering; frame_stores lists direct frame-view stores through
-// a parameter for outright diagnostics.
+/** The escape info the enforcement step reads. summaries and method_summaries are
+ *  the per-function and per-method fixpoint results; the lambda tables are keyed by
+ *  the "lo:hi" span string; lambda_spans keeps the unique spans in first-seen order
+ *  for deterministic rendering; frame_stores lists direct frame-view stores through
+ *  a parameter for outright diagnostics. */
 export struct EscapeInfo {
     summaries: *Map<string, SummaryHandle>,
     method_summaries: *Map<string, SummaryHandle>,
@@ -59,36 +59,55 @@ export struct EscapeInfo {
     resolvable_fn_binds: *Map<string, string>,
 }
 
-// A small set of parameter indices backed by an int64 bitmask. A function with
-// more than 64 parameters is beyond any real program, so an index past the bound
-// saturates to the top of the lattice (all bits) rather than dropping, keeping the
-// over-approximation sound.
+/** A small set of parameter indices backed by an int64 bitmask. A function with
+ *  more than 64 parameters is beyond any real program, so an index past the bound
+ *  saturates to the top of the lattice (all bits) rather than dropping, keeping the
+ *  over-approximation sound. */
 export func ps_single(i: int64) -> int64 {
     if i < 0 { return 0 }
     if i >= 64 { return -1 }
     return 1 << i
 }
+/** Whether parameter index i is a member of the bitmask set.
+ *  @param mask the parameter-index bitmask
+ *  @param i the index to test
+ *  @return true when bit i is set */
 export func ps_has(mask: int64, i: int64) -> bool {
     return i >= 0 && i < 64 && (mask & (1 << i)) != 0
 }
+/** The union of two parameter-index sets.
+ *  @param a the first bitmask
+ *  @param b the second bitmask
+ *  @return the bitmask holding every index in either set */
 export func ps_union(a: int64, b: int64) -> int64 { return a | b }
 
+/** The bottom abstract value: no origins, no reads, and not a frame view, the lattice
+ *  identity the dataflow join starts from.
+ *  @return an empty SumVal */
 export func val_none() -> SumVal { return SumVal { origins: 0, reads: 0, frame: false } }
+/** The join of two abstract values, unioning their origins and reads and taking the
+ *  frame-view flag if either has it, the merge at a control-flow confluence.
+ *  @param a the first value
+ *  @param b the second value
+ *  @return the least upper bound of a and b */
 export func val_join(a: SumVal, b: SumVal) -> SumVal {
     return SumVal { origins: a.origins | b.origins, reads: a.reads | b.reads, frame: a.frame || b.frame }
 }
 
+/** A base summary for a recognized function that neither aliases a parameter nor reads
+ *  through one, distinct from not_builtin's empty sentinel by carrying empty false.
+ *  @return a real SummaryHandle with no aliasing, reads, sinks, or flows */
 export func empty_summary() -> SummaryHandle {
     return SummaryHandle { empty: false, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
 }
-// A sentinel meaning "not a recognized builtin": the walk falls through to the
-// summary table, a constructor, a resolvable bind, or the opaque TOP.
+/** A sentinel meaning "not a recognized builtin": the walk falls through to the
+ *  summary table, a constructor, a resolvable bind, or the opaque TOP. */
 export func not_builtin() -> SummaryHandle {
     return SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
 }
 
-// The span key used for the lambda tables. The dump orders lambda lines by the
-// numeric (lo, hi) held in lambda_spans, not by this string.
+/** The span key used for the lambda tables. The dump orders lambda lines by the
+ *  numeric (lo, hi) held in lambda_spans, not by this string. */
 export func sum_span_key(lo: int64, hi: int64) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push_int(b, lo)
@@ -116,6 +135,12 @@ func flow_token(i: int64, j: int64) -> string {
     free(b)
     return out
 }
+/** Whether the flow edge from parameter i to parameter j is present in an encoded
+ *  flows string, matched by its self-delimiting token.
+ *  @param flows the encoded flows string
+ *  @param i the source parameter index
+ *  @param j the destination parameter index
+ *  @return true when the edge i to j is encoded in flows */
 export func flow_has(flows: string, i: int64, j: int64) -> bool {
     tok: string = flow_token(i, j)
     mut p: int64 = 0
@@ -127,6 +152,12 @@ export func flow_has(flows: string, i: int64, j: int64) -> bool {
     }
     return false
 }
+/** Adds the flow edge from parameter i to parameter j to a flows string, a no-op when
+ *  the edge is already present or either index is past the 64-parameter bound.
+ *  @param flows the encoded flows string to extend
+ *  @param i the source parameter index
+ *  @param j the destination parameter index
+ *  @return the flows string with the edge present */
 export func flow_add(flows: string, i: int64, j: int64) -> string {
     if i >= 64 || j >= 64 { return flows }
     if flow_has(flows, i, j) { return flows }
@@ -138,6 +169,10 @@ export func flow_add(flows: string, i: int64, j: int64) -> string {
     free(b)
     return out
 }
+/** Rebuilds a flows string in sorted, deduplicated order, so two summaries with the
+ *  same edges compare and render identically regardless of insertion order.
+ *  @param flows the encoded flows string to canonicalize
+ *  @return the same edge set in canonical order */
 export func flows_canon(flows: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     mut i: int64 = 0
@@ -161,9 +196,9 @@ export func flows_canon(flows: string) -> string {
     return out
 }
 
-// Closes a function's sink set backward over its store edges: if argument i's view
-// flows into argument j's place and j is sunk, then i reaches the same boundary and
-// sinks too. Iterated to a fixed point.
+/** Closes a function's sink set backward over its store edges: if argument i's view
+ *  flows into argument j's place and j is sunk, then i reaches the same boundary and
+ *  sinks too. Iterated to a fixed point. */
 export func close_sinks(sinks: int64, flows: string) -> int64 {
     mut cur: int64 = sinks
     mut changed: bool = true
@@ -185,12 +220,12 @@ export func close_sinks(sinks: int64, flows: string) -> int64 {
     return cur
 }
 
-// The audited escape behavior of each builtin, so a call to one does not fall
-// through to the conservative TOP an unknown callee gets. move and alloc hand
-// their argument back through the result; the rest return fresh heap values,
-// scalars, pointers, unit, or errors and store nothing between arguments.
-// chan_send and chan_try_send are deliberately not here: the walk records their
-// send sink by name and then treats the call as opaque TOP, matching stage0.
+/** The audited escape behavior of each builtin, so a call to one does not fall
+ *  through to the conservative TOP an unknown callee gets. move and alloc hand
+ *  their argument back through the result; the rest return fresh heap values,
+ *  scalars, pointers, unit, or errors and store nothing between arguments.
+ *  chan_send and chan_try_send are deliberately not here: the walk records their
+ *  send sink by name and then treats the call as opaque TOP, matching stage0. */
 export func builtin_summary(name: string) -> SummaryHandle {
     if str_eq(name, "move") {
         return SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
@@ -236,7 +271,7 @@ func is_neutral_builtin(name: string) -> bool {
     return false
 }
 
-// Builds the immutable name and type tables from the merged, desugared module.
+/** Builds the immutable name and type tables from the merged, desugared module. */
 export func sum_tables_new(a: *Ast) -> *SumTables {
     ifaces: *Map<string, int64> = alloc(map_new())
     struct_idx: *Map<string, int64> = alloc(map_new())
@@ -282,10 +317,10 @@ func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
     return g
 }
 
-// Whether a type may carry a frame pointer when held or projected by value: a
-// slice, closure, interface, or an aggregate containing one, and a generic or
-// inference hole (conservative). A pointer, future, collector, and every scalar
-// or heap-backed primitive do not.
+/** Whether a type may carry a frame pointer when held or projected by value: a
+ *  slice, closure, interface, or an aggregate containing one, and a generic or
+ *  inference hole (conservative). A pointer, future, collector, and every scalar
+ *  or heap-backed primitive do not. */
 export func sum_is_view(t: *SumTables, tyid: int64, gens: *Map<string, int64>) -> bool {
     seen: *Map<string, int64> = alloc(map_new())
     return is_view_rec(t, tyid, gens, seen)
@@ -355,10 +390,10 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
     return false
 }
 
-// Whether a managed pointer is reachable through a value of this type, however
-// deeply a struct, enum, tuple, or array buries it. A bare *T (not *void) counts;
-// *raw T is the FFI boundary and does not; a generic type parameter does not,
-// since it already seeds origins as a view.
+/** Whether a managed pointer is reachable through a value of this type, however
+ *  deeply a struct, enum, tuple, or array buries it. A bare *T (not *void) counts;
+ *  *raw T is the FFI boundary and does not; a generic type parameter does not,
+ *  since it already seeds origins as a view. */
 export func sum_reaches_managed(t: *SumTables, tyid: int64) -> bool {
     seen: *Map<string, int64> = alloc(map_new())
     return reaches_rec(t, tyid, seen)

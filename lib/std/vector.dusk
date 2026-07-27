@@ -1,9 +1,13 @@
-// std.vector: a growable array, generic over its element type. Backed by a heap
-// buffer that doubles on demand. Pass the vector by pointer so growth persists.
-// Element access is bounds checked; the raw buffer never escapes. vec_sort takes
-// a closure comparator and sorts in place with a stable, deterministic merge;
-// vec_contains and vec_index_of search by ==, legal only for a T that == itself
-// accepts (a scalar or a string, never a pointer).
+/** std.vector: a growable array, generic over its element type, backed by a heap buffer
+ *  that doubles on demand. Pass the vector by pointer so growth persists across a push.
+ *  Element access is bounds checked and the raw buffer never escapes. vec_sort takes a
+ *  closure comparator and sorts in place with a stable, deterministic merge; vec_contains
+ *  and vec_index_of search by ==, legal only for a T that == itself accepts, a scalar or
+ *  a string, never a pointer. A vector stores its elements by value: for a managed pointer
+ *  element the vector holds the pointer and the caller owns the pointed to object, so
+ *  vec_free releases the backing buffer only and never the elements. */
+
+@paradigm procedural
 
 foreign "C" {
     func abort() -> void
@@ -14,16 +18,36 @@ func vec_bounds_fault() -> void {
     abort()
 }
 
+/** A growable array as a heap buffer, a length, and a capacity. data points at the
+ *  backing buffer, len is the number of live elements, and cap is how many the buffer
+ *  holds before it must double. Build one with vec_new and pass it by pointer so a push
+ *  that grows the buffer is seen by every holder; the vector owns data and vec_free
+ *  releases it. */
 export struct Vector<T> {
     data: *raw T,
     len: int64,
     cap: int64,
 }
 
+/** A fresh empty vector with no backing buffer allocated yet; the first vec_push grows
+ *  it. Build one on the heap with alloc(vec_new()) and pass it by pointer so pushes
+ *  persist.
+ *  @return an empty vector of length 0
+ *  @example
+ *  v: *Vector<int64> = alloc(vec_new())
+ *  vec_push(v, 10)
+ *  vec_push(v, 20)
+ *  vec_free(v)
+ *  free(v) */
 export func vec_new<T>() -> Vector<T> {
     return Vector { data: alloc_bytes(0), len: 0, cap: 0 }
 }
 
+/** Appends x to the end of v, doubling the backing buffer first when it is full, four
+ *  slots the first time it grows. x is stored by value; for a managed pointer element the
+ *  vector takes the pointer and the caller still owns the object it points at.
+ *  @param v the vector to append to, borrowed and grown in place
+ *  @param x the element to append */
 export func vec_push<T>(v: *Vector<T>, x: T) -> void {
     if (*v).len == (*v).cap {
         mut nc: int64 = (*v).cap * 2
@@ -44,6 +68,13 @@ export func vec_push<T>(v: *Vector<T>, x: T) -> void {
     (*v).len = (*v).len + 1
 }
 
+/** The element at index i, copied out by value. i is bounds checked: a negative index or
+ *  one at or past the length prints "fatal: vector index out of bounds" and aborts. For a
+ *  managed pointer element the copy is the same pointer the vector holds, an alias, not a
+ *  new object, so freeing it while the vector still holds it is a double free.
+ *  @param v the vector to read, borrowed
+ *  @param i the index to read, in [0, vec_len(v))
+ *  @return the element at i */
 export func vec_get<T>(v: *Vector<T>, i: int64) -> T {
     if i < 0 {
         vec_bounds_fault()
@@ -54,6 +85,14 @@ export func vec_get<T>(v: *Vector<T>, i: int64) -> T {
     return (*v).data[i]
 }
 
+/** Overwrites the element at index i with x, in place. i is bounds checked exactly as
+ *  vec_get: a negative index or one at or past the length prints "fatal: vector index out
+ *  of bounds" and aborts. The prior element is overwritten in place and not freed, so a
+ *  managed pointer element the caller means to replace must be freed before this call or
+ *  its object leaks.
+ *  @param v the vector to write, borrowed and mutated in place
+ *  @param i the index to write, in [0, vec_len(v))
+ *  @param x the replacement element */
 export func vec_set<T>(v: *Vector<T>, i: int64, x: T) -> void {
     if i < 0 {
         vec_bounds_fault()
@@ -64,23 +103,33 @@ export func vec_set<T>(v: *Vector<T>, i: int64, x: T) -> void {
     (*v).data[i] = x
 }
 
+/** Drops the last element of v by shrinking its length by one, leaving the capacity and
+ *  buffer as they are. The dropped element is not returned or freed, so a managed pointer
+ *  element must be read with vec_get or removed with vec_take before this call if its
+ *  object is to be freed. An empty vector is left unchanged, no fault.
+ *  @param v the vector to shrink, borrowed and mutated in place */
 export func vec_pop<T>(v: *Vector<T>) -> void {
     if (*v).len > 0 {
         (*v).len = (*v).len - 1
     }
 }
 
-// Removes the element at index i and hands it back to the caller as its own value.
-// Bounds checked exactly as vec_get: a negative index and one at or past the length
-// both fault through vec_bounds_fault. The survivors keep their order, so every
-// element after i shifts down one slot, a plain copy loop with no memmove; taking
-// the last index shifts nothing. The returned value is the same fat pointer the
-// vector held, so a managed element's owner is now the caller, free it when done.
-// Iterating forward over a vector being taken from skips the shifted successor;
-// drain from the back with `while vec_len(v) > 0 { vec_take(v, vec_len(v) - 1) }`.
-// The head declares `owning`, so the checker classifies the result as the
-// caller's own value and exempts it from the container-alias condemnation, so a
-// direct free of the take, or a free of an owner binding of it, is legal.
+/** Removes the element at index i and hands it back to the caller as its own value. i is
+ *  bounds checked exactly as vec_get: a negative index or one at or past the length prints
+ *  "fatal: vector index out of bounds" and aborts. The survivors keep their order, so
+ *  every element after i shifts down one slot, a plain copy loop; taking the last index
+ *  shifts nothing. The head declares owning, so the checker treats the result as the
+ *  caller's own value and exempts it from the container alias condemnation: a direct free
+ *  of the take, or a free of an owner binding of it, is legal, which is how a managed
+ *  pointer element leaves the vector without a leak.
+ *  @param v the vector to remove from, borrowed and mutated in place
+ *  @param i the index to remove, in [0, vec_len(v))
+ *  @return the removed element, now owned by the caller
+ *  @example
+ *  while vec_len(v) > 0 {
+ *      x := vec_take(v, vec_len(v) - 1)
+ *      free(x)
+ *  } */
 export owning func vec_take<T>(v: *Vector<T>, i: int64) -> T {
     if i < 0 {
         vec_bounds_fault()
@@ -98,10 +147,19 @@ export owning func vec_take<T>(v: *Vector<T>, i: int64) -> T {
     return out
 }
 
+/** The number of live elements in v, its length, not its capacity.
+ *  @param v the vector to measure, borrowed
+ *  @return the element count */
 export func vec_len<T>(v: *Vector<T>) -> int64 {
     return (*v).len
 }
 
+/** Frees v's backing buffer and nothing else. The elements are stored by value and are
+ *  never freed here, so for a managed pointer element the caller drains and frees each
+ *  element first, for example with vec_take in a loop, or every element object leaks.
+ *  After this the vector holds a stale buffer pointer and must not be read again; the
+ *  caller frees the Vector allocation itself when it was heap allocated.
+ *  @param v the vector whose buffer to release, borrowed */
 export func vec_free<T>(v: *Vector<T>) -> void {
     free((*v).data)
 }
@@ -142,17 +200,18 @@ func vec_sort_merge_run<T>(v: *Vector<T>, buf: *raw T, lo: int64, mid: int64, hi
     }
 }
 
-// Sorts v in place with cmp, an ordering closure returning negative when its
-// first argument sorts before its second, zero when the two are equal, and
-// positive when the first sorts after. A bottom up (iterative) merge sort:
-// passes double a merged run width from 1 up past v's length, each pass
-// merging adjacent runs of the prior width out of v's backing data into one
-// scratch buffer sized to v and then copying the whole buffer back before
-// the next pass starts, so a pass always merges from data untouched by
-// itself. The sort is stable, equal elements keep the relative order they
-// started in, and deterministic: two calls over the same data and cmp always
-// produce the same output order. A vector of fewer than two elements returns
-// immediately, cmp uncalled.
+/** Sorts v in place with cmp, an ordering closure returning negative when its first
+ *  argument sorts before its second, zero when the two are equal, and positive when the
+ *  first sorts after. The sort is a bottom up merge sort, stable so equal elements keep
+ *  the relative order they started in, and deterministic so two calls over the same data
+ *  and cmp always produce the same order. A vector of fewer than two elements returns at
+ *  once with cmp uncalled. The elements are reordered in place, not copied out, so
+ *  ownership of every element is unchanged.
+ *  @param v the vector to sort, borrowed and reordered in place
+ *  @param cmp the ordering closure, negative for before, zero for equal, positive for
+ *  after
+ *  @example
+ *  vec_sort(v, lambda (a: int64, b: int64) -> int32 { return int32(a - b) }) */
 export func vec_sort<T>(v: *Vector<T>, cmp: (T, T) -> int32) -> void {
     n: int64 = (*v).len
     if n < 2 {
@@ -185,11 +244,14 @@ export func vec_sort<T>(v: *Vector<T>, cmp: (T, T) -> int32) -> void {
     free(buf)
 }
 
-// Whether x appears anywhere in v, by ==. Only legal for a T that == itself
-// accepts: a scalar or a string, per dusk's own rule that pointers do not
-// compare (compare the values they point to instead); a Vector<T> of a
-// pointer typed T rejects vec_contains at the ground, types only pass the
-// same way any other illegal == does.
+/** Whether x appears anywhere in v, tested by ==. Only legal for a T that == itself
+ *  accepts, a scalar or a string, per dusk's own rule that pointers do not compare,
+ *  compare the values they point to instead; a Vector<T> of a pointer typed T rejects
+ *  vec_contains at the ground types only pass the same way any other illegal == does. v
+ *  and x are borrowed.
+ *  @param v the vector to search, borrowed
+ *  @param x the value to look for
+ *  @return true when some element of v equals x */
 export func vec_contains<T>(v: *Vector<T>, x: T) -> bool {
     mut i: int64 = 0
     n: int64 = (*v).len
@@ -203,8 +265,12 @@ export func vec_contains<T>(v: *Vector<T>, x: T) -> bool {
     return found
 }
 
-// The index of the first element of v equal to x by ==, or -1 when none is.
-// Carries the same == restriction on T as vec_contains.
+/** The index of the first element of v equal to x by ==, or -1 when none is. It carries
+ *  the same == restriction on T as vec_contains: only a scalar or a string T is legal,
+ *  never a pointer. v and x are borrowed.
+ *  @param v the vector to search, borrowed
+ *  @param x the value to look for
+ *  @return the index of the first match, or -1 when x is not present */
 export func vec_index_of<T>(v: *Vector<T>, x: T) -> int64 {
     mut i: int64 = 0
     n: int64 = (*v).len
@@ -217,13 +283,17 @@ export func vec_index_of<T>(v: *Vector<T>, x: T) -> int64 {
     return -1
 }
 
-// Applies f once to each element of v, in index order, and collects the
-// results into a fresh heap vector the caller owns. The source vector and
-// its elements are not mutated or freed. Result ownership is exactly what f
-// returned: if f allocates owning pointers, drain those elements, for example
-// with vec_take in a loop, before vec_free and free of the outer vector. Plain
-// values and borrowed pointers need no special handling beyond freeing the
-// outer vector.
+/** Applies f once to each element of v, in index order, and collects the results into a
+ *  fresh heap vector the caller owns. The source vector and its elements are not mutated
+ *  or freed. Result ownership is exactly what f returned: when f allocates owning
+ *  pointers, drain those elements, for example with vec_take in a loop, before vec_free
+ *  and free of the outer vector; plain values and borrowed pointers need no handling
+ *  beyond freeing the outer vector.
+ *  @param v the source vector, borrowed and left unchanged
+ *  @param f the mapping closure, applied once per element
+ *  @return a fresh caller owned vector of f's results, in index order
+ *  @example
+ *  texts := vec_map(nums, lambda (x: int64) -> string { return int_to_string(x) }) */
 export func vec_map<T, U>(v: *Vector<T>, f: (T) -> U) -> *Vector<U> {
     out: *Vector<U> = alloc(vec_new())
     mut i: int64 = 0
@@ -235,14 +305,16 @@ export func vec_map<T, U>(v: *Vector<T>, f: (T) -> U) -> *Vector<U> {
     return out
 }
 
-// Calls p once on each element of v, in index order, and copies every value
-// for which p returns true into a fresh heap vector the caller owns. The
-// source vector is not mutated or freed, and the selected element values are
-// copied as values. If T is a managed pointer type, the new vector holds the
-// same pointers as the source vector, so both vectors alias the pointed to
-// objects. Freeing an element reachable through both vectors is a double free;
-// dusk's ownership checker does not prevent this across vec_filter, and the
-// runtime generational free check is the backstop that faults stale reads.
+/** Calls p once on each element of v, in index order, and copies every element for which
+ *  p returns true into a fresh heap vector the caller owns. The source vector is not
+ *  mutated or freed and the selected elements are copied by value. When T is a managed
+ *  pointer type the new vector holds the same pointers as the source, so both vectors
+ *  alias the pointed to objects: freeing an element reachable through both is a double
+ *  free, which dusk's ownership checker does not prevent across vec_filter, and the
+ *  runtime generational free check is the backstop that faults a stale read.
+ *  @param v the source vector, borrowed and left unchanged
+ *  @param p the predicate closure, applied once per element
+ *  @return a fresh caller owned vector of the elements p accepted, in index order */
 export func vec_filter<T>(v: *Vector<T>, p: (T) -> bool) -> *Vector<T> {
     out: *Vector<T> = alloc(vec_new())
     mut i: int64 = 0
@@ -257,14 +329,20 @@ export func vec_filter<T>(v: *Vector<T>, p: (T) -> bool) -> *Vector<T> {
     return out
 }
 
-// Reduces v to a single value by folding f left to right over its elements in
-// index order, starting from init. f is called exactly once per element, its
-// first argument the accumulator so far and its second the current element, and
-// its result becomes the next accumulator; the final accumulator is returned.
-// An empty vector returns init unchanged, f uncalled. The source vector is not
-// mutated or freed. The accumulator type A is independent of the element type T,
-// so a vector of one type folds into a value of another, a running sum, a joined
-// string, a built structure.
+/** Reduces v to a single value by folding f left to right over its elements in index
+ *  order, starting from init. f is called exactly once per element, its first argument
+ *  the accumulator so far and its second the current element, and its result becomes the
+ *  next accumulator; the final accumulator is returned. An empty vector returns init
+ *  unchanged with f uncalled. The source vector is not mutated or freed. The accumulator
+ *  type A is independent of the element type T, so a vector of one type folds into a
+ *  value of another, a running sum, a joined string, a built structure.
+ *  @param v the source vector, borrowed and left unchanged
+ *  @param init the starting accumulator, returned as is for an empty vector
+ *  @param f the folding closure, taking the accumulator and an element and returning the
+ *  next accumulator
+ *  @return the accumulator after folding every element
+ *  @example
+ *  total := vec_fold(nums, 0, lambda (acc: int64, x: int64) -> int64 { return acc + x }) */
 export func vec_fold<T, A>(v: *Vector<T>, init: A, f: (A, T) -> A) -> A {
     mut acc: A = init
     mut i: int64 = 0

@@ -1,11 +1,13 @@
-// std.concurrent.sync: a mutex and a condition variable over pthread, the
-// sanctioned way to mutate shared memory between threads. The blessed shape
-// is a *raw buffer guarded by one Mutex: lock, touch the buffer, unlock, and
-// inside a function body prefer lock(m) followed by defer unlock(m). Handles
-// are one word and copy freely; every copy names the same lock. The mutex is
-// the error checking kind, so relocking by the holder, unlocking by a non
-// holder, and freeing a held mutex all fault by name instead of hanging or
-// corrupting.
+/** std.concurrent.sync: a mutex and a condition variable over pthread, the
+ *  sanctioned way to mutate shared memory between threads. The blessed shape
+ *  is a *raw buffer guarded by one Mutex: lock, touch the buffer, unlock, and
+ *  inside a function body prefer lock(m) followed by defer unlock(m). Handles
+ *  are one word and copy freely; every copy names the same lock. The mutex is
+ *  the error checking kind, so relocking by the holder, unlocking by a non
+ *  holder, and freeing a held mutex all fault by name instead of hanging or
+ *  corrupting. */
+
+@paradigm procedural
 
 foreign "C" {
     func cool_mutex_new() -> *void
@@ -19,62 +21,88 @@ foreign "C" {
     func cool_cond_free(cv: *void) -> void
 }
 
+/** A mutex handle, one word over the pthread lock the runtime owns. The handle
+ *  copies by value and every copy names the same lock, so guarding shared memory
+ *  means handing each thread a copy of the one mutex. */
 export struct Mutex {
     h: *void,
 }
 
+/** A condition variable handle, one word over the pthread condvar. Every copy
+ *  names the same variable and pairs with the mutex the waiters hold. */
 export struct Condvar {
     h: *void,
 }
 
-// Creates a mutex. Exhaustion is fatal, the allocator's contract.
+/** Creates a mutex. Exhaustion is fatal, the allocator's contract.
+ *  @return a mutex every copy of which names the same lock
+ *  @example
+ *  m := mutex_new()
+ *  lock(m)
+ *  defer unlock(m)
+ *  balance[0] = balance[0] + 1 */
 export func mutex_new() -> Mutex {
     return Mutex { h: cool_mutex_new() }
 }
 
-// Acquires the mutex, blocking until it is free. An unlock of this mutex
-// happens before the lock that next acquires it, which is the ordering that
-// makes the guarded memory safe to touch. Relocking while already holding it
-// is fatal by name.
+/** Acquires the mutex, blocking until it is free. An unlock of this mutex
+ *  happens before the lock that next acquires it, which is the ordering that
+ *  makes the guarded memory safe to touch. Relocking while already holding it
+ *  is fatal by name.
+ *  @param m the mutex to acquire */
 export func lock(m: Mutex) -> void {
     cool_mutex_lock(m.h)
 }
 
-// Releases the mutex. Unlocking a mutex this thread does not hold is fatal
-// by name.
+/** Releases the mutex. Unlocking a mutex this thread does not hold is fatal
+ *  by name.
+ *  @param m the mutex to release */
 export func unlock(m: Mutex) -> void {
     cool_mutex_unlock(m.h)
 }
 
-// Frees the mutex. Freeing while any thread holds it is fatal.
+/** Frees the mutex. Freeing while any thread holds it is fatal.
+ *  @param m the mutex to free once no thread holds or contends it */
 export func mutex_free(m: Mutex) -> void {
     cool_mutex_free(m.h)
 }
 
-// Creates a condition variable. Exhaustion is fatal.
+/** Creates a condition variable. Exhaustion is fatal.
+ *  @return a fresh condition variable */
 export func cond_new() -> Condvar {
     return Condvar { h: cool_cond_new() }
 }
 
-// Releases the mutex, sleeps until a signal or broadcast, and reacquires the
-// mutex before returning. The caller must hold the mutex. Wakeups can be
-// spurious, so always wait inside a loop that rechecks the predicate.
+/** Releases the mutex, sleeps until a signal or broadcast, and reacquires the
+ *  mutex before returning. The caller must hold the mutex. Wakeups can be
+ *  spurious, so always wait inside a loop that rechecks the predicate.
+ *  @param cv the condition variable to wait on
+ *  @param m the mutex the caller holds, released while parked and reacquired before return
+ *  @example
+ *  lock(m)
+ *  while ready[0] == 0 {
+ *      cond_wait(cv, m)
+ *  }
+ *  unlock(m) */
 export func cond_wait(cv: Condvar, m: Mutex) -> void {
     cool_cond_wait(cv.h, m.h)
 }
 
-// Wakes one waiter, if any thread is waiting.
+/** Wakes one waiter, if any thread is waiting.
+ *  @param cv the condition variable to signal */
 export func cond_signal(cv: Condvar) -> void {
     cool_cond_signal(cv.h)
 }
 
-// Wakes every waiter.
+/** Wakes every waiter.
+ *  @param cv the condition variable to broadcast on */
 export func cond_broadcast(cv: Condvar) -> void {
     cool_cond_broadcast(cv.h)
 }
 
-// Frees the condition variable. Freeing while any thread waits on it is
-// fatal by name.
+/** Frees the condition variable. Freeing while any thread waits on it is
+ *  fatal by name.
+ *  @param cv the condition variable to free once no thread waits on it */
 export func cond_free(cv: Condvar) -> void {
     cool_cond_free(cv.h)
 }

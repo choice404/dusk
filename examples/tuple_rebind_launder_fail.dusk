@@ -1,0 +1,19 @@
+// A borrow laundered through a tuple binding and a rebind still reaches the freed binder:
+// pair := (p, 1) records member 0's borrow, q := pair carries it, and y from y, n := q is a
+// borrow, so free(y) rejects the double free.
+@paradigm procedural
+func take(p: *int64) -> void {
+    pair := (p, 1)
+    q := pair
+    y, n := q
+    println(n)
+    free(y)
+}
+func main() -> int32 {
+    p: *int64 = alloc(8)
+    *p = 7
+    take(p)
+    println(*p)
+    free(p)
+    return 0
+}

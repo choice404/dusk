@@ -1,58 +1,89 @@
-// std.math: the libm scalar functions over float64, bound straight through
-// the foreign boundary with no C shim of its own, since libm already ships
-// beside libc and every dusk binary links `-lm`. `pi` and `e` are the two
-// constants libm keeps as macros rather than symbols, so they come back as
-// plain dusk literals. `is_nan` and `is_inf` are the two float64 predicates
-// glibc exposes as macros too, each reproduced here as a pure dusk expression
-// over IEEE 754's own algebra rather than a foreign call.
+/** std.math: the libm scalar functions over float64, bound straight through the
+ *  foreign boundary with no C shim of its own, since libm already ships beside libc
+ *  and every dusk binary links -lm. Every angle is in radians and every result carries
+ *  IEEE 754 semantics verbatim, so a domain error such as sqrt of a negative returns
+ *  NaN rather than faulting. pi and e are the two constants libm keeps as macros rather
+ *  than symbols, so they come back as plain dusk literals. is_nan and is_inf are the
+ *  two float64 predicates glibc exposes as macros too, each reproduced here as a pure
+ *  dusk expression over IEEE 754's own algebra rather than a foreign call. */
+
+@paradigm procedural
 
 export foreign "C" {
+    /** The sine of x, x in radians. */
     func sin(x: float64) -> float64
+    /** The cosine of x, x in radians. */
     func cos(x: float64) -> float64
+    /** The tangent of x, x in radians. */
     func tan(x: float64) -> float64
+    /** The arc sine of x in radians, NaN when x is outside [-1, 1]. */
     func asin(x: float64) -> float64
+    /** The arc cosine of x in radians, NaN when x is outside [-1, 1]. */
     func acos(x: float64) -> float64
+    /** The arc tangent of x in radians, in the range [-pi/2, pi/2]. */
     func atan(x: float64) -> float64
+    /** The arc tangent of y/x in radians, using the signs of both to place the result
+     *  in the correct quadrant of [-pi, pi]. */
     func atan2(y: float64, x: float64) -> float64
+    /** e raised to the power x. */
     func exp(x: float64) -> float64
+    /** The natural logarithm of x, NaN for a negative x and negative infinity at 0. */
     func log(x: float64) -> float64
+    /** The base two logarithm of x. */
     func log2(x: float64) -> float64
+    /** The base ten logarithm of x. */
     func log10(x: float64) -> float64
+    /** The non negative square root of x, NaN for a negative x. */
     func sqrt(x: float64) -> float64
+    /** The real cube root of x, defined for a negative x. */
     func cbrt(x: float64) -> float64
+    /** The largest integer value not greater than x, as a float64. */
     func floor(x: float64) -> float64
+    /** The smallest integer value not less than x, as a float64. */
     func ceil(x: float64) -> float64
+    /** x rounded to the nearest integer, halves rounded away from zero, as a float64. */
     func round(x: float64) -> float64
+    /** x with its fractional part discarded, rounded toward zero, as a float64. */
     func trunc(x: float64) -> float64
+    /** The floating point remainder of x divided by y, with the sign of x. */
     func fmod(x: float64, y: float64) -> float64
+    /** The absolute value of x. */
     func fabs(x: float64) -> float64
+    /** The Euclidean distance sqrt(x*x + y*y), computed without intermediate overflow. */
     func hypot(x: float64, y: float64) -> float64
+    /** The lesser of a and b. */
     func fmin(a: float64, b: float64) -> float64
+    /** The greater of a and b. */
     func fmax(a: float64, b: float64) -> float64
 }
 
-// Archimedes' constant, to float64 precision.
+/** Archimedes' constant pi, to float64 precision.
+ *  @return the closest float64 to pi */
 export func pi() -> float64 {
     return 3.14159265358979323846
 }
 
-// Euler's number, to float64 precision.
+/** Euler's number e, to float64 precision.
+ *  @return the closest float64 to e */
 export func e() -> float64 {
     return 2.71828182845904523536
 }
 
-// Whether x is NaN. NaN is IEEE 754's only float64 value that compares
-// unequal to itself, so this needs no foreign call. Built from `==` and a
-// bool negation rather than float64 `!=` directly, since `!=` on a float
-// only differs from `!(==)` at a NaN operand, exactly the case this checks.
+/** Whether x is NaN. NaN is IEEE 754's only float64 value that compares unequal to
+ *  itself, so this needs no foreign call. It is built from == and a bool negation
+ *  rather than float64 != directly, since != on a float only differs from !(==) at a
+ *  NaN operand, exactly the case this checks.
+ *  @param x the value to test
+ *  @return true when x is NaN */
 export func is_nan(x: float64) -> bool {
     return !(x == x)
 }
 
-// Whether x is positive or negative infinity. A finite value only ever
-// satisfies x + x == x at 0.0, which the last clause excludes by name, so
-// what remains is exactly the two infinities; x == x rules out NaN, which
-// this function reports false rather than true.
+/** Whether x is positive or negative infinity. A finite value only ever satisfies
+ *  x + x == x at 0.0, which the last clause excludes by name, so what remains is
+ *  exactly the two infinities; x == x rules out NaN, which this reports false for.
+ *  @param x the value to test
+ *  @return true when x is positive or negative infinity */
 export func is_inf(x: float64) -> bool {
     return x == x && (x + x == x) && x != 0.0
 }

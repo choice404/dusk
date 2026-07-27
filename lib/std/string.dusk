@@ -1,9 +1,10 @@
-// std.string: helpers over NUL terminated strings. Length and comparison,
-// signed integer parsing and formatting, a growable StringBuilder, the raw
-// buffer bridge a foreign call reads, and the float constant formatting the
-// bootstrap compiler emits its IR through. The byte oriented toolkit at the end
-// searches, trims, splits, joins, replaces, repeats, and ASCII case folds, each
-// returning a fresh heap string the caller owns and frees.
+/** std.string: helpers over NUL terminated strings. Length and comparison, signed integer
+ *  parsing and formatting, a growable StringBuilder, the raw buffer bridge a foreign call
+ *  reads, and the float constant formatting the compiler emits its IR through. The byte
+ *  oriented toolkit at the end searches, trims, splits, joins, replaces, repeats, and
+ *  ASCII case folds, each returning a fresh heap string the caller owns and frees. A
+ *  string is a NUL terminated raw byte view, so every operation here is byte oriented and
+ *  case folding is ASCII only; see std.unicode for scalar aware decoding. */
 
 @import std.vector
 
@@ -12,10 +13,12 @@ foreign "C" {
     func cool_f32_bits(x: float64) -> int64
 }
 
-// Copies a string into a fresh NUL terminated raw byte buffer the C boundary
-// can read, since a string view is typed apart from a raw pointer and a
-// foreign signature takes only a scalar, a *raw T, or a *void. The caller
-// owns the buffer and frees it once the call that reads it has returned.
+/** Copies a string into a fresh NUL terminated raw byte buffer the C boundary can read,
+ *  since a string view is typed apart from a raw pointer and a foreign signature takes
+ *  only a scalar, a *raw T, or a *void. s is borrowed.
+ *  @param s the string to copy
+ *  @return a fresh NUL terminated buffer the caller owns and frees once the call that
+ *  reads it has returned */
 export func cbuf(s: string) -> *raw char {
     n: int64 = str_len(s)
     buf: *raw char = alloc_bytes(n + 1)
@@ -28,6 +31,10 @@ export func cbuf(s: string) -> *raw char {
     return buf
 }
 
+/** The length of s in bytes, not scalars, counting up to but not including the NUL
+ *  terminator. s is borrowed.
+ *  @param s the string to measure
+ *  @return the byte length of s */
 export func str_len(s: string) -> int64 {
     mut n: int64 = 0
     while s[n] != 0 {
@@ -36,6 +43,11 @@ export func str_len(s: string) -> int64 {
     return n
 }
 
+/** Whether a and b hold the same bytes, comparing up to the NUL terminator. Both are
+ *  borrowed.
+ *  @param a the first string
+ *  @param b the second string
+ *  @return true when a and b are byte for byte equal */
 export func str_eq(a: string, b: string) -> bool {
     mut i: int64 = 0
     while a[i] != 0 {
@@ -47,9 +59,12 @@ export func str_eq(a: string, b: string) -> bool {
     return b[i] == 0
 }
 
-// Whether s begins with prefix, comparing NUL terminated bytes. The empty prefix
-// is a prefix of every string. A prefix longer than s fails at the byte where s
-// runs into its own NUL, so s is never read past its terminator.
+/** Whether s begins with prefix, comparing NUL terminated bytes. The empty prefix is a
+ *  prefix of every string. A prefix longer than s fails at the byte where s runs into its
+ *  own NUL, so s is never read past its terminator. Both are borrowed.
+ *  @param s the string to test
+ *  @param prefix the prefix to look for
+ *  @return true when s begins with prefix */
 export func starts_with(s: string, prefix: string) -> bool {
     mut i: int64 = 0
     while prefix[i] != 0 {
@@ -61,10 +76,14 @@ export func starts_with(s: string, prefix: string) -> bool {
     return true
 }
 
-// A fresh heap string of the bytes s[lo, hi). The range is clamped to the string:
-// a lo below 0 becomes 0, a hi past the length becomes the length, and a lo above
-// hi yields the empty string. The result is NUL terminated and owned by the
-// caller, who frees the underlying buffer with free.
+/** A fresh heap string of the bytes s[lo, hi), lo included and hi excluded. The range is
+ *  clamped to the string, so a lo below 0 becomes 0, a hi past the length becomes the
+ *  length, and a lo above hi yields the empty string; the call never faults on an out of
+ *  range index. s is borrowed.
+ *  @param s the source string
+ *  @param lo the inclusive start byte offset, clamped to [0, str_len(s)]
+ *  @param hi the exclusive end byte offset, clamped to [0, str_len(s)]
+ *  @return a fresh NUL terminated string the caller owns and frees with free */
 export func substring(s: string, lo: int64, hi: int64) -> string {
     n: int64 = str_len(s)
     mut a: int64 = lo
@@ -89,10 +108,11 @@ export func substring(s: string, lo: int64, hi: int64) -> string {
     return cstr(d)
 }
 
-// The base 10 text of a signed integer. The value is accumulated in the non
-// positive range, where INT64_MIN needs no negation, so the most negative input
-// never overflows the way negating it would. The result is a fresh heap string
-// owned by the caller.
+/** The base ten text of a signed integer. The value is accumulated in the non positive
+ *  range, where the most negative int64 needs no negation, so it never overflows the way
+ *  negating it would.
+ *  @param n the value to format
+ *  @return the base ten text as a fresh heap string the caller owns and frees */
 export func int_to_string(n: int64) -> string {
     if n == 0 {
         d: *raw char = alloc_bytes(2)
@@ -131,11 +151,13 @@ export func int_to_string(n: int64) -> string {
     return cstr(d)
 }
 
-// The 0x prefixed, 16 digit, uppercase hex text of n read as a raw 64 bit word.
-// A negative n is its two's complement word, FFFFFFFFFFFFFFFF for -1, never a
-// signed form, so this reproduces the host compiler's 0x{:016X} of a float
-// constant's bits byte for byte. Each nibble is masked out after an arithmetic
-// shift, so the sign fill of the high nibbles is discarded.
+/** The 0x prefixed, 16 digit, uppercase hex text of n read as a raw 64 bit word. A
+ *  negative n is its two's complement word, FFFFFFFFFFFFFFFF for -1, never a signed form,
+ *  so this reproduces a 0x016X format of a float constant's bits byte for byte. Each
+ *  nibble is masked out after an arithmetic shift, so the sign fill of the high nibbles is
+ *  discarded.
+ *  @param n the raw 64 bit word to format
+ *  @return the 0x prefixed 16 digit hex text as a fresh heap string the caller owns */
 export func int_to_hex16(n: int64) -> string {
     d: *raw char = alloc_bytes(19)
     d[0] = 48
@@ -155,20 +177,24 @@ export func int_to_hex16(n: int64) -> string {
     return cstr(d)
 }
 
-// The IR constant token for a float64 value: 0x followed by the 16 hex digits of
-// its IEEE 754 bits. The host compiler lowers a float literal as 0x{:016X} of
-// f64::to_bits, so this reproduces the same token for the same value, which is
-// what a dusk hosted compiler emits for a float64 constant.
+/** The IR constant token for a float64 value: 0x followed by the 16 hex digits of its
+ *  IEEE 754 bits. The compiler lowers a float literal as the 016X hex of its bits, so this
+ *  reproduces the same token for the same value, which is what the compiler emits for a
+ *  float64 constant.
+ *  @param x the value to format
+ *  @return the IR constant token as a fresh heap string the caller owns */
 export func f64_to_ir_hex(x: float64) -> string {
     return int_to_hex16(cool_f64_bits(x))
 }
 
-// The IR constant token a float32 literal rounds to, as the exact double it
-// equals: 0x followed by the 16 hex digits of (double)(float)x. The host compiler
-// emits a float32 constant as the f64 bits of the parsed value and narrows it
-// with a later fptrunc, so a byte for byte match of the emitted token uses
-// f64_to_ir_hex; this returns the post rounding value for a consumer that wants
-// the double a float32 constant actually holds.
+/** The IR constant token a float32 literal rounds to, as the exact double it equals: 0x
+ *  followed by the 16 hex digits of the double that x narrowed to float and widened back
+ *  equals. The compiler emits a float32 constant as the f64 bits of the parsed value and
+ *  narrows it with a later fptrunc, so a byte for byte match of the emitted token uses
+ *  f64_to_ir_hex; this returns the post rounding value for a consumer that wants the double
+ *  a float32 constant actually holds.
+ *  @param x the value to round to float32 and format
+ *  @return the IR constant token as a fresh heap string the caller owns */
 export func f32_to_ir_hex(x: float64) -> string {
     return int_to_hex16(cool_f32_bits(x))
 }
@@ -199,12 +225,15 @@ func digit_val(c: int64, base: int64) -> int64 {
     return v
 }
 
-// Parse a signed integer in the given base, from 2 to 36, returning the value
-// and an error. An optional sign leads. A base that has a canonical prefix
-// accepts it, 0x or 0X for 16, 0o or 0O for 8, and 0b or 0B for 2, but the base
-// is never inferred from the prefix. A prefix that does not match the base, like
-// 0x under base 10, is read as digits and fails on the bad digit. An empty input
-// or a digit the base rejects is an error.
+/** Parses a signed integer in the given base, from 2 to 36. An optional sign leads. A base
+ *  with a canonical prefix accepts it, 0x or 0X for 16, 0o or 0O for 8, and 0b or 0B for 2,
+ *  but the base is never inferred from the prefix; a prefix that does not match the base,
+ *  like 0x under base 10, is read as digits and fails on the bad digit. s is borrowed.
+ *  @param s the text to parse
+ *  @param base the numeric base, from 2 to 36
+ *  @return the parsed value paired with an error; on success the error is empty, and a
+ *  failure returns 0 with one of "base must be between 2 and 36", "invalid digit for base",
+ *  "integer overflow", or "no digits to parse" */
 export func parse_int_radix(s: string, base: int64) -> (int64, error) {
     if base < 2 {
         return (0, error { message: "base must be between 2 and 36" })
@@ -274,30 +303,46 @@ export func parse_int_radix(s: string, base: int64) -> (int64, error) {
     return (acc, error {})
 }
 
-// Parse a signed base 10 integer. A 0x, 0o, or 0b prefix is not base 10, so it
-// fails on the prefix letter. Use parse_int_radix for another base.
+/** Parses a signed base ten integer. A 0x, 0o, or 0b prefix is not base ten, so it fails
+ *  on the prefix letter; use parse_int_radix for another base. s is borrowed.
+ *  @param s the text to parse
+ *  @return the parsed value paired with an error; on success the error is empty, and a
+ *  failure returns 0 with the error set */
 export func parse_int(s: string) -> (int64, error) {
     return parse_int_radix(s, 10)
 }
 
-// A growable, heap backed string. The buffer always holds a NUL after the last
-// character, so sb_cstr hands back a valid string view with no extra work. Build
-// it on the heap with alloc(sb_new()) and pass it by pointer so growth persists,
-// the same shape std.vector uses.
+/** A growable, heap backed string as a buffer, a length, and a capacity. data points at
+ *  the backing buffer, len is the character count, and cap is the buffer size. The buffer
+ *  always holds a NUL after the last character, so sb_cstr hands back a valid string view
+ *  with no extra work. Build one on the heap with alloc(sb_new()) and pass it by pointer
+ *  so growth persists; the builder owns data and sb_free releases it. */
 export struct StringBuilder {
     data: *raw char,
     len: int64,
     cap: int64,
 }
 
+/** A fresh empty builder with a small buffer already allocated and NUL terminated. Build
+ *  one on the heap with alloc(sb_new()) and pass it by pointer so pushes persist.
+ *  @return an empty StringBuilder
+ *  @example
+ *  b: *StringBuilder = alloc(sb_new())
+ *  sb_push(b, "hello, ")
+ *  sb_push(b, name)
+ *  out: string = substring(sb_cstr(b), 0, sb_size(b))
+ *  sb_free(b)
+ *  free(b) */
 export func sb_new() -> StringBuilder {
     d: *raw char = alloc_bytes(8)
     d[0] = 0
     return StringBuilder { data: d, len: 0, cap: 8 }
 }
 
-// Append one character, growing the buffer when the character and its NUL would
-// not fit. The NUL terminator is rewritten after every push.
+/** Appends one character to s, growing the buffer when the character and its NUL would not
+ *  fit. The NUL terminator is rewritten after every push, so s stays a valid string view.
+ *  @param s the builder to append to, borrowed and grown in place
+ *  @param c the character byte to append */
 export func sb_push_char(s: *StringBuilder, c: char) -> void {
     if (*s).len + 1 >= (*s).cap {
         mut nc: int64 = (*s).cap * 2
@@ -319,7 +364,9 @@ export func sb_push_char(s: *StringBuilder, c: char) -> void {
     (*s).data[(*s).len] = 0
 }
 
-// Append every character of a string up to its NUL.
+/** Appends every byte of t to s, up to but not including t's NUL. t is borrowed.
+ *  @param s the builder to append to, borrowed and grown in place
+ *  @param t the string to append */
 export func sb_push(s: *StringBuilder, t: string) -> void {
     mut i: int64 = 0
     while t[i] != 0 {
@@ -328,10 +375,11 @@ export func sb_push(s: *StringBuilder, t: string) -> void {
     }
 }
 
-// Append the base 10 text of n straight into the builder, with no intermediate
-// string. The value is accumulated in the non positive range, the same guard
-// int_to_string uses, so INT64_MIN needs no negation and never overflows. Digits
-// go out most significant first by dividing down from the highest power of ten.
+/** Appends the base ten text of n straight into s, with no intermediate string. The value
+ *  is accumulated in the non positive range, the same guard int_to_string uses, so the
+ *  most negative int64 needs no negation and never overflows.
+ *  @param s the builder to append to, borrowed and grown in place
+ *  @param n the value to format and append */
 export func sb_push_int(s: *StringBuilder, n: int64) -> void {
     if n == 0 {
         sb_push_char(s, 48)
@@ -357,23 +405,35 @@ export func sb_push_int(s: *StringBuilder, n: int64) -> void {
     }
 }
 
+/** The number of characters in s, its length, not its capacity.
+ *  @param s the builder to measure, borrowed
+ *  @return the character count */
 export func sb_size(s: *StringBuilder) -> int64 {
     return (*s).len
 }
 
-// View the built bytes as a string. The buffer is always NUL terminated, so this
-// is a zero cost reinterpret. The view borrows the buffer and is valid until the
-// builder next grows or is freed.
+/** The built bytes viewed as a string. The buffer is always NUL terminated, so this is a
+ *  zero cost reinterpret, not a copy: the view borrows s's buffer and is valid only until
+ *  s next grows or is freed. Copy it with substring when it must outlive the builder.
+ *  @param s the builder to view, borrowed
+ *  @return a borrowed string view of s's buffer, valid until s grows or is freed */
 export func sb_cstr(s: *StringBuilder) -> string {
     return cstr((*s).data)
 }
 
+/** Frees s's backing buffer and nothing else. After this the buffer is stale and must not
+ *  be read; the caller frees the StringBuilder allocation itself when it was heap
+ *  allocated.
+ *  @param s the builder whose buffer to release, borrowed */
 export func sb_free(s: *StringBuilder) -> void {
     free((*s).data)
 }
 
-// Concatenate two strings into a fresh heap builder. Ownership moves to the
-// caller, who frees the buffer with sb_free and the builder struct with free.
+/** Concatenates two strings into a fresh heap builder. Both arguments are borrowed.
+ *  @param a the first string
+ *  @param b the second string
+ *  @return a fresh heap builder holding a followed by b, which the caller frees with
+ *  sb_free and then free */
 export func concat(a: string, b: string) -> *StringBuilder {
     s: *StringBuilder = alloc(sb_new())
     sb_push(s, a)
@@ -381,8 +441,11 @@ export func concat(a: string, b: string) -> *StringBuilder {
     return s
 }
 
-// The byte offset of the first occurrence of needle in s, or -1 when absent.
-// The empty needle matches at offset 0, the convention strstr follows.
+/** The byte offset of the first occurrence of needle in s, or -1 when absent. The empty
+ *  needle matches at offset 0, the convention strstr follows. Both are borrowed.
+ *  @param s the string to search
+ *  @param needle the substring to find
+ *  @return the byte offset of the first match, or -1 when needle is not present */
 export func str_find(s: string, needle: string) -> int64 {
     n: int64 = str_len(s)
     m: int64 = str_len(needle)
@@ -410,14 +473,19 @@ export func str_find(s: string, needle: string) -> int64 {
     return -1
 }
 
-// Whether needle occurs anywhere in s.
+/** Whether needle occurs anywhere in s. Both are borrowed.
+ *  @param s the string to search
+ *  @param needle the substring to look for
+ *  @return true when needle occurs in s */
 export func str_contains(s: string, needle: string) -> bool {
     return str_find(s, needle) >= 0
 }
 
-// Copies a char slice into a fresh heap string owned by the caller. The
-// bridge from stack text back to the dynamic string world: a char array
-// slices to char[] and lands here.
+/** Copies a char slice into a fresh heap string. It is the bridge from stack text back to
+ *  the dynamic string world: a char array slices to char[] and lands here. cs is borrowed
+ *  and its bytes are copied.
+ *  @param cs the char slice to copy
+ *  @return a fresh heap string of the slice's bytes the caller owns and frees */
 export func str_from_chars(cs: char[]) -> string {
     s: *StringBuilder = alloc(sb_new())
     mut i: int64 = 0
@@ -431,9 +499,12 @@ export func str_from_chars(cs: char[]) -> string {
     return out
 }
 
-// Whether s ends with suffix, comparing NUL terminated bytes, the tail mirror of
-// starts_with. The empty suffix is a suffix of every string. A suffix longer than
-// s fails without reading past either terminator.
+/** Whether s ends with suffix, comparing NUL terminated bytes, the tail mirror of
+ *  starts_with. The empty suffix is a suffix of every string. A suffix longer than s fails
+ *  without reading past either terminator. Both are borrowed.
+ *  @param s the string to test
+ *  @param suffix the suffix to look for
+ *  @return true when s ends with suffix */
 export func ends_with(s: string, suffix: string) -> bool {
     n: int64 = str_len(s)
     m: int64 = str_len(suffix)
@@ -450,10 +521,12 @@ export func ends_with(s: string, suffix: string) -> bool {
     return true
 }
 
-// The byte offset of the last occurrence of needle in s, or -1 when absent. The
-// empty needle matches at the end, str_len(s), the tail mirror of str_find
-// returning 0 for the empty needle at the start. The scan walks candidate offsets
-// down from the last that could fit and returns the first that matches.
+/** The byte offset of the last occurrence of needle in s, or -1 when absent. The empty
+ *  needle matches at the end, str_len(s), the tail mirror of str_find returning 0 for the
+ *  empty needle at the start. Both are borrowed.
+ *  @param s the string to search
+ *  @param needle the substring to find
+ *  @return the byte offset of the last match, or -1 when needle is not present */
 export func str_rfind(s: string, needle: string) -> int64 {
     n: int64 = str_len(s)
     m: int64 = str_len(needle)
@@ -481,12 +554,16 @@ export func str_rfind(s: string, needle: string) -> int64 {
     return -1
 }
 
-// Compare a and b as sequences of unsigned bytes, lexicographically: negative
-// when a sorts before b, zero when the two are equal, positive when a sorts
-// after. Bytes read unsigned, so a byte of a multibyte UTF-8 sequence orders
-// above ASCII rather than below it, and a shorter string that is a prefix of a
-// longer one sorts first at the NUL. Shaped as an int32 comparator to pass
-// straight to vec_sort.
+/** Compares a and b as sequences of unsigned bytes, lexicographically. Bytes read
+ *  unsigned, so a byte of a multibyte UTF-8 sequence orders above ASCII rather than below
+ *  it, and a shorter string that is a prefix of a longer one sorts first at the NUL. It is
+ *  shaped as an int32 comparator to pass straight to vec_sort. Both are borrowed.
+ *  @param a the first string
+ *  @param b the second string
+ *  @return negative when a sorts before b, zero when the two are equal, positive when a
+ *  sorts after
+ *  @example
+ *  vec_sort(names, str_cmp) */
 export func str_cmp(a: string, b: string) -> int32 {
     mut i: int64 = 0
     mut result: int32 = 0
@@ -530,9 +607,10 @@ func is_ascii_ws(c: char) -> bool {
     return false
 }
 
-// Strip ASCII whitespace from the front of s, returning a fresh heap string the
-// caller owns. The result is always a fresh string, a copy of s when nothing
-// strips.
+/** Strips ASCII whitespace, space, tab, carriage return, and line feed, from the front of
+ *  s. The result is always a fresh string, a copy of s when nothing strips. s is borrowed.
+ *  @param s the string to trim
+ *  @return the front trimmed text as a fresh heap string the caller owns and frees */
 export func trim_start(s: string) -> string {
     n: int64 = str_len(s)
     mut lo: int64 = 0
@@ -542,9 +620,10 @@ export func trim_start(s: string) -> string {
     return substring(s, lo, n)
 }
 
-// Strip ASCII whitespace from the end of s, returning a fresh heap string the
-// caller owns. The result is always a fresh string, a copy of s when nothing
-// strips.
+/** Strips ASCII whitespace, space, tab, carriage return, and line feed, from the end of
+ *  s. The result is always a fresh string, a copy of s when nothing strips. s is borrowed.
+ *  @param s the string to trim
+ *  @return the end trimmed text as a fresh heap string the caller owns and frees */
 export func trim_end(s: string) -> string {
     n: int64 = str_len(s)
     mut hi: int64 = n
@@ -554,9 +633,11 @@ export func trim_end(s: string) -> string {
     return substring(s, 0, hi)
 }
 
-// Strip ASCII whitespace from both ends of s, returning a fresh heap string the
-// caller owns. An all whitespace string trims to the empty string, still a fresh
-// allocation.
+/** Strips ASCII whitespace, space, tab, carriage return, and line feed, from both ends of
+ *  s. An all whitespace string trims to the empty string, still a fresh allocation. s is
+ *  borrowed.
+ *  @param s the string to trim
+ *  @return the trimmed text as a fresh heap string the caller owns and frees */
 export func trim(s: string) -> string {
     n: int64 = str_len(s)
     mut lo: int64 = 0
@@ -570,13 +651,22 @@ export func trim(s: string) -> string {
     return substring(s, lo, hi)
 }
 
-// Split s on every occurrence of sep, returning the pieces in order as a fresh
-// heap Vector of fresh heap strings, the vector and every element owned by the
-// caller (free each element, then vec_free and free the vector). Adjacent
-// separators yield an empty string between them, and a leading or trailing
-// separator yields a leading or trailing empty element, the same pieces Go's
-// strings.Split produces. An empty sep is not scanned for, since it would match
-// between every byte; the result is a single element vector holding a copy of s.
+/** Splits s on every occurrence of sep, returning the pieces in order. Adjacent separators
+ *  yield an empty string between them, and a leading or trailing separator yields a leading
+ *  or trailing empty element. An empty sep is not scanned for, since it would match between
+ *  every byte, so the result is then a single element vector holding a copy of s. Both
+ *  arguments are borrowed.
+ *  @param s the string to split
+ *  @param sep the separator to split on
+ *  @return a fresh heap vector of fresh heap strings, the vector and every element owned by
+ *  the caller; free each element, then vec_free and free the vector
+ *  @example
+ *  parts := str_split("a,b,c", ",")
+ *  while vec_len(parts) > 0 {
+ *      free(vec_take(parts, vec_len(parts) - 1))
+ *  }
+ *  vec_free(parts)
+ *  free(parts) */
 export func str_split(s: string, sep: string) -> *Vector<string> {
     v: *Vector<string> = alloc(vec_new())
     m: int64 = str_len(sep)
@@ -608,10 +698,13 @@ export func str_split(s: string, sep: string) -> *Vector<string> {
     return v
 }
 
-// Concatenate the elements of parts with sep between each adjacent pair, into a
-// fresh heap string the caller owns. An empty vector yields the empty string, and
-// a single element yields a copy of that element with no separator. The elements
-// are read, never taken, so parts and its strings stay the caller's to free.
+/** Concatenates the elements of parts with sep between each adjacent pair. An empty vector
+ *  yields the empty string, and a single element yields a copy of that element with no
+ *  separator. The elements are read, never taken, so parts and its strings stay the
+ *  caller's to free. parts and sep are borrowed.
+ *  @param parts the strings to join, borrowed and left unchanged
+ *  @param sep the separator placed between adjacent elements
+ *  @return the joined text as a fresh heap string the caller owns and frees */
 export func str_join(parts: *Vector<string>, sep: string) -> string {
     sb: *StringBuilder = alloc(sb_new())
     n: int64 = vec_len(parts)
@@ -629,11 +722,15 @@ export func str_join(parts: *Vector<string>, sep: string) -> string {
     return out
 }
 
-// Replace every non overlapping occurrence of old in s with new_s, scanning left
-// to right, into a fresh heap string the caller owns. After a match the scan
-// resumes past the whole matched run, so replacements never overlap. An empty old
-// is not scanned for, since it would match between every byte; the result is then
-// a fresh copy of s. A missing old also yields a fresh copy of s.
+/** Replaces every non overlapping occurrence of old in s with new_s, scanning left to
+ *  right. After a match the scan resumes past the whole matched run, so replacements never
+ *  overlap. An empty old is not scanned for, since it would match between every byte, so
+ *  the result is then a fresh copy of s; a missing old also yields a fresh copy of s. All
+ *  three arguments are borrowed.
+ *  @param s the string to scan
+ *  @param old the substring to replace
+ *  @param new_s the replacement text
+ *  @return the replaced text as a fresh heap string the caller owns and frees */
 export func replace_all(s: string, old: string, new_s: string) -> string {
     m: int64 = str_len(old)
     n: int64 = str_len(s)
@@ -668,8 +765,11 @@ export func replace_all(s: string, old: string, new_s: string) -> string {
     return out
 }
 
-// s concatenated n times, into a fresh heap string the caller owns. A count of
-// zero or less yields the empty string, still a fresh allocation.
+/** s concatenated n times. A count of zero or less yields the empty string, still a fresh
+ *  allocation. s is borrowed.
+ *  @param s the string to repeat
+ *  @param n the repeat count; zero or less yields the empty string
+ *  @return the repeated text as a fresh heap string the caller owns and frees */
 export func repeat(s: string, n: int64) -> string {
     sb: *StringBuilder = alloc(sb_new())
     mut i: int64 = 0
@@ -683,11 +783,12 @@ export func repeat(s: string, n: int64) -> string {
     return out
 }
 
-// Uppercase the ASCII letters a to z of s, leaving every other byte unchanged, in
-// a fresh heap string the caller owns. Only ASCII folds: a byte of a multibyte
-// UTF-8 sequence is 128 or above and passes through untouched, so non ASCII text
-// copies verbatim. This is deliberately ASCII only; a full Unicode case fold is
-// out of scope here.
+/** Uppercases the ASCII letters a to z of s, leaving every other byte unchanged. Only
+ *  ASCII folds: a byte of a multibyte UTF-8 sequence is 128 or above and passes through
+ *  untouched, so non ASCII text copies verbatim. This is ASCII only on purpose; a full
+ *  Unicode case fold is out of scope here. s is borrowed.
+ *  @param s the string to uppercase
+ *  @return the uppercased text as a fresh heap string the caller owns and frees */
 export func to_upper(s: string) -> string {
     n: int64 = str_len(s)
     d: *raw char = alloc_bytes(n + 1)
@@ -705,11 +806,12 @@ export func to_upper(s: string) -> string {
     return cstr(d)
 }
 
-// Lowercase the ASCII letters A to Z of s, leaving every other byte unchanged, in
-// a fresh heap string the caller owns. Only ASCII folds: a byte of a multibyte
-// UTF-8 sequence is 128 or above and passes through untouched, so non ASCII text
-// copies verbatim. This is deliberately ASCII only; a full Unicode case fold is
-// out of scope here.
+/** Lowercases the ASCII letters A to Z of s, leaving every other byte unchanged. Only
+ *  ASCII folds: a byte of a multibyte UTF-8 sequence is 128 or above and passes through
+ *  untouched, so non ASCII text copies verbatim. This is ASCII only on purpose; a full
+ *  Unicode case fold is out of scope here. s is borrowed.
+ *  @param s the string to lowercase
+ *  @return the lowercased text as a fresh heap string the caller owns and frees */
 export func to_lower(s: string) -> string {
     n: int64 = str_len(s)
     d: *raw char = alloc_bytes(n + 1)

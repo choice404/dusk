@@ -1,0 +1,23 @@
+// A pointer to an interface returned from a function dangles: alloc boxes the fat interface
+// value, but its data field still points at the frame-local concrete value the box was made
+// from, so the returned *Shape reads a dead frame slot. Refused like a bare interface return.
+@paradigm oop
+interface Shape {
+    area() -> int64
+}
+struct Circle { r: int64 }
+impl Shape for Circle {
+    func area() -> int64 { return self.r * self.r }
+}
+func f() -> *Shape {
+    c := Circle { r: 2 }
+    s: Shape = c
+    return alloc(s)
+}
+func main() -> int32 {
+    p := f()
+    s2: Shape = *p
+    println(s2.area())
+    free(p)
+    return 0
+}

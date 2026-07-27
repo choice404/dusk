@@ -182,6 +182,7 @@ func declare_one(tc: *TypeChecker, b: BindNode, tyid: int64, mutable: bool, valu
     a: *Ast = (*tc).ast
     name: string = ast_name(a, b.name)
     reject_alloc_shadow(tc, name, value_lo, value_hi)
+    reject_builtin_binding(tc, name, tyid, false, value_lo, value_hi)
     declare(tc, name, tyid)
     set_esc(tc, name, false, false)
     if mutable { declare_mut(tc, name) }
@@ -220,6 +221,86 @@ func record_mut_tuple(tc: *TypeChecker, stmt: StmtNode, bind: BindNode, tyid: in
     }
     if !has_array { return }
     map_put((*tc).mut_tuple_types, span_key(val.lo, val.hi), MutTupleEntry { ty: tyid })
+}
+
+func tuple_member_key(name: string, i: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push_char(b, 35)
+    sb_push_int(b, i)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func member_key_cat(prefix: string, suffix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push(b, suffix)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Copies the recorded ownership subtree rooted at src_prefix (the leaf key itself and every
+// key under src_prefix#...) to dst_prefix. A rebind q := pair or a destructure binder thus
+// inherits the borrow records the source tuple binding held, at every nesting depth. The #
+// separator keeps a prefix from matching a longer sibling name.
+func copy_member_subtree(tc: *TypeChecker, src_prefix: string, dst_prefix: string) -> void {
+    m: *Map<string, int64> = (*tc).tuple_member_own
+    keys: *Vector<string> = map_keys(m)
+    pfx: string = member_key_cat(src_prefix, "#")
+    plen: int64 = str_len(src_prefix)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        k: string = vec_get(keys, i)
+        if str_eq(k, src_prefix) {
+            map_put(m, dst_prefix, unwrap_or(map_get(m, k), own_borrow()))
+        } else if starts_with(k, pfx) {
+            rest: string = substring(k, plen, str_len(k))
+            map_put(m, member_key_cat(dst_prefix, rest), unwrap_or(map_get(m, k), own_borrow()))
+        }
+        i = i + 1
+    }
+}
+
+// Records the per-member ownership of a tuple literal recursively, so a borrowed leaf at any
+// nesting depth is remembered under its path key (name#i, name#i#j, ...). A nested tuple
+// member recurses so a launder through ((p, 1), 2) survives the inner destructure; a
+// borrowed identifier or borrowed match member records a leaf; an owner or fresh member
+// records nothing and keeps the destructure default. Surface-only.
+func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) -> void {
+    if value.kind != xk_tuple() { return }
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < value.b {
+        mid: int64 = vec_get((*a).kids, value.a + i)
+        me: ExprNode = vec_get((*a).exprs, mid)
+        key: string = tuple_member_key(prefix, i)
+        if me.kind == xk_tuple() {
+            record_member_own_rec(tc, key, me)
+        } else if me.kind == xk_ident() && own_of(tc, ast_name(a, me.a)) == own_borrow() {
+            map_put((*tc).tuple_member_own, key, own_borrow())
+        } else if me.kind == xk_match() {
+            mv: int64 = match_own_of(tc, mid)
+            if mv == own_borrow() { map_put((*tc).tuple_member_own, key, own_borrow()) }
+        }
+        i = i + 1
+    }
+}
+
+// Records a tuple binding's member ownership so a later destructure propagates a borrow. A
+// tuple literal value records its members recursively; a bound tuple name (q := pair) copies
+// the source's recorded subtree so the rebind carries the launder forward.
+func record_tuple_member_own(tc: *TypeChecker, name: string, value: ExprNode) -> void {
+    if (*tc).types_only { return }
+    if value.kind == xk_tuple() {
+        record_member_own_rec(tc, name, value)
+    } else if value.kind == xk_ident() {
+        copy_member_subtree(tc, ast_name((*tc).ast, value.a), name)
+    }
 }
 
 func is_enum_ctor_call(tc: *TypeChecker, expr_id: int64) -> bool {
@@ -290,11 +371,24 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     if !want_own && value.kind == xk_match() && !(*tc).types_only && match_own_of(tc, stmt.c) >= 0 {
         want_own = true
     }
+    // A generic binding whose value is a name that already carries an ownership record
+    // inherits it: `y := x` over a borrowed type-parameter x must keep y a borrow so a
+    // later free(y) rejects the launder, exactly as the concrete `y := x` over a managed
+    // x already does through is_managed_ty. An annotation that names a type parameter is
+    // the same unprovable case. classify_value_own reads own_of(src) below, so a scalar x
+    // with no record adds nothing and a copied owner still faults as a copy.
+    if !want_own && !(*tc).types_only && value.kind == xk_ident() && own_of(tc, ast_name(a, value.a)) != 0 {
+        want_own = true
+    }
+    if !want_own && !(*tc).types_only && is_typaram_ast(tc, b.ty) {
+        want_own = true
+    }
     if want_own {
         declare_own(tc, ast_name(a, b.name), binding_own(tc, stmt, value, vt, tyid))
     }
     record_enum_bind(tc, ast_name(a, b.name), stmt.c)
     record_mut_tuple(tc, stmt, b, tyid)
+    record_tuple_member_own(tc, ast_name(a, b.name), value)
     link_binding_aliases(tc, ast_name(a, b.name), stmt.c, false)
     esc: EscPair = value_escape(tc, stmt.c)
     set_esc(tc, ast_name(a, b.name), esc.slice, esc.closure)
@@ -353,13 +447,32 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         // match's surface wildcard, so a recorded verdict enters the ownership record even when
         // is_managed_ty cannot see the part is managed, mirroring the single-binding path.
         mut own_member: int64 = -1
+        binder_name: string = ast_name(a, b.name)
         if value.kind == xk_tuple() && value.b == stmt.b && !(*tc).types_only {
             member_id: int64 = vec_get((*a).kids, value.a + m)
             mem: ExprNode = vec_get((*a).exprs, member_id)
             if mem.kind == xk_match() {
                 mv: int64 = match_own_of(tc, member_id)
                 if mv >= 0 { own_member = mv }
+            } else if mem.kind == xk_ident() {
+                // A member that names a borrowed value hands the destructure binder that
+                // borrow, not the owner default, so `y, n := (x, 1)` over a borrowed x
+                // keeps y a borrow and a later free(y) rejects the launder.
+                mo: int64 = own_of(tc, ast_name(a, mem.a))
+                if mo != 0 { own_member = mo }
+            } else if mem.kind == xk_tuple() {
+                // A nested tuple member records its own subtree under the binder, so a
+                // further destructure of the binder still reaches a buried borrow.
+                record_member_own_rec(tc, binder_name, mem)
             }
+        } else if value.kind == xk_ident() && !(*tc).types_only {
+            // Destructuring a tuple binding by name copies the member's recorded subtree
+            // onto the binder (leaf and nested), so a borrow laundered through
+            // `pair := (x, 1); y, n := pair` or a deeper nesting still reaches the freed
+            // binder.
+            copy_member_subtree(tc, tuple_member_key(ast_name(a, value.a), m), binder_name)
+            tmo: *Map<string, int64> = (*tc).tuple_member_own
+            if map_has(tmo, binder_name) { own_member = unwrap_or(map_get(tmo, binder_name), -1) }
         }
         if is_managed_ty(tc, tyid) {
             mut own_v: int64 = own_owner()

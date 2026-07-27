@@ -3189,7 +3189,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.11.1\n
+out dusk 1.12.0\n
 argv version
 code 0
 ---
@@ -4774,12 +4774,18 @@ mode run
 file examples/method_using.dusk
 out 8\n
 ---
-# An async func with a `using` allocator is rejected, not silently dropped: the
-# ambient allocator is not wired through the task frame the poll function reads.
-test async_using_fail
-mode check_fail
-file examples/async_using_fail.dusk
-err_has an async func cannot take a using parameter
+# An async func may take a `using` allocator: the parameter rides the task frame and
+# bare alloc resolves it by name, so the arena backs the allocation. async_using_await
+# proves the allocator is re-read from the frame after a suspension.
+test async_using
+mode run
+file examples/async_using.dusk
+out 8\n
+---
+test async_using_await
+mode run
+file examples/async_using_await.dusk
+out 21\n
 ---
 # A lambda with a `using` allocator is rejected: a lambda body has no ambient
 # allocator, so the parameter was a silent no-op before.
@@ -4926,4 +4932,224 @@ test fstr_import_span
 mode check_fail
 file examples/fstr_import_span.dusk
 err_has fstr_import_span_helper.dusk: 12:20: error: cannot print a pointer; dereference it or print its fields
+---
+test matchexpr_float
+mode run
+file examples/matchexpr_float.dusk
+out 2.5\n
+---
+test match_struct
+mode run
+file examples/match_struct.dusk
+out 1\n
+---
+test match_iface
+mode run
+file examples/match_iface.dusk
+out 1\n
+---
+test match_tuple
+mode run
+file examples/match_tuple.dusk
+out 3\n
+---
+test match_arr
+mode run
+file examples/match_arr.dusk
+out 2\n
+---
+test match_enum
+mode run
+file examples/match_enum.dusk
+out 2\n
+---
+test match_variant_tail
+mode run
+file examples/match_variant_tail.dusk
+out 7\n
+---
+test tuple_nested
+mode run
+file examples/tuple_nested.dusk
+out 10\n
+---
+test tuple_closure
+mode run
+file examples/tuple_closure.dusk
+out 6\n
+---
+test tuple_iface
+mode run
+file examples/tuple_iface.dusk
+out 9\n
+---
+test sizeof_tuple_fail
+mode check_fail
+file examples/sizeof_tuple_fail.dusk
+err_has sizeof takes a type or a value; a tuple type is written through a named struct
+---
+test iife_direct_fail
+mode check_fail
+file examples/iife_direct_fail.dusk
+err_has a lambda literal cannot be called where it is written; bind it to a name and call the name
+---
+test iife_paren_fail
+mode check_fail
+file examples/iife_paren_fail.dusk
+err_has a lambda literal cannot be called where it is written; bind it to a name and call the name
+---
+test iife_field_fail
+mode check_fail
+file examples/iife_field_fail.dusk
+err_has a lambda literal cannot be called where it is written; bind it to a name and call the name
+---
+test iife_bound_ok
+mode run
+file examples/iife_bound_ok.dusk
+out 6\n
+---
+test generic_free_borrow_fail
+mode check_fail
+file examples/generic_free_borrow_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test generic_task_free_fail
+mode check_fail
+file examples/generic_task_free_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test generic_return_match_fail
+mode check_fail
+file examples/generic_return_match_fail.dusk
+err_has cannot return a borrowed match result; move the payload or return an owning call
+---
+test generic_move_borrow_fail
+mode check_fail
+file examples/generic_move_borrow_fail.dusk
+err_has cannot move a borrowed pointer; only its owner can be moved
+---
+test generic_bind_match_free_fail
+mode check_fail
+file examples/generic_bind_match_free_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test generic_reassign_fail
+mode check_fail
+file examples/generic_reassign_fail.dusk
+err_has cannot reassign an owning pointer; it leaks the allocation it holds
+---
+test generic_borrow_ok
+mode run
+file examples/generic_borrow_ok.dusk
+out 13\n9\n
+---
+test builtin_shadow_fail
+mode check_fail
+file examples/builtin_shadow_fail.dusk
+err_has 'move' is a builtin; a function cannot take its name
+---
+test builtin_shadow_functional_fail
+mode check_fail
+file examples/builtin_shadow_functional_fail.dusk
+err_has 'map' is a builtin; a function cannot take its name
+---
+test defer_conditional_fail
+mode check_fail
+file examples/defer_conditional_fail.dusk
+err_has defer_conditional_fail.dusk: 12:9: error: a defer inside a conditional or loop is not supported
+---
+test println_escbrace
+mode run
+file examples/println_escbrace.dusk
+out A{B\n{{\nopen { close }\nval={5}\ntyped {brace} and 9\n
+---
+test iface_tuple_return_fail
+mode check_fail
+file examples/iface_tuple_return_fail.dusk
+err_has returning an interface value is not supported
+---
+test generic_bind_launder_fail
+mode check_fail
+file examples/generic_bind_launder_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test generic_lambda_param_free_fail
+mode check_fail
+file examples/generic_lambda_param_free_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test generic_tuple_launder_fail
+mode check_fail
+file examples/generic_tuple_launder_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test builtin_shadow_local_fail
+mode check_fail
+file examples/builtin_shadow_local_fail.dusk
+err_has 'println' is a builtin; a binding cannot take its name
+---
+test user_eprintln_ok
+mode run
+file examples/user_eprintln_ok.dusk
+out {ok}\n
+---
+test import_builtin_collide_fail
+mode check_fail
+file examples/import_builtin_collide_fail.dusk
+err_has 'fold' is a builtin; a function cannot take its name
+---
+test sizeof_suffix
+mode run
+file examples/sizeof_suffix.dusk
+out 8\n8\n8\n
+---
+test sizeof_shadow
+mode run
+file examples/sizeof_shadow.dusk
+out 16\n11\n
+---
+test matchexpr_neg
+mode run
+file examples/matchexpr_neg.dusk
+out -1 2\n
+---
+test matchexpr_closure
+mode run
+file examples/matchexpr_closure.dusk
+out 2.5\n
+---
+test matchexpr_iface
+mode run
+file examples/matchexpr_iface.dusk
+out 6.75\n
+---
+test matchexpr_cast
+mode run
+file examples/matchexpr_cast.dusk
+out 2.5\n
+---
+test iface_ptr_return_fail
+mode check_fail
+file examples/iface_ptr_return_fail.dusk
+err_has returning an interface value is not supported
+---
+test tuple_rebind_launder_fail
+mode check_fail
+file examples/tuple_rebind_launder_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test tuple_nested_launder_fail
+mode check_fail
+file examples/tuple_nested_launder_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test param_shadow_builtin_fail
+mode check_fail
+file examples/param_shadow_builtin_fail.dusk
+err_has param_shadow_builtin_fail.dusk: 6:6: error: 'println' is a builtin; a binding cannot take its name
+---
+test builtin_name_scalar_ok
+mode run
+file examples/builtin_name_scalar_ok.dusk
+out keep\n42\n
 ---

@@ -1,8 +1,8 @@
-// std.memory.allocator: the Allocator interface and two allocators that
-// implement it. A function that allocates takes an allocator marked `using`, and
-// the builtins alloc and free dispatch to it. Choosing the allocator type
-// chooses the implementation. Pass a stateful allocator and its bump offset
-// advances in place, since methods take the receiver by pointer.
+/** std.memory.allocator: the Allocator interface and the allocators that
+ *  implement it. A function that allocates takes an allocator marked `using`, and
+ *  the builtins alloc and free dispatch to it. Choosing the allocator type
+ *  chooses the implementation. Pass a stateful allocator and its bump offset
+ *  advances in place, since methods take the receiver by pointer. */
 
 @paradigm procedural
 @paradigm oop
@@ -11,6 +11,10 @@ foreign "C" {
     func abort() -> void
 }
 
+/** The allocation interface the alloc and free builtins dispatch to when an
+ *  allocator is in scope with `using`. alloc hands back a block of at least size
+ *  bytes aligned to align; free releases a block alloc returned, or is a no op for
+ *  allocators that reclaim in bulk. */
 interface Allocator {
     alloc(size: int64, align: int64) -> *void
     free(p: *void) -> void
@@ -32,8 +36,8 @@ func buffer_exhausted() -> void {
     abort()
 }
 
-// The libc backed heap allocator. This is the default when no allocator is in
-// scope, so an explicit Heap is only needed to pass one through `using`.
+/** The libc backed heap allocator. This is the default when no allocator is in
+ *  scope, so an explicit Heap is only needed to pass one through `using`. */
 export struct Heap {
     tag: int64,
 }
@@ -47,13 +51,21 @@ impl Allocator for Heap {
     }
 }
 
+/** A fresh heap allocator, the value to pass through `using` when the default
+ *  needs naming explicitly.
+ *  @return a heap allocator
+ *  @example
+ *  func build(using a: Allocator) -> *Node {
+ *      return alloc(Node { next: 0 })
+ *  }
+ *  n := build(heap()) */
 export func heap() -> Heap {
     return Heap { tag: 0 }
 }
 
-// A bump allocator over a caller provided buffer. It touches no heap. Allocations
-// carve forward from the buffer, aligned to the request, and individual frees are
-// a no op. Exhausting the buffer aborts rather than handing out memory past it.
+/** A bump allocator over a caller provided buffer. It touches no heap. Allocations
+ *  carve forward from the buffer, aligned to the request, and individual frees are
+ *  a no op. Exhausting the buffer aborts rather than handing out memory past it. */
 export struct FixedBuffer {
     base: *raw int8,
     cap: int64,
@@ -74,13 +86,18 @@ impl Allocator for FixedBuffer {
     }
 }
 
+/** A bump allocator over the caller's buffer, starting empty. Pass it by pointer
+ *  through `using` so the bump offset advances in place.
+ *  @param base the start of the backing buffer the allocator carves from
+ *  @param cap the buffer length in bytes; allocating past it aborts
+ *  @return a bump allocator positioned at the start of the buffer */
 export func fixed_buffer(base: *raw int8, cap: int64) -> FixedBuffer {
     return FixedBuffer { base: base, cap: cap, used: 0 }
 }
 
-// A debug allocator. It tracks each allocation to report leaks and catch a
-// double free, and poisons freed memory with 0xDD. Route a section of code
-// through it with `using`, then read debug_leaks() and debug_double_frees().
+/** A debug allocator. It tracks each allocation to report leaks and catch a
+ *  double free, and poisons freed memory with 0xDD. Route a section of code
+ *  through it with `using`, then read debug_leaks() and debug_double_frees(). */
 export struct Debug {
     tag: int64,
 }
@@ -94,6 +111,8 @@ impl Allocator for Debug {
     }
 }
 
+/** A fresh debug allocator to pass through `using`.
+ *  @return a debug allocator that tracks allocations and poisons freed memory */
 export func debug() -> Debug {
     return Debug { tag: 0 }
 }

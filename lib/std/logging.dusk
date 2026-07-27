@@ -1,9 +1,9 @@
-// std.logging: level gated logging over one process wide level word. The level
-// lives in the C runtime as a single atomic word, shared by every thread, so
-// `log_set_level` from any thread takes effect everywhere at the next log call.
-// The order is Debug < Info < Warn < Error, default Info, and a call fires when
-// its own level is at or above the current threshold. Every message goes to
-// stderr, tagged with its level, so program output on stdout stays clean.
+/** std.logging: level gated logging over one process wide level word. The level
+ *  lives in the C runtime as a single atomic word, shared by every thread, so
+ *  log_set_level from any thread takes effect everywhere at the next log call. The
+ *  order is Debug < Info < Warn < Error, default Info, and a call fires when its own
+ *  level is at or above the current threshold. Every message goes to stderr, tagged
+ *  with its level, so program output on stdout stays clean. */
 
 @paradigm procedural
 
@@ -12,6 +12,10 @@ foreign "C" {
     func cool_log_level_set(l: int64) -> void
 }
 
+/** The four severity levels, ordered least to most severe: Debug for tracing, Info
+ *  for normal progress, Warn for a recoverable oddity, Error for a failure. The
+ *  declaration order is the severity order, so a level fires only when it is at or
+ *  above the current threshold. */
 export enum LogLevel {
     Debug,
     Info,
@@ -30,30 +34,44 @@ func level_num(l: LogLevel) -> int64 {
     }
 }
 
-// Sets the threshold: a call at or above this level fires, anything below is
-// dropped. Takes effect for every thread at their next log call.
+/** Sets the process wide threshold: a later call at or above this level fires,
+ *  anything below it is dropped. The threshold is one shared runtime word, so the new
+ *  level takes effect for every thread at its next log call.
+ *  @param l the new minimum level to emit */
 export func log_set_level(l: LogLevel) -> void {
     cool_log_level_set(level_num(l))
 }
 
+/** Logs msg at the Debug level, printed to stderr as "[debug] msg" when the current
+ *  threshold is Debug. msg is borrowed and not freed here.
+ *  @param msg the message text */
 export func log_debug(msg: string) -> void {
     if 0 >= cool_log_level_get() {
         printerr("[debug] {}", msg)
     }
 }
 
+/** Logs msg at the Info level, printed to stderr as "[info] msg" when the current
+ *  threshold is Info or below. msg is borrowed and not freed here.
+ *  @param msg the message text */
 export func log_info(msg: string) -> void {
     if 1 >= cool_log_level_get() {
         printerr("[info] {}", msg)
     }
 }
 
+/** Logs msg at the Warn level, printed to stderr as "[warn] msg" when the current
+ *  threshold is Warn or below. msg is borrowed and not freed here.
+ *  @param msg the message text */
 export func log_warn(msg: string) -> void {
     if 2 >= cool_log_level_get() {
         printerr("[warn] {}", msg)
     }
 }
 
+/** Logs msg at the Error level, printed to stderr as "[error] msg". This is the most
+ *  severe level, so it fires at every threshold. msg is borrowed and not freed here.
+ *  @param msg the message text */
 export func log_error(msg: string) -> void {
     if 3 >= cool_log_level_get() {
         printerr("[error] {}", msg)

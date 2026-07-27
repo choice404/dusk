@@ -46,12 +46,16 @@ func collect_globals(r: *Resolver) -> void {
             // between the cast and the user function.
             if str_eq(fname, "int8") || str_eq(fname, "int16") || str_eq(fname, "int32") || str_eq(fname, "int64") || str_eq(fname, "char") || str_eq(fname, "rune") || str_eq(fname, "float32") || str_eq(fname, "float64") {
                 emit(r, quoted_msg("", fname, " is a primitive type name; a function cannot take it"), f.lo, f.hi)
-            }
-            // hash is a builtin call form the same way the cast names are, and a
-            // top-level function under the name would leave the checker and
-            // codegen resolving the same call differently, so it is refused at
-            // the declaration the same as a cast name.
-            if str_eq(fname, "hash") {
+            } else if is_builtin_name(fname) {
+                // Every other builtin call name (alloc, free, move, sizeof, hash, the
+                // print family, ptr_add, cstr, the file and parse helpers, the task
+                // builtins, the functional builtins, the debug hooks) is reserved the same
+                // way a cast name is: a top-level function under the name is silently
+                // shadowed by the builtin the checker and codegen resolve first, so its
+                // body is dead and an owning alloc splits at clang. Refuse it at the
+                // declaration in one coherent rule across paradigms. Methods and interface
+                // members live under ik_impl and ik_interface, not ik_func, so a type's
+                // own alloc or free method is untouched.
                 emit(r, quoted_msg("", fname, " is a builtin; a function cannot take its name"), f.lo, f.hi)
             }
             map_put((*r).globals, fname, 1)
@@ -285,6 +289,45 @@ func resolve_expr_slice(r: *Resolver, off: int64, len: int64) -> void {
     }
 }
 
+// Whether an expression is a spelled-out type rather than a value: a bare type
+// name (builtin, declared struct/enum/interface, or in-scope generic) or a tuple
+// of such. sizeof accepts a named type or a value, so a tuple type spelled inline
+// (int64, int32) is neither and must be rejected with the named-struct hint.
+func rs_type_spelling(r: *Resolver, id: int64) -> bool {
+    a: *Ast = (*r).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        n: string = ast_name(a, e.a)
+        // A name bound as a local shadows any type or top-level of the same name, so
+        // sizeof of a tuple built from such locals is a value, not a type spelling: check
+        // the scope stack before the type tables so `a := 5; sizeof((a, b))` reads the
+        // values' size rather than rejecting a phantom tuple type.
+        scopes4: *Vector<*Map<string, Var>> = (*r).scopes
+        mut si: int64 = vec_len(scopes4) - 1
+        while si >= 0 {
+            if map_has(vec_get(scopes4, si), n) { return false }
+            si = si - 1
+        }
+        if is_reserved_uint(n) { return true }
+        if is_type_name(n) { return true }
+        globals3: *Map<string, int64> = (*r).globals
+        generics3: *Map<string, int64> = (*r).cur_generics
+        if map_has(globals3, n) { return true }
+        if map_has(generics3, n) { return true }
+        return false
+    }
+    if e.kind == xk_tuple() {
+        if e.b == 0 { return false }
+        mut i: int64 = 0
+        while i < e.b {
+            if !rs_type_spelling(r, vec_get((*a).kids, e.a + i)) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    return false
+}
+
 func resolve_expr(r: *Resolver, id: int64) -> void {
     a: *Ast = (*r).ast
     e: ExprNode = vec_get((*a).exprs, id)
@@ -324,6 +367,9 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
                     } else if map_has(generics, n) {
                         walk_arg = false
                     }
+                } else if arg.kind == xk_tuple() && rs_type_spelling(r, arg_id) {
+                    emit(r, "sizeof takes a type or a value; a tuple type is written through a named struct", arg.lo, arg.hi)
+                    walk_arg = false
                 }
             }
             if walk_arg {

@@ -1,11 +1,21 @@
-// std.functional.either: a value of one of two types, Left or Right. Left is the
-// error or first case by convention, Right is the success or second case.
+/** std.functional.either: a value of one of two types, Left or Right. Left is the
+ *  error or first case by convention, Right is the success or second case. The
+ *  helpers below fold, map, and chain over the Right case, so Either threads a
+ *  computation forward while carrying a Left aside untouched. */
 
+@paradigm functional
+
+/** One of two values: Left holds an L, Right holds an R. By convention Left is the
+ *  error or first case and Right is the success or second case, so the mapping and
+ *  chaining helpers act on Right and pass a Left through. */
 export enum Either<L, R> {
     Left(l: L),
     Right(r: R),
 }
 
+/** Whether e is the Left case.
+ *  @param e the value to test
+ *  @return true when e is Left, false when it is Right */
 export func is_left<L, R>(e: Either<L, R>) -> bool {
     match e {
         Left(l) => return true,
@@ -13,6 +23,10 @@ export func is_left<L, R>(e: Either<L, R>) -> bool {
     }
 }
 
+/** The Left value, or fallback when e is Right.
+ *  @param e the value to inspect
+ *  @param fallback the L returned when e is Right
+ *  @return e's Left value, or fallback */
 export func left_or<L, R>(e: Either<L, R>, fallback: L) -> L {
     match e {
         Left(l) => return l,
@@ -20,6 +34,10 @@ export func left_or<L, R>(e: Either<L, R>, fallback: L) -> L {
     }
 }
 
+/** The Right value, or fallback when e is Left.
+ *  @param e the value to inspect
+ *  @param fallback the R returned when e is Left
+ *  @return e's Right value, or fallback */
 export func right_or<L, R>(e: Either<L, R>, fallback: R) -> R {
     match e {
         Left(l) => return fallback,
@@ -27,6 +45,10 @@ export func right_or<L, R>(e: Either<L, R>, fallback: R) -> R {
     }
 }
 
+/** Maps f over the Right value, passing a Left through unchanged.
+ *  @param e the value to map
+ *  @param f applied to a Right value to produce the new Right
+ *  @return Right(f(r)) when e is Right, else the original Left */
 export func either_map<L, R, B>(e: Either<L, R>, f: (R) -> B) -> Either<L, B> {
     match e {
         Left(l) => return Either.Left(l),
@@ -34,6 +56,10 @@ export func either_map<L, R, B>(e: Either<L, R>, f: (R) -> B) -> Either<L, B> {
     }
 }
 
+/** Maps f over the Left value, passing a Right through unchanged.
+ *  @param e the value to map
+ *  @param f applied to a Left value to produce the new Left
+ *  @return Left(f(l)) when e is Left, else the original Right */
 export func either_map_left<L, R, B>(e: Either<L, R>, f: (L) -> B) -> Either<B, R> {
     match e {
         Left(l) => return Either.Left(f(l)),
@@ -41,6 +67,11 @@ export func either_map_left<L, R, B>(e: Either<L, R>, f: (L) -> B) -> Either<B, 
     }
 }
 
+/** Chains f, which itself returns an Either, onto the Right value; a Left passes
+ *  through. This is the monadic bind for the Right channel.
+ *  @param e the value to chain from
+ *  @param f applied to a Right value to produce the next Either
+ *  @return f(r) when e is Right, else the original Left */
 export func either_and_then<L, R, B>(e: Either<L, R>, f: (R) -> Either<L, B>) -> Either<L, B> {
     match e {
         Left(l) => return Either.Left(l),
@@ -48,6 +79,11 @@ export func either_and_then<L, R, B>(e: Either<L, R>, f: (R) -> Either<L, B>) ->
     }
 }
 
+/** Recovers from a Left by running f, which returns an Either; a Right passes
+ *  through unchanged.
+ *  @param e the value to recover
+ *  @param f applied to a Left value to produce a replacement Either
+ *  @return f(l) when e is Left, else the original Right */
 export func either_or_else<L, R>(e: Either<L, R>, f: (L) -> Either<L, R>) -> Either<L, R> {
     match e {
         Left(l) => return f(l),

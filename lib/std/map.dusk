@@ -1,13 +1,13 @@
-// std.map: a hash map generic over both its key type K and its value type V.
-// Open addressing with linear probing over heap buffers that double and rehash
-// once the table is half full, which keeps an empty slot reachable so a probe
-// always terminates. Pass the map by pointer so inserts and growth persist.
-// A key is any hashable type, an integer of any width, a char, a rune, or a
-// string; keys hash through the hash builtin and compare with ==, so a string
-// key hashes and compares by its content and a scalar key by its value. The map
-// stores keys by value: a string key is the caller's pointer and must outlive
-// the map, exactly the contract the string-keyed map always had, and a scalar
-// key carries no lifetime at all.
+/** std.map: a hash map generic over both its key type K and its value type V. It is open
+ *  addressing with linear probing over heap buffers that double and rehash once the table
+ *  is half full, which keeps an empty slot reachable so a probe always terminates. Pass
+ *  the map by pointer so inserts and growth persist. A key is any hashable type, an
+ *  integer of any width, a char, a rune, or a string; keys hash through the hash builtin
+ *  and compare with ==, so a string key hashes and compares by its content and a scalar
+ *  key by its value. The map stores keys and values by value: a string key is the
+ *  caller's pointer and must outlive the map, and a scalar key carries no lifetime at
+ *  all. Iteration follows insertion order, a pure function of the insert sequence rather
+ *  than the hash layout. */
 
 @import std.string
 @import std.functional.maybe
@@ -22,6 +22,11 @@ func map_take_fault() -> void {
     abort()
 }
 
+/** A hash map as parallel slot buffers and an insertion order record. used marks which
+ *  slots hold a live entry, keys and vals are the parallel key and value buffers, len is
+ *  the live entry count, and cap is the slot count that doubles when the table is half
+ *  full. order lists the keys in first insertion order so iteration is deterministic. The
+ *  map owns every buffer and the order vector; map_free releases them all. */
 export struct Map<K, V> {
     used: *raw bool,
     keys: *raw K,
@@ -35,13 +40,23 @@ export struct Map<K, V> {
     order: *Vector<K>,
 }
 
-// The string hash the map used before the hash builtin existed, kept so an
-// external caller of the old name keeps working for one release. It is the same
-// polynomial rolling hash the builtin computes for a string.
+/** The string hash the map used before the hash builtin existed, kept so an external
+ *  caller of the old name keeps working. It forwards to the hash builtin, the same
+ *  polynomial rolling hash computed over a string's content. s is borrowed.
+ *  @param s the string to hash
+ *  @return the hash of s */
 export func map_hash(s: string) -> int64 {
     return hash(s)
 }
 
+/** A fresh empty map with a small backing table already allocated. Build one on the heap
+ *  with alloc(map_new()) and pass it by pointer so inserts persist.
+ *  @return an empty map with no entries
+ *  @example
+ *  m: *Map<string, int64> = alloc(map_new())
+ *  map_put(m, "a", 1)
+ *  map_free(m)
+ *  free(m) */
 export func map_new<K, V>() -> Map<K, V> {
     cap: int64 = 8
     u: *raw bool = alloc_bytes(cap * sizeof(bool))
@@ -124,6 +139,15 @@ func map_place<K, V>(m: *Map<K, V>, k: K, v: V) -> bool {
     return true
 }
 
+/** Inserts the pair (k, v), or overwrites the value when k is already present. A first
+ *  insertion records k in the insertion order, an overwrite leaves the order untouched.
+ *  The table grows and rehashes first when it is half full. k and v are stored by value:
+ *  an overwritten value is dropped in place and not freed, so a managed value the caller
+ *  replaces must be freed first or its object leaks, and a string key must outlive the
+ *  map.
+ *  @param m the map to insert into, borrowed and grown in place
+ *  @param k the key, stored by value
+ *  @param v the value, stored by value */
 export func map_put<K, V>(m: *Map<K, V>, k: K, v: V) -> void {
     if (*m).len * 2 >= (*m).cap {
         map_grow(m)
@@ -150,6 +174,14 @@ func map_forget_order<K, V>(m: *Map<K, V>, k: K) -> void {
     (*o).len = write
 }
 
+/** Removes the entry for k, returning true when it was present and false when it was not.
+ *  It clears the slot, repairs the probe cluster so later lookups still find their keys,
+ *  and forgets k from the insertion order. The stored value is dropped in place and not
+ *  freed, so a managed value must be read out with map_take rather than map_remove when
+ *  the caller needs to free its object; the key bytes are left to whoever else holds them.
+ *  @param m the map to remove from, borrowed and mutated in place
+ *  @param k the key to remove
+ *  @return true when k was a member before this call */
 export func map_remove<K, V>(m: *Map<K, V>, k: K) -> bool {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
@@ -182,16 +214,23 @@ export func map_remove<K, V>(m: *Map<K, V>, k: K) -> bool {
     return false
 }
 
-// Removes the entry for k and hands its value back to the caller as its own. Probes
-// for k the same way map_get does; on a hit it captures the value, then reuses
-// map_remove verbatim for the slot clear, cluster repair, and insertion-order forget,
-// and returns the captured value. A managed value's owner is now the caller. The
-// stored key K is dropped from the table and the order vector, but its heap bytes (a
-// string key) are untouched: they belong to whoever else holds the string. On a miss
-// it faults through map_take_fault; probe with map_has first when a key may be absent.
-// The head declares `owning`, so the checker classifies the removed value as the
-// caller's own and exempts it from the container-alias condemnation, so a direct free
-// of the take, or a free of an owner binding of it, is legal.
+/** Removes the entry for k and hands its value back to the caller as its own. It probes
+ *  for k the way map_get does; on a hit it captures the value, reuses map_remove for the
+ *  slot clear, cluster repair, and insertion order forget, and returns the captured
+ *  value. The stored key is dropped from the table and the order record, but its heap
+ *  bytes, a string key, are left to whoever else holds the string. On a miss it prints
+ *  "fatal: map_take of a missing key" and aborts, so probe with map_has first when a key
+ *  may be absent. The head declares owning, so the checker treats the removed value as the
+ *  caller's own and exempts it from the container alias condemnation: a direct free of the
+ *  take, or a free of an owner binding of it, is legal.
+ *  @param m the map to remove from, borrowed and mutated in place
+ *  @param k the key whose value to take; must be present
+ *  @return the removed value, now owned by the caller
+ *  @example
+ *  if map_has(m, "a") {
+ *      v := map_take(m, "a")
+ *      free(v)
+ *  } */
 export owning func map_take<K, V>(m: *Map<K, V>, k: K) -> V {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
@@ -209,6 +248,12 @@ export owning func map_take<K, V>(m: *Map<K, V>, k: K) -> V {
     return (*m).vals[idx]
 }
 
+/** Looks up k, returning Maybe.Some of its value when present and Maybe.None when absent.
+ *  The value inside Some is a copy the map still owns, a borrow for a managed pointer
+ *  value, so do not free it while the map holds it; drain with map_take to take ownership.
+ *  @param m the map to read, borrowed
+ *  @param k the key to look up
+ *  @return Maybe.Some of the value when k is present, Maybe.None otherwise */
 export func map_get<K, V>(m: *Map<K, V>, k: K) -> Maybe<V> {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
@@ -223,6 +268,10 @@ export func map_get<K, V>(m: *Map<K, V>, k: K) -> Maybe<V> {
     return Maybe.None
 }
 
+/** Whether k has an entry in m, without reading its value.
+ *  @param m the map to test, borrowed
+ *  @param k the key to look for
+ *  @return true when k is present */
 export func map_has<K, V>(m: *Map<K, V>, k: K) -> bool {
     mut idx: int64 = map_slot(m, k)
     while (*m).used[idx] {
@@ -237,30 +286,42 @@ export func map_has<K, V>(m: *Map<K, V>, k: K) -> bool {
     return false
 }
 
+/** The number of live entries in m.
+ *  @param m the map to measure, borrowed
+ *  @return the entry count */
 export func map_len<K, V>(m: *Map<K, V>) -> int64 {
     return (*m).len
 }
 
-// The key at insertion-order position i, read straight from the map's own order
-// record. Position i runs from 0 to map_len minus 1, the same range map_len
-// bounds, and visits every live key exactly once in the order the keys first
-// entered the map. The returned key is a borrow of the value the map still holds:
-// for a string key that is the string the map owns, so do not free it. Bounds
-// checked through vec_get, so an i outside the range faults rather than reads a
-// stale slot. Pair with map_len to walk a map without allocating the copy
-// map_keys returns.
+/** The key at insertion order position i, read straight from the map's own order record.
+ *  Position i runs from 0 to map_len minus 1 and visits every live key exactly once in
+ *  the order the keys first entered the map. The returned key is a borrow of the value
+ *  the map still holds, a string it owns, so do not free it. i is bounds checked through
+ *  vec_get, so an i outside the range faults rather than reads a stale slot. Pair with
+ *  map_len to walk a map without allocating the copy map_keys returns.
+ *  @param m the map to read, borrowed
+ *  @param i the insertion order position, in [0, map_len(m))
+ *  @return the key at position i, borrowed from the map
+ *  @example
+ *  mut i: int64 = 0
+ *  while i < map_len(m) {
+ *      k := map_key_at(m, i)
+ *      v := map_val_at(m, i)
+ *      i = i + 1
+ *  } */
 export func map_key_at<K, V>(m: *Map<K, V>, i: int64) -> K {
     return vec_get((*m).order, i)
 }
 
-// The value stored for the key at insertion-order position i. It reads that key
-// from the order record, then probes the table for its slot exactly as map_get
-// does and returns the value there. The returned value is a borrow the map still
-// owns; drain with map_take when you need the value as your own. Under the map's
-// order invariant every recorded key is live in the table, so the probe always
-// hits and the miss branch below is unreachable; it faults through map_take_fault
-// rather than return a garbage slot, matching map_take's miss discipline, so a
-// corrupted order record faults loudly instead of reading uninitialized memory.
+/** The value stored for the key at insertion order position i. It reads that key from the
+ *  order record, then probes the table for its slot the way map_get does and returns the
+ *  value there. The returned value is a borrow the map still owns; drain with map_take
+ *  when you need the value as your own. Under the map's order invariant every recorded key
+ *  is live, so the probe always hits; a corrupted order record faults through
+ *  "fatal: map_take of a missing key" rather than reading uninitialized memory.
+ *  @param m the map to read, borrowed
+ *  @param i the insertion order position, in [0, map_len(m))
+ *  @return the value at position i, borrowed from the map */
 export func map_val_at<K, V>(m: *Map<K, V>, i: int64) -> V {
     k: K = vec_get((*m).order, i)
     mut idx: int64 = map_slot(m, k)
@@ -277,14 +338,16 @@ export func map_val_at<K, V>(m: *Map<K, V>, i: int64) -> V {
     return (*m).vals[idx]
 }
 
-// The keys in insertion order, as a fresh vector the caller owns and frees with
-// vec_free and free. Each key is copied out of the map's own order record, so the
-// returned vector is independent of the map: freeing it never touches the map,
-// and map_free never touches it, so there is no shared owner. The copied elements
-// are the key values themselves; for a string key that is the string the map
-// still owns, so freeing the returned vector releases its buffer only. A key
-// appears once, at its first insertion, so iterating the result visits every
-// live entry exactly once in a deterministic order.
+/** The keys in insertion order, as a fresh vector the caller owns and frees with vec_free
+ *  and free. Each key is copied out of the map's own order record, so the returned vector
+ *  is independent of the map: freeing it never touches the map and map_free never touches
+ *  it, so there is no shared owner. The copied elements are the key values themselves; for
+ *  a string key that is the string the map still owns, so freeing the returned vector
+ *  releases its buffer only, never the key bytes. A key appears once, at its first
+ *  insertion, so iterating the result visits every live entry exactly once in a
+ *  deterministic order.
+ *  @param m the map to enumerate, borrowed
+ *  @return a fresh caller owned vector of the keys, in insertion order */
 export func map_keys<K, V>(m: *Map<K, V>) -> *Vector<K> {
     out: *Vector<K> = alloc(vec_new())
     src: *Vector<K> = (*m).order
@@ -296,6 +359,12 @@ export func map_keys<K, V>(m: *Map<K, V>) -> *Vector<K> {
     return out
 }
 
+/** Frees the map's slot buffers and its order vector, and nothing else. Keys and values
+ *  are stored by value and are never freed here, so for a managed key or value the caller
+ *  drains and frees each first, for example by walking map_key_at and map_val_at or by
+ *  map_take in a loop; a string key belongs to whoever else holds it. After this the caller
+ *  frees the Map allocation itself when it was heap allocated.
+ *  @param m the map whose buffers to release, borrowed */
 export func map_free<K, V>(m: *Map<K, V>) -> void {
     free((*m).used)
     free((*m).keys)

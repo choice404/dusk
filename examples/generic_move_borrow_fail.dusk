@@ -1,0 +1,18 @@
+// Borrow-side family: a bare type-parameter parameter is a borrow, so moving it rejects.
+// Only the owner of a managed pointer can move it, and the caller keeps ownership across
+// the call. The concrete func f(p: *Box) already rejects the same move.
+@paradigm procedural
+
+struct Box { v: int64 }
+
+func f<T>(p: T) -> void {
+    q := move(p)
+    free(q)
+}
+
+func main() -> int32 {
+    b: *Box = alloc(Box { v: 7 })
+    f(b)
+    println("{}", (*b).v)
+    return 0
+}

@@ -329,11 +329,32 @@ export func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
     if n.kind == ctyk_void() { return ast_type(a, tk_unit(), 0, 0, 0) }
     if n.kind == ctyk_error() { return ast_type(a, tk_named(), ast_intern(a, "error"), 0, 0) }
     if n.kind == ctyk_thread() { return ast_type(a, tk_named(), ast_intern(a, "thread"), 0, 0) }
-    if n.kind == ctyk_struct() || n.kind == ctyk_enum() { return ast_type(a, tk_named(), ast_intern(a, n.text), 0, 0) }
+    if n.kind == ctyk_struct() || n.kind == ctyk_enum() || n.kind == ctyk_iface() { return ast_type(a, tk_named(), ast_intern(a, n.text), 0, 0) }
     if n.kind == ctyk_ptr() { return ast_type(a, tk_ptr(), cty_to_ast(c, n.a), 0, 0) }
     if n.kind == ctyk_rawptr() { return ast_type(a, tk_rawptr(), cty_to_ast(c, n.a), 0, 0) }
     if n.kind == ctyk_slice() { return ast_type(a, tk_slice(), cty_to_ast(c, n.a), 0, 0) }
     if n.kind == ctyk_array() { return ast_type(a, tk_array(), cty_to_ast(c, n.a), n.b, 0) }
+    if n.kind == ctyk_tuple() {
+        elems: *Vector<int64> = alloc(vec_new())
+        mut ti: int64 = 0
+        while ti < n.b {
+            vec_push(elems, cty_to_ast(c, cty_tuple_elem(c, ty, ti)))
+            ti = ti + 1
+        }
+        off, len := ast_kids(a, elems)
+        return ast_type(a, tk_tuple(), off, len, 0)
+    }
+    if n.kind == ctyk_closure() {
+        rid: int64 = cty_to_ast(c, cty_closure_ret(c, ty))
+        ptypes: *Vector<int64> = alloc(vec_new())
+        mut pi: int64 = 0
+        while pi < n.b {
+            vec_push(ptypes, cty_to_ast(c, cty_closure_param(c, ty, pi)))
+            pi = pi + 1
+        }
+        poff, plen := ast_kids(a, ptypes)
+        return ast_type(a, tk_func(), poff, plen, rid)
+    }
     return ast_type(a, tk_infer(), 0, 0, 0)
 }
 

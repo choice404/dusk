@@ -1,10 +1,10 @@
-// mono: the monomorphization driver. rewrite_item copies every non-generic item
-// in source order, emit_ty and instantiate feed the worklist, force_future_instances
-// mints one Future per async func, then the worklist drains LIFO under the 10000
-// instantiation budget. requested gates each distinct mangled name once, so the
-// interface backstop and the budget diagnostic fire at most once per site. The
-// ground items land in a fresh item table dumped through the parser's ast_dump; the
-// arena nodes they reference are appended in place, orphan leakage by design.
+/** mono: the monomorphization driver. rewrite_item copies every non-generic item
+ *  in source order, emit_ty and instantiate feed the worklist, force_future_instances
+ *  mints one Future per async func, then the worklist drains LIFO under the 10000
+ *  instantiation budget. requested gates each distinct mangled name once, so the
+ *  interface backstop and the budget diagnostic fire at most once per site. The
+ *  ground items land in a fresh item table dumped through the parser's ast_dump; the
+ *  arena nodes they reference are appended in place, orphan leakage by design. */
 
 @paradigm procedural
 
@@ -32,6 +32,13 @@ func wl_pop(wl: *Vector<WorkItem>) -> WorkItem {
     return item
 }
 
+/** Emits a diagnostic naming each unresolved instantiation the worklist could not
+ *  reach, the report the interface backstop and unresolved-name paths raise.
+ *  @param m the monomorphizer to record diagnostics against
+ *  @param missing the mangled names that could not be resolved
+ *  @param what the kind of item, used in the message
+ *  @param lo the span start of the requesting site
+ *  @param hi the span end of the requesting site */
 export func report_missing(m: *Mono, missing: *Vector<string>, what: string, lo: int64, hi: int64) -> void {
     mut i: int64 = 0
     while i < vec_len(missing) {
@@ -50,6 +57,14 @@ export func report_missing(m: *Mono, missing: *Vector<string>, what: string, lo:
     }
 }
 
+/** Requests one instantiation of a generic name at a concrete type-argument set,
+ *  pushing it onto the worklist the first time that mangled name is seen so each
+ *  distinct instance is emitted once.
+ *  @param m the monomorphizer whose worklist and requested set are updated
+ *  @param name the generic item name to instantiate
+ *  @param args the concrete type arguments
+ *  @param lo the span start of the requesting site
+ *  @param hi the span end of the requesting site */
 export func enqueue(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi: int64) -> void {
     a: *Ast = (*m).ast
     mg: string = mono_mangle(a, name, args)
@@ -80,6 +95,14 @@ export func enqueue(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi:
     vec_push(m_worklist(m), WorkItem { name: name, args: argcopy, lo: lo, hi: hi })
 }
 
+/** Enqueues an instantiation and returns its mangled name, the seam a call or type
+ *  reference uses to name the concrete instance it will resolve to.
+ *  @param m the monomorphizer whose worklist is fed
+ *  @param name the generic item name to instantiate
+ *  @param args the concrete type arguments
+ *  @param lo the span start of the requesting site
+ *  @param hi the span end of the requesting site
+ *  @return the mangled name of the requested instance */
 export func instantiate(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi: int64) -> string {
     a: *Ast = (*m).ast
     cargs: *Vector<int64> = alloc(vec_new())
@@ -92,6 +115,14 @@ export func instantiate(m: *Mono, name: string, args: *Vector<int64>, lo: int64,
     return mono_mangle(a, name, cargs)
 }
 
+/** Emits the ground form of an AST type, enqueuing any generic instantiation it names
+ *  and returning the type node id codegen will see, the type-side feeder of the
+ *  worklist.
+ *  @param m the monomorphizer whose worklist is fed
+ *  @param id the AST type node to ground
+ *  @param lo the span start for any diagnostic
+ *  @param hi the span end for any diagnostic
+ *  @return the ground AST type node id */
 export func emit_ty(m: *Mono, id: int64, lo: int64, hi: int64) -> int64 {
     a: *Ast = (*m).ast
     n: TypeNode = vec_get((*a).types, id)
@@ -141,6 +172,14 @@ export func emit_ty(m: *Mono, id: int64, lo: int64, hi: int64) -> int64 {
     return mt_named0(a, "int64")
 }
 
+/** Emits the ground form of a field type after applying a type-parameter
+ *  substitution, the emit_ty path a struct or enum instantiation takes for each field.
+ *  @param m the monomorphizer whose worklist is fed
+ *  @param id the field's AST type node
+ *  @param subst the type-parameter to argument substitution for this instance
+ *  @param lo the span start for any diagnostic
+ *  @param hi the span end for any diagnostic
+ *  @return the ground AST type node id for the field */
 export func emit_field_ty(m: *Mono, id: int64, subst: *Map<string, int64>, lo: int64, hi: int64) -> int64 {
     applied: int64 = subst_apply(m, id, subst)
     check_future_spell(m, applied, lo, hi)
@@ -374,9 +413,9 @@ func mono_run(m: *Mono) -> void {
     }
 }
 
-// Runs monomorphization over the checked module and returns the Mono record, whose
-// `out` holds the ground items, `diags` the inference and ban diagnostics, and
-// `future_table` the mangled Future to element map.
+/** Runs monomorphization over the checked module and returns the Mono record, whose
+ *  `out` holds the ground items, `diags` the inference and ban diagnostics, and
+ *  `future_table` the mangled Future to element map. */
 export func mono_expand(a: *Ast, tyarena: *TyArena, muts: *Map<string, MutTupleEntry>) -> *Mono {
     m: *Mono = mono_new(a, tyarena, muts)
     mono_run(m)
@@ -416,13 +455,17 @@ func ast_with_items(a: *Ast, items: *Vector<ItemNode>) -> *Ast {
     })
 }
 
-// The monomorphized ground module: a shallow Ast presenting the ground item table
-// over the shared arenas. The ground double pass type-checks it and the mono dump
-// renders it.
+/** The monomorphized ground module: a shallow Ast presenting the ground item table
+ *  over the shared arenas. The ground double pass type-checks it and the mono dump
+ *  renders it. */
 export func mono_ground(m: *Mono) -> *Ast {
     return ast_with_items((*m).ast, (*m).out)
 }
 
+/** The canonical parser-format dump of the monomorphized ground module, the output the
+ *  mono command prints and the ground double pass re-checks.
+ *  @param m the monomorphizer holding the ground items
+ *  @return the ground module rendered in the parser dump format */
 export func mono_dump(m: *Mono) -> string {
     return ast_dump(mono_ground(m))
 }

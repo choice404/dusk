@@ -1,8 +1,8 @@
-// std.concurrent.channel: a bounded, thread safe queue for handing values
-// between threads. A send blocks while the channel is full, a recv blocks
-// while it is empty, and closing wakes everyone. The handle is one word and
-// copies freely; every copy names the same channel. The sanctioned shutdown
-// order is close, then join every thread that touches the channel, then free.
+/** std.concurrent.channel: a bounded, thread safe queue for handing values
+ *  between threads. A send blocks while the channel is full, a recv blocks
+ *  while it is empty, and closing wakes everyone. The handle is one word and
+ *  copies freely; every copy names the same channel. The sanctioned shutdown
+ *  order is close, then join every thread that touches the channel, then free. */
 
 @import std.async.future
 
@@ -18,23 +18,44 @@ foreign "C" {
     func cool_chan_free(ch: *void) -> void
 }
 
+/** A channel handle, one word wrapping the shared ring the runtime owns. The
+ *  handle copies by value and every copy names the same channel, so passing it
+ *  to a spawned thread shares the queue rather than duplicating it. */
 export struct Channel<T> {
     h: *void,
 }
 
-// Creates a channel holding at most cap elements. The binding annotation pins
-// the element type, as in jobs: Channel<int64> = chan_new(8). A capacity
-// below one or exhausted memory is fatal, the allocator's contract.
+/** Creates a channel holding at most cap elements. The binding annotation pins
+ *  the element type, as in jobs: Channel<int64> = chan_new(8). A capacity
+ *  below one or exhausted memory is fatal, the allocator's contract.
+ *  @param cap the ring capacity, at least one; senders block once cap elements are buffered
+ *  @return a channel whose every copy names the same ring
+ *  @example
+ *  jobs: Channel<int64> = chan_new(8)
+ *  producer := spawn worker(jobs)
+ *  e := chan_send(jobs, 42)
+ *  e.ignore()
+ *  chan_close(jobs)
+ *  join producer
+ *  chan_free(jobs) */
 export func chan_new<T>(cap: int64) -> Channel<T> {
     return Channel { h: cool_chan_new(sizeof(T), cap) }
 }
 
-// Sends x, blocking while the channel is full. The value crosses by copy, so
-// hand over a managed pointer with chan_send(c, move(p)) and let the receiver
-// own it. The error exists when the channel is closed; a moved value refused
-// that way never entered the ring and its record leaks, so finish sending
-// before anyone closes. An element that could view this frame, a slice, a
-// closure, or an interface value, is rejected at compile time.
+/** Sends x, blocking while the channel is full. The value crosses by copy, so
+ *  hand over a managed pointer with chan_send(c, move(p)) and let the receiver
+ *  own it. The error exists when the channel is closed; a moved value refused
+ *  that way never entered the ring and its record leaks, so finish sending
+ *  before anyone closes. An element that could view this frame, a slice, a
+ *  closure, or an interface value, is rejected at compile time.
+ *  @param c the channel to send on
+ *  @param x the value to enqueue, copied into the ring
+ *  @return an error that exists only when the channel was closed
+ *  @example
+ *  e := chan_send(jobs, 7)
+ *  if e.exists() {
+ *      println(e.toString())
+ *  } */
 export func chan_send<T>(c: Channel<T>, x: T) -> error {
     buf: *raw T = alloc_bytes(sizeof(T))
     buf[0] = x
@@ -46,9 +67,19 @@ export func chan_send<T>(c: Channel<T>, x: T) -> error {
     return error {}
 }
 
-// Receives the oldest value, blocking while the channel is empty. The error
-// exists once the channel is closed and drained, so a loop breaking on
-// e.exists() consumes everything senders managed to deliver.
+/** Receives the oldest value, blocking while the channel is empty. The error
+ *  exists once the channel is closed and drained, so a loop breaking on
+ *  e.exists() consumes everything senders managed to deliver.
+ *  @param c the channel to receive from
+ *  @return the oldest value paired with an error that exists only once the channel is closed and drained
+ *  @example
+ *  while true {
+ *      v, e := chan_recv(jobs)
+ *      if e.exists() {
+ *          break
+ *      }
+ *      consume(v)
+ *  } */
 export func chan_recv<T>(c: Channel<T>) -> (T, error) {
     buf: *raw T = alloc_bytes(sizeof(T))
     rc := cool_chan_recv(c.h, buf)
@@ -60,23 +91,31 @@ export func chan_recv<T>(c: Channel<T>) -> (T, error) {
     return (v, error {})
 }
 
-// Receives the oldest value on the event loop without parking the loop thread.
-// A detached helper blocks in the same recv off-thread and completes the loop
-// future when a value or the drained close arrives, so awaiting this yields the
-// same pair chan_recv would: the value and the empty error, or the zero pattern
-// for T beside "receive on a closed, drained channel". The binding annotation
-// pins the element type, as in f: Future<int64> = chan_recv_async(c). An element
-// that could view a frame, a slice, a closure, or an interface value, is
-// rejected at compile time, the future element ban at the minting site.
+/** Receives the oldest value on the event loop without parking the loop thread.
+ *  A detached helper blocks in the same recv off-thread and completes the loop
+ *  future when a value or the drained close arrives, so awaiting this yields the
+ *  same pair chan_recv would: the value and the empty error, or the zero pattern
+ *  for T beside "receive on a closed, drained channel". The binding annotation
+ *  pins the element type, as in f: Future<int64> = chan_recv_async(c). An element
+ *  that could view a frame, a slice, a closure, or an interface value, is
+ *  rejected at compile time, the future element ban at the minting site.
+ *  @param c the channel to receive from
+ *  @return a loop future that completes with the value and error chan_recv would return
+ *  @example
+ *  f: Future<int64> = chan_recv_async(jobs)
+ *  v, e := await f */
 export func chan_recv_async<T>(c: Channel<T>) -> Future<T> {
     f: Future<T> = future_wrap(cool_chan_recv_future(c.h, sizeof(T)))
     return f
 }
 
-// Sends x only if the channel has room right now, never blocking. The error
-// says "send on a closed channel" or "channel is full", so the two refusals
-// read differently. A moved value refused either way leaks its record, the
-// chan_send contract.
+/** Sends x only if the channel has room right now, never blocking. The error
+ *  says "send on a closed channel" or "channel is full", so the two refusals
+ *  read differently. A moved value refused either way leaks its record, the
+ *  chan_send contract.
+ *  @param c the channel to send on
+ *  @param x the value to enqueue when room exists
+ *  @return an error that exists when the channel is closed or full */
 export func chan_try_send<T>(c: Channel<T>, x: T) -> error {
     buf: *raw T = alloc_bytes(sizeof(T))
     buf[0] = x
@@ -91,9 +130,11 @@ export func chan_try_send<T>(c: Channel<T>, x: T) -> error {
     return error {}
 }
 
-// Receives only if a value is ready right now, never blocking. The error
-// says "receive on a closed, drained channel" or "channel is empty", and the
-// value beside either error is the zero pattern for T.
+/** Receives only if a value is ready right now, never blocking. The error
+ *  says "receive on a closed, drained channel" or "channel is empty", and the
+ *  value beside either error is the zero pattern for T.
+ *  @param c the channel to receive from
+ *  @return a value paired with an error that exists when the channel is empty or closed and drained */
 export func chan_try_recv<T>(c: Channel<T>) -> (T, error) {
     buf: *raw T = alloc_bytes(sizeof(T))
     rc := cool_chan_try_recv(c.h, buf)
@@ -108,10 +149,13 @@ export func chan_try_recv<T>(c: Channel<T>) -> (T, error) {
     return (v, error {})
 }
 
-// Receives, blocking at most ms milliseconds against a monotonic clock. The
-// error says "receive on a closed, drained channel" or "receive timed out",
-// and the value beside either error is the zero pattern for T. A timeout of
-// zero polls once and gives blocked senders no chance to arrive.
+/** Receives, blocking at most ms milliseconds against a monotonic clock. The
+ *  error says "receive on a closed, drained channel" or "receive timed out",
+ *  and the value beside either error is the zero pattern for T. A timeout of
+ *  zero polls once and gives blocked senders no chance to arrive.
+ *  @param c the channel to receive from
+ *  @param ms the deadline in milliseconds; zero polls once and returns
+ *  @return a value paired with an error that exists on timeout or on a closed, drained channel */
 export func chan_recv_timeout<T>(c: Channel<T>, ms: int64) -> (T, error) {
     buf: *raw T = alloc_bytes(sizeof(T))
     rc := cool_chan_recv_timeout(c.h, buf, ms)
@@ -126,16 +170,18 @@ export func chan_recv_timeout<T>(c: Channel<T>, ms: int64) -> (T, error) {
     return (v, error {})
 }
 
-// Closes the channel and wakes every blocked sender and receiver. Idempotent.
-// Values already buffered stay receivable after the close.
+/** Closes the channel and wakes every blocked sender and receiver. Idempotent.
+ *  Values already buffered stay receivable after the close.
+ *  @param c the channel to close */
 export func chan_close<T>(c: Channel<T>) -> void {
     cool_chan_close(c.h)
 }
 
-// Frees the channel. Freeing while a thread is blocked inside a send or recv
-// is fatal. Close, join, then free. Managed pointers still buffered here are
-// dropped as raw bytes and leak, so drain before freeing when elements own
-// heap records.
+/** Frees the channel. Freeing while a thread is blocked inside a send or recv
+ *  is fatal. Close, join, then free. Managed pointers still buffered here are
+ *  dropped as raw bytes and leak, so drain before freeing when elements own
+ *  heap records.
+ *  @param c the channel to free after every touching thread has joined */
 export func chan_free<T>(c: Channel<T>) -> void {
     cool_chan_free(c.h)
 }

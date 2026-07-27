@@ -436,6 +436,15 @@ export func p_string_body_id(p: *Parser, t: Token) -> int64 {
     return intern_owned((*(*p).ast).interner, body)
 }
 
+// The interned format-cooked body of a string literal used as a print format, read from
+// its raw source span so an escaped brace survives as a literal brace rather than a
+// placeholder delimiter. lo/hi are the string token span, quotes included, the same span
+// p_string_body_id reads.
+export func p_fmt_body_id(p: *Parser, lo: int64, hi: int64) -> int64 {
+    body: string = fmt_cook_internal((*p).src, (*p).n, lo, hi)
+    return intern_owned((*(*p).ast).interner, body)
+}
+
 // The interned internal-form body of an f-string chunk token. A full or head chunk
 // opens with the two-byte f" prefix, a mid or tail chunk with the one-byte } that
 // closed the prior hole; every chunk ends with a single { or " delimiter one byte

@@ -1,4 +1,4 @@
-// loader: P4 import resolver, parser merger, privatizer, and namespace fold.
+/** loader: P4 import resolver, parser merger, privatizer, and namespace fold. */
 
 @paradigm procedural
 
@@ -19,6 +19,10 @@
 @import paradigm
 @import prescan
 
+/** The loader's whole output: module is the merged AST across the root and its
+ *  imports, has_module gates the passes that read it, errors holds the load-stage
+ *  diagnostics, files backs span rendering, and links and csources carry the C
+ *  boundary directives the driver forwards to clang. */
 export struct Program {
     module: *Ast,
     has_module: bool,
@@ -30,6 +34,11 @@ export struct Program {
 
 struct ParsedFile {
     ok: bool,
+    // Whether the file lexed and parsed into a valid AST, before the paradigm gate ran. A
+    // gate error leaves the AST intact, so the loader can still walk the imports to collect
+    // their own diagnostics (a reserved-name reject in an imported module, say) rather than
+    // stopping at the root's gate error and masking them.
+    struct_ok: bool,
     ast: *Ast,
     src: Source,
 }
@@ -216,10 +225,10 @@ func last_dot(s: string) -> int64 {
     return last
 }
 
-// The package cache root dawn clones git imports into and the loader resolves a
-// slash-bearing import against. Exported so the dawn root, a second entry point
-// that imports this file, reaches it by its bare name: privatize renames every
-// unexported item per file, so an unexported helper is invisible across roots.
+/** The package cache root dawn clones git imports into and the loader resolves a
+ *  slash-bearing import against. Exported so the dawn root, a second entry point
+ *  that imports this file, reaches it by its bare name: privatize renames every
+ *  unexported item per file, so an unexported helper is invisible across roots. */
 export func dawn_cache() -> string {
     dc: string = env("DAWN_CACHE")
     if str_len(dc) > 0 {
@@ -295,7 +304,7 @@ func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
     s, e := source_load(path)
     if e.exists() {
         vec_push(errors, read_error(path, e))
-        return ParsedFile { ok: false, ast: ast_new(), src: s }
+        return ParsedFile { ok: false, struct_ok: false, ast: ast_new(), src: s }
     }
     lx: *Lexer = lex(s.text, s.len)
     p: *Parser = parser_new(lx_tokens(lx), s.text, s.len)
@@ -316,6 +325,7 @@ func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
         ok = false
         j = j + 1
     }
+    struct_ok: bool = ok
     if ok {
         paradigm_errs: *Vector<SpanDiagnostic> = paradigm_check(a)
         mut k: int64 = 0
@@ -326,7 +336,7 @@ func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
             k = k + 1
         }
     }
-    return ParsedFile { ok: ok, ast: a, src: s }
+    return ParsedFile { ok: ok, struct_ok: struct_ok, ast: a, src: s }
 }
 
 func ast_import_strings(a: *Ast) -> *Vector<string> {
@@ -534,6 +544,13 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<L
     }
 }
 
+/** The P4 loader entry point: lexes and parses the root, recursively loads every
+ *  import, privatizes and paradigm-gates each file, and merges them into one flat
+ *  module, the single seam the driver and every dump command reach the surface
+ *  module through.
+ *  @param root_path the root source file to load from
+ *  @param prog the program name used in diagnostics
+ *  @return the merged Program, with has_module false and errors populated on failure */
 export func load(root_path: string, prog: string) -> Program {
     errors: *Vector<LoadDiag> = alloc(vec_new())
     files: *Vector<FileSrc> = alloc(vec_new())
@@ -549,7 +566,13 @@ export func load(root_path: string, prog: string) -> Program {
     mut base: int64 = 0
 
     root: ParsedFile = parse_file(root_path, errors)
-    if !root.ok {
+    // A structurally broken root (a lex or parse error) cannot be walked further. A root
+    // that only failed the paradigm gate keeps a valid AST, so the walk continues to gate
+    // its imports too: an imported module that reserves a builtin name surfaces its own
+    // reject rather than being masked by the root's gate error. The check pipeline reports
+    // every collected load diagnostic and stops before resolve, so no pass runs on the
+    // gate-violating module.
+    if !root.struct_ok {
         return empty_program(errors, files, links, csources)
     }
     map_put(visited, canon(root_path), 1)

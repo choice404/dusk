@@ -627,7 +627,12 @@ func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, arg_len: 
                 tc_emit(tc, task_holds_view_msg(name, cap), arg.lo, arg.hi)
             }
         }
-        if is_managed_ty(tc, t) && own_of(tc, cap) != own_moved() {
+        // A borrowed managed capture is re-declared a borrow inside the task lambda so
+        // freeing or moving it there rejects. A bare type-parameter capture is treated
+        // the same: at some instantiation T is a managed pointer the enclosing frame
+        // owns, and the concrete twin already rejects the free inside the lambda. T lowers
+        // to a hole, so the capture's declared AST type is consulted through its name.
+        if is_managed_or_typaram_name(tc, t, cap) && own_of(tc, cap) != own_moved() {
             vec_push(borrowed, cap)
         }
         cidx = cidx + 1
@@ -925,6 +930,10 @@ func alias_result_msg(verb: string) -> string {
 export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> int64 {
     a: *Ast = (*tc).ast
     f: ExprNode = vec_get((*a).exprs, callee_id)
+    if f.kind == xk_lambda() {
+        tc_emit(tc, "a lambda literal cannot be called where it is written; bind it to a name and call the name", f.lo, f.hi)
+        return ty_unknown((*tc).ty)
+    }
     if f.kind == xk_field() {
         mname: string = ast_name(a, f.b)
         base: ExprNode = vec_get((*a).exprs, f.a)

@@ -63,6 +63,20 @@ export func gen_async_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode) -> string 
         gs_bind(st, ga_copy(ast_name(a, p2.name)), LocalVal { ty: vec_get(param_tys, j), op: gep })
         j = j + 1
     }
+    // A using parameter names the ambient allocator, the same scan gen_func runs. The
+    // param lives in the async frame (bound to its frame GEP above), so alloc and free in
+    // the body resolve the allocator by name through gs_lookup_frame0 and load it from the
+    // slot at each site: after an await suspension the poll re-enters and re-reads the
+    // allocator from the frame, so it survives the suspension exactly as any other param.
+    mut ui: int64 = 0
+    while ui < f.params_len {
+        up: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + ui))
+        if up.is_using {
+            (*st).allocator_name = ga_copy(ast_name(a, up.name))
+            (*st).allocator_ty = cty_lower_ast(c, a, up.ty)
+        }
+        ui = ui + 1
+    }
     place_named_label(fb, "start")
     block: BlockNode = vec_get((*a).blocks, f.body)
     mut k: int64 = 0

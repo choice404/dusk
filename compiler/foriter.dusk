@@ -419,9 +419,13 @@ func fi_impl(a: *Ast, fc: ForCtx, id: int64) -> int64 {
     return ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)
 }
 
-// Rewrites every classified container for in the module into its index loop. A
-// no-op when the table is empty, so a program that iterates no container is left
-// byte-identical and its emitted IR unchanged.
+/** Rewrites every classified container for in the module into its index loop, the
+ *  pre-mono pass that keeps container layout in dusk source. A no-op when the table
+ *  is empty, so a program that iterates no container is left byte-identical and its
+ *  emitted IR unchanged.
+ *  @param a the merged module whose classified for loops are rewritten in place
+ *  @param for_iters the surface pass table mapping a for stmt id to its class: 1 vector, 2 map-keys, 3 map-pairs
+ *  @param for_iter_asts the companion table mapping a for stmt id to its iterand AST type id when one was recovered */
 export func foriter(a: *Ast, for_iters: *Map<int64, int64>, for_iter_asts: *Map<int64, int64>) -> void {
     if map_len(for_iters) == 0 { return }
     fc: ForCtx = ForCtx { classes: for_iters, asts: for_iter_asts }

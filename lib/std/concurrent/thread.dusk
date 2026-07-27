@@ -1,11 +1,24 @@
-// std.concurrent.thread: helpers around the spawn and join builtins. The
-// builtins themselves need no import; this module carries what rides beside
-// them, starting with sleep.
+/** std.concurrent.thread: helpers around the spawn and join builtins. The
+ *  builtins themselves need no import; spawn f(args) starts f on a fresh OS
+ *  thread and yields a typed handle, and join on that handle blocks until the
+ *  thread returns and hands back its value, so a thread can carry any return
+ *  type across the join. This module carries what rides beside those builtins,
+ *  starting with sleep. */
+
+@paradigm procedural
 
 foreign "C" {
     func cool_sleep_ms(ms: int64) -> void
 }
 
+/** Blocks the calling thread for ms milliseconds against the wall clock. This
+ *  parks a real OS thread, so a task on the event loop uses sleep_async instead,
+ *  which yields the loop while it waits.
+ *  @param ms the sleep duration in milliseconds; a non positive value returns at once
+ *  @example
+ *  worker := spawn compute(input)
+ *  sleep_ms(10)
+ *  result := join worker */
 export func sleep_ms(ms: int64) -> void {
     cool_sleep_ms(ms)
 }

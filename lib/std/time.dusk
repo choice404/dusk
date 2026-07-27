@@ -1,22 +1,18 @@
-// std.time: wall clock reads and a pure dusk proleptic Gregorian civil
-// calendar over them, UTC only. now_ns is the one foreign call, a shim over
-// clock_gettime(CLOCK_REALTIME); now_ms and now_unix are pure arithmetic on
-// top of it. Everything from a Unix timestamp to a calendar date and back
-// (civil_from_unix, unix_from_civil) and to ISO 8601 text (format_iso8601)
-// is ordinary dusk over int64 seconds, no C call and no struct tm, since
-// dusk never reads a libc struct's own layout. There is no time zone
-// support: every value here is UTC, and a caller wanting local time
-// converts outside this module.
-//
-// The calendar arithmetic is Howard Hinnant's days_from_civil /
-// civil_from_days (http://howardhinnant.github.io/date_algorithms.html,
-// public domain), which maps a (year, month, day) triple to a day count
-// from the epoch and back with no lookup table, correct proleptically over
-// the whole int64 range and exact through at least year 2400 on both
-// directions, verified here against Python's own calendar for 200,000
-// random dates before this module shipped. It assumes a divide that
-// truncates toward zero, dusk's own `/` and `%`, exactly the C rule it was
-// written against.
+/** std.time: wall clock reads and a pure dusk proleptic Gregorian civil calendar over
+ *  them, UTC only. now_ns is the one foreign call, a shim over clock_gettime with
+ *  CLOCK_REALTIME; now_ms and now_unix are pure arithmetic on top of it. Everything from
+ *  a Unix timestamp to a calendar date and back, civil_from_unix and unix_from_civil, and
+ *  to ISO 8601 text, format_iso8601, is ordinary dusk over int64 seconds, no C call and
+ *  no struct tm, since dusk never reads a libc struct's own layout. There is no time zone
+ *  support: every value here is UTC, and a caller wanting local time converts outside this
+ *  module.
+ *
+ *  The calendar arithmetic is Howard Hinnant's days_from_civil and civil_from_days
+ *  (http://howardhinnant.github.io/date_algorithms.html, public domain), which maps a
+ *  (year, month, day) triple to a day count from the epoch and back with no lookup table,
+ *  correct proleptically over the whole int64 range and exact through at least year 2400
+ *  in both directions. It assumes a divide that truncates toward zero, dusk's own / and %,
+ *  exactly the C rule it was written against. */
 
 @paradigm procedural
 
@@ -26,26 +22,30 @@ foreign "C" {
     func cool_unix_now_ns() -> int64
 }
 
-// Nanoseconds since the Unix epoch, UTC.
+/** The current wall clock time in nanoseconds since the Unix epoch, UTC.
+ *  @return nanoseconds since 1970-01-01T00:00:00Z */
 export func now_ns() -> int64 {
     return cool_unix_now_ns()
 }
 
-// Milliseconds since the Unix epoch, UTC.
+/** The current wall clock time in milliseconds since the Unix epoch, UTC, the nanosecond
+ *  reading divided down and so truncated toward the past.
+ *  @return milliseconds since 1970-01-01T00:00:00Z */
 export func now_ms() -> int64 {
     return cool_unix_now_ns() / 1000000
 }
 
-// Seconds since the Unix epoch, UTC.
+/** The current wall clock time in whole seconds since the Unix epoch, UTC, the nanosecond
+ *  reading divided down and so truncated toward the past.
+ *  @return seconds since 1970-01-01T00:00:00Z */
 export func now_unix() -> int64 {
     return cool_unix_now_ns() / 1000000000
 }
 
-// A UTC calendar date and time, one field per component, each a plain
-// int64: year (proleptic Gregorian, so a year before 1 is zero or
-// negative), month in [1, 12], day in [1, the month's length], and hour,
-// minute, second in their ordinary ranges. There is no sub-second field;
-// now_ns and now_ms carry finer precision on their own.
+/** A UTC calendar date and time, one int64 field per component: year in the proleptic
+ *  Gregorian calendar, so a year before 1 is zero or negative; month in [1, 12]; day in
+ *  [1, the month's length]; and hour, minute, second in their ordinary ranges. There is
+ *  no sub second field, since now_ns and now_ms carry finer precision on their own. */
 export struct Civil {
     year: int64,
     month: int64,
@@ -125,8 +125,15 @@ func civil_from_days(z: int64) -> Ymd {
     return Ymd { year: yy, month: m, day: d }
 }
 
-// The UTC calendar reading of a Unix timestamp, in whole seconds. civil_from_unix(0)
-// is 1970-01-01T00:00:00, and a negative secs reads a date before the epoch.
+/** The UTC calendar reading of a Unix timestamp given in whole seconds. civil_from_unix(0)
+ *  is 1970-01-01T00:00:00, and a negative secs reads a date before the epoch. It is the
+ *  exact inverse of unix_from_civil for an in range Civil.
+ *  @param secs whole seconds since the Unix epoch, negative before it
+ *  @return the UTC calendar reading of secs
+ *  @example
+ *  c: Civil = civil_from_unix(now_unix())
+ *  iso: string = format_iso8601(c)
+ *  free(iso) */
 export func civil_from_unix(secs: int64) -> Civil {
     days: int64 = floor_div(secs, 86400)
     tod: int64 = floor_mod(secs, 86400)
@@ -145,21 +152,24 @@ export func civil_from_unix(secs: int64) -> Civil {
     }
 }
 
-// The Unix timestamp, in whole seconds, of a UTC calendar reading. Out of
-// range field values (a month past 12, a day past its month's length) are
-// not rejected; they roll forward the same way Hinnant's day count arithmetic
-// always does, the way most civil calendar libraries treat an out of range
-// field as a relative offset rather than a fault.
+/** The Unix timestamp in whole seconds of a UTC calendar reading. Out of range field
+ *  values, a month past 12 or a day past its month's length, are not rejected; they roll
+ *  forward the way Hinnant's day count arithmetic does, treating an out of range field as
+ *  a relative offset rather than a fault, so use parse_iso8601 when strict validation is
+ *  wanted.
+ *  @param c the UTC calendar reading to convert
+ *  @return whole seconds since the Unix epoch */
 export func unix_from_civil(c: Civil) -> int64 {
     days: int64 = days_from_civil(c.year, c.month, c.day)
     return days * 86400 + c.hour * 3600 + c.minute * 60 + c.second
 }
 
-// The day of week for c, with 0 as Sunday, 1 as Monday, through 6 as
-// Saturday. 1970-01-01 has day count 0 and returns 4, Thursday, after the
-// epoch count is shifted by four. Out of range month or day values are not
-// rejected; they roll forward through the same days_from_civil arithmetic
-// unix_from_civil uses, since weekday performs no validation of its own.
+/** The day of week for c: 0 is Sunday, 1 is Monday, through 6 is Saturday. 1970-01-01 has
+ *  day count 0 and returns 4, Thursday. Out of range month or day values are not rejected;
+ *  they roll forward through the same days_from_civil arithmetic unix_from_civil uses,
+ *  since weekday performs no validation of its own.
+ *  @param c the UTC calendar date to read; only its year, month, and day matter
+ *  @return the day of week, 0 for Sunday through 6 for Saturday */
 export func weekday(c: Civil) -> int64 {
     return floor_mod(days_from_civil(c.year, c.month, c.day) + 4, 7)
 }
@@ -187,14 +197,21 @@ func iso_two_digits(s: string, i: int64) -> int64 {
     return (int64(s[i]) - 48) * 10 + (int64(s[i + 1]) - 48)
 }
 
-// Parses exactly the ISO 8601 UTC text format_iso8601 emits:
-// [-]Y{4,}-MM-DDTHH:MM:SSZ, with uppercase T and Z, a year of at least four
-// ASCII digits, and two ASCII digits for every other field. It is the strict
-// inverse of format_iso8601, so parse_iso8601(format_iso8601(c)) returns c for
-// every representable Civil, including negative years and years wider than
-// four digits. Structural mismatches return "iso8601: malformed timestamp";
-// month, day, hour, minute, or second outside range return "iso8601: field out
-// of range". A literal leap second, :60, is intentionally rejected.
+/** Parses exactly the ISO 8601 UTC text format_iso8601 emits: [-]Y{4,}-MM-DDTHH:MM:SSZ,
+ *  with an uppercase T and Z, a year of at least four ASCII digits, and two ASCII digits
+ *  for every other field. It is the strict inverse of format_iso8601, so
+ *  parse_iso8601(format_iso8601(c)) returns c for every representable Civil, negative years
+ *  and years wider than four digits included. A literal leap second, :60, is rejected. s
+ *  is borrowed and not freed here.
+ *  @param s the timestamp text to parse
+ *  @return the parsed Civil paired with an error; on success the error is empty, a
+ *  structural mismatch returns "iso8601: malformed timestamp", and a field outside its
+ *  range returns "iso8601: field out of range", with a zeroed Civil in either failure
+ *  @example
+ *  c, e := parse_iso8601("2026-07-27T12:00:00Z")
+ *  if e.exists() {
+ *      return e
+ *  } */
 export func parse_iso8601(s: string) -> (Civil, error) {
     len: int64 = str_len(s)
     mut i: int64 = 0
@@ -355,9 +372,11 @@ func pad_int(n: int64, width: int64) -> string {
     return out
 }
 
-// Renders c as ISO 8601 extended UTC text, "YYYY-MM-DDTHH:MM:SSZ", the
-// trailing Z marking UTC since this module carries no other zone. The
-// result is a fresh heap string the caller owns.
+/** Renders c as ISO 8601 extended UTC text, YYYY-MM-DDTHH:MM:SSZ, the trailing Z marking
+ *  UTC since this module carries no other zone. A year outside [0, 9999] still prints in
+ *  full, wider than four digits, and a negative year keeps its leading minus.
+ *  @param c the UTC calendar reading to render
+ *  @return the ISO 8601 text as a fresh heap string the caller owns and frees */
 export func format_iso8601(c: Civil) -> string {
     y: string = pad_int(c.year, 4)
     mo: string = pad_int(c.month, 2)

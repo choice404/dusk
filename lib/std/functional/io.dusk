@@ -1,24 +1,31 @@
-// std.functional.io: IO<T> as a true lazy monad. An IO<T> holds a collected
-// thunk, so building a chain suspends the computation instead of running it:
-// nothing happens until run forces the thunk. The thunk and every step it
-// captures live on the collected heap, so a chain outlives the frame that built
-// it and survives a collection between build and force. run is the only effect
-// boundary; it forces the thunk on this thread and returns its value.
+/** std.functional.io: IO<T> as a true lazy monad. An IO<T> holds a collected
+ *  thunk, so building a chain suspends the computation instead of running it:
+ *  nothing happens until run forces the thunk. The thunk and every step it
+ *  captures live on the collected heap, so a chain outlives the frame that built
+ *  it and survives a collection between build and force. run is the only effect
+ *  boundary; it forces the thunk on this thread and returns its value. */
 
 @paradigm functional
 
 @import std.functional.result
 
+/** A suspended computation of a T. run holds the collected thunk that produces the
+ *  value; nothing runs until the thunk is forced, so an IO<T> is a value you build
+ *  and pass around before deciding to discharge its effect. */
 export struct IO<T> {
     run: collector<() -> T>,
 }
 
-// The IO monad: `do IO { ... }` threads a value through each bind. bind returns a
-// new lazy IO whose thunk forces the source, feeds its value to the continuation,
-// then forces the continuation's own IO. m is a struct of a collected thunk and k
-// is a collected continuation, both immortal safe captures, so the built chain
-// leaves the frame. unit lifts a plain value into an IO that yields it on force.
+// The IO monad: `do IO { ... }` threads a value through each bind, and nothing
+// runs until the built chain is forced by run.
 monad IO {
+    /** Sequences the continuation k after m. Returns a new lazy IO whose thunk
+     *  forces m, feeds its value to k, then forces the IO k returns. m and k are a
+     *  collected thunk and a collected continuation, both immortal safe captures,
+     *  so the built chain leaves the frame that assembled it.
+     *  @param m the source IO to force first
+     *  @param k the continuation, run on m's forced value to yield the next IO
+     *  @return a lazy IO that forces m then k's result when discharged */
     export func bind<A, B>(m: IO<A>, k: collector<(A) -> IO<B>>) -> IO<B> {
         return IO {
             run: collector<() -> B>(lambda () -> B {
@@ -28,6 +35,9 @@ monad IO {
             }),
         }
     }
+    /** Lifts a plain value into an IO that yields it on force.
+     *  @param x the value to lift
+     *  @return an IO whose thunk returns x */
     export func unit<A>(x: A) -> IO<A> {
         return IO {
             run: collector<() -> A>(lambda () -> A {
@@ -37,8 +47,15 @@ monad IO {
     }
 }
 
-// Lifts a plain value into IO, the named surface unit. The thunk captures the
-// value and yields it on force.
+/** Lifts a plain value into IO, the named surface unit. The thunk captures the
+ *  value and yields it on force.
+ *  @param x the value to lift
+ *  @return an IO whose thunk returns x
+ *  @example
+ *  program := io_and_then(io_pure(2), lambda (n: int64) -> IO<bool> {
+ *      return io_println(int_to_string(n))
+ *  })
+ *  discarded := run(program) */
 export func io_pure<A>(x: A) -> IO<A> {
     return IO {
         run: collector<() -> A>(lambda () -> A {
@@ -47,15 +64,20 @@ export func io_pure<A>(x: A) -> IO<A> {
     }
 }
 
-// Discharges the effect: forces the thunk on this thread and returns its value.
-// The chain's collected environments stay rooted through m until the force
-// completes, so a collection during the build cannot sweep the suspended steps.
+/** Discharges the effect: forces the thunk on this thread and returns its value.
+ *  The chain's collected environments stay rooted through m until the force
+ *  completes, so a collection during the build cannot sweep the suspended steps.
+ *  @param m the IO to force
+ *  @return the value the forced thunk produces */
 export func run<A>(m: IO<A>) -> A {
     return (m.run)()
 }
 
-// Maps a pure function over an IO. Returns a new lazy IO whose thunk forces the
-// source and applies f to its value.
+/** Maps a pure function over an IO. Returns a new lazy IO whose thunk forces the
+ *  source and applies f to its value.
+ *  @param m the source IO
+ *  @param f the pure function applied to m's forced value
+ *  @return a lazy IO yielding f of m's value */
 export func io_map<A, B>(m: IO<A>, f: collector<(A) -> B>) -> IO<B> {
     return IO {
         run: collector<() -> B>(lambda () -> B {
@@ -65,9 +87,12 @@ export func io_map<A, B>(m: IO<A>, f: collector<(A) -> B>) -> IO<B> {
     }
 }
 
-// Sequences an effectful step after an IO. Returns a new lazy IO whose thunk
-// forces the source, hands its value to f, then forces the IO f returns. This is
-// bind by another name, the explicit surface for chaining without do.
+/** Sequences an effectful step after an IO. Returns a new lazy IO whose thunk
+ *  forces the source, hands its value to f, then forces the IO f returns. This is
+ *  bind by another name, the explicit surface for chaining without do.
+ *  @param m the source IO to force first
+ *  @param f the continuation, run on m's forced value to yield the next IO
+ *  @return a lazy IO that forces m then f's result */
 export func io_and_then<A, B>(m: IO<A>, f: collector<(A) -> IO<B>>) -> IO<B> {
     return IO {
         run: collector<() -> B>(lambda () -> B {
@@ -78,8 +103,10 @@ export func io_and_then<A, B>(m: IO<A>, f: collector<(A) -> IO<B>>) -> IO<B> {
     }
 }
 
-// Prints a message with no trailing newline when forced, and yields true. An
-// effect yields bool, not a void IO, which IO<T> does not carry.
+/** Prints a message with no trailing newline when forced, and yields true. An
+ *  effect yields bool, not a void IO, which IO<T> does not carry.
+ *  @param msg the text printed when the IO is forced
+ *  @return an IO that prints msg and yields true on force */
 export func io_print(msg: string) -> IO<bool> {
     return IO {
         run: collector<() -> bool>(lambda () -> bool {
@@ -89,7 +116,9 @@ export func io_print(msg: string) -> IO<bool> {
     }
 }
 
-// Prints a message with a trailing newline when forced, and yields true.
+/** Prints a message with a trailing newline when forced, and yields true.
+ *  @param msg the text printed when the IO is forced
+ *  @return an IO that prints msg with a newline and yields true on force */
 export func io_println(msg: string) -> IO<bool> {
     return IO {
         run: collector<() -> bool>(lambda () -> bool {
@@ -99,8 +128,9 @@ export func io_println(msg: string) -> IO<bool> {
     }
 }
 
-// Reads one line from stdin when forced, stripped of its newline, as a Result:
-// Ok on a line, Err with the failure message at end of input or on a read error.
+/** Reads one line from stdin when forced, stripped of its newline, as a Result:
+ *  Ok on a line, Err with the failure message at end of input or on a read error.
+ *  @return an IO yielding Ok of the line, or Err at end of input or on a read error */
 export func io_read_line() -> IO<Result<string, string>> {
     return IO {
         run: collector<() -> Result<string, string>>(lambda () -> Result<string, string> {

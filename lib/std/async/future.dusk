@@ -1,10 +1,12 @@
-// std.async.future: the one shot completion future over the event loop. A
-// future is minted pending on the loop thread, completed exactly once from
-// any thread, and consumed exactly once on the loop thread by await, a timed
-// await, or a ready try_poll. The record lives in the generational heap, so
-// consuming it retires it and a second consume faults by name, the double
-// join contract. The handle is a plain pair of words and copies freely;
-// every copy names the same future.
+/** std.async.future: the one shot completion future over the event loop. A
+ *  future is minted pending on the loop thread, completed exactly once from
+ *  any thread, and consumed exactly once on the loop thread by await, a timed
+ *  await, or a ready try_poll. The record lives in the generational heap, so
+ *  consuming it retires it and a second consume faults by name, the double
+ *  join contract. The handle is a plain pair of words and copies freely;
+ *  every copy names the same future. */
+
+@paradigm procedural
 
 foreign "C" {
     func cool_future_new(elem_size: int64) -> *void
@@ -16,45 +18,66 @@ foreign "C" {
     func cool_future_release(f: *void, gen: int64) -> void
 }
 
+/** A future handle, the pair of words (record pointer, generation) that names one
+ *  completion slot. The handle copies by value; every copy names the same slot,
+ *  and the generation is what lets a stale copy be refused after the slot retires. */
 export struct Future<T> {
     h: *void,
     gen: int64,
 }
 
-// Mints a pending future. The binding annotation pins the element type, as in
-// f: Future<int64> = future_new(). Loop thread only; exhaustion is fatal, the
-// allocator's contract. An element that could view a frame, a slice, a
-// closure, or an interface value, is rejected at compile time, the channel
-// element ban applied at the minting site.
+/** Mints a pending future. The binding annotation pins the element type, as in
+ *  f: Future<int64> = future_new(). Loop thread only; exhaustion is fatal, the
+ *  allocator's contract. An element that could view a frame, a slice, a
+ *  closure, or an interface value, is rejected at compile time, the channel
+ *  element ban applied at the minting site.
+ *  @return a pending future every copy of which names the same completion slot
+ *  @example
+ *  f: Future<int64> = future_new()
+ *  h := f.h
+ *  gen := f.gen
+ *  spawn produce(h, gen)
+ *  v, e := await f */
 export func future_new<T>() -> Future<T> {
     h := cool_future_new(sizeof(T))
     return Future { h: h, gen: cool_future_gen(h) }
 }
 
-// Wraps a raw completion handle from the runtime into a typed future, the
-// power layer for stdlib modules that mint futures in C, like the timers.
-// The binding annotation pins the element type. The handle must be a live
-// future record; anything else is on the raw layer's honor system.
+/** Wraps a raw completion handle from the runtime into a typed future, the
+ *  power layer for stdlib modules that mint futures in C, like the timers.
+ *  The binding annotation pins the element type. The handle must be a live
+ *  future record; anything else is on the raw layer's honor system.
+ *  @param h a live future record from the runtime
+ *  @return the typed future naming that record */
 export func future_wrap<T>(h: *void) -> Future<T> {
     return Future { h: h, gen: cool_future_gen(h) }
 }
 
-// Completes the future with a value and an error, from any thread, waking
-// the loop. The awaiter receives exactly this pair, so an offloaded body
-// hands its own failure through unchanged. The returned error exists when
-// the future was already completed, whether or not the awaiter has consumed
-// it yet, so racing completers never need to outrun the awaiter; the losing
-// value is dropped. Passing an error here does not discharge it; the
-// completer still inspects or ignores its own binding.
+/** Completes the future with a value and an error, from any thread, waking
+ *  the loop. The awaiter receives exactly this pair, so an offloaded body
+ *  hands its own failure through unchanged. The returned error exists when
+ *  the future was already completed, whether or not the awaiter has consumed
+ *  it yet, so racing completers never need to outrun the awaiter; the losing
+ *  value is dropped. Passing an error here does not discharge it; the
+ *  completer still inspects or ignores its own binding.
+ *  @param f the future to complete
+ *  @param v the value handed to the awaiter
+ *  @param e the error handed to the awaiter, payload for the awaiter rather than a fault here
+ *  @return an error that exists only when the future was already completed and this completion lost the race */
 export func complete<T>(f: Future<T>, v: T, e: error) -> error {
     return complete_raw(f.h, f.gen, v, e)
 }
 
-// Completes a future addressed by its raw handle words, the completer surface a
-// thread carries when the typed future belongs to the loop thread. The two
-// words, h and gen, are the future struct's fields lifted out before the spawn,
-// so the completion crosses without capturing a future. Otherwise identical to
-// complete: exactly one completion wins and a late loser is dropped.
+/** Completes a future addressed by its raw handle words, the completer surface a
+ *  thread carries when the typed future belongs to the loop thread. The two
+ *  words, h and gen, are the future struct's fields lifted out before the spawn,
+ *  so the completion crosses without capturing a future. Otherwise identical to
+ *  complete: exactly one completion wins and a late loser is dropped.
+ *  @param h the future record pointer lifted from the struct before the spawn
+ *  @param gen the generation lifted alongside h, which retires a stale completion
+ *  @param v the value handed to the awaiter
+ *  @param e the error handed to the awaiter, payload rather than a fault here
+ *  @return an error that exists only when this completion lost the race */
 export func complete_raw<T>(h: *void, gen: int64, v: T, e: error) -> error {
     buf: *raw T = alloc_bytes(sizeof(T))
     buf[0] = v
@@ -73,11 +96,14 @@ export func complete_raw<T>(h: *void, gen: int64, v: T, e: error) -> error {
     return error {}
 }
 
-// Waits until the future completes, then consumes it, returning the value
-// and error the completer supplied. Fires due timers while parked. When
-// nothing can complete the future, no timer pending, no spawned thread
-// alive, no pool task in flight, the wait is a deadlock and faults by name
-// instead of hanging. Loop thread only.
+/** Waits until the future completes, then consumes it, returning the value
+ *  and error the completer supplied. Fires due timers while parked. When
+ *  nothing can complete the future, no timer pending, no spawned thread
+ *  alive, no pool task in flight, the wait is a deadlock and faults by name
+ *  instead of hanging. Loop thread only. This is the surface the await keyword
+ *  lowers to inside an async func.
+ *  @param f the future to wait on and consume
+ *  @return the value and error the winning completer supplied */
 export func await<T>(f: Future<T>) -> (T, error) {
     buf: *raw T = alloc_bytes(sizeof(T))
     ebuf: *raw error = alloc_bytes(sizeof(int64))
@@ -89,10 +115,13 @@ export func await<T>(f: Future<T>) -> (T, error) {
     return (v, err)
 }
 
-// Waits at most ms milliseconds against a monotonic clock. On completion the
-// future is consumed like await. On timeout the error says "await timed out",
-// the value is the zero pattern for T, and the future stays live, so the
-// caller can retry, poll, or free it. The recoverable escape hatch.
+/** Waits at most ms milliseconds against a monotonic clock. On completion the
+ *  future is consumed like await. On timeout the error says "await timed out",
+ *  the value is the zero pattern for T, and the future stays live, so the
+ *  caller can retry, poll, or free it. The recoverable escape hatch.
+ *  @param f the future to wait on, left live on timeout
+ *  @param ms the deadline in milliseconds
+ *  @return the completion pair, or the zero value beside "await timed out" when the deadline passes first */
 export func await_timeout<T>(f: Future<T>, ms: int64) -> (T, error) {
     buf: *raw T = alloc_bytes(sizeof(T))
     ebuf: *raw error = alloc_bytes(sizeof(int64))
@@ -107,9 +136,11 @@ export func await_timeout<T>(f: Future<T>, ms: int64) -> (T, error) {
     return (v, err)
 }
 
-// Polls without parking, after firing due timers. A ready future is consumed
-// exactly as await consumes it. While pending the error says "future is
-// pending", the value is the zero pattern for T, and the future stays live.
+/** Polls without parking, after firing due timers. A ready future is consumed
+ *  exactly as await consumes it. While pending the error says "future is
+ *  pending", the value is the zero pattern for T, and the future stays live.
+ *  @param f the future to poll, left live while pending
+ *  @return the completion pair when ready, or the zero value beside "future is pending" */
 export func try_poll<T>(f: Future<T>) -> (T, error) {
     buf: *raw T = alloc_bytes(sizeof(T))
     ebuf: *raw error = alloc_bytes(sizeof(int64))
@@ -124,10 +155,11 @@ export func try_poll<T>(f: Future<T>) -> (T, error) {
     return (v, err)
 }
 
-// Releases a future that will never be consumed, pending or completed. A
-// completion racing the release either wins first and is dropped with the
-// record or arrives after and is refused; neither corrupts. A consumed
-// future needs no free and freeing it faults, the double free family.
+/** Releases a future that will never be consumed, pending or completed. A
+ *  completion racing the release either wins first and is dropped with the
+ *  record or arrives after and is refused; neither corrupts. A consumed
+ *  future needs no free and freeing it faults, the double free family.
+ *  @param f the unconsumed future to release */
 export func future_free<T>(f: Future<T>) -> void {
     cool_future_release(f.h, f.gen)
 }

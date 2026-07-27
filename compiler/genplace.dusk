@@ -16,6 +16,106 @@
 
 export struct Place { ok: bool, ty: int64, ptr: string }
 
+// The enum index for a top-level name, or -1. A tuple/struct/array literal or an
+// enum constructor has no place, so static_expr_ty types it directly rather than
+// through gs_lookup; the enum constructor cases route through this.
+func gp_enum_id(a: *Ast, name: string) -> int64 {
+    enums: *Vector<EnumNode> = (*a).enums
+    mut i: int64 = 0
+    while i < vec_len(enums) {
+        e: EnumNode = vec_get(enums, i)
+        if str_eq(ast_name(a, e.name), name) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// The return cty of an interface method, read from the interface declaration in the AST so
+// a match arm or bind of s.method() over an interface value sizes its result slot. All
+// impls of the interface share this declared return, so the static answer is exact. void
+// when the interface or method does not resolve.
+func gp_iface_method_ret(s: *GenFuncState, iface_name: string, method: string) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    ifaces: *Vector<InterfaceNode> = (*a).interfaces
+    mut i: int64 = 0
+    while i < vec_len(ifaces) {
+        iface: InterfaceNode = vec_get(ifaces, i)
+        if str_eq(ast_name(a, iface.name), iface_name) {
+            mut j: int64 = 0
+            while j < iface.methods_len {
+                ms: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + j))
+                if str_eq(ast_name(a, ms.name), method) {
+                    return cty_lower_ast(c, a, ms.ret)
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return cty_void(c)
+}
+
+// The cty a cast builtin (int8..int64, char, rune, float32, float64) yields, or void when
+// the name is not a cast. Lets static_expr_ty size a match arm or aggregate member spelled
+// as a cast call, `float64(n)`, which the value dispatch already lowers.
+func gp_cast_ret(c: *CTyArena, name: string) -> int64 {
+    if str_eq(name, "float64") { return cty_f64(c) }
+    if str_eq(name, "float32") { return cty_f32(c) }
+    if str_eq(name, "int8") { return cty_int(c, 8) }
+    if str_eq(name, "int16") { return cty_int(c, 16) }
+    if str_eq(name, "int32") { return cty_int(c, 32) }
+    if str_eq(name, "int64") { return cty_int(c, 64) }
+    if str_eq(name, "char") { return cty_char(c) }
+    if str_eq(name, "rune") { return cty_int(c, 32) }
+    return cty_void(c)
+}
+
+// The "Type.method" method-table key (gm_key is not exported here, so we build it).
+func gp_mkey(t: string, m: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, t)
+    sb_push_char(b, 46)
+    sb_push(b, m)
+    out: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The static type of a tuple/array element. static_expr_ty leaves bare scalar
+// literals unknown (they carry no place), but a tuple or array literal needs each
+// element's type to size its aggregate the same way gen_tuple/gen_array_lit do, so
+// this backfills the scalar literal kinds exactly as ge_tail_ty's hand list does.
+func gp_lit_ty(s: *GenFuncState, id: int64) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    t: int64 = static_expr_ty(s, id)
+    if vec_get(cty_nodes(c), t).kind != ctyk_void() { return t }
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_int() {
+        // A width suffix pins the literal's type; without it the aggregate slot sizes an
+        // int32 tuple member as int64 and codegen stores past the member, so sizeof of a
+        // suffixed tuple and a suffixed match arm both read wrong. e.b is the suffix name.
+        if e.b >= 0 {
+            sn: string = ast_name(a, e.b)
+            if str_eq(sn, "int8") || str_eq(sn, "i8") || str_eq(sn, "uint8") || str_eq(sn, "u8") { return cty_int(c, 8) }
+            if str_eq(sn, "int16") || str_eq(sn, "i16") || str_eq(sn, "uint16") || str_eq(sn, "u16") { return cty_int(c, 16) }
+            if str_eq(sn, "int32") || str_eq(sn, "i32") || str_eq(sn, "uint32") || str_eq(sn, "u32") { return cty_int(c, 32) }
+        }
+        return cty_int(c, 64)
+    }
+    if e.kind == xk_bool() { return cty_bool(c) }
+    if e.kind == xk_char() { return cty_char(c) }
+    if e.kind == xk_rune() { return cty_int(c, 32) }
+    if e.kind == xk_str() { return cty_rawptr(c, cty_char(c)) }
+    if e.kind == xk_fstr() { return cty_rawptr(c, cty_char(c)) }
+    // A negated or otherwise unary literal takes its operand's type, so `(-1, 2)` sizes
+    // both members as int64 rather than leaving the negated one void.
+    if e.kind == xk_unary() { return gp_lit_ty(s, e.b) }
+    return t
+}
+
 export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -25,7 +125,34 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
         ok, lv := gs_lookup(s, name)
         if ok { return lv.ty }
     }
+    if e.kind == xk_float() { return cty_f64(c) }
+    if e.kind == xk_struct_lit() {
+        sname: string = ast_name(a, e.a)
+        if str_eq(sname, "error") { return cty_error(c) }
+        return cty_intern(c, ctyk_struct(), 0, 0, sname)
+    }
+    if e.kind == xk_tuple() {
+        tys: *Vector<int64> = alloc(vec_new())
+        mut ti: int64 = 0
+        while ti < e.b {
+            vec_push(tys, gp_lit_ty(s, vec_get((*a).kids, e.a + ti)))
+            ti = ti + 1
+        }
+        return cty_tuple_make(c, tys)
+    }
+    if e.kind == xk_array() {
+        mut elem: int64 = cty_int(c, 64)
+        if e.b > 0 { elem = gp_lit_ty(s, vec_get((*a).kids, e.a)) }
+        return cty_intern(c, ctyk_array(), elem, e.b, "")
+    }
     if e.kind == xk_field() {
+        base_e: ExprNode = vec_get((*a).exprs, e.a)
+        if base_e.kind == xk_ident() {
+            bname: string = ast_name(a, base_e.a)
+            if !gs_has(s, bname) && gp_enum_id(a, bname) >= 0 {
+                return cty_intern(c, ctyk_enum(), 0, 0, bname)
+            }
+        }
         bt: int64 = static_expr_ty(s, e.a)
         idx: int64 = cty_struct_field(c, bt, ast_name(a, e.b))
         if idx >= 0 { return cty_struct_field_ty(c, bt, idx) }
@@ -42,6 +169,16 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
             if bn2.kind == ctyk_ptr() { return bn2.a }
             if bn2.kind == ctyk_rawptr() { return bn2.a }
         }
+        // Negation and bitwise-not keep their operand's numeric type.
+        if e.a == uop_neg() || e.a == uop_bitnot() { return static_expr_ty(s, e.b) }
+    }
+    // An arithmetic binary keeps its operands' type (a comparison or logical op yields a
+    // bool and is left to the value path). Either operand's resolvable static type answers.
+    if e.kind == xk_binary() && e.a <= bop_mod() {
+        lt: int64 = static_expr_ty(s, e.b)
+        if vec_get(cty_nodes(c), lt).kind != ctyk_void() { return lt }
+        rt: int64 = static_expr_ty(s, e.c)
+        if vec_get(cty_nodes(c), rt).kind != ctyk_void() { return rt }
     }
     // A call's static type: the two builtins that flow a value type through
     // (move is identity, alloc wraps its argument in a managed pointer) plus a
@@ -51,6 +188,15 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
         callee: ExprNode = vec_get((*a).exprs, e.a)
         if callee.kind == xk_ident() {
             cname: string = ast_name(a, callee.a)
+            // A call of a local closure yields the closure's declared return; the closure
+            // cty carries it. Checked before the top-level-name branch since a local
+            // shadows a global of the same name.
+            if gs_has(s, cname) {
+                cok, clv := gs_lookup(s, cname)
+                if cok && vec_get(cty_nodes(c), clv.ty).kind == ctyk_closure() {
+                    return cty_closure_ret(c, clv.ty)
+                }
+            }
             if !gs_has(s, cname) {
                 if str_eq(cname, "move") && e.c > 0 {
                     return static_expr_ty(s, vec_get((*a).kids, e.b))
@@ -58,10 +204,44 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
                 if str_eq(cname, "alloc") && e.c == 1 {
                     return cty_intern(c, ctyk_ptr(), static_expr_ty(s, vec_get((*a).kids, e.b)), 0, "")
                 }
+                // A cast builtin spelled as a call, float64(n), yields the cast's type.
+                castt: int64 = gp_cast_ret(c, cname)
+                if vec_get(cty_nodes(c), castt).kind != ctyk_void() { return castt }
                 if genctx_has_fn((*s).ctx, cname) {
                     sig: GenFnSig = genctx_fn((*s).ctx, cname)
                     return sig.ret
                 }
+            }
+        }
+        // A call whose callee is a field is either an enum payload constructor
+        // (E.Variant(args), typed as the enum) or a method call (typed as the
+        // method's declared return). The method receiver may be a value or a
+        // managed pointer, so a *T self resolves through its pointee.
+        if callee.kind == xk_field() {
+            cbase: ExprNode = vec_get((*a).exprs, callee.a)
+            if cbase.kind == xk_ident() {
+                cbname: string = ast_name(a, cbase.a)
+                if !gs_has(s, cbname) && gp_enum_id(a, cbname) >= 0 {
+                    return cty_intern(c, ctyk_enum(), 0, 0, cbname)
+                }
+            }
+            recv_ty: int64 = static_expr_ty(s, callee.a)
+            rn: CTyNode = vec_get(cty_nodes(c), recv_ty)
+            // A method call on an interface value resolves through the interface's declared
+            // method return, shared by every impl, so a match arm of s.area() sizes right.
+            if rn.kind == ctyk_iface() {
+                ir: int64 = gp_iface_method_ret(s, rn.text, ast_name(a, callee.b))
+                if vec_get(cty_nodes(c), ir).kind != ctyk_void() { return ir }
+            }
+            mut tname: string = ""
+            if rn.kind == ctyk_struct() || rn.kind == ctyk_enum() { tname = rn.text }
+            else if rn.kind == ctyk_ptr() {
+                inner: CTyNode = vec_get(cty_nodes(c), rn.a)
+                if inner.kind == ctyk_struct() || inner.kind == ctyk_enum() { tname = inner.text }
+            }
+            if !str_eq(tname, "") {
+                key: string = gp_mkey(tname, ast_name(a, callee.b))
+                if genctx_has_method((*s).ctx, key) { return genctx_method((*s).ctx, key).ret }
             }
         }
     }

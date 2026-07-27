@@ -1,0 +1,24 @@
+// Borrow-side family: a task lambda that captures a bare type-parameter value treats the
+// capture as a borrow, so freeing it inside the lambda rejects. The enclosing frame owns
+// the pointer at every instantiation where T is managed, so the spawned lambda cannot free
+// it. The concrete worker(p: *Box) already rejects the same free inside the lambda.
+@paradigm procedural
+
+struct Box { v: int64 }
+
+func worker<T>(p: T) -> void {
+    t, e := spawn(lambda () -> void {
+        free(p)
+    })
+    e.ignore()
+    je := join(t)
+    je.ignore()
+}
+
+func main() -> int32 {
+    b: *Box = alloc(Box { v: 7 })
+    worker(b)
+    free(b)
+    println("done")
+    return 0
+}

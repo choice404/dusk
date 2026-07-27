@@ -1,16 +1,16 @@
-// std.json: a JSON parser and emitter over a recursive Json value. json_parse
-// reads the full grammar (null, booleans, numbers, strings with escapes,
-// arrays, objects, and arbitrary nesting) into a heap Json tree, returning an
-// error value on any malformed input rather than a partial or invalid tree.
-// json_emit writes a Json tree back out in compact form, re-escaping strings
-// and formatting numbers through the runtime's %.17g shim so a parsed number
-// round-trips through emit and back to the same double.
-//
-// The value is a tagged union: JNull, JBool, JNum (float64), JStr, JArr over a
-// vector of child pointers, and JObj over a string keyed map of child
-// pointers. Build a leaf with alloc(Json.JNum(3.5)) and a branch with
-// alloc(Json.JArr(items)); the tree is heap allocated throughout, so a Json a
-// function builds outlives the frame and the caller owns it.
+/** std.json: a JSON parser and emitter over a recursive Json value. json_parse reads the
+ *  full grammar, null, booleans, numbers, strings with escapes, arrays, objects, and
+ *  arbitrary nesting, into a heap Json tree, returning an error value on any malformed
+ *  input rather than a partial or invalid tree. json_emit writes a Json tree back out in
+ *  compact form, re escaping strings and formatting numbers through the runtime's 17
+ *  significant digit shim so a parsed number round trips through emit and back to the same
+ *  double. json_free deep frees a tree.
+ *
+ *  The value is a tagged union: JNull, JBool over a bool, JNum over a float64, JStr over a
+ *  string, JArr over a vector of child pointers, and JObj over a string keyed map of child
+ *  pointers. Build a leaf with alloc(Json.JNum(3.5)) and a branch with
+ *  alloc(Json.JArr(items)); the tree is heap allocated throughout, so a Json a function
+ *  builds outlives the frame and the caller owns it. */
 
 @paradigm procedural
 
@@ -29,8 +29,11 @@ foreign "C" {
     func cool_f64_str(v: float64, buf: *raw char, cap: int64) -> int64
 }
 
-// A JSON value. JArr owns its element vector and JObj owns its field map; both
-// hold child pointers, so a nested document is a tree of alloc'd Json nodes.
+/** A JSON value as a tagged union. JNull is the null literal; JBool carries a bool; JNum
+ *  carries a float64, JSON having one number type; JStr carries a decoded string; JArr
+ *  carries a vector of child pointers and owns that vector; and JObj carries a string keyed
+ *  map of child pointers and owns that map. Both JArr and JObj hold child pointers, so a
+ *  nested document is a tree of alloc'd Json nodes that json_free walks and releases. */
 export enum Json {
     JNull,
     JBool(b: bool),
@@ -530,12 +533,24 @@ func jp_value_inner(p: *JParser) -> *Json {
     return alloc(Json.JNull)
 }
 
-// Parse s as a single JSON document, returning the root value and an error. On
-// any malformed input, an unexpected byte, a bad escape, an unterminated
-// string, an out of grammar number, an unbalanced bracket, or trailing content
-// after the value, the error carries a descriptive message and the returned
-// pointer is a throwaway JNull the caller must not read. On success the error
-// does not exist and the pointer roots a fully built tree the caller owns.
+/** Parses s as a single JSON document, returning the root value and an error. Nesting
+ *  deeper than 1000 levels is refused with an error rather than overflowing the stack. s
+ *  is borrowed; the returned tree is a fresh heap allocation independent of s.
+ *  @param s the JSON text to parse
+ *  @return the root value paired with an error; on success the error is empty and the
+ *  pointer roots a fully built tree the caller owns and frees with json_free, and on any
+ *  malformed input, an unexpected byte, a bad escape, an unterminated string, an out of
+ *  grammar number, an unbalanced bracket, or trailing content, the error carries a
+ *  descriptive message and the returned pointer is a throwaway JNull the caller must not
+ *  read
+ *  @example
+ *  root, e := json_parse("{\"n\": 3.5, \"ok\": true}")
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  out: string = json_emit(root)
+ *  free(out)
+ *  json_free(root) */
 export func json_parse(s: string) -> (*Json, error) {
     p: *JParser = alloc(JParser { s: s, pos: 0, n: str_len(s), err: "", depth: 0 })
     jp_skip_ws(p)
@@ -700,10 +715,11 @@ func emit_object(sb: *StringBuilder, fs: *Map<string, *Json>) -> void {
     free(keys)
 }
 
-// Emit j as a compact JSON string with no insignificant whitespace. Strings are
-// re-escaped, numbers are formatted through %.17g so a parsed number
-// round-trips, and object keys emit in the order they were inserted. The result
-// is a fresh heap string the caller owns.
+/** Emits j as a compact JSON string with no insignificant whitespace. Strings are re
+ *  escaped, numbers are formatted to 17 significant digits so a parsed number round trips,
+ *  and object keys emit in the order they were inserted. j is borrowed and left intact.
+ *  @param j the tree to emit
+ *  @return the compact JSON text as a fresh heap string the caller owns and frees */
 export func json_emit(j: *Json) -> string {
     sb: *StringBuilder = alloc(sb_new())
     emit_value(sb, j)
@@ -713,22 +729,15 @@ export func json_emit(j: *Json) -> string {
     return out
 }
 
-// Deep free a heap Json tree, freeing every node, string payload, object key,
-// and backing buffer, so json_free consumes root and no pointer into the tree is
-// valid afterward: a later deref of any freed block faults named through the
-// generation backstop. The tree must be fully heap allocated, which every
-// json_parse result is; a hand built tree carrying a literal string payload is
-// undefined behavior at that string's free, since free of a never allocated
-// pointer is out of contract. A subtree reachable from two parents double frees,
-// and the second free faults named rather than corrupting silently.
-//
-// The walk uses a worklist rather than recursion because a recursive spelling
-// cannot express it: a *Json parameter borrows, so a payload pointer freed
-// through a recursive call would reject as a borrowed free. vec_take and map_take
-// remove each child from its container and hand back the owner, so the taken
-// pointer is this frame's to free; pushing root into the work list borrows it,
-// and the take below forges the owner, which is exactly what a hand written tree
-// free needs.
+/** Deep frees a heap Json tree, releasing every node, string payload, object key, and
+ *  backing buffer, so json_free consumes root and no pointer into the tree is valid
+ *  afterward; a later deref of any freed block faults through the generation backstop
+ *  rather than corrupting silently. The tree must be fully heap allocated, which every
+ *  json_parse result is: a hand built tree carrying a literal string payload is undefined
+ *  behavior at that string's free, since freeing a never allocated pointer is out of
+ *  contract. A subtree reachable from two parents double frees, and the second free faults
+ *  rather than corrupting. root is consumed and must not be read after this call.
+ *  @param root the root of the tree to free, consumed by this call */
 export func json_free(root: *Json) -> void {
     work: *Vector<*Json> = alloc(vec_new())
     vec_push(work, root)

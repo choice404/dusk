@@ -1,4 +1,7 @@
-// genscope: local scope stack accessors for codegen.
+/** genscope: local scope stack accessors for codegen. Codegen keeps a stack of
+ *  name-to-slot frames on the GenFuncState; these accessors push and pop frames
+ *  and bind and resolve locals against them, including the defer replay walk and
+ *  the frame-0-only path that pins allocator dispatch. */
 
 @paradigm procedural
 
@@ -12,10 +15,14 @@
 
 func gs_new_frame() -> *Map<string, LocalVal> { return alloc(map_new()) }
 
+/** Opens a fresh inner scope by pushing an empty name frame onto the state's
+ *  scope stack, the seam a block or loop body enters through. */
 export func gs_scope_push(s: *GenFuncState) -> void {
     vec_push((*s).scopes, gs_new_frame())
 }
 
+/** Closes the innermost scope, popping and freeing its name frame as a block or
+ *  loop body exits. */
 export func gs_scope_pop(s: *GenFuncState) -> void {
     scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
     n: int64 = vec_len(scopes) - 1
@@ -24,12 +31,22 @@ export func gs_scope_pop(s: *GenFuncState) -> void {
     free(frame)
 }
 
+/** Binds name to its lowered local value in the innermost scope, the seam every
+ *  declaration and parameter registers its slot through.
+ *  @param s the codegen function state whose innermost frame receives the binding
+ *  @param name the local name being bound
+ *  @param lv the lowered value and type recorded for the name */
 export func gs_bind(s: *GenFuncState, name: string, lv: LocalVal) -> void {
     scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
     frame: *Map<string, LocalVal> = vec_get(scopes, vec_len(scopes) - 1)
     map_put(frame, name, lv)
 }
 
+/** Resolves name to its lowered value, innermost scope first, honoring the defer
+ *  replay base so a flushed defer resolves its free names in the function frame.
+ *  @param s the codegen function state to resolve against
+ *  @param name the local name to look up
+ *  @return whether the name was found, paired with its lowered value when it was */
 export func gs_lookup(s: *GenFuncState, name: string) -> (bool, LocalVal) {
     c: *CTyArena = genctx_ctys((*s).ctx)
     missing: LocalVal = LocalVal { ty: cty_void(c), op: gs_copy("") }
@@ -65,12 +82,12 @@ export func gs_lookup(s: *GenFuncState, name: string) -> (bool, LocalVal) {
     return (false, missing)
 }
 
-// Resolves a name in the function frame (frame 0) only, never an inner scope.
-// The ambient allocator a `using` parameter names is bound at frame 0 by
-// construction, and a nested binding that shadows that name must not hijack
-// alloc/free dispatch through an unrelated slot. The checker rejects such a
-// shadow outright; this frame-0-only resolution is the codegen backstop that
-// keeps allocator dispatch pinned to the parameter even if one slips through.
+/** Resolves a name in the function frame (frame 0) only, never an inner scope,
+ *  the codegen backstop that keeps allocator dispatch pinned to the `using`
+ *  parameter even if a shadowing binding slips past the checker.
+ *  @param s the codegen function state to resolve against
+ *  @param name the local name to look up in frame 0
+ *  @return whether the name was found in frame 0, paired with its lowered value */
 export func gs_lookup_frame0(s: *GenFuncState, name: string) -> (bool, LocalVal) {
     c: *CTyArena = genctx_ctys((*s).ctx)
     missing: LocalVal = LocalVal { ty: cty_void(c), op: gs_copy("") }
@@ -82,6 +99,11 @@ export func gs_lookup_frame0(s: *GenFuncState, name: string) -> (bool, LocalVal)
     return (false, missing)
 }
 
+/** Whether name resolves in any live scope, the presence test that mirrors
+ *  gs_lookup's walk without materializing the value.
+ *  @param s the codegen function state to test against
+ *  @param name the local name to look for
+ *  @return true when name is bound in a live scope */
 export func gs_has(s: *GenFuncState, name: string) -> bool {
     scopes: *Vector<*Map<string, LocalVal>> = (*s).scopes
     if (*s).defer_replay {

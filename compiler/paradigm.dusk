@@ -8,6 +8,7 @@
 @import std.map
 @import ast
 @import diag
+@import resolveexpr
 
 struct Gate {
     functional: bool,
@@ -292,6 +293,15 @@ func gate_items(g: *Gate, a: *Ast) -> void {
         it: ItemNode = vec_get(items, i)
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
+            // A top-level function cannot take a functional builtin's name in any file,
+            // reported here at the gate so an imported module that defines `func fold`
+            // surfaces the reservation reject rather than the usage-gate's paradigm error
+            // masking it. The universal builtins are caught by the resolver's reservation,
+            // which no paradigm gate preempts.
+            fname: string = ast_name(a, f.name)
+            if is_functional_builtin(fname) {
+                vec_push((*g).errors, span_diag(f.lo, f.hi, quoted_msg("", fname, " is a builtin; a function cannot take its name")))
+            }
             gate_block(g, a, f.body)
         } else if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)

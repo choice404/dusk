@@ -1,18 +1,28 @@
-// std.io: simple console output over the print builtins, plus typed line input
-// that reads a line through the read_line builtin and parses it.
+/** std.io: simple console output over the print builtins, plus typed line input
+ *  that reads a whole line through the read_line builtin and parses it. Output goes
+ *  to stdout, input comes from stdin, and the two parsing readers turn a failed read
+ *  or a malformed line into an error value the caller handles rather than a fault. */
 
 @import std.string
 
+/** Prints n on its own line to stdout, in base ten with a trailing newline.
+ *  @param n the integer to print */
 export func print_int(n: int64) -> void {
     println(n)
 }
 
+/** Prints s on its own line to stdout, with a trailing newline. s is borrowed and
+ *  not freed here.
+ *  @param s the line of text to print */
 export func print_line(s: string) -> void {
     println(s)
 }
 
-// Read one line from stdin and parse it as a base 10 integer. The error exists
-// at end of input or when the line is not an integer.
+/** Reads one line from stdin and parses it as a base ten signed integer. The line is
+ *  read whole and consumed; leftover text on the line that is not part of the number
+ *  makes the parse fail.
+ *  @return the parsed value paired with an error; the error exists at end of input or
+ *  when the line does not parse as an integer, and the value is 0 in that case */
 export func read_int() -> (int64, error) {
     line, e := read_line()
     if e.exists() {
@@ -21,8 +31,11 @@ export func read_int() -> (int64, error) {
     return parse_int(line)
 }
 
-// Read one line from stdin and parse it as a float. The error exists at end of
-// input or when the line is not a number.
+/** Reads one line from stdin and parses it as a float64. The line is read whole and
+ *  consumed; leftover text on the line that is not part of the number makes the parse
+ *  fail.
+ *  @return the parsed value paired with an error; the error exists at end of input or
+ *  when the line does not parse as a number, and the value is 0.0 in that case */
 export func read_float() -> (float64, error) {
     line, e := read_line()
     if e.exists() {

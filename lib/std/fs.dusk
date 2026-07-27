@@ -1,36 +1,28 @@
-// std.fs: files, directories, and paths. The low level foreign block binds
-// libc directly (open, close, read, write, lseek, mkdir, rmdir, unlink,
-// rename), including the variadic form of open that carries the create
-// mode as its optional third argument. Every wrapper that can fail returns
-// its value alongside an error built from os_errno/errstr, std.os's own
-// convention: read os_errno() immediately after the call that may have set it,
-// before any other foreign call has a chance to overwrite it.
-//
-// file_stat and directory iteration are shims in the C runtime rather than a
-// direct binding, since struct stat and DIR are C layouts dusk never reads:
-// cool_stat fills three plain int64 words instead of handing back a struct,
-// and cool_dir_open/cool_dir_next/cool_dir_close move an opaque stream
-// through a bit-pattern int64 rather than a pointer. The int64 handle is
-// not a stylistic choice: dusk's == rejects every pointer type outright
-// ("pointers do not compare; compare the values they point to"), so a
-// dusk wrapper has no way to test a *void or *raw T against NULL the way a
-// C caller would test opendir's or readdir's own return. Every shim here
-// that can fail hands the failure back through a separate int64 status or
-// length instead, so the dusk side never needs a null check it cannot
-// write.
-//
-// path_join, path_dirname, path_basename, and path_extension are pure
-// dusk, ported from the same path arithmetic the compiler's own driver and
-// home modules use to lay out target/dusk-out and resolve DUSK_HOME,
-// reproduced here rather than imported so std.fs carries no dependency on
-// the compiler. They carry the path_ prefix, unlike the rest of this
-// module's wrappers, because a bare basename, dirname, or stat is not just
-// a style choice here: dusk gives every exported top level function a
-// bare, unmangled link symbol, and libc already owns exactly those three
-// names (POSIX basename(3), dirname(3), and stat(2)) among everything this
-// module's own binary links in; colliding with one is not a naming
-// preference; a call meant for libc's own stat resolves to this module's
-// definition instead and corrupts.
+/** std.fs: files, directories, and paths. The low level foreign block binds libc
+ *  directly, open, close, read, write, lseek, mkdir, rmdir, unlink, and rename, including
+ *  the variadic form of open that carries the create mode as its optional third argument.
+ *  Every wrapper that can fail returns its value alongside an error built from os_errno
+ *  and errstr, std.os's own convention: read os_errno() immediately after the call that
+ *  may have set it, before any other foreign call has a chance to overwrite it.
+ *
+ *  file_stat and directory iteration are shims in the C runtime rather than a direct
+ *  binding, since struct stat and DIR are C layouts dusk never reads: cool_stat fills
+ *  three plain int64 words instead of handing back a struct, and the cool_dir_open,
+ *  cool_dir_next, and cool_dir_close trio move an opaque stream through a bit pattern
+ *  int64 rather than a pointer. The int64 handle is not a stylistic choice: dusk's ==
+ *  rejects every pointer type outright, "pointers do not compare; compare the values they
+ *  point to", so a dusk wrapper has no way to test a *void or *raw T against NULL the way
+ *  a C caller would test opendir's or readdir's own return. Every shim here that can fail
+ *  hands the failure back through a separate int64 status or length instead, so the dusk
+ *  side never needs a null check it cannot write.
+ *
+ *  path_join, path_dirname, path_basename, and path_extension are pure dusk over int64
+ *  string offsets, no filesystem access at all, so they operate on a path as text whether
+ *  or not it exists. They carry the path_ prefix, unlike the rest of this module's
+ *  wrappers, because dusk gives every exported top level function a bare, unmangled link
+ *  symbol and libc already owns basename, dirname, and stat among everything this module's
+ *  binary links in; colliding with one is not a naming preference, a call meant for libc's
+ *  own stat would resolve to this module's definition instead and corrupt. */
 
 @paradigm procedural
 
@@ -54,31 +46,70 @@ foreign "C" {
     func cool_dir_close(handle: int64) -> int64
 }
 
-// open() flags, Linux/glibc values. Bitwise-or them together, as C does:
-// open_file(path, o_wronly() | o_creat() | o_trunc(), mode_0644()).
+/** The open flag for read only access, a Linux glibc value. Bitwise or the o_ flags
+ *  together the way C does, for instance o_wronly() | o_creat() | o_trunc(), and pass the
+ *  result to open_file.
+ *  @return the O_RDONLY flag bit */
 export func o_rdonly() -> int32 { return 0 }
+/** The open flag for write only access.
+ *  @return the O_WRONLY flag bit */
 export func o_wronly() -> int32 { return 1 }
+/** The open flag for read and write access.
+ *  @return the O_RDWR flag bit */
 export func o_rdwr() -> int32 { return 2 }
+/** The open flag that creates the file when it does not exist, using the mode passed to
+ *  open_file.
+ *  @return the O_CREAT flag bit */
 export func o_creat() -> int32 { return 64 }
+/** The open flag that, with o_creat(), fails when the file already exists.
+ *  @return the O_EXCL flag bit */
 export func o_excl() -> int32 { return 128 }
+/** The open flag that truncates an existing file to zero length on open.
+ *  @return the O_TRUNC flag bit */
 export func o_trunc() -> int32 { return 512 }
+/** The open flag that seeks to end before every write, appending.
+ *  @return the O_APPEND flag bit */
 export func o_append() -> int32 { return 1024 }
 
-// lseek() whence values, portable across POSIX platforms.
+/** The seek whence value that measures offset from the start of the file, portable across
+ *  POSIX platforms.
+ *  @return the SEEK_SET whence value */
 export func seek_set() -> int32 { return 0 }
+/** The seek whence value that measures offset from the current position.
+ *  @return the SEEK_CUR whence value */
 export func seek_cur() -> int32 { return 1 }
+/** The seek whence value that measures offset from the end of the file.
+ *  @return the SEEK_END whence value */
 export func seek_end() -> int32 { return 2 }
 
-// Common octal permission modes, spelled out so a caller never hand-converts
-// octal to decimal: 0644 (owner read/write, group and other read) and 0755
-// (owner read/write/execute, group and other read/execute).
+/** The octal permission mode 0644, owner read and write, group and other read, spelled
+ *  out so a caller never hand converts octal to decimal.
+ *  @return the mode 0644 as a decimal int32 */
 export func mode_0644() -> int32 { return 420 }
+/** The octal permission mode 0755, owner read, write, and execute, group and other read
+ *  and execute.
+ *  @return the mode 0755 as a decimal int32 */
 export func mode_0755() -> int32 { return 493 }
 
-// Opens path with the given open() flags and, when flags includes o_creat(),
-// the given create mode; mode is otherwise ignored by the OS but always
-// passed, since an unread vararg is harmless. Returns the new descriptor, or
-// -1 with an error carrying strerror's text on failure.
+/** Opens path with the given open flags and, when flags includes o_creat(), the given
+ *  create mode; mode is otherwise ignored by the OS but always passed, since an unread
+ *  vararg is harmless. path is borrowed and copied across the C boundary.
+ *  @param path the file path to open
+ *  @param flags the open flags, o_ values bitwise ored together
+ *  @param mode the create permission mode, used only with o_creat()
+ *  @return the new descriptor paired with an error; on success the error is empty, and on
+ *  failure the descriptor is -1 and the error carries strerror's text
+ *  @example
+ *  fd, e := open_file("out.txt", o_wronly() | o_creat() | o_trunc(), mode_0644())
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  wrote, werr := write_bytes(fd, buf, n)
+ *  if werr.exists() {
+ *      return werr
+ *  }
+ *  ce := close_file(fd)
+ *  ce.ignore() */
 export func open_file(path: string, flags: int32, mode: int32) -> (int32, error) {
     buf: *raw char = cbuf(path)
     fd: int32 = open(buf, flags, mode)
@@ -90,7 +121,10 @@ export func open_file(path: string, flags: int32, mode: int32) -> (int32, error)
     return (fd, error {})
 }
 
-// Closes a descriptor opened by open_file.
+/** Closes a descriptor opened by open_file. After this the descriptor is invalid and
+ *  must not be reused.
+ *  @param fd the descriptor to close
+ *  @return an empty error on success, or one carrying strerror's text on failure */
 export func close_file(fd: int32) -> error {
     rc: int32 = close(fd)
     code: int64 = os_errno()
@@ -100,9 +134,14 @@ export func close_file(fd: int32) -> error {
     return error {}
 }
 
-// Reads up to cap bytes into buf. Returns the count read; 0 with no error is
-// end of file. buf is a staged raw buffer the caller owns, the same
-// alloc_bytes idiom std.async.io's read_nb uses.
+/** Reads up to cap bytes from fd into buf. buf is a staged raw buffer the caller owns and
+ *  must size to at least cap bytes; a shorter buffer is an out of bounds write, undefined
+ *  behavior.
+ *  @param fd the descriptor to read from
+ *  @param buf the destination buffer the caller owns, at least cap bytes
+ *  @param cap the maximum number of bytes to read
+ *  @return the count read paired with an error; a count of 0 with an empty error is end of
+ *  file, and a failure returns 0 with the error set */
 export func read_bytes(fd: int32, buf: *void, cap: int64) -> (int64, error) {
     n: int64 = read(fd, buf, cap)
     code: int64 = os_errno()
@@ -112,9 +151,13 @@ export func read_bytes(fd: int32, buf: *void, cap: int64) -> (int64, error) {
     return (n, error {})
 }
 
-// Writes n bytes from buf. Returns the count actually written, which can be
-// less than n on a short write; the caller loops if it must write every
-// byte.
+/** Writes n bytes from buf to fd. buf is borrowed and must hold at least n bytes.
+ *  @param fd the descriptor to write to
+ *  @param buf the source buffer, borrowed, at least n bytes
+ *  @param n the number of bytes to write
+ *  @return the count actually written paired with an error; the count can be less than n
+ *  on a short write, so the caller loops when it must write every byte, and a failure
+ *  returns 0 with the error set */
 export func write_bytes(fd: int32, buf: *void, n: int64) -> (int64, error) {
     wr: int64 = write(fd, buf, n)
     code: int64 = os_errno()
@@ -124,8 +167,12 @@ export func write_bytes(fd: int32, buf: *void, n: int64) -> (int64, error) {
     return (wr, error {})
 }
 
-// Repositions fd's file offset by offset bytes relative to whence
-// (seek_set/seek_cur/seek_end) and returns the resulting absolute offset.
+/** Repositions fd's file offset by offset bytes relative to whence.
+ *  @param fd the descriptor to reposition
+ *  @param offset the byte offset, which may be negative with seek_cur() or seek_end()
+ *  @param whence the reference point, one of seek_set(), seek_cur(), or seek_end()
+ *  @return the resulting absolute offset from the start of the file paired with an error;
+ *  a failure returns 0 with the error set */
 export func seek(fd: int32, offset: int64, whence: int32) -> (int64, error) {
     pos: int64 = lseek(fd, offset, whence)
     code: int64 = os_errno()
@@ -135,8 +182,12 @@ export func seek(fd: int32, offset: int64, whence: int32) -> (int64, error) {
     return (pos, error {})
 }
 
-// Creates a directory. mode is the usual create permission, subject to the
-// process umask; mode_0755() is the common case.
+/** Creates a directory at path. path is borrowed and copied across the C boundary.
+ *  @param path the directory path to create
+ *  @param mode the create permission, subject to the process umask; mode_0755() is the
+ *  common case
+ *  @return an empty error on success, or one carrying strerror's text on failure, for
+ *  instance when the path already exists */
 export func make_dir(path: string, mode: int32) -> error {
     buf: *raw char = cbuf(path)
     rc: int32 = mkdir(buf, mode)
@@ -148,7 +199,10 @@ export func make_dir(path: string, mode: int32) -> error {
     return error {}
 }
 
-// Removes an empty directory.
+/** Removes an empty directory at path. A non empty directory is not removed and returns an
+ *  error. path is borrowed and copied across the C boundary.
+ *  @param path the directory path to remove
+ *  @return an empty error on success, or one carrying strerror's text on failure */
 export func remove_dir(path: string) -> error {
     buf: *raw char = cbuf(path)
     rc: int32 = rmdir(buf)
@@ -160,7 +214,10 @@ export func remove_dir(path: string) -> error {
     return error {}
 }
 
-// Removes a file (or a symlink itself, never its target).
+/** Removes a file at path, or a symlink itself, never the symlink's target. path is
+ *  borrowed and copied across the C boundary.
+ *  @param path the file path to remove
+ *  @return an empty error on success, or one carrying strerror's text on failure */
 export func remove_file(path: string) -> error {
     buf: *raw char = cbuf(path)
     rc: int32 = unlink(buf)
@@ -172,9 +229,13 @@ export func remove_file(path: string) -> error {
     return error {}
 }
 
-// Renames or moves old_path to new_path, replacing new_path if it already
-// exists and both names sit on the same filesystem, the usual rename(2)
-// contract.
+/** Renames or moves old_path to new_path, replacing new_path when it already exists and
+ *  both names sit on the same filesystem, the usual rename contract. A move across
+ *  filesystems fails rather than copying. Both paths are borrowed and copied across the C
+ *  boundary.
+ *  @param old_path the existing path to rename
+ *  @param new_path the destination path, replaced when it exists
+ *  @return an empty error on success, or one carrying strerror's text on failure */
 export func move_file(old_path: string, new_path: string) -> error {
     obuf: *raw char = cbuf(old_path)
     nbuf: *raw char = cbuf(new_path)
@@ -188,20 +249,21 @@ export func move_file(old_path: string, new_path: string) -> error {
     return error {}
 }
 
-// The handful of stat() fields exposed as plain scalars, never the raw
-// struct stat layout. mode carries the POSIX type and permission bits
-// together, and mtime is seconds since the epoch, UTC.
+/** The handful of stat fields exposed as plain scalars, never the raw struct stat layout.
+ *  size is the file length in bytes, mode carries the POSIX type and permission bits
+ *  together, and mtime is the modification time in seconds since the epoch, UTC. */
 export struct FileStat {
     size: int64,
     mode: int64,
     mtime: int64,
 }
 
-// Reads path's size, mode, and modification time. A failure (commonly a
-// missing path) returns a zeroed FileStat alongside the error. Named
-// file_stat, not stat, since dusk links every exported function under its
-// bare name and libc's own stat(2) already owns that one; see the module
-// doc comment above.
+/** Reads path's size, mode, and modification time. It is named file_stat, not stat, since
+ *  dusk links every exported function under its bare name and libc's own stat already owns
+ *  that one. path is borrowed and copied across the C boundary.
+ *  @param path the file path to stat
+ *  @return the FileStat paired with an error; on success the error is empty, and a failure,
+ *  commonly a missing path, returns a zeroed FileStat with the error set */
 export func file_stat(path: string) -> (FileStat, error) {
     buf: *raw char = cbuf(path)
     out_size: *raw int64 = alloc_bytes(sizeof(int64))
@@ -223,14 +285,36 @@ export func file_stat(path: string) -> (FileStat, error) {
     return (st, error {})
 }
 
-// An open directory stream. h is an opaque token, the bit pattern of the C
-// DIR* cool_dir_open minted, meaningful only to dir_next and dir_close;
-// dusk code never reads or compares it directly.
+/** An open directory stream. h is an opaque token, the bit pattern of the C DIR*
+ *  cool_dir_open minted, meaningful only to dir_next and dir_close; dusk code never reads
+ *  or compares it directly. Open one with dir_open, walk it with dir_next, and release it
+ *  with dir_close. */
 export struct Dir {
     h: int64,
 }
 
-// Opens path for directory iteration.
+/** Opens path for directory iteration.
+ *  @param path the directory path to open
+ *  @return the open stream paired with an error; on success the error is empty and the Dir
+ *  is ready to walk, and on failure the error carries strerror's text and the Dir is a
+ *  zeroed value that is never valid to walk or close
+ *  @example
+ *  d, e := dir_open(".")
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  mut going: bool = true
+ *  while going {
+ *      name, found := dir_next(d)
+ *      if found {
+ *          print(name)
+ *          free(name)
+ *      } else {
+ *          going = false
+ *      }
+ *  }
+ *  ce := dir_close(d)
+ *  ce.ignore() */
 export func dir_open(path: string) -> (Dir, error) {
     buf: *raw char = cbuf(path)
     out_handle: *raw int64 = alloc_bytes(sizeof(int64))
@@ -246,12 +330,13 @@ export func dir_open(path: string) -> (Dir, error) {
     return (Dir { h: h }, error {})
 }
 
-// The next entry's bare name (no path prefix), and whether one was found.
-// "." and ".." are skipped, the same convention most directory walks
-// follow. The second value is false, with the empty string as the first,
-// once the stream is exhausted; a hard read error also reports false, since
-// dir_next carries no error channel of its own and a mid-walk failure is
-// rare enough that end of stream is the practical reading for it.
+/** The next entry's bare name, no path prefix, and whether one was found. The "." and ".."
+ *  entries are skipped, the convention most directory walks follow. Entries arrive in the
+ *  filesystem's own order, not sorted.
+ *  @param d the open stream to advance
+ *  @return the next entry name as a fresh heap string the caller owns paired with true, or
+ *  the empty string paired with false once the stream is exhausted; a hard read error also
+ *  reports the empty string and false, since dir_next carries no error channel of its own */
 export func dir_next(d: Dir) -> (string, bool) {
     cap: int64 = 1024
     mut done: bool = false
@@ -277,7 +362,10 @@ export func dir_next(d: Dir) -> (string, bool) {
     return (result, found)
 }
 
-// Closes a directory stream opened by dir_open.
+/** Closes a directory stream opened by dir_open. After this the Dir is invalid and must
+ *  not be walked or closed again.
+ *  @param d the stream to close
+ *  @return an empty error on success, or one carrying strerror's text on failure */
 export func dir_close(d: Dir) -> error {
     rc: int64 = cool_dir_close(d.h)
     code: int64 = os_errno()
@@ -287,10 +375,13 @@ export func dir_close(d: Dir) -> error {
     return error {}
 }
 
-// Joins a directory and a name with a single '/', collapsing any trailing
-// separators on dir first so a directory that already ends in one, or in a
-// run of them, still yields exactly one before name. An empty dir joins to
-// name alone. The result is a fresh heap string the caller owns.
+/** Joins a directory and a name with a single slash, collapsing any trailing separators on
+ *  dir first so a directory that already ends in one, or in a run of them, still yields
+ *  exactly one before name. An empty dir joins to name alone. This is pure text arithmetic
+ *  and touches no filesystem. Both arguments are borrowed.
+ *  @param dir the directory part, whose trailing slashes are collapsed
+ *  @param name the name to append
+ *  @return the joined path as a fresh heap string the caller owns and frees */
 export func path_join(dir: string, name: string) -> string {
     if str_len(dir) == 0 {
         return substring(name, 0, str_len(name))
@@ -317,12 +408,14 @@ export func path_join(dir: string, name: string) -> string {
     return out
 }
 
-// The directory portion of a path: everything up to the last '/'. A path
-// with no separator names a file in the working directory, so its
-// directory is ".". The result is a fresh heap string the caller owns.
-// Named path_dirname, not dirname, since dusk links every exported
-// function under its bare name and libc's own dirname(3) already owns
-// that one; see the module doc comment above.
+/** The directory portion of a path, everything up to the last slash. A path with no
+ *  separator names a file in the working directory, so its directory is ".". It is named
+ *  path_dirname, not dirname, since dusk links every exported function under its bare name
+ *  and libc's own dirname already owns that one. p is borrowed and this touches no
+ *  filesystem.
+ *  @param p the path to split
+ *  @return the directory part as a fresh heap string the caller owns, or "." when p has no
+ *  separator */
 export func path_dirname(p: string) -> string {
     n: int64 = str_len(p)
     mut last: int64 = -1
@@ -339,11 +432,12 @@ export func path_dirname(p: string) -> string {
     return substring(p, 0, last)
 }
 
-// The final path component: everything after the last '/', or the whole
-// string when it holds no separator. The result is a fresh heap string the
-// caller owns. Named path_basename, not basename, since dusk links every
-// exported function under its bare name and libc's own basename(3) already
-// owns that one; see the module doc comment above.
+/** The final path component, everything after the last slash, or the whole string when it
+ *  holds no separator. It is named path_basename, not basename, since dusk links every
+ *  exported function under its bare name and libc's own basename already owns that one. p
+ *  is borrowed and this touches no filesystem.
+ *  @param p the path to split
+ *  @return the final component as a fresh heap string the caller owns and frees */
 export func path_basename(p: string) -> string {
     n: int64 = str_len(p)
     mut last: int64 = -1
@@ -360,15 +454,14 @@ export func path_basename(p: string) -> string {
     return substring(p, last + 1, n)
 }
 
-// The extension of a path's final component, without its leading '.', or
-// the empty string when that component carries none. A '.' in the leading
-// position of the final component is part of the name, not an extension
-// boundary, so a dotfile like ".bashrc" has no extension, matching the
-// compiler's own stem_of. Only the final component is searched, so a '.' in
-// an earlier directory name never leaks in as a false extension. Named
-// path_extension for symmetry with path_join, path_dirname, and
-// path_basename, though it carries no libc name of its own to collide
-// with.
+/** The extension of a path's final component, without its leading dot, or the empty string
+ *  when that component carries none. A dot in the leading position of the final component
+ *  is part of the name, not an extension boundary, so a dotfile like ".bashrc" has no
+ *  extension. Only the final component is searched, so a dot in an earlier directory name
+ *  never leaks in as a false extension. p is borrowed and this touches no filesystem.
+ *  @param p the path to inspect
+ *  @return the extension without its leading dot as a fresh heap string the caller owns,
+ *  or the empty string when there is none */
 export func path_extension(p: string) -> string {
     n: int64 = str_len(p)
     mut start: int64 = 0

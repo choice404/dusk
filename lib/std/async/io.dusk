@@ -1,11 +1,11 @@
-// std.async.io: readiness futures over the reactor, and the non blocking byte
-// surface for the file descriptors they watch. The reactor is one C thread
-// that turns fd readiness into one shot readiness futures on the event loop.
-// Arming a watch (readable / writable) raises a gauge into the deadlock gate,
-// so an await whose only possible completer is an epoll watch parks instead
-// of false faulting. Pipes are the deterministic test rig. The sanctioned
-// order is loop_init, reactor_start, all watches fired, reactor_stop,
-// loop_free; the reactor is restartable after stop.
+/** std.async.io: readiness futures over the reactor, and the non blocking byte
+ *  surface for the file descriptors they watch. The reactor is one C thread
+ *  that turns fd readiness into one shot readiness futures on the event loop.
+ *  Arming a watch (readable / writable) raises a gauge into the deadlock gate,
+ *  so an await whose only possible completer is an epoll watch parks instead
+ *  of false faulting. Pipes are the deterministic test rig. The sanctioned
+ *  order is loop_init, reactor_start, all watches fired, reactor_stop,
+ *  loop_free; the reactor is restartable after stop. */
 
 @import std.async.future
 
@@ -20,14 +20,26 @@ foreign "C" {
     func cool_fd_close(fd: int64) -> int64
 }
 
+/** A pipe's two ends, the read fd r and the write fd w, as pipe_new returns them.
+ *  Both are blocking until you call fd_nonblock on the end you intend to watch. */
 export struct Pipe {
     r: int64,
     w: int64,
 }
 
-// Starts the reactor thread. A fresh epoll fd and eventfd each start, so a
-// stopped reactor restarts clean. A double start, or an OS refusal setting up
-// epoll, is an error rather than a fault, the loop_init shape.
+/** Starts the reactor thread. A fresh epoll fd and eventfd each start, so a
+ *  stopped reactor restarts clean. A double start, or an OS refusal setting up
+ *  epoll, is an error rather than a fault, the loop_init shape.
+ *  @return an error that exists on a double start or an epoll setup refusal
+ *  @example
+ *  ie := loop_init()
+ *  ie.ignore()
+ *  re := reactor_start()
+ *  re.ignore()
+ *  m, e := await readable(fd)
+ *  e.ignore()
+ *  reactor_stop()
+ *  loop_free() */
 export func reactor_start() -> error {
     rc := cool_reactor_start()
     if rc == 1 {
@@ -36,38 +48,44 @@ export func reactor_start() -> error {
     return error {}
 }
 
-// Stops the reactor: signals the thread, which drains events already ready,
-// then joins. Stopping with a watch still armed is a fault on the C side, a
-// parked awaiter would otherwise be stranded, so fire or free every watch
-// before stopping.
+/** Stops the reactor: signals the thread, which drains events already ready,
+ *  then joins. Stopping with a watch still armed is a fault on the C side, a
+ *  parked awaiter would otherwise be stranded, so fire or free every watch
+ *  before stopping. */
 export func reactor_stop() -> void {
     cool_reactor_stop()
 }
 
-// Arms a one shot readiness watch on fd and returns a future that completes
-// with the readiness mask: 1 readable, 2 writable, 4 hangup, 8 error, ORed
-// together. One armed watch per fd, full stop: a read watch and a write watch
-// on the SAME fd collide, so arm one at a time; a second watch on an fd that
-// already has one is a fault. The watch is one shot, it fires exactly once and
-// the reactor then drops it. Awaiting or freeing the future is the ordinary
-// double consume contract; note future_free does NOT disarm the watch, so a
-// freed watch stays counted until it later fires and completes its dead record
-// (refused). The mask element is a plain int64, clean under the future element
-// ban by construction.
+/** Arms a one shot readiness watch on fd and returns a future that completes
+ *  with the readiness mask: 1 readable, 2 writable, 4 hangup, 8 error, ORed
+ *  together. One armed watch per fd, full stop: a read watch and a write watch
+ *  on the SAME fd collide, so arm one at a time; a second watch on an fd that
+ *  already has one is a fault. The watch is one shot, it fires exactly once and
+ *  the reactor then drops it. Awaiting or freeing the future is the ordinary
+ *  double consume contract; note future_free does NOT disarm the watch, so a
+ *  freed watch stays counted until it later fires and completes its dead record
+ *  (refused). The mask element is a plain int64, clean under the future element
+ *  ban by construction.
+ *  @param fd the file descriptor to watch for readability
+ *  @return a one shot future completing with the readiness mask */
 export func readable(fd: int64) -> Future<int64> {
     f: Future<int64> = future_wrap(cool_fd_ready(fd, 0))
     return f
 }
 
-// Arms a one shot writability watch on fd. See readable for the mask bits and
-// the one-watch-per-fd, one-shot, and future_free rules.
+/** Arms a one shot writability watch on fd. See readable for the mask bits and
+ *  the one-watch-per-fd, one-shot, and future_free rules.
+ *  @param fd the file descriptor to watch for writability
+ *  @return a one shot future completing with the readiness mask */
 export func writable(fd: int64) -> Future<int64> {
     f: Future<int64> = future_wrap(cool_fd_ready(fd, 1))
     return f
 }
 
-// Sets fd non blocking (O_NONBLOCK). An OS refusal is an error value, since
-// this call carries an error channel.
+/** Sets fd non blocking (O_NONBLOCK). An OS refusal is an error value, since
+ *  this call carries an error channel.
+ *  @param fd the file descriptor to switch to non blocking mode
+ *  @return an error that exists when the OS refuses the change */
 export func fd_nonblock(fd: int64) -> error {
     rc := cool_fd_nonblock(fd)
     if rc == 1 {
@@ -76,10 +94,11 @@ export func fd_nonblock(fd: int64) -> error {
     return error {}
 }
 
-// Creates a pipe. The fds are close on exec and blocking by default; call
-// fd_nonblock on an end before arming a watch on it. The two fds are staged
-// through a scratch buffer widened to int64, the channel element idiom. On an
-// OS refusal returns (Pipe with both ends -1, error).
+/** Creates a pipe. The fds are close on exec and blocking by default; call
+ *  fd_nonblock on an end before arming a watch on it. The two fds are staged
+ *  through a scratch buffer widened to int64, the channel element idiom. On an
+ *  OS refusal returns (Pipe with both ends -1, error).
+ *  @return the pipe's read and write ends paired with an error that exists on an OS refusal */
 export func pipe_new() -> (Pipe, error) {
     out2: *raw int64 = alloc_bytes(2 * sizeof(int64))
     rc := cool_pipe2(out2)
@@ -97,7 +116,9 @@ export func pipe_new() -> (Pipe, error) {
     return (Pipe { r: rfd, w: wfd }, error {})
 }
 
-// Closes fd. An OS refusal other than EINTR is an error value.
+/** Closes fd. An OS refusal other than EINTR is an error value.
+ *  @param fd the file descriptor to close
+ *  @return an error that exists when the close fails for a reason other than EINTR */
 export func fd_close(fd: int64) -> error {
     rc := cool_fd_close(fd)
     if rc == 1 {
@@ -106,11 +127,15 @@ export func fd_close(fd: int64) -> error {
     return error {}
 }
 
-// Reads up to cap bytes into buf without blocking. Returns the count read; a
-// count of 0 with no error is end of stream, every writer closed. The reactor
-// shim returns -1 for "would block", the canonical recoverable string, and -2
-// for a hard read failure. Stage buf through alloc_bytes, the channel element
-// idiom.
+/** Reads up to cap bytes into buf without blocking. Returns the count read; a
+ *  count of 0 with no error is end of stream, every writer closed. The reactor
+ *  shim returns -1 for "would block", the canonical recoverable string, and -2
+ *  for a hard read failure. Stage buf through alloc_bytes, the channel element
+ *  idiom.
+ *  @param fd the file descriptor to read from
+ *  @param buf the destination buffer, staged through alloc_bytes
+ *  @param cap the buffer capacity in bytes
+ *  @return the count read paired with an error; count 0 with no error is end of stream */
 export func read_nb(fd: int64, buf: *void, cap: int64) -> (int64, error) {
     rc := cool_read_nb(fd, buf, cap)
     if rc == -1 {
@@ -122,11 +147,15 @@ export func read_nb(fd: int64, buf: *void, cap: int64) -> (int64, error) {
     return (rc, error {})
 }
 
-// Writes up to n bytes from buf without blocking. Returns the count written;
-// -1 is "would block", -2 is a hard write failure, -3 is a broken pipe. The
-// runtime ignores SIGPIPE process-wide, so writing to a pipe whose read end is
-// closed (or a reset socket) returns a "broken pipe" error value, not a process
-// kill; handle it like any other error.
+/** Writes up to n bytes from buf without blocking. Returns the count written;
+ *  -1 is "would block", -2 is a hard write failure, -3 is a broken pipe. The
+ *  runtime ignores SIGPIPE process-wide, so writing to a pipe whose read end is
+ *  closed (or a reset socket) returns a "broken pipe" error value, not a process
+ *  kill; handle it like any other error.
+ *  @param fd the file descriptor to write to
+ *  @param buf the source buffer
+ *  @param n the byte count to attempt
+ *  @return the count written paired with an error; a full send buffer surfaces as "would block" */
 export func write_nb(fd: int64, buf: *void, n: int64) -> (int64, error) {
     rc := cool_write_nb(fd, buf, n)
     if rc == -1 {

@@ -67,7 +67,12 @@ export func parse_stmt(p: *Parser) -> int64 {
             p_error(p, "'await' cannot appear under defer; a defer runs at completion and cannot suspend")
             p_bump(p)
         }
-        return ast_stmt(p_ast(p), sk_defer(), parse_expr(p), 0, 0, 0)
+        // Carry the `defer` keyword span in the b/c fields (the sk_break precedent, which
+        // uses a/b), so the defer-inside-a-conditional reject points its caret at the
+        // keyword the fix targets rather than the whole deferred expression. t0 is the
+        // keyword token captured before the keyword was eaten, so it is stable regardless
+        // of argument evaluation order.
+        return ast_stmt(p_ast(p), sk_defer(), parse_expr(p), t0.lo, t0.hi, 0)
     }
     if p_kw(p, "if") { return parse_if_stmt(p) }
     if p_kw(p, "while") { return parse_while_stmt(p) }
@@ -302,6 +307,33 @@ func parse_unary_inner(p: *Parser) -> int64 {
     return parse_postfix(p)
 }
 
+// The print builtins whose first string-literal argument is a format string. Only these
+// three expand a literal first argument's braces (check_format and gen_print), so only
+// their format literal is re-cooked from its raw span to keep an escaped brace distinct
+// from a typed placeholder. eprint and eprintln are not builtins: a user may define them,
+// and cooking such a user call's argument would corrupt an ordinary string.
+func is_print_format_name(name: string) -> bool {
+    return str_eq(name, "print") || str_eq(name, "println") || str_eq(name, "printerr")
+}
+
+// When a call names a print builtin and its first argument is a string literal, replace
+// that argument with a format-cooked copy read from the raw source span. Everything else
+// (a non-print call, an f-string or non-literal first argument) is untouched, so no other
+// string literal changes and a format with no escaped brace cooks to the identical body.
+func recook_format_arg(p: *Parser, callee: int64, args: *Vector<int64>) -> void {
+    if vec_len(args) == 0 { return }
+    a: *Ast = p_ast(p)
+    ce: ExprNode = vec_get((*a).exprs, callee)
+    if ce.kind != xk_ident() { return }
+    if !is_print_format_name(ast_name(a, ce.a)) { return }
+    fid: int64 = vec_get(args, 0)
+    fe: ExprNode = vec_get((*a).exprs, fid)
+    if fe.kind != xk_str() { return }
+    cooked: int64 = p_fmt_body_id(p, fe.lo, fe.hi)
+    ns: int64 = ast_expr(a, xk_str(), fe.lo, fe.hi, cooked, 0, 0, 0)
+    vec_set(args, 0, ns)
+}
+
 func parse_postfix(p: *Parser) -> int64 {
     mut e: int64 = parse_primary(p)
     mut going: bool = true
@@ -316,6 +348,7 @@ func parse_postfix(p: *Parser) -> int64 {
             (*p).no_struct = saved
             p_expect(p, k_rparen())
             n: ExprNode = vec_get((*p_ast(p)).exprs, e)
+            recook_format_arg(p, e, args)
             off, len := ast_kids(p_ast(p), args)
             e = ast_expr(p_ast(p), xk_call(), n.lo, p_prev_hi(p), e, off, len, 0)
         } else if p_at(p, k_lbracket()) {

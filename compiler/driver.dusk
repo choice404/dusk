@@ -1,13 +1,13 @@
-// driver: the spine. It assembles a textual LLVM IR module, writes it to a .ll
-// file, links that file against the C runtime with clang, and runs the result.
-// This is the same path the stage0 compiler's demo command walks, reproduced in
-// dusk: prove source text through IR through clang through a running binary, end
-// to end, before any front end sits in front of it. The module here is hardcoded,
-// the phase 0 spine that prints a line and an integer and exits zero.
-//
-// Progress and error messages go to stderr, so stdout carries only the built
-// program's own output. printerr flushes stdout first, so the two streams stay in
-// order even though the child program runs in a separate process.
+/** driver: the spine. It assembles a textual LLVM IR module, writes it to a .ll
+ *  file, links that file against the C runtime with clang, and runs the result.
+ *  This is the same path the stage0 compiler's demo command walks, reproduced in
+ *  dusk: prove source text through IR through clang through a running binary, end
+ *  to end, before any front end sits in front of it. The module here is hardcoded,
+ *  the phase 0 spine that prints a line and an integer and exits zero.
+ *
+ *  Progress and error messages go to stderr, so stdout carries only the built
+ *  program's own output. printerr flushes stdout first, so the two streams stay in
+ *  order even though the child program runs in a separate process. */
 
 @paradigm procedural
 
@@ -48,6 +48,11 @@ func make_out_dir(out: string) -> bool {
     return true
 }
 
+/** The output stem for a source path: its basename with the extension dropped, the
+ *  name the driver gives the emitted binary under target/dusk-out. Falls back to
+ *  "out" for an empty stem.
+ *  @param path the source file path
+ *  @return the basename without extension, or "out" when that is empty */
 export func stem_of(path: string) -> string {
     mut start: int64 = 0
     mut i: int64 = 0
@@ -259,10 +264,10 @@ func check_ir_written(ll: string) -> bool {
     return true
 }
 
-// Runs the demo: emit the spine IR, write it, link it, and run it. Progress goes
-// to stderr and the built program owns stdout. Returns 0 when the scaffold did its
-// job, whatever the built program's own exit code, and 1 when a step of the build
-// itself failed. prog is argv[0], used to locate the toolchain home.
+/** Runs the demo: emit the spine IR, write it, link it, and run it. Progress goes
+ *  to stderr and the built program owns stdout. Returns 0 when the scaffold did its
+ *  job, whatever the built program's own exit code, and 1 when a step of the build
+ *  itself failed. prog is argv[0], used to locate the toolchain home. */
 export func run_demo(prog: string) -> int32 {
     home: string = dusk_home(prog)
     out: string = out_dir()
@@ -300,20 +305,20 @@ export func run_demo(prog: string) -> int32 {
     return 0
 }
 
-// Builds a source file through the shared IR spine, writes target/dusk-out, and
-// links the runtime. The run flag controls whether the linked binary is executed.
-// This is the compiler's own entry; it pins the output to out_dir(), the stage0
-// parallel target/dusk-out.
+/** Builds a source file through the shared IR spine, writes target/dusk-out, and
+ *  links the runtime. The run flag controls whether the linked binary is executed.
+ *  This is the compiler's own entry; it pins the output to out_dir(), the stage0
+ *  parallel target/dusk-out. */
 export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64) -> int32 {
     return build_module_to(prog, path, run_it, argv, arg_start, out_dir())
 }
 
-// The general form: build into an explicit output directory. build_module fixes
-// that directory to target/dusk-out; dawn passes its own target/dawn-out so a
-// package build and the compiler's own build never overwrite each other's IR or
-// binary. Everything else, the front end gates, the readback check, the clang
-// line, and the exit-code passthrough, is shared, so the two entry points differ
-// only in where the two files land.
+/** The general form: build into an explicit output directory. build_module fixes
+ *  that directory to target/dusk-out; dawn passes its own target/dawn-out so a
+ *  package build and the compiler's own build never overwrite each other's IR or
+ *  binary. Everything else, the front end gates, the readback check, the clang
+ *  line, and the exit-code passthrough, is shared, so the two entry points differ
+ *  only in where the two files land. */
 export func build_module_to(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string) -> int32 {
     ir: CliIrResult = compile_ir_text(path, prog, default_target())
     if !ir.ok {
@@ -719,11 +724,11 @@ func archive_lib(home: string, ll: string, stem: string, out: string, csources: 
     return 0
 }
 
-// Builds a source file as a linkable C library: it compiles through the shared IR
-// spine, writes stem.ll, archives the runtime and the module into libstem.a, and
-// generates stem.h from the export prototypes. The module may omit main, since
-// monomorphization roots every export and each export survives to the archive. A
-// build with no exports still produces an archive, empty of dusk entry points.
+/** Builds a source file as a linkable C library: it compiles through the shared IR
+ *  spine, writes stem.ll, archives the runtime and the module into libstem.a, and
+ *  generates stem.h from the export prototypes. The module may omit main, since
+ *  monomorphization roots every export and each export survives to the archive. A
+ *  build with no exports still produces an archive, empty of dusk entry points. */
 export func build_lib(prog: string, path: string) -> int32 {
     out: string = out_dir()
     ir: CliIrResult = compile_ir_text(path, prog, default_target())

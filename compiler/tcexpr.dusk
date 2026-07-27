@@ -302,6 +302,7 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
     }
     saved_ret: int64 = (*tc).cur_ret
     saved_raw_ret: int64 = (*tc).cur_raw_ret
+    saved_ret_ast: int64 = (*tc).cur_ret_ast
     saved_depth: int64 = (*tc).branch_depth
     saved_loops: int64 = (*tc).loop_depth
     // A lambda lowers to its own function with no `using` parameter, so it has no
@@ -312,6 +313,7 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
     saved_alloc: string = (*tc).cur_allocator
     (*tc).cur_ret = tc_raw_type(tc, e.c)
     (*tc).cur_raw_ret = tc_raw_type(tc, e.c)
+    (*tc).cur_ret_ast = e.c
     (*tc).branch_depth = 0
     (*tc).loop_depth = 0
     (*tc).cur_allocator = ""
@@ -321,8 +323,17 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
         p2: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + j))
         pname: string = ast_name(a, p2.name)
         declare(tc, pname, vec_get(ps, j))
+        reject_builtin_binding(tc, pname, vec_get(ps, j), true, e.lo, e.hi)
         declare_binding_ast(tc, pname, p2.ty)
         set_esc(tc, pname, false, false)
+        // A lambda parameter of a bare type parameter is a borrow, the same rule a
+        // function parameter follows: the caller owns the value the lambda is handed, so
+        // freeing or moving it inside the lambda rejects. A managed parameter is already a
+        // borrow through the task-capture path when this lambda is a task; this covers the
+        // generic hole where the type is unprovable on the surface.
+        if !(*tc).types_only && is_typaram_ast(tc, p2.ty) {
+            declare_own(tc, pname, own_borrow())
+        }
         j = j + 1
     }
     mut b: int64 = 0
@@ -339,6 +350,7 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
     }
     (*tc).cur_ret = saved_ret
     (*tc).cur_raw_ret = saved_raw_ret
+    (*tc).cur_ret_ast = saved_ret_ast
     (*tc).branch_depth = saved_depth
     (*tc).loop_depth = saved_loops
     (*tc).cur_allocator = saved_alloc
@@ -459,6 +471,11 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
     copy_faults: *Vector<int64> = alloc(vec_new())
     own_tails: *Vector<int64> = alloc(vec_new())
     mut any_managed: bool = false
+    // Surface-pass evidence that an arm extracts a generic payload binder whose managed
+    // status is unprovable until mono grounds it. Without it a bind such as `x := match
+    // *c { Has(p) => p }` over a borrowed generic subject records no verdict, and the
+    // free/return check downstream reads the owner default and launders the borrow.
+    mut any_unprovable: bool = false
     mut i: int64 = 0
     while i < e.c {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
@@ -509,6 +526,7 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
                 }
             } else {
                 if arm_tail_managed(tc, e.a, arm.pat, tail_id, at) { any_managed = true }
+                if arm_tail_unprovable(tc, e.a, arm.pat, tail_id) { any_unprovable = true }
                 vec_push(own_vals, arm_own_value(tc, arm.pat, tail_id, subj_own, at))
                 vec_push(copy_faults, arm_copy_fault(tc, arm.pat, tail_id, subj_own))
                 vec_push(own_tails, tail_id)
@@ -520,7 +538,7 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
     (*tc).branch_depth = (*tc).branch_depth - 1
     check_match_arm_lambdas(tc, e)
     check_match_scrutinee(tc, st, e.a, e.b, e.c)
-    if !(*tc).types_only && (ctx == 1 || any_managed) {
+    if !(*tc).types_only && (ctx == 1 || any_managed || any_unprovable) {
         finalize_match_own(tc, id, own_vals, copy_faults, own_tails)
     }
     // On the ground pass the arms have concrete types, so a match yields the type they

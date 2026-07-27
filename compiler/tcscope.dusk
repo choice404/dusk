@@ -9,6 +9,7 @@
 @import ty
 @import tysigs
 @import tcstate
+@import resolveexpr
 
 func new_ty_map() -> *Map<string, int64> { return alloc(map_new()) }
 func new_err_map() -> *Map<string, ErrBind> { return alloc(map_new()) }
@@ -144,6 +145,26 @@ export func declare(tc: *TypeChecker, name: string, tyid: int64) -> void {
     scopes: *Vector<*Map<string, int64>> = (*tc).scopes
     scope: *Map<string, int64> = vec_get(scopes, vec_len(scopes) - 1)
     map_put(scope, name, tyid)
+}
+
+// A binding cannot take a builtin call name only when a call of that name could be hijacked
+// by the builtin: a closure-typed binding (the parse format cook and the codegen builtin
+// dispatch both key on the call name, so a local closure named println has its argument
+// cooked and its call resolved as the builtin). A concrete non-function binding, a string or
+// int named filter or map, is never called and is left alone, so the golden runner's own
+// `filter: string` compiles. When admit_unknown is set the unprovable case is refused too:
+// only at a parameter or lambda parameter, whose declared type is exact, so an unknown there
+// is genuinely a bare type parameter that may be a closure at instantiation, never the
+// surface-erased element of a concrete generic container the way a let, match binder, or for
+// binder can be. Surface-only; the top-level function reservation stays in the resolver over
+// the full name list.
+export func reject_builtin_binding(tc: *TypeChecker, name: string, tyid: int64, admit_unknown: bool, lo: int64, hi: int64) -> void {
+    if (*tc).types_only { return }
+    if !is_builtin_name(name) { return }
+    k: int64 = ty_get((*tc).ty, tyid).kind
+    if k == tyk_func() || (admit_unknown && k == tyk_unknown()) {
+        tc_emit(tc, quoted_msg("", name, " is a builtin; a binding cannot take its name"), lo, hi)
+    }
 }
 
 export func lookup(tc: *TypeChecker, name: string) -> int64 {

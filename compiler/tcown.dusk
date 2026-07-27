@@ -1,4 +1,4 @@
-// tcown: ownership, must-handle helpers, and mutable place checks.
+/** tcown: ownership, must-handle helpers, and mutable place checks. */
 
 @paradigm procedural
 
@@ -13,6 +13,12 @@
 @import tcscope
 @import tcmatch
 
+/** Whether a lowered type is a managed pointer, a non raw pointer to a non unit type,
+ *  the base test the ownership discipline uses to decide a value must be tracked and
+ *  released.
+ *  @param tc the type checker holding the type arena
+ *  @param tyid the lowered type id to test
+ *  @return true when tyid is a managed pointer */
 export func is_managed_ty(tc: *TypeChecker, tyid: int64) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind != tyk_ptr() { return false }
@@ -20,6 +26,40 @@ export func is_managed_ty(tc: *TypeChecker, tyid: int64) -> bool {
     return inner.kind != tyk_unit()
 }
 
+/** Whether an AST type node is a bare type parameter of the function under check: a
+ *  named type with no type arguments whose name is in cur_generics. `lower` maps such a
+ *  type to ty_unknown, indistinguishable from any other hole, so the borrow-side gates
+ *  consult the written node (a param's declared type, a binding's, the return) rather
+ *  than the lowered id. On the surface pass a generic body sees T as this; mono grounds T
+ *  before the ground pass, where cur_generics is empty, so this is surface-only. The
+ *  ownership discipline treats such a type like a managed pointer for the borrow-side
+ *  obligations only (a param is a borrow, a returned or bound match verdict is recorded,
+ *  a task capture is tracked, a reassignment leaks), since a runtime T may be managed and
+ *  the concrete twin already rejects. Owner-side pessimism stays off so a scalar T copy
+ *  or arithmetic is not false-rejected. */
+export func is_typaram_ast(tc: *TypeChecker, astty: int64) -> bool {
+    if astty < 0 { return false }
+    a: *Ast = (*tc).ast
+    n: TypeNode = vec_get((*a).types, astty)
+    if n.kind != tk_named() { return false }
+    if n.c != 0 { return false }
+    gmap: *Map<string, int64> = (*tc).cur_generics
+    return map_has(gmap, ast_name(a, n.a))
+}
+
+/** Managed (by lowered type) or a bare type parameter (by AST node): the borrow-side gate
+ *  that keeps the ownership discipline alive inside a generic body without marking a T
+ *  binder an owner. The name resolves its declared AST type through binding_ast_of. */
+export func is_managed_or_typaram_name(tc: *TypeChecker, tyid: int64, name: string) -> bool {
+    if is_managed_ty(tc, tyid) { return true }
+    return is_typaram_ast(tc, binding_ast_of(tc, name))
+}
+
+/** Whether a type carries an error, directly or inside a tuple member, the test the
+ *  must-handle check uses to decide a binding takes on an error obligation.
+ *  @param tc the type checker holding the type arena
+ *  @param tyid the lowered type id to scan
+ *  @return true when tyid is an error or a tuple containing one */
 export func ty_has_error(tc: *TypeChecker, tyid: int64) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_error() { return true }
@@ -33,6 +73,12 @@ export func ty_has_error(tc: *TypeChecker, tyid: int64) -> bool {
     return false
 }
 
+/** Rejects a read of a name whose pointer was already moved out, the use after move
+ *  gate. A no-op on the ground pass, which does not re-run ownership.
+ *  @param tc the type checker holding the ownership scope
+ *  @param name the identifier being used
+ *  @param lo the span start of the use
+ *  @param hi the span end of the use */
 export func check_ident_move_use(tc: *TypeChecker, name: string, lo: int64, hi: int64) -> void {
     if (*tc).types_only { return }
     if own_of(tc, name) == own_moved() {
@@ -89,17 +135,22 @@ func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
     }
 }
 
+/** Discharges the must-handle obligation of every error-bearing identifier read
+ *  anywhere inside an expression, the seam a condition or discarded expression uses to
+ *  mark its errors handled. A no-op on the ground pass.
+ *  @param tc the type checker holding the error bindings
+ *  @param expr_id the expression whose identifier reads are marked handled */
 export func mark_errs_in(tc: *TypeChecker, expr_id: int64) -> void {
     if (*tc).types_only { return }
     mark_errs_in_rec(tc, expr_id)
 }
 
-// Whether a call hands its result back to the caller as an owned value. The result
-// classifies as an owner and is exempt from the container-alias condemnation. A call
-// qualifies when its callee is a bare non-local top-level function whose head declares
-// the `owning` marker; the stdlib takes vec_take and map_take carry the marker
-// like any other owning func. A method callee, a local shadow, or a builtin never
-// qualifies.
+/** Whether a call hands its result back to the caller as an owned value. The result
+ *  classifies as an owner and is exempt from the container-alias condemnation. A call
+ *  qualifies when its callee is a bare non-local top-level function whose head declares
+ *  the `owning` marker; the stdlib takes vec_take and map_take carry the marker
+ *  like any other owning func. A method callee, a local shadow, or a builtin never
+ *  qualifies. */
 export func is_owning_call(tc: *TypeChecker, e: ExprNode) -> bool {
     if e.kind != xk_call() { return false }
     a: *Ast = (*tc).ast
@@ -111,14 +162,14 @@ export func is_owning_call(tc: *TypeChecker, e: ExprNode) -> bool {
     return sig_fn((*tc).sigtab, n).owning
 }
 
-// The ownership a value expression hands to the binding it initializes. A call hands
-// its own value back when the callee is an owning func or when its result is a managed
-// pointer, otherwise it borrows; a bare
-// identifier that already owns is an illegal copy, faulted here in the one owner-copy
-// voice the assignment form uses, and every other identifier borrows; anything else is
-// the caller's own fresh value. vt is the value's type, read only to judge whether a
-// plain call's result is managed. walk_match_expr calls this per arm tail to reach a
-// match expression's aggregate verdict.
+/** The ownership a value expression hands to the binding it initializes. A call hands
+ *  its own value back when the callee is an owning func or when its result is a managed
+ *  pointer, otherwise it borrows; a bare
+ *  identifier that already owns is an illegal copy, faulted here in the one owner-copy
+ *  voice the assignment form uses, and every other identifier borrows; anything else is
+ *  the caller's own fresh value. vt is the value's type, read only to judge whether a
+ *  plain call's result is managed. walk_match_expr calls this per arm tail to reach a
+ *  match expression's aggregate verdict. */
 export func classify_value_own(tc: *TypeChecker, value: ExprNode, vt: int64) -> int64 {
     if value.kind == xk_call() {
         if is_owning_call(tc, value) { return own_owner() }
@@ -138,11 +189,11 @@ export func classify_value_own(tc: *TypeChecker, value: ExprNode, vt: int64) -> 
     return own_owner()
 }
 
-// The tail value expression of a match arm, or -1 for an arm that yields no value.
-// An arm yields a value only when its block's last statement is an expression
-// statement; an arm that returns or is empty diverges. Mirrors the arm-tail rule
-// codegen lowers in ge_arm_body, so the ownership verdict judges exactly the arms that
-// store a result into the match slot.
+/** The tail value expression of a match arm, or -1 for an arm that yields no value.
+ *  An arm yields a value only when its block's last statement is an expression
+ *  statement; an arm that returns or is empty diverges. Mirrors the arm-tail rule
+ *  codegen lowers in ge_arm_body, so the ownership verdict judges exactly the arms that
+ *  store a result into the match slot. */
 export func match_arm_tail(a: *Ast, block_id: int64) -> int64 {
     b: BlockNode = vec_get((*a).blocks, block_id)
     if b.len == 0 { return -1 }
@@ -174,15 +225,15 @@ func tail_is_move_binder(tc: *TypeChecker, pat_id: int64, tail: ExprNode) -> boo
     return arg.kind == xk_ident() && pat_binds_name(a, pat_id, ast_name(a, arg.a))
 }
 
-// The ownership a single arm's tail contributes to a managed-pointer match, judged with
-// the arm scope live so arm-local names resolve. No diagnostic: the emit is deferred to
-// walk_match_expr, which fires it only once the match is confirmed managed. A payload
-// binder extracted bare, or an outer owner named in the tail, yields an owner and reads as
-// a copy through arm_copy_fault; the same binder through move yields an owner cleanly; a
-// borrowed subject borrows either way; an arm-local fresh owner (its scope ends after the
-// tail) is a move out, an owner with no copy fault. Every other tail (a fresh alloc, an
-// owning call, a managed-returning call) reads its own inferred type. subj_own is the
-// subject's ownership, judged once.
+/** The ownership a single arm's tail contributes to a managed-pointer match, judged with
+ *  the arm scope live so arm-local names resolve. No diagnostic: the emit is deferred to
+ *  walk_match_expr, which fires it only once the match is confirmed managed. A payload
+ *  binder extracted bare, or an outer owner named in the tail, yields an owner and reads as
+ *  a copy through arm_copy_fault; the same binder through move yields an owner cleanly; a
+ *  borrowed subject borrows either way; an arm-local fresh owner (its scope ends after the
+ *  tail) is a move out, an owner with no copy fault. Every other tail (a fresh alloc, an
+ *  owning call, a managed-returning call) reads its own inferred type. subj_own is the
+ *  subject's ownership, judged once. */
 export func arm_own_value(tc: *TypeChecker, pat_id: int64, tail_id: int64, subj_own: int64, tail_ty: int64) -> int64 {
     a: *Ast = (*tc).ast
     tail: ExprNode = vec_get((*a).exprs, tail_id)
@@ -216,10 +267,10 @@ export func arm_own_value(tc: *TypeChecker, pat_id: int64, tail_id: int64, subj_
     return own_owner()
 }
 
-// The tail expr id of an arm whose bare extraction copies an owner, or -1. A payload
-// binder under an owned subject and an owner identifier from an outer scope both copy a
-// value that outlives the extraction; a move, an arm-local owner, and a borrow do not.
-// No diagnostic; walk_match_expr emits once the match is confirmed managed.
+/** The tail expr id of an arm whose bare extraction copies an owner, or -1. A payload
+ *  binder under an owned subject and an owner identifier from an outer scope both copy a
+ *  value that outlives the extraction; a move, an arm-local owner, and a borrow do not.
+ *  No diagnostic; walk_match_expr emits once the match is confirmed managed. */
 export func arm_copy_fault(tc: *TypeChecker, pat_id: int64, tail_id: int64, subj_own: int64) -> int64 {
     a: *Ast = (*tc).ast
     tail: ExprNode = vec_get((*a).exprs, tail_id)
@@ -235,15 +286,20 @@ export func arm_copy_fault(tc: *TypeChecker, pat_id: int64, tail_id: int64, subj
     return -1
 }
 
-// The match-expression ownership verdict, keyed by the match expr id. Populated by
-// walk_match_expr on the surface pass while each arm scope is live; read by the binding,
-// destructure, free/move, and return-position checks. own_owner()/own_borrow() carry the
-// verdict; a missing entry means the match was not a managed-pointer match (or the ground
-// pass, which never writes).
+/** The match-expression ownership verdict, keyed by the match expr id. Populated by
+ *  walk_match_expr on the surface pass while each arm scope is live; read by the binding,
+ *  destructure, free/move, and return-position checks. own_owner()/own_borrow() carry the
+ *  verdict; a missing entry means the match was not a managed-pointer match (or the ground
+ *  pass, which never writes). */
 export func set_match_own(tc: *TypeChecker, id: int64, v: int64) -> void {
     map_put((*tc).match_own, id, v)
 }
 
+/** The ownership verdict recorded for a managed-pointer match expression, or -1 when
+ *  none was recorded, the read paired with set_match_own.
+ *  @param tc the type checker holding the match verdicts
+ *  @param id the match expression id
+ *  @return the recorded ownership tag, or -1 when the match has no verdict */
 export func match_own_of(tc: *TypeChecker, id: int64) -> int64 {
     return unwrap_or(map_get((*tc).match_own, id), -1)
 }
@@ -275,12 +331,12 @@ func binder_payload_ty(tc: *TypeChecker, subj_id: int64, pat_id: int64, binder: 
     return sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, idx)
 }
 
-// Whether an arm tail yields a managed pointer, the gate that keeps the ownership verdict
-// to managed-pointer matches. A bare payload binder or a move of one resolves its managed
-// status from the enum's declared payload type (the inferred binder is a surface hole); any
-// other tail (a fresh alloc, an owning call, an outer identifier) reads its own inferred
-// type. So a scalar match never fabricates an ownership disagreement and an int payload of
-// an owned-deref subject never false-copies, exactly as the decl-type gate did before.
+/** Whether an arm tail yields a managed pointer, the gate that keeps the ownership verdict
+ *  to managed-pointer matches. A bare payload binder or a move of one resolves its managed
+ *  status from the enum's declared payload type (the inferred binder is a surface hole); any
+ *  other tail (a fresh alloc, an owning call, an outer identifier) reads its own inferred
+ *  type. So a scalar match never fabricates an ownership disagreement and an int payload of
+ *  an owned-deref subject never false-copies, exactly as the decl-type gate did before. */
 export func arm_tail_managed(tc: *TypeChecker, subj_id: int64, pat_id: int64, tail_id: int64, tail_ty: int64) -> bool {
     a: *Ast = (*tc).ast
     tail: ExprNode = vec_get((*a).exprs, tail_id)
@@ -308,6 +364,75 @@ export func arm_tail_managed(tc: *TypeChecker, subj_id: int64, pat_id: int64, ta
     return is_managed_ty(tc, tail_ty)
 }
 
+// Whether the match subject is a (pointer to a) generic enum instantiated with a bare
+// type-parameter argument of the current function, e.g. Cell<T> or *Cell<T> inside a
+// generic body. The subject's declared AST type carries the instantiation the lowered
+// type erased, so a concrete arg like Maybe<int64> reads as provable and is excluded: its
+// payload is a known scalar, and dragging it into the ownership verdict would fabricate a
+// borrow/owner disagreement across a scalar match. Peels one deref on the subject expr and
+// one pointer on the declared type. A subject with no recorded binding type (an inferred
+// local, a chained match) reads false.
+func subject_generic_enum_arg(tc: *TypeChecker, subj_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    e0: ExprNode = vec_get((*a).exprs, subj_id)
+    mut root: int64 = subj_id
+    if e0.kind == xk_unary() && e0.a == uop_deref() { root = e0.b }
+    er: ExprNode = vec_get((*a).exprs, root)
+    if er.kind != xk_ident() { return false }
+    astty: int64 = binding_ast_of(tc, ast_name(a, er.a))
+    if astty < 0 { return false }
+    nt: TypeNode = vec_get((*a).types, astty)
+    mut named: int64 = astty
+    if nt.kind == tk_ptr() { named = nt.a }
+    en: TypeNode = vec_get((*a).types, named)
+    if en.kind != tk_named() { return false }
+    mut i: int64 = 0
+    while i < en.c {
+        if is_typaram_ast(tc, vec_get((*a).kids, en.b + i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+/** Whether an arm tail extracts a payload binder whose managed status is unprovable on the
+ *  surface pass: the subject is a generic enum instantiated with a bare type parameter, so
+ *  the variant payload lowers to ty_unknown in the sig and is_managed_ty cannot classify
+ *  it. Parallel to arm_tail_managed but for the generic case: a generic-enum payload bound,
+ *  freed, or returned through a borrowed subject stays unprovably managed on the surface, so
+ *  the match records its verdict for the borrow-side consumers to reject the launder. A
+ *  concrete instantiation (Maybe<int64>) or a non-generic enum is excluded by the subject
+ *  guard, so a scalar match is never dragged in; mono grounds the payload before the ground
+ *  pass, which never writes a verdict, so this is surface-only. */
+export func arm_tail_unprovable(tc: *TypeChecker, subj_id: int64, pat_id: int64, tail_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    tail: ExprNode = vec_get((*a).exprs, tail_id)
+    mut binder: string = ""
+    if tail.kind == xk_ident() && pat_binds_name(a, pat_id, ast_name(a, tail.a)) {
+        binder = ast_name(a, tail.a)
+    } else if tail.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, tail.a)
+        if callee.kind == xk_ident() && str_eq(ast_name(a, callee.a), "move") && tail.c > 0 {
+            arg: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, tail.b))
+            if arg.kind == xk_ident() && pat_binds_name(a, pat_id, ast_name(a, arg.a)) {
+                binder = ast_name(a, arg.a)
+            }
+        }
+    }
+    if str_len(binder) == 0 { return false }
+    if !subject_generic_enum_arg(tc, subj_id) { return false }
+    pty: int64 = binder_payload_ty(tc, subj_id, pat_id, binder)
+    return ty_get((*tc).ty, pty).kind == tyk_unknown()
+}
+
+/** The ownership a new binding takes on from its initializer: a borrow when the
+ *  binding is declared borrowing, the agreed verdict of a managed-pointer match, else
+ *  the value expression's own classification.
+ *  @param tc the type checker holding the ownership state
+ *  @param stmt the binding statement, whose flags carry the borrow bit
+ *  @param value the initializer expression
+ *  @param vt the initializer's lowered type
+ *  @param decl_ty the binding's declared type
+ *  @return the ownership tag the binding is declared with */
 export func binding_own(tc: *TypeChecker, stmt: StmtNode, value: ExprNode, vt: int64, decl_ty: int64) -> int64 {
     if (stmt.d & 2) != 0 { return own_borrow() }
     // A match expression bound to a managed pointer takes the verdict its arms agreed on,
@@ -323,12 +448,30 @@ export func binding_own(tc: *TypeChecker, stmt: StmtNode, value: ExprNode, vt: i
     return classify_value_own(tc, value, vt)
 }
 
+/** Checks that reassigning a managed pointer does not silently leak the value it held,
+ *  the owner-side gate on assignment, admitting a bare type parameter alongside a
+ *  managed pointer. A no-op on the ground pass.
+ *  @param tc the type checker holding the ownership state
+ *  @param lhs_id the assignment target expression
+ *  @param rhs_id the assigned value expression
+ *  @param lhs_ty the target's lowered type
+ */
 export func check_assign_ownership(tc: *TypeChecker, lhs_id: int64, rhs_id: int64, lhs_ty: int64) -> void {
     if (*tc).types_only { return }
-    if !is_managed_ty(tc, lhs_ty) { return }
     a: *Ast = (*tc).ast
     lhs: ExprNode = vec_get((*a).exprs, lhs_id)
     rhs: ExprNode = vec_get((*a).exprs, rhs_id)
+    // A bare type-parameter lhs is admitted alongside a managed pointer: inside a generic
+    // body the reassigned name may hold a managed pointer at some instantiation, and
+    // copying or reassigning an owner is a leak the concrete twin already rejects. T lowers
+    // to a hole, so an ident lhs consults its declared AST type. The owner/borrow verdicts
+    // consulted below are surface-only, so a scalar T is never touched (it carries no owner
+    // record) and the ground pass re-checks the concrete type.
+    mut relevant: bool = is_managed_ty(tc, lhs_ty)
+    if !relevant && lhs.kind == xk_ident() {
+        relevant = is_typaram_ast(tc, binding_ast_of(tc, ast_name(a, lhs.a)))
+    }
+    if !relevant { return }
     if lhs.kind == xk_ident() && rhs.kind == xk_ident() {
         src: string = ast_name(a, rhs.a)
         if own_of(tc, src) == own_owner() {
@@ -371,6 +514,12 @@ func chain_field_ty(tc: *TypeChecker, base_ty: int64, fname: string) -> int64 {
     return ty_unknown((*tc).ty)
 }
 
+/** The structural type of an lvalue chain, following idents, fields, index, and
+ *  deref to the type the value sits at, the resolver the ownership and place checks
+ *  walk a target expression through. ty_unknown when the chain does not resolve.
+ *  @param tc the type checker holding the type arena and scope
+ *  @param expr_id the lvalue chain expression
+ *  @return the lowered type the chain resolves to, or ty_unknown */
 export func own_chain_ty(tc: *TypeChecker, expr_id: int64) -> int64 {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
@@ -404,6 +553,10 @@ func value_chain_root(tc: *TypeChecker, expr_id: int64) -> (bool, string, int64,
     return (false, "", 0, 0)
 }
 
+/** Enforces the place rule on an assignment target: a field store through a pointer
+ *  needs an explicit dereference, so a bare p.field lhs is rejected with the fix.
+ *  @param tc the type checker to record a diagnostic against
+ *  @param lhs_id the assignment target expression */
 export func check_assign_target(tc: *TypeChecker, lhs_id: int64) -> void {
     a: *Ast = (*tc).ast
     lhs: ExprNode = vec_get((*a).exprs, lhs_id)
@@ -442,6 +595,15 @@ export func check_assign_target(tc: *TypeChecker, lhs_id: int64) -> void {
     }
 }
 
+/** Declares the binder an await result binds, recording its type, mutability,
+ *  ownership, and any error obligation, the seam that registers an awaited value into
+ *  the scope like any other binding.
+ *  @param tc the type checker whose scope receives the binding
+ *  @param b the binder node naming the variable
+ *  @param mutable whether the binder is declared mut
+ *  @param pt the awaited future's payload type
+ *  @param lo the span start of the binding
+ *  @param hi the span end of the binding */
 export func declare_await_bind(tc: *TypeChecker, b: BindNode, mutable: bool, pt: int64, lo: int64, hi: int64) -> void {
     mut tyid: int64 = pt
     if b.ty >= 0 { tyid = tc_type(tc, b.ty) } else { tyid = harden((*tc).ty, pt) }
@@ -452,123 +614,4 @@ export func declare_await_bind(tc: *TypeChecker, b: BindNode, mutable: bool, pt:
     if n.kind == tyk_error() { declare_err(tc, name, lo, hi) }
     declare(tc, name, tyid)
     set_esc(tc, name, false, false)
-}
-
-func scan_task_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, int64>) -> void {
-    if expr_id < 0 { return }
-    a: *Ast = (*tc).ast
-    e: ExprNode = vec_get((*a).exprs, expr_id)
-    if e.kind == xk_call() {
-        callee: ExprNode = vec_get((*a).exprs, e.a)
-        if callee.kind == xk_ident() && e.c > 0 {
-            cname: string = ast_name(a, callee.a)
-            arg0_id: int64 = vec_get((*a).kids, e.b)
-            arg0: ExprNode = vec_get((*a).exprs, arg0_id)
-            if arg0.kind == xk_ident() {
-                aname: string = ast_name(a, arg0.a)
-                if !map_has(bound, aname) && is_local(tc, aname) && is_managed_ty(tc, lookup(tc, aname)) && own_of(tc, aname) != own_moved() {
-                    if str_eq(cname, "free") {
-                        tc_emit(tc, "cannot free a borrowed pointer; only its owner frees it", arg0.lo, arg0.hi)
-                    } else if str_eq(cname, "move") {
-                        tc_emit(tc, "cannot move a borrowed pointer; only its owner can be moved", arg0.lo, arg0.hi)
-                    }
-                }
-            }
-        }
-        scan_task_expr(tc, e.a, bound)
-        mut i: int64 = 0
-        while i < e.c {
-            scan_task_expr(tc, vec_get((*a).kids, e.b + i), bound)
-            i = i + 1
-        }
-    } else if e.kind == xk_unary() {
-        scan_task_expr(tc, e.b, bound)
-    } else if e.kind == xk_binary() || e.kind == xk_range() {
-        scan_task_expr(tc, e.b, bound)
-        scan_task_expr(tc, e.c, bound)
-    } else if e.kind == xk_field() || e.kind == xk_index() {
-        scan_task_expr(tc, e.a, bound)
-        if e.kind == xk_index() { scan_task_expr(tc, e.b, bound) }
-    } else if e.kind == xk_tuple() || e.kind == xk_array() || e.kind == xk_fstr() {
-        mut j: int64 = 0
-        while j < e.b {
-            scan_task_expr(tc, vec_get((*a).kids, e.a + j), bound)
-            j = j + 1
-        }
-    } else if e.kind == xk_struct_lit() {
-        mut k: int64 = 1
-        while k < e.c {
-            scan_task_expr(tc, vec_get((*a).kids, e.b + k), bound)
-            k = k + 2
-        }
-    } else if e.kind == xk_await() || e.kind == xk_collect() {
-        scan_task_expr(tc, e.a, bound)
-        if e.kind == xk_collect() { scan_task_expr(tc, e.b, bound) }
-    }
-}
-
-func scan_task_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, int64>) -> void {
-    a: *Ast = (*tc).ast
-    s: StmtNode = vec_get((*a).stmts, stmt_id)
-    if s.kind == sk_let() {
-        scan_task_expr(tc, s.c, bound)
-        mut i: int64 = 0
-        while i < s.b {
-            b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
-            map_put(bound, ast_name(a, b.name), 1)
-            i = i + 1
-        }
-    } else if s.kind == sk_assign() {
-        scan_task_expr(tc, s.a, bound)
-        scan_task_expr(tc, s.b, bound)
-    } else if s.kind == sk_assign_op() {
-        scan_task_expr(tc, s.b, bound)
-        scan_task_expr(tc, s.c, bound)
-    } else if s.kind == sk_return() || s.kind == sk_defer() || s.kind == sk_expr() {
-        scan_task_expr(tc, s.a, bound)
-    } else if s.kind == sk_if() {
-        scan_task_expr(tc, s.a, bound)
-        scan_task_block(tc, s.b, bound)
-        if s.c >= 0 { scan_task_block(tc, s.c, bound) }
-    } else if s.kind == sk_while() {
-        scan_task_expr(tc, s.a, bound)
-        scan_task_block(tc, s.b, bound)
-    } else if s.kind == sk_for() {
-        scan_task_expr(tc, s.b, bound)
-        map_put(bound, ast_name(a, s.a), 1)
-        scan_task_block(tc, s.c, bound)
-    } else if s.kind == sk_match() {
-        scan_task_expr(tc, s.a, bound)
-        mut m: int64 = 0
-        while m < s.c {
-            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + m))
-            scan_task_block(tc, arm.body, bound)
-            m = m + 1
-        }
-    }
-}
-
-func scan_task_block(tc: *TypeChecker, block_id: int64, bound: *Map<string, int64>) -> void {
-    a: *Ast = (*tc).ast
-    b: BlockNode = vec_get((*a).blocks, block_id)
-    mut i: int64 = 0
-    while i < b.len {
-        scan_task_stmt(tc, vec_get((*a).kids, b.off + i), bound)
-        i = i + 1
-    }
-}
-
-export func check_task_lambda_ownership(tc: *TypeChecker, expr_id: int64) -> void {
-    if (*tc).types_only { return }
-    a: *Ast = (*tc).ast
-    e: ExprNode = vec_get((*a).exprs, expr_id)
-    if e.kind != xk_lambda() { return }
-    bound: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < e.b {
-        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
-        map_put(bound, ast_name(a, p.name), 1)
-        i = i + 1
-    }
-    scan_task_block(tc, e.d, bound)
 }

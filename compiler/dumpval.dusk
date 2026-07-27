@@ -100,6 +100,50 @@ export func string_body_internal(src: string, n: int64, lo: int64, hi: int64) ->
     return r
 }
 
+// The internal interned form of a print/println format string body for the span
+// [lo, hi). Identical to string_body_internal except a brace produced by an escape
+// (\u{7b} for { or \u{7d} for }) is doubled in the stored body. The format layer folds a
+// doubled brace to one literal brace and reads a single { as a placeholder delimiter, so
+// doubling an escaped brace keeps it a literal distinct from a typed { or }. A brace typed
+// directly in the source passes through single, so a typed {} stays a placeholder and a
+// typed {{ stays the doubled literal it already was. Every non-brace scalar matches
+// string_body_internal byte for byte, so a format with no escaped brace cooks to the same
+// body and its emitted IR is unchanged. Ports the 1.11.1 f-string raw-span cook, which
+// resolves the same escaped-versus-typed brace ambiguity, to the format path.
+export func fmt_cook_internal(src: string, n: int64, lo: int64, hi: int64) -> string {
+    out: *StringBuilder = alloc(sb_new())
+    mut p: int64 = lo + 1
+    mut going: bool = true
+    while going {
+        if p >= hi {
+            going = false
+        } else {
+            b: int64 = bytes.byte_at(src, n, p)
+            if b == 34 {
+                going = false
+            } else if b == 92 {
+                res: Escape = scan_escape(src, n, p + 1)
+                if res.scalar >= 0 {
+                    push_internal(out, res.scalar)
+                    if res.scalar == 123 || res.scalar == 125 { push_internal(out, res.scalar) }
+                }
+                p = res.next
+            } else if b < 128 {
+                push_internal(out, b)
+                p = p + 1
+            } else {
+                d: Decoded = bytes.decode_utf8(src, n, p)
+                push_internal(out, d.scalar)
+                p = p + d.len
+            }
+        }
+    }
+    r: string = substring_n(sb_cstr(out), sb_size(out), 0, sb_size(out))
+    sb_free(out)
+    free(out)
+    return r
+}
+
 // The internal interned form of an interpolated string chunk body for the span
 // [lo, hi), the raw bytes between one chunk's delimiters. Like string_body_internal
 // it decodes escapes and emits each scalar in internal form, but it also collapses

@@ -251,7 +251,11 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
     } else {
         // A managed return type hints the match verdict the same way a managed binding does,
         // so a returned match extraction over a locally allocated subject still classifies.
-        if !(*tc).types_only && e.kind == xk_match() && is_managed_ty(tc, (*tc).cur_ret) { (*tc).match_ctx = 1 }
+        // A bare type-parameter return (a generic func returning T) hints the same way: the
+        // returned match may launder a borrow the subject owns, and the surface pass is the
+        // only place the borrow is visible before mono grounds T. T lowers to a hole, so the
+        // written return node is consulted through cur_ret_ast.
+        if !(*tc).types_only && e.kind == xk_match() && (is_managed_ty(tc, (*tc).cur_ret) || is_typaram_ast(tc, (*tc).cur_ret_ast)) { (*tc).match_ctx = 1 }
         t = infer_expr(tc, expr_id)
         (*tc).match_ctx = 0
     }
@@ -260,7 +264,7 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
     // the caller's owner exactly as the copy spelling does in binding position. The
     // verdict walk_match_expr stored gates on a managed return type, so a scalar match
     // return is untouched.
-    if !(*tc).types_only && e.kind == xk_match() && is_managed_ty(tc, (*tc).cur_ret) {
+    if !(*tc).types_only && e.kind == xk_match() && (is_managed_ty(tc, (*tc).cur_ret) || is_typaram_ast(tc, (*tc).cur_ret_ast)) {
         if match_own_of(tc, expr_id) == own_borrow() {
             tc_emit(tc, "cannot return a borrowed match result; move the payload or return an owning call", e.lo, e.hi)
         }
@@ -431,8 +435,9 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         }
     } else if s.kind == sk_defer() {
         if (*tc).branch_depth > 0 {
-            de: ExprNode = vec_get((*a).exprs, s.a)
-            tc_emit(tc, "a defer inside a conditional or loop is not supported; register it at the top level of the function", de.lo, de.hi)
+            // The caret points at the `defer` keyword (its span rides in s.b/s.c from the
+            // parser), not the deferred expression: the keyword is what is misplaced.
+            tc_emit(tc, "a defer inside a conditional or loop is not supported; register it at the top level of the function", s.b, s.c)
         }
         if s.a >= 0 { infer_expr(tc, s.a) }
     } else if s.kind == sk_if() {

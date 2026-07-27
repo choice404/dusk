@@ -172,12 +172,21 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
             declare_iface_bind(tc, ast_name(a, p.name), ty_name((*tc).ty, raw))
         }
         declare(tc, ast_name(a, p.name), tyid)
+        reject_builtin_binding(tc, ast_name(a, p.name), tyid, true, f.lo, f.hi)
         declare_binding_ast(tc, ast_name(a, p.name), p.ty)
         if p.is_using { (*tc).cur_allocator = ast_name(a, p.name) }
         map_put((*tc).cur_params, ast_name(a, p.name), 1)
         map_put((*tc).cur_param_index, ast_name(a, p.name), i)
         set_esc(tc, ast_name(a, p.name), false, false)
-        if is_managed_ty(tc, tyid) {
+        // A managed pointer parameter is a borrow the caller still owns, so freeing or
+        // moving it rejects. A bare type-parameter parameter (T on the surface pass) is
+        // treated the same: inside a generic body T may be a managed pointer at some
+        // instantiation, and the concrete twin already rejects, so the discipline must
+        // hold on the un-ground surface. Marking it a borrow only restricts free/move
+        // and reassignment, never a scalar copy, so a T = int64 instantiation is
+        // untouched. Mono grounds T before the ground pass, where is_managed_ty judges
+        // the concrete type directly.
+        if is_managed_ty(tc, tyid) || is_typaram_ast(tc, p.ty) {
             declare_own(tc, ast_name(a, p.name), own_borrow())
         }
         n: TyNode = ty_get((*tc).ty, tyid)
@@ -288,6 +297,7 @@ export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
     // which the interface/conformance branch reads.
     (*tc).cur_ret = unmangle((*tc).ty, tc_raw_type(tc, f.ret), (*tc).future_elems)
     (*tc).cur_raw_ret = tc_raw_type(tc, f.ret)
+    (*tc).cur_ret_ast = f.ret
     (*tc).branch_depth = 0
     (*tc).loop_depth = 0
     (*tc).cur_allocator = ""
@@ -302,9 +312,13 @@ export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
     if f.is_async {
         check_async_sig(tc, f)
     } else {
-        raw_ret: TyNode = ty_get((*tc).ty, (*tc).cur_raw_ret)
-        ifaces2: *Map<string, int64> = (*tc).ifaces
-        if raw_ret.kind == tyk_named() && map_has(ifaces2, ty_name((*tc).ty, (*tc).cur_raw_ret)) {
+        // A bare interface return, or one embedded in a tuple, array, or struct field,
+        // hands back a fat pointer to a boxed value the returning frame may still own, so
+        // it is refused. The aggregate case matters since S1 let a tuple with an interface
+        // member build instead of dying in cty_to_ast; without this it reads a dead frame
+        // slot and prints garbage.
+        iseen: *Map<string, int64> = alloc(map_new())
+        if ret_embeds_iface(tc, (*tc).cur_raw_ret, iseen) {
             tc_emit(tc, "returning an interface value is not supported; return the concrete type or a pointer to it", f.lo, f.hi)
         }
     }

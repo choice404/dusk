@@ -1,9 +1,9 @@
-// genstate: shared function-lowering state for dusk scalar codegen.
-//
-// The statement, expression, call, and print lowerers all need the same local
-// scope stack, return type, defer stack, and scalar cast rules. Keeping those
-// facts here avoids cyclic imports while preserving the byte shape established
-// by function lowering.
+/** genstate: shared function-lowering state for dusk scalar codegen.
+ *
+ *  The statement, expression, call, and print lowerers all need the same local
+ *  scope stack, return type, defer stack, and scalar cast rules. Keeping those
+ *  facts here avoids cyclic imports while preserving the byte shape established
+ *  by function lowering. */
 
 @paradigm procedural
 
@@ -18,10 +18,20 @@
 @import genptr
 @import frame
 
+/** A bound local as codegen holds it: its ctype id and the LLVM operand naming its
+ *  slot or value. The record gs_bind stores and gs_lookup returns. */
 export struct LocalVal { ty: int64, op: string }
+/** A lowered value: its ctype id and the LLVM operand carrying it, the currency the
+ *  expression lowerers pass and return. */
 export struct Val { ty: int64, op: string }
+/** The pieces of an interface fat value resolved for a method call: ok whether the
+ *  value is an interface, data the receiver operand, fp the resolved function pointer. */
 export struct IfaceSlot { ok: bool, data: string, fp: string }
 
+/** The shared function-lowering state every scalar codegen lowerer threads: the emit
+ *  module and function builder it writes IR into, the scope stack, return type, defer
+ *  stack, loop targets, and frame context, plus the current statement offset stamped
+ *  for fault locations. */
 export struct GenFuncState {
     module: *EmitModule,
     ctx: *GenCtx,
@@ -51,21 +61,33 @@ export struct GenFuncState {
     cur_lo: int64,
 }
 
+/** A fresh owned copy of a string, the way codegen detaches an operand from a borrowed
+ *  buffer before it outlives the source.
+ *  @param s the string to copy
+ *  @return a heap copy of s */
 export func gs_copy(s: string) -> string {
     return substring(s, 0, str_len(s))
 }
 
+/** The finished contents of a string builder as an owned string, the builder-to-value
+ *  seam codegen ends an IR fragment with.
+ *  @param b the string builder to read out
+ *  @return an owned copy of the builder's contents */
 export func gs_built(b: *StringBuilder) -> string {
     return substring(sb_cstr(b), 0, sb_size(b))
 }
 
+/** A lowered value from a type and an operand, copying the operand so the Val owns it.
+ *  @param ty the value's ctype id
+ *  @param op the LLVM operand carrying the value
+ *  @return the Val pairing ty with an owned copy of op */
 export func gen_val(ty: int64, op: string) -> Val {
     return Val { ty: ty, op: gs_copy(op) }
 }
 
-// The interned "path:line" constant for the statement being lowered, the argument
-// every location-carrying fault call passes. The label is owned by the module's
-// string table, so the caller must not free it.
+/** The interned "path:line" constant for the statement being lowered, the argument
+ *  every location-carrying fault call passes. The label is owned by the module's
+ *  string table, so the caller must not free it. */
 export func fault_loc(s: *GenFuncState) -> string {
     text: string = genctx_loc_text((*s).ctx, (*s).cur_lo)
     label: string = emit_cstring((*s).module, text)
@@ -73,9 +95,9 @@ export func fault_loc(s: *GenFuncState) -> string {
     return label
 }
 
-// Emits a located fault call `call void @<name>(ptr <loc>)`, interning the
-// current statement's "path:line" as it goes. Every guarded read and pointer
-// check routes its fault through here so the site names its source line.
+/** Emits a located fault call `call void @<name>(ptr <loc>)`, interning the
+ *  current statement's "path:line" as it goes. Every guarded read and pointer
+ *  check routes its fault through here so the site names its source line. */
 export func fault_call(s: *GenFuncState, name: string) -> void {
     loc: string = fault_loc(s)
     b: *StringBuilder = alloc(sb_new())
@@ -91,8 +113,8 @@ export func fault_call(s: *GenFuncState, name: string) -> void {
     free(t)
 }
 
-// Allocates storage through the entry funnel so loop-body bindings do not emit a
-// dynamic alloca at the binding site.
+/** Allocates storage through the entry funnel so loop-body bindings do not emit a
+ *  dynamic alloca at the binding site. */
 export func gen_alloca(s: *GenFuncState, ty: int64) -> string {
     c: *CTyArena = genctx_ctys((*s).ctx)
     dest: string = next_tmp((*s).fb)
@@ -116,11 +138,11 @@ export func gen_alloca(s: *GenFuncState, ty: int64) -> string {
     return dest
 }
 
-// Allocates storage through the entry funnel, stamped with an explicit alignment
-// at least align. A byval argument slot uses this so the alloca alignment covers
-// the byval align the call claims, since a byval struct that is naturally under
-// eight byte aligned rides an eightbyte aligned stack slot. On the async frame
-// path the slot's frame offset is aligned the same way.
+/** Allocates storage through the entry funnel, stamped with an explicit alignment
+ *  at least align. A byval argument slot uses this so the alloca alignment covers
+ *  the byval align the call claims, since a byval struct that is naturally under
+ *  eight byte aligned rides an eightbyte aligned stack slot. On the async frame
+ *  path the slot's frame offset is aligned the same way. */
 export func gen_alloca_align(s: *GenFuncState, ty: int64, align: int64) -> string {
     c: *CTyArena = genctx_ctys((*s).ctx)
     dest: string = next_tmp((*s).fb)
@@ -148,6 +170,12 @@ export func gen_alloca_align(s: *GenFuncState, ty: int64, align: int64) -> strin
     return dest
 }
 
+/** Reserves a slot for a raw word type, from the entry-block alloca funnel normally
+ *  or from the async task frame when frame lowering is on; a wider type than a word in
+ *  a frame stops at a named build error rather than smashing the next slot.
+ *  @param s the function state to emit into
+ *  @param llty the LLVM type of the slot, a word type under frame lowering
+ *  @return the operand naming the reserved slot */
 export func gen_alloca_raw(s: *GenFuncState, llty: string) -> string {
     dest: string = next_tmp((*s).fb)
     if (*s).frame_on {
@@ -173,6 +201,12 @@ export func gen_alloca_raw(s: *GenFuncState, llty: string) -> string {
     return dest
 }
 
+/** Reserves backing storage for a value of a given type: an entry-block alloca
+ *  normally, or a task-frame allocation under async frame lowering so the storage
+ *  survives across a suspend.
+ *  @param s the function state to emit into
+ *  @param ty the ctype id whose size the slot must hold
+ *  @return the operand naming the backing slot */
 export func gen_backing_slot(s: *GenFuncState, ty: int64) -> string {
     if !(*s).frame_on { return gen_alloca(s, ty) }
     sa: SizeAlign = cty_size_align(genctx_ctys((*s).ctx), ty)
@@ -190,7 +224,7 @@ export func gen_backing_slot(s: *GenFuncState, ty: int64) -> string {
     return dest
 }
 
-// Loads a scalar slot through the same textual helper used by Phase A.
+/** Loads a scalar slot through the same textual helper used by Phase A. */
 export func gen_load_slot(s: *GenFuncState, ty: int64, ptr: string) -> string {
     c: *CTyArena = genctx_ctys((*s).ctx)
     dest: string = next_tmp((*s).fb)
@@ -200,6 +234,12 @@ export func gen_load_slot(s: *GenFuncState, ty: int64, ptr: string) -> string {
     return dest
 }
 
+/** Stores a scalar value into a slot at the value's LLVM type, the store twin of
+ *  gen_load_slot.
+ *  @param s the function state to emit into
+ *  @param ty the ctype id giving the store its LLVM type
+ *  @param val the operand to store
+ *  @param ptr the slot operand to store into */
 export func gen_store_slot(s: *GenFuncState, ty: int64, val: string, ptr: string) -> void {
     ll: string = cty_ll(genctx_ctys((*s).ctx), ty)
     store((*s).fb, ll, val, ptr)
@@ -293,6 +333,14 @@ func emit_fp_to_int(s: *GenFuncState, from: int64, op: string, to: int64, signed
     return dest
 }
 
+/** Coerces a scalar operand between integer types, widening bool and char with zext
+ *  and every other integer with sext, the one place the signedness convention lives.
+ *  Returns the operand unchanged when the types already match.
+ *  @param s the function state to emit the conversion into
+ *  @param from the source ctype id
+ *  @param op the operand to convert
+ *  @param to the target ctype id
+ *  @return the operand at the target type, a fresh temporary when a conversion emitted */
 export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> string {
     if from == to { return gs_copy(op) }
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -500,6 +548,13 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
     return gs_copy(op)
 }
 
+/** Adapts a lowered value to a target type, boxing a concrete struct into an
+ *  interface fat value where that is the target and otherwise falling back to scalar
+ *  coercion, the seam an argument or assignment crosses to meet its expected type.
+ *  @param s the function state to emit into
+ *  @param v the source value
+ *  @param target the target ctype id
+ *  @return the value at the target type */
 export func adapt(s: *GenFuncState, v: Val, target: int64) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
     from: CTyNode = vec_get(cty_nodes(c), v.ty)
@@ -583,6 +638,14 @@ export func adapt(s: *GenFuncState, v: Val, target: int64) -> Val {
     return Val { ty: target, op: coerce(s, v.ty, v.op, target) }
 }
 
+/** Resolves an interface value's receiver and function pointer for a method call,
+ *  returning ok false when the value is not an interface, the seam a dynamic method
+ *  dispatch lowers through.
+ *  @param s the function state holding the module and context
+ *  @param value_ty the ctype id of the receiver value
+ *  @param value the operand carrying the interface fat value
+ *  @param method the method name being dispatched
+ *  @return the receiver and function pointer, or ok false when value_ty is not an interface */
 export func iface_slot(s: *GenFuncState, value_ty: int64, value: string, method: string) -> IfaceSlot {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)

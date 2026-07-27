@@ -1,0 +1,32 @@
+// Borrow-side family, the assignment site: inside a generic body a binder that owns a
+// managed value at instantiation cannot be reassigned, since the reassignment drops the
+// allocation it held. y owns the payload moved out of an owned generic-enum subject, and
+// `y = other` would leak it. The check_assign_ownership gate admits the type-parameter left
+// side so the leak is caught here rather than only at a concrete instantiation.
+@paradigm procedural
+
+struct Box { v: int64 }
+
+enum Cell<T> {
+    Has(p: T),
+}
+
+func f<T>(x: T, other: T) -> void {
+    c: *Cell<T> = alloc(Cell.Has(x))
+    mut y: T = match *c {
+        Has(p) => move(p),
+    }
+    y = other
+    free(y)
+    free(c)
+}
+
+func main() -> int32 {
+    a: *Box = alloc(Box { v: 1 })
+    b: *Box = alloc(Box { v: 2 })
+    f(a, b)
+    free(a)
+    free(b)
+    println("done")
+    return 0
+}
