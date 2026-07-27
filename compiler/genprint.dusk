@@ -158,6 +158,10 @@ func gp_display_string(s: *GenFuncState, v: Val) -> string {
     return out
 }
 
+// The print dispatch, type-directing a value to the right runtime printer. Its
+// non-errout, no-newline path is mirrored arm for arm by gp_fstr_value, which
+// appends the same rendering to an f-string builder; keep the two in step so
+// f"{v}" and println("{}", v) never diverge.
 func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), v.ty)
@@ -202,8 +206,12 @@ func gp_emit_lit(s: *GenFuncState, text: string, lo: int64, hi: int64, errout: b
     if errout { gp_call_cstr(s, "cool_eprint_cstr", label) } else { gp_call_cstr(s, "cool_print_cstr", label) }
 }
 
-func gp_emit_fmt_lit(s: *GenFuncState, fmt: string, lo: int64, hi: int64, errout: bool) -> void {
-    if hi <= lo { return }
+// Collapses the doubled braces of a format or f-string chunk over [lo, hi): {{
+// becomes {, }} becomes }, every other byte passes through. The interpolated
+// string codegen (gp_fsb_chunk) and the format-placeholder codegen (gp_emit_fmt_lit)
+// both cook their literal pieces through this one walk, so the two brace-escape
+// rules can never drift apart. Returns the cooked piece, owned by the caller.
+func gp_collapse_braces(fmt: string, lo: int64, hi: int64) -> string {
     lit: *StringBuilder = alloc(sb_new())
     mut i: int64 = lo
     while i < hi {
@@ -239,13 +247,20 @@ func gp_emit_fmt_lit(s: *GenFuncState, fmt: string, lo: int64, hi: int64, errout
             i = i + 1
         }
     }
-    if sb_size(lit) > 0 {
-        piece: string = gs_built(lit)
+    r: string = gs_built(lit)
+    sb_free(lit)
+    free(lit)
+    return r
+}
+
+func gp_emit_fmt_lit(s: *GenFuncState, fmt: string, lo: int64, hi: int64, errout: bool) -> void {
+    if hi <= lo { return }
+    piece: string = gp_collapse_braces(fmt, lo, hi)
+    if str_len(piece) > 0 {
         label: string = emit_cstring_body((*s).module, piece)
         if errout { gp_call_cstr(s, "cool_eprint_cstr", label) } else { gp_call_cstr(s, "cool_print_cstr", label) }
     }
-    sb_free(lit)
-    free(lit)
+    free(piece)
 }
 
 func gp_format_print(s: *GenFuncState, args_off: int64, args_len: int64, newline: bool, errout: bool) -> Val {
@@ -288,6 +303,186 @@ func gp_format_print(s: *GenFuncState, args_off: int64, args_len: int64, newline
     gp_emit_fmt_lit(s, fmt, seg_start, str_len(fmt), errout)
     if newline { gp_newline(s, errout) }
     return Val { ty: cty_void(genctx_ctys((*s).ctx)), op: gs_copy("") }
+}
+
+// The f-string builder sinks. Each mirrors the matching cool_print_* call the
+// value dispatch below would pick, but takes the builder handle bh as its first
+// argument, so the accumulated string is byte identical to what println("{}", v)
+// would write. The builder threads by pointer; nothing here reads its state.
+func gp_fsb_cstr(s: *GenFuncState, bh: string, ptr: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @cool_fsb_cstr(ptr ")
+    sb_push(b, bh)
+    sb_push(b, ", ptr ")
+    sb_push(b, ptr)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+func gp_fsb_bytes(s: *GenFuncState, bh: string, ptr: string, count: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @cool_fsb_bytes(ptr ")
+    sb_push(b, bh)
+    sb_push(b, ", ptr ")
+    sb_push(b, ptr)
+    sb_push(b, ", i64 ")
+    sb_push(b, count)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+func gp_fsb_num(s: *GenFuncState, fn: string, bh: string, ty: string, op: string) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @")
+    sb_push(b, fn)
+    sb_push(b, "(ptr ")
+    sb_push(b, bh)
+    sb_push(b, ", ")
+    sb_push(b, ty)
+    sb_push_char(b, 32)
+    sb_push(b, op)
+    sb_push_char(b, 41)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+}
+
+// The char / char array / char slice sink, mirroring gp_print_char_text but
+// appending to the builder. Returns whether the value was a char text form.
+func gp_fsb_char_text(s: *GenFuncState, bh: string, v: Val) -> bool {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if n.kind == ctyk_char() {
+        slot: string = gen_alloca(s, v.ty)
+        gen_store_slot(s, v.ty, v.op, slot)
+        gp_fsb_bytes(s, bh, slot, "1")
+        return true
+    }
+    if n.kind == ctyk_array() {
+        en: CTyNode = vec_get(cty_nodes(c), n.a)
+        if en.kind == ctyk_char() {
+            slot2: string = gen_alloca(s, v.ty)
+            gen_store_slot(s, v.ty, v.op, slot2)
+            count: string = int_to_string(n.b)
+            gp_fsb_bytes(s, bh, slot2, count)
+            free(count)
+            return true
+        }
+    }
+    if n.kind == ctyk_slice() {
+        en2: CTyNode = vec_get(cty_nodes(c), n.a)
+        if en2.kind == ctyk_char() {
+            ll: string = cty_ll(c, v.ty)
+            p: string = gp_extract_part(s, ll, v.op, 0)
+            cnt: string = gp_extract_part(s, ll, v.op, 1)
+            free(ll)
+            gp_fsb_bytes(s, bh, p, cnt)
+            return true
+        }
+    }
+    return false
+}
+
+// Appends one interpolation hole's value to the builder, dispatching on the
+// lowered type exactly as gp_print_value's non-errout, no-newline path does:
+// char text through the byte sink, rawptr and error as C strings, a float
+// coerced to f64, a struct through its toString, everything else coerced to i64.
+// Kept arm for arm with gp_print_value so parity holds for every printable type.
+func gp_fstr_value(s: *GenFuncState, bh: string, v: Val) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    n: CTyNode = vec_get(cty_nodes(c), v.ty)
+    if gp_fsb_char_text(s, bh, v) { return }
+    if n.kind == ctyk_rawptr() || n.kind == ctyk_error() {
+        gp_fsb_cstr(s, bh, v.op)
+    } else if cty_is_float(c, v.ty) {
+        d: string = coerce(s, v.ty, v.op, cty_f64(c))
+        gp_fsb_num(s, "cool_fsb_f64", bh, "double", d)
+    } else if n.kind == ctyk_struct() {
+        text0: string = gp_display_string(s, v)
+        if str_len(text0) > 0 { gp_fsb_cstr(s, bh, text0) }
+    } else {
+        d2: string = coerce(s, v.ty, v.op, cty_int(c, 64))
+        gp_fsb_num(s, "cool_fsb_i64", bh, "i64", d2)
+    }
+}
+
+// Appends one chunk constant to the builder. The chunk body arrives already cooked
+// by the parser (fstr_chunk_internal): its escapes are decoded and its doubled
+// braces are collapsed on the raw span, where a literal {{ is distinguishable from a
+// \u{7b} escape. So the constant is emitted verbatim, with no brace handling here;
+// a brace fold at this layer would wrongly fold a pair of escape-produced braces.
+// An empty chunk emits nothing.
+func gp_fsb_chunk(s: *GenFuncState, bh: string, fmt: string) -> void {
+    if str_len(fmt) > 0 {
+        label: string = emit_cstring_body((*s).module, fmt)
+        gp_fsb_cstr(s, bh, label)
+    }
+}
+
+// Lowers an interpolated string to a builder run. Its kids strictly alternate
+// chunk (even) and hole (odd): 2n+1 kids, chunks possibly empty. Open a builder,
+// append each chunk constant and each hole value in source order, then finish
+// into one generational heap string, the same allocation class the + concat and
+// substring return. The result Val is a string (rawptr to char).
+export func gen_fstr(s: *GenFuncState, e: ExprNode) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    a: *Ast = (*(*s).ctx).ast
+    // The builder runtime is declared here, not in the unconditional prelude, so a
+    // program that spells no f-string emits IR byte identical to before this
+    // feature. emit_declare deduplicates, so the six lines land once per module.
+    m: *EmitModule = (*s).module
+    emit_declare(m, "ptr @cool_fsb_new()")
+    emit_declare(m, "void @cool_fsb_cstr(ptr, ptr)")
+    emit_declare(m, "void @cool_fsb_bytes(ptr, ptr, i64)")
+    emit_declare(m, "void @cool_fsb_i64(ptr, i64)")
+    emit_declare(m, "void @cool_fsb_f64(ptr, double)")
+    emit_declare(m, "ptr @cool_fsb_fin(ptr)")
+    bh: string = next_tmp((*s).fb)
+    nb: *StringBuilder = alloc(sb_new())
+    sb_push(nb, bh)
+    sb_push(nb, " = call ptr @cool_fsb_new()")
+    ntext: string = gs_built(nb)
+    sb_free(nb)
+    free(nb)
+    line((*s).fb, ntext)
+    free(ntext)
+    mut i: int64 = 0
+    mut is_chunk: bool = true
+    while i < e.b {
+        kid_id: int64 = vec_get((*a).kids, e.a + i)
+        if is_chunk {
+            kide: ExprNode = vec_get((*a).exprs, kid_id)
+            gp_fsb_chunk(s, bh, ast_name(a, kide.a))
+        } else {
+            v: Val = gen_expr(s, kid_id)
+            gp_fstr_value(s, bh, v)
+        }
+        is_chunk = !is_chunk
+        i = i + 1
+    }
+    rt: string = next_tmp((*s).fb)
+    fb: *StringBuilder = alloc(sb_new())
+    sb_push(fb, rt)
+    sb_push(fb, " = call ptr @cool_fsb_fin(ptr ")
+    sb_push(fb, bh)
+    sb_push_char(fb, 41)
+    ftext: string = gs_built(fb)
+    sb_free(fb)
+    free(fb)
+    line((*s).fb, ftext)
+    free(ftext)
+    free(bh)
+    return Val { ty: cty_rawptr(c, cty_char(c)), op: rt }
 }
 
 // Lowers the print family; the first string literal selects format expansion.

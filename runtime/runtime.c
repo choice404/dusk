@@ -115,6 +115,9 @@ void cool_eprint_f64(double v) {
     fprintf(stderr, "%g", v);
 }
 
+/* PARITY: the f-string builder (cool_fsb_i64 / cool_fsb_f64 below) must render
+   with the same PRId64 and %g formats these printers use, so f"{v}" writes the
+   same bytes println("{}", v) does. Change a format here and there together. */
 void cool_print_i64(int64_t v) {
     printf("%" PRId64, v);
 }
@@ -129,6 +132,135 @@ void cool_print_f64(double v) {
 
 void cool_println_f64(double v) {
     printf("%g\n", v);
+}
+
+/* The interpolated string (f-string) builder. An f"..." expression opens one
+   builder, appends the rendered bytes of each chunk and hole in order, then
+   finishes into a single generational heap string. The scratch buffer is plain
+   malloc doubled on demand and freed by cool_fsb_fin after the copy, so only the
+   finished string outlives the expression.
+
+   PARITY (keep in lockstep with the print family at runtime.c:118-131): cool_fsb_i64
+   formats with PRId64 and cool_fsb_f64 with %g, byte identical to cool_print_i64 and
+   cool_print_f64, so f"{v}" writes exactly the bytes println("{}", v) writes minus
+   the newline for every printable type. Changing a format here means changing it
+   there too. */
+typedef struct {
+    char *buf;
+    size_t len;
+    size_t cap;
+} cool_fsb;
+
+static void cool_fsb_oom(void) {
+    fflush(stdout);
+    fputs("fatal: out of memory\n", stderr);
+    abort();
+}
+
+static void cool_fsb_reserve(cool_fsb *b, size_t extra) {
+    /* The running length plus this append must not wrap size_t; a wrap would let a
+       short reserve back a long write and corrupt the heap, so an overflow aborts on
+       the OOM path rather than proceeding. */
+    if (extra > SIZE_MAX - b->len) {
+        cool_fsb_oom();
+    }
+    size_t need = b->len + extra;
+    if (need <= b->cap) {
+        return;
+    }
+    /* Double until the capacity covers need, but never past the point where doubling
+       would itself wrap; there it clamps to the exact need, which the guard above
+       proved is representable. */
+    size_t ncap = b->cap ? b->cap : 64;
+    while (ncap < need) {
+        if (ncap > SIZE_MAX / 2) {
+            ncap = need;
+            break;
+        }
+        ncap *= 2;
+    }
+    char *nb = (char *)realloc(b->buf, ncap);
+    if (!nb) {
+        cool_fsb_oom();
+    }
+    b->buf = nb;
+    b->cap = ncap;
+}
+
+void *cool_fsb_new(void) {
+    cool_fsb *b = (cool_fsb *)malloc(sizeof(cool_fsb));
+    if (!b) {
+        cool_fsb_oom();
+    }
+    b->buf = NULL;
+    b->len = 0;
+    b->cap = 0;
+    return b;
+}
+
+/* Byte counted append, the char / char array / char slice sink: exactly n bytes,
+   so an embedded NUL or a multibyte UTF-8 sequence passes through, matching
+   cool_print_bytes. */
+void cool_fsb_bytes(void *h, const char *p, int64_t n) {
+    if (n <= 0) {
+        return;
+    }
+    cool_fsb *b = (cool_fsb *)h;
+    cool_fsb_reserve(b, (size_t)n);
+    memcpy(b->buf + b->len, p, (size_t)n);
+    b->len += (size_t)n;
+}
+
+/* NUL terminated string sink for a chunk constant, a string hole, a rawptr, an
+   error message, or a struct's toString result. A null pointer appends nothing,
+   matching cool_print_cstr's empty read. */
+void cool_fsb_cstr(void *h, const char *s) {
+    if (!s) {
+        return;
+    }
+    cool_fsb_bytes(h, s, (int64_t)strlen(s));
+}
+
+void cool_fsb_i64(void *h, int64_t v) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%" PRId64, v);
+    if (n > 0) {
+        cool_fsb_bytes(h, tmp, n);
+    }
+}
+
+void cool_fsb_f64(void *h, double v) {
+    char tmp[64];
+    int n = snprintf(tmp, sizeof(tmp), "%g", v);
+    if (n > 0) {
+        cool_fsb_bytes(h, tmp, n);
+    }
+}
+
+/* Copies the accumulated bytes into a fresh generational heap string, the same
+   allocation class cool_str_concat and substring return, so free() reclaims the
+   result like any other heap string. The scratch is released here; the builder
+   is single use. */
+char *cool_fsb_fin(void *h) {
+    cool_fsb *b = (cool_fsb *)h;
+    /* The NUL terminator makes the request len + 1; refuse a length that would wrap
+       that byte count or overflow the signed size cool_gen_alloc takes, and abort if
+       the allocation itself fails, so the terminating store below never lands on a
+       null or short buffer. */
+    if (b->len >= (size_t)INT64_MAX) {
+        cool_fsb_oom();
+    }
+    char *out = (char *)cool_gen_alloc((int64_t)(b->len + 1));
+    if (!out) {
+        cool_fsb_oom();
+    }
+    if (b->len > 0) {
+        memcpy(out, b->buf, b->len);
+    }
+    out[b->len] = 0;
+    free(b->buf);
+    free(b);
+    return out;
 }
 
 /* The std.logging level word. Default 1 (Info). Relaxed ordering is enough:

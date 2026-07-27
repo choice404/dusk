@@ -1,0 +1,62 @@
+// The interpolation parity pin (I7): for every printable type, f"{v}" writes
+// exactly the bytes println("{}", v) writes minus the newline. Each type is
+// rendered first through the f-string, then through the format placeholder twin,
+// so the golden output shows the two blocks byte for byte identical; an in-program
+// == gate against the expected constants makes the parity a hard runtime check.
+@paradigm oop
+@paradigm procedural
+
+interface Display {
+    toString() -> string
+}
+
+struct Box {
+    v: int64,
+}
+
+impl Display for Box {
+    func toString() -> string {
+        return "box"
+    }
+}
+
+func main() -> int64 {
+    i: int64 = -42
+    b: bool = true
+    fl: float64 = 3.5
+    c: char = 'Z'
+    s: string = "hi"
+    r: rune = r'A'
+    arr: char[3] = "abc"
+    bx: Box = Box { v: 7 }
+
+    println(f"{i}")
+    println(f"{b}")
+    println(f"{fl}")
+    println(f"{c}")
+    println(f"{s}")
+    println(f"{r}")
+    println(f"{arr}")
+    println(f"{bx}")
+
+    println("{}", i)
+    println("{}", b)
+    println("{}", fl)
+    println("{}", c)
+    println("{}", s)
+    println("{}", r)
+    println("{}", arr)
+    println("{}", bx)
+
+    mut ok: bool = true
+    if !(f"{i}" == "-42") { ok = false }
+    if !(f"{b}" == "1") { ok = false }
+    if !(f"{fl}" == "3.5") { ok = false }
+    if !(f"{c}" == "Z") { ok = false }
+    if !(f"{s}" == "hi") { ok = false }
+    if !(f"{r}" == "65") { ok = false }
+    if !(f"{arr}" == "abc") { ok = false }
+    if !(f"{bx}" == "box") { ok = false }
+    if ok { println("PARITY OK") } else { println("PARITY FAIL") }
+    return 0
+}

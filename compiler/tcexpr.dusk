@@ -748,6 +748,22 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         }
         return ty_unknown((*tc).ty)
     }
+    if e.kind == xk_fstr() {
+        // The kids alternate chunk (even) and hole (odd). Each chunk is a plain
+        // string that needs no check; each hole is inferred and must be printable by
+        // the same rule the format placeholder enforces, so an enum, a pointer, or a
+        // void value is rejected here with the printable-set diagnostic. The result
+        // is a string, the concat class, with no ownership or paradigm obligation.
+        mut fi: int64 = 1
+        while fi < e.b {
+            kid_id: int64 = vec_get((*a).kids, e.a + fi)
+            ht: int64 = infer_expr(tc, kid_id)
+            kide: ExprNode = vec_get((*a).exprs, kid_id)
+            check_printable(tc, ht, kide.lo, kide.hi)
+            fi = fi + 2
+        }
+        return ty_str((*tc).ty)
+    }
     if e.kind == xk_sizeof_type() { return ty_int((*tc).ty, 64) }
     if e.kind == xk_collect() {
         inner: int64 = tc_type(tc, e.a)

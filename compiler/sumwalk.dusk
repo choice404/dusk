@@ -292,6 +292,17 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         }
         return v
     }
+    if e.kind == xk_fstr() {
+        // The result is a freshly allocated string, the concat class, so it carries
+        // no view of any frame the holes read; the holes are still evaluated so their
+        // own reads register.
+        mut fi: int64 = 0
+        while fi < e.b {
+            sum_eval(c, kid(a, e.a, fi))
+            fi = fi + 1
+        }
+        return val_none()
+    }
     if e.kind == xk_index() {
         idx: ExprNode = vec_get((*a).exprs, e.b)
         if idx.kind == xk_range() {

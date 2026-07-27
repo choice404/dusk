@@ -14,6 +14,11 @@
 
 // The lexer state: the source and its byte length, the current offset, whether a
 // newline has been seen since the last token, and the collected tokens and faults.
+// fstr_active is true while the lexer is inside an interpolation hole, lexing
+// ordinary tokens; fstr_depth counts the braces opened within that hole so the
+// matching close brace, the one at depth zero, ends the hole and re-enters chunk
+// mode. Both reset at end of input so a malformed f-string never leaks the mode
+// into the next token.
 export struct Lexer {
     src: string,
     n: int64,
@@ -22,6 +27,8 @@ export struct Lexer {
     tokens: *Vector<Token>,
     errors: *Vector<Located>,
     docs: *Vector<DocBlock>,
+    fstr_active: bool,
+    fstr_depth: int64,
 }
 
 export func lx_new(src: string, n: int64) -> *Lexer {
@@ -36,7 +43,30 @@ export func lx_new(src: string, n: int64) -> *Lexer {
         tokens: tv,
         errors: ev,
         docs: dv,
+        fstr_active: false,
+        fstr_depth: 0,
     })
+}
+
+// The interpolation mode accessors. fstr_active is read on every symbol dispatch
+// to decide whether a brace steers the hole depth, so it is a plain field read.
+export func lx_fstr_active(lx: *Lexer) -> bool {
+    return (*lx).fstr_active
+}
+export func lx_fstr_depth(lx: *Lexer) -> int64 {
+    return (*lx).fstr_depth
+}
+export func lx_fstr_set_active(lx: *Lexer, on: bool) -> void {
+    (*lx).fstr_active = on
+}
+export func lx_fstr_set_depth(lx: *Lexer, d: int64) -> void {
+    (*lx).fstr_depth = d
+}
+// Clears the interpolation mode, called at end of input so an unterminated
+// f-string does not carry fstr_active into a later lex.
+export func lx_fstr_reset(lx: *Lexer) -> void {
+    (*lx).fstr_active = false
+    (*lx).fstr_depth = 0
 }
 
 // The byte at the current offset, the next, and the one after, each -1 at or past

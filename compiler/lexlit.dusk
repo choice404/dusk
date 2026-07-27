@@ -34,6 +34,85 @@ export func lx_string(lx: *Lexer, start: int64) -> void {
     lx_push(lx, k_str(), start)
 }
 
+// An interpolated string, opened by an f immediately before a quote. The lexer
+// splits it into chunk tokens (k_fstr_full / _head / _mid / _tail) and lexes each
+// interpolation hole as ordinary tokens, counted by lx_symbol's brace hooks. This
+// is the initial entry: the f and the quote are the current two bytes. A second
+// f-string opened while a hole is active is rejected, since a hole binds one
+// expression and a nested f-string would need its own binding first.
+export func lx_fstring(lx: *Lexer, start: int64) -> void {
+    if lx_fstr_active(lx) {
+        lx_err(lx, start, "an interpolated string cannot nest inside another; bind the inner one first")
+        // Recover by consuming only the f, so the quote that follows lexes as an
+        // ordinary string. The outer hole's brace depth is untouched, so the outer
+        // f-string still terminates.
+        lx_advance(lx, 1)
+        return
+    }
+    lx_advance(lx, 2)
+    lx_fstr_scan(lx, start, true)
+}
+
+// Re-enters chunk mode after an interpolation hole closes. brace_pos is the offset
+// of the closing brace, which lx_symbol has confirmed sits at depth zero. The chunk
+// token that follows spans from that brace, so it is a k_fstr_mid or k_fstr_tail.
+export func lx_fstr_cont(lx: *Lexer, brace_pos: int64) -> void {
+    lx_advance(lx, 1)
+    lx_fstr_scan(lx, brace_pos, false)
+}
+
+// Scans one chunk of an interpolated string, from the byte just past the leading
+// delimiter to the next single { that opens a hole or the closing quote. A doubled
+// {{ or }} is a literal brace kept in the chunk (the codegen collapse folds it); a
+// bare } is a fault; a backslash steps the shared escape scanner; end of input is an
+// unterminated literal that also clears the mode. first selects the full/head token
+// on close/open, otherwise the mid/tail token continuing a prior hole.
+func lx_fstr_scan(lx: *Lexer, start: int64, first: bool) -> void {
+    mut going: bool = true
+    while going {
+        c: int64 = lx_peek(lx)
+        if c < 0 {
+            lx_err(lx, start, "unterminated string literal")
+            lx_fstr_reset(lx)
+            going = false
+        } else if c == 34 {
+            lx_advance(lx, 1)
+            if first {
+                lx_push(lx, k_fstr_full(), start)
+            } else {
+                lx_push(lx, k_fstr_tail(), start)
+            }
+            lx_fstr_set_active(lx, false)
+            going = false
+        } else if c == 123 {
+            if lx_peek2(lx) == 123 {
+                lx_advance(lx, 2)
+            } else {
+                lx_advance(lx, 1)
+                if first {
+                    lx_push(lx, k_fstr_head(), start)
+                } else {
+                    lx_push(lx, k_fstr_mid(), start)
+                }
+                lx_fstr_set_active(lx, true)
+                lx_fstr_set_depth(lx, 0)
+                going = false
+            }
+        } else if c == 125 {
+            if lx_peek2(lx) == 125 {
+                lx_advance(lx, 2)
+            } else {
+                lx_err(lx, lx_pos(lx), "unmatched '}' in an interpolated string; write '}}' for a literal brace")
+                lx_advance(lx, 1)
+            }
+        } else if c == 92 {
+            scan_one_escape(lx)
+        } else {
+            lx_advance(lx, 1)
+        }
+    }
+}
+
 // Steps one backslash escape, recording its fault if any. Shared by the three
 // literal scanners. The backslash is at the current offset on entry.
 func scan_one_escape(lx: *Lexer) -> int64 {

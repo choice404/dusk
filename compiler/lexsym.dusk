@@ -8,6 +8,7 @@
 
 @import token
 @import lexcore
+@import lexlit
 
 // The kind and byte length of the multi or single character operator that starts
 // with c, given the next two bytes. A length of 0 means c starts no operator, so
@@ -115,6 +116,22 @@ export func lx_symbol(lx: *Lexer, start: int64, c: int64) -> void {
         lx_bump_scalar(lx)
         lx_err(lx, start, "unexpected character")
         return
+    }
+    // Inside an interpolation hole a brace steers the hole depth: an opening brace
+    // deepens it and still lexes as its own token, a closing brace at a positive
+    // depth balances it and still lexes as a token, and a closing brace at depth
+    // zero ends the hole and re-enters chunk mode rather than lexing as a token.
+    if lx_fstr_active(lx) {
+        if c == 123 {
+            lx_fstr_set_depth(lx, lx_fstr_depth(lx) + 1)
+        } else if c == 125 {
+            if lx_fstr_depth(lx) > 0 {
+                lx_fstr_set_depth(lx, lx_fstr_depth(lx) - 1)
+            } else {
+                lx_fstr_cont(lx, start)
+                return
+            }
+        }
     }
     kind, len := match_op(c, lx_peek2(lx), lx_peek3(lx))
     if len > 0 {

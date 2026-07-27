@@ -1,0 +1,20 @@
+// An f-string built inside an async func body. The builder and its intermediate
+// values live within one poll invocation with no await between them, so the whole
+// render is straight-line inside the poll function; the async frame machinery
+// carries the spilled locals the hole reads.
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+async func greet(n: int64) -> string {
+    return f"value is {n}"
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    r := async_run(greet(21))
+    loop_free()
+    println(r)
+    return 0
+}

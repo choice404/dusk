@@ -234,6 +234,10 @@ func copy_expr(dst: *Ast, src: *Ast, id: int64) -> int64 {
         off3, len3 := copy_expr_list(dst, src, e.a, e.b)
         return ast_expr(dst, xk_array(), e.lo, e.hi, off3, len3, 0, 0)
     }
+    if e.kind == xk_fstr() {
+        offf, lenf := copy_expr_list(dst, src, e.a, e.b)
+        return ast_expr(dst, xk_fstr(), e.lo, e.hi, offf, lenf, 0, 0)
+    }
     if e.kind == xk_struct_lit() {
         off4, len4 := copy_field_pairs(dst, src, e.b, e.c)
         return ast_expr(dst, xk_struct_lit(), e.lo, e.hi, copy_name(dst, src, e.a), off4, len4, 0)
@@ -579,6 +583,8 @@ func shift_expr(a: *Ast, id: int64, base: int64) -> void {
         shift_expr_slice(a, e.a, e.b, base)
     } else if e.kind == xk_array() {
         shift_expr_slice(a, e.a, e.b, base)
+    } else if e.kind == xk_fstr() {
+        shift_expr_slice(a, e.a, e.b, base)
     } else if e.kind == xk_struct_lit() {
         mut j: int64 = 0
         while j < e.c {
@@ -752,6 +758,8 @@ func fold_expr(a: *Ast, id: int64, ns: *Map<string, int64>, exports: *Map<string
     } else if e.kind == xk_tuple() {
         fold_expr_slice(a, e.a, e.b, ns, exports, files, errors)
     } else if e.kind == xk_array() {
+        fold_expr_slice(a, e.a, e.b, ns, exports, files, errors)
+    } else if e.kind == xk_fstr() {
         fold_expr_slice(a, e.a, e.b, ns, exports, files, errors)
     } else if e.kind == xk_struct_lit() {
         mut i: int64 = 0

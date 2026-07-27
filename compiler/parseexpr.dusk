@@ -374,6 +374,22 @@ func parse_primary(p: *Parser) -> int64 {
         p_bump(p)
         return ast_expr(p_ast(p), xk_str(), t.lo, t.hi, sid, 0, 0, 0)
     }
+    if t.kind == k_fstr_full() {
+        // A holeless interpolated string is still an f-string: a single-chunk xk_fstr,
+        // not a plain xk_str. That keeps its doubled braces cooked through the builder
+        // and keeps it a value rather than a format string, so println(f"...{{}}") is a
+        // value print, never a re-scanned format placeholder.
+        fsid: int64 = p_fstr_chunk_id(p, t)
+        p_bump(p)
+        chunk: int64 = ast_expr(p_ast(p), xk_str(), t.lo, t.hi, fsid, 0, 0, 0)
+        one: *Vector<int64> = alloc(vec_new())
+        vec_push(one, chunk)
+        off, len := ast_kids(p_ast(p), one)
+        return ast_expr(p_ast(p), xk_fstr(), t.lo, t.hi, off, len, 0, 0)
+    }
+    if t.kind == k_fstr_head() {
+        return parse_fstring(p, t)
+    }
     if t.kind == k_char() {
         sc: int64 = p_char_scalar(p, t.lo + 1)
         p_bump(p)
@@ -454,6 +470,45 @@ func parse_array(p: *Parser, lo: int64) -> int64 {
     p_expect(p, k_rbracket())
     off, len := ast_kids(p_ast(p), elems)
     return ast_expr(p_ast(p), xk_array(), lo, p_prev_hi(p), off, len, 0, 0)
+}
+
+// Builds an xk_fstr node from a head token onward. The head chunk is the first kid;
+// then the loop alternates a hole expression and the chunk that follows it, taking a
+// mid chunk to continue or a tail chunk to finish, so the kids read chunk, hole,
+// chunk, hole, ..., chunk. A hole whose first token is already a mid or tail chunk is
+// empty and is named as the mistake, distinct from the {} format placeholder.
+func parse_fstring(p: *Parser, head: Token) -> int64 {
+    kids: *Vector<int64> = alloc(vec_new())
+    lo: int64 = head.lo
+    head_id: int64 = p_fstr_chunk_id(p, head)
+    vec_push(kids, ast_expr(p_ast(p), xk_str(), head.lo, head.hi, head_id, 0, 0, 0))
+    p_bump(p)
+    mut hi: int64 = head.hi
+    mut reading: bool = true
+    while reading {
+        if p_at(p, k_fstr_mid()) || p_at(p, k_fstr_tail()) || p_at_eof(p) {
+            p_error(p, "an interpolation hole needs an expression; '{}' is the format placeholder for println, an f-string writes the expression inline")
+        } else {
+            vec_push(kids, parse_expr(p))
+        }
+        ct: Token = p_tok(p)
+        if ct.kind == k_fstr_mid() {
+            mid_id: int64 = p_fstr_chunk_id(p, ct)
+            vec_push(kids, ast_expr(p_ast(p), xk_str(), ct.lo, ct.hi, mid_id, 0, 0, 0))
+            p_bump(p)
+        } else if ct.kind == k_fstr_tail() {
+            tail_id: int64 = p_fstr_chunk_id(p, ct)
+            vec_push(kids, ast_expr(p_ast(p), xk_str(), ct.lo, ct.hi, tail_id, 0, 0, 0))
+            hi = ct.hi
+            p_bump(p)
+            reading = false
+        } else {
+            p_error(p, expected_found("the closing of the interpolated string", p))
+            reading = false
+        }
+    }
+    off, len := ast_kids(p_ast(p), kids)
+    return ast_expr(p_ast(p), xk_fstr(), lo, hi, off, len, 0, 0)
 }
 
 func parse_paren(p: *Parser, lo: int64) -> int64 {

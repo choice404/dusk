@@ -436,6 +436,21 @@ export func p_string_body_id(p: *Parser, t: Token) -> int64 {
     return intern_owned((*(*p).ast).interner, body)
 }
 
+// The interned internal-form body of an f-string chunk token. A full or head chunk
+// opens with the two-byte f" prefix, a mid or tail chunk with the one-byte } that
+// closed the prior hole; every chunk ends with a single { or " delimiter one byte
+// before hi. fstr_chunk_internal reads the exact body span [lo, hi), decodes its
+// escapes, and collapses each doubled brace to a single one, so the interned chunk
+// is fully cooked and codegen appends it verbatim.
+export func p_fstr_chunk_id(p: *Parser, t: Token) -> int64 {
+    mut lo: int64 = t.lo + 1
+    if t.kind == k_fstr_full() || t.kind == k_fstr_head() {
+        lo = t.lo + 2
+    }
+    body: string = fstr_chunk_internal((*p).src, (*p).n, lo, t.hi - 1)
+    return intern_owned((*(*p).ast).interner, body)
+}
+
 export func p_char_scalar(p: *Parser, bstart: int64) -> int64 {
     b: int64 = byte_at((*p).src, (*p).n, bstart)
     if b < 0 { return 0 }

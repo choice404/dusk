@@ -203,7 +203,10 @@ func lx_number(lx: *Lexer, start: int64) -> void {
 
 // Runs the scan loop to end of input, dispatching each lead byte. The rune guard,
 // r immediately before a quote, is tested before the identifier pass so `r'a'`
-// lexes as a rune and a bare `r` stays an identifier.
+// lexes as a rune and a bare `r` stays an identifier. The f-string guard is the
+// twin: f immediately before a quote opens an interpolated string, a bare f stays
+// an identifier. End of input reached inside an interpolation hole is an
+// unterminated literal, and clears the mode so it never leaks past the scan.
 export func lex_run(lx: *Lexer) -> void {
     mut going: bool = true
     while going {
@@ -211,11 +214,21 @@ export func lex_run(lx: *Lexer) -> void {
         start: int64 = lx_pos(lx)
         c: int64 = lx_peek(lx)
         if c < 0 {
+            if lx_fstr_active(lx) {
+                lx_err(lx, start, "unterminated string literal")
+                lx_fstr_reset(lx)
+            }
             lx_push(lx, k_eof(), start)
             going = false
         } else if c == 114 {
             if lx_peek2(lx) == 39 {
                 lx_rune(lx, start)
+            } else {
+                lx_dispatch(lx, start, c)
+            }
+        } else if c == 102 {
+            if lx_peek2(lx) == 34 {
+                lx_fstring(lx, start)
             } else {
                 lx_dispatch(lx, start, c)
             }

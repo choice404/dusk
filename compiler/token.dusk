@@ -96,6 +96,16 @@ export func k_rbracket() -> int64 { return 61 }
 export func k_eof() -> int64 { return 62 }
 export func k_ellipsis() -> int64 { return 63 }
 
+// The interpolated string kinds. An f-string lexes into a chunk-and-hole sequence:
+// a holeless f"abc" is one k_fstr_full; an f"a{x}b{y}c" is k_fstr_head ("a{"),
+// then the hole's ordinary tokens, then k_fstr_mid ("}b{"), then the second hole,
+// then k_fstr_tail ("}c"). Each carries only its byte span, its chunk body rebuilt
+// from the span like any other string token.
+export func k_fstr_full() -> int64 { return 64 }
+export func k_fstr_head() -> int64 { return 65 }
+export func k_fstr_mid() -> int64 { return 66 }
+export func k_fstr_tail() -> int64 { return 67 }
+
 // The Debug name of an operator, punctuation, or end kind, matching stage0's
 // TokenKind Debug output. Returns the empty string for a special kind, whose
 // renderer reads the source span instead.
@@ -154,6 +164,10 @@ export func kind_name(kind: int64) -> string {
     if kind == 61 { return "RBracket" }
     if kind == 62 { return "Eof" }
     if kind == 63 { return "Ellipsis" }
+    if kind == 64 { return "FStrFull" }
+    if kind == 65 { return "FStrHead" }
+    if kind == 66 { return "FStrMid" }
+    if kind == 67 { return "FStrTail" }
     return ""
 }
 

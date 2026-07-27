@@ -3189,7 +3189,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.11.0\n
+out dusk 1.11.1\n
 argv version
 code 0
 ---
@@ -4804,4 +4804,126 @@ test nested_lambda_pollute
 mode run
 file examples/nested_lambda_pollute.dusk
 out 44\n
+---
+# Interpolated strings (1.11.1). The lexer, parser, walker sweep, and per-hole
+# printability check land first; codegen through the cool_fsb builder family and the
+# run-parity goldens follow. fstr_check_ok now runs and prints every legal shape;
+# the parity golden pins f"{v}" byte for byte against the println("{}", v) twin; the
+# twins prove each illegal hole or malformed literal is rejected with its own
+# diagnostic.
+test fstr_check_ok
+mode run
+file examples/fstr_check_ok.dusk
+out n=5 b=1 f=3.5 s=hi\nno holes at all\n55\n5\na {lit} b 5 c\nsum=10\njoined hihi\npx=1\nhere is point\na5hi\n
+---
+test fstr_parity
+mode run
+file examples/fstr_parity.dusk
+out -42\n1\n3.5\nZ\nhi\n65\nabc\nbox\n-42\n1\n3.5\nZ\nhi\n65\nabc\nbox\nPARITY OK\n
+---
+test fstr_escapes
+mode run
+file examples/fstr_escapes.dusk
+out lit { and } braces\na=1\nb=2\n12\nuni A end\nabc\n[]\n
+---
+test fstr_exprs
+mode run
+file examples/fstr_exprs.dusk
+out dbl=8\npx=10\nidx=20\nsum=9\nlit=5\npt=8\n
+---
+test fstr_lambda
+mode run
+file examples/fstr_lambda.dusk
+out hi dusk v11\n
+---
+test fstr_async
+mode run
+file examples/fstr_async.dusk
+out value is 21\n
+---
+test fstr_concat
+mode run
+file examples/fstr_concat.dusk
+out a7!\n
+---
+test fstr_display
+mode run
+file examples/fstr_display.dusk
+out today is warm\n
+---
+test fstr_as_arg
+mode run
+file examples/fstr_as_arg.dusk
+out x3\n
+---
+test fstr_enum_hole_fail
+mode check_fail
+file examples/fstr_enum_hole_fail.dusk
+err_has cannot print the enum 'Color'; match on it and print its parts
+---
+test fstr_ptr_hole_fail
+mode check_fail
+file examples/fstr_ptr_hole_fail.dusk
+err_has cannot print a pointer; dereference it or print its fields
+---
+test fstr_void_hole_fail
+mode check_fail
+file examples/fstr_void_hole_fail.dusk
+err_has cannot print a void value
+---
+test fstr_await_hole_fail
+mode check_fail
+file examples/fstr_await_hole_fail.dusk
+err_has 'await' cannot appear mid-expression; give the awaited value a name, as in v, e := await f
+---
+test fstr_empty_hole_fail
+mode check_fail
+file examples/fstr_empty_hole_fail.dusk
+err_has an interpolation hole needs an expression; '{}' is the format placeholder for println, an f-string writes the expression inline
+---
+test fstr_nested_fail
+mode check_fail
+file examples/fstr_nested_fail.dusk
+err_has an interpolated string cannot nest inside another; bind the inner one first
+---
+test fstr_bracechunk_fail
+mode check_fail
+file examples/fstr_bracechunk_fail.dusk
+err_has unmatched '}' in an interpolated string; write '}}' for a literal brace
+---
+test fstr_unterminated_fail
+mode check_fail
+file examples/fstr_unterminated_fail.dusk
+err_has unterminated string literal
+---
+# Interpolated strings, two-model review follow-ups. An import-qualified call folds
+# the same in a hole as outside it; a holeless f-string is a value with cooked braces,
+# never a format string; a \u brace escape stays literal while a doubled brace folds;
+# f-strings type as strings in match arms and arm-let blocks; and an f-string hole
+# error inside an imported file carets that file, proving the load merge shifts the
+# node's kids.
+test fstr_import_qual
+mode run
+file examples/fstr_import_qual.dusk
+out 12\nq:15\nimp:10\n
+---
+test fstr_holeless_value
+mode run
+file examples/fstr_holeless_value.dusk
+out holed 5 {} end\nholeless {} end\nholed 5 {} end\nholeless {} end\n
+---
+test fstr_escbrace
+mode run
+file examples/fstr_escbrace.dusk
+out {{ 1\nA{B 2\n{} 3\n
+---
+test fstr_match_arms
+mode run
+file examples/fstr_match_arms.dusk
+out yes 7\nN:14\n
+---
+test fstr_import_span
+mode check_fail
+file examples/fstr_import_span.dusk
+err_has fstr_import_span_helper.dusk: 12:20: error: cannot print a pointer; dereference it or print its fields
 ---
