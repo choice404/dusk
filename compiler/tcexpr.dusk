@@ -230,7 +230,7 @@ func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: int64, lo
             if !compat((*tc).ty, fld.ty, actual) {
                 tc_emit(tc, wrong_field_msg(name, fname2), val.lo, val.hi)
             }
-            check_int_fits(tc, val_id2, fld.ty)
+            check_lit_fits_target(tc, val_id2, fld.ty)
             embeds: *Map<string, TyList> = (*tc).embed_fields
             if map_has(embeds, name) {
                 raws: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
@@ -591,8 +591,13 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
     e: ExprNode = vec_get((*a).exprs, id)
     if e.kind == xk_int() {
         mut w: int64 = 0
-        if e.b >= 0 { w = int_suffix_width(ast_name(a, e.b)) }
-        if w != 0 { check_int_value_fits(tc, e.a, w, e.lo, e.hi) }
+        mut unsigned: bool = false
+        if e.b >= 0 {
+            w = int_suffix_width(ast_name(a, e.b))
+            unsigned = int_suffix_unsigned(ast_name(a, e.b))
+        }
+        if w != 0 { check_suffix_value_fits(tc, e.a, w, unsigned, e.lo, e.hi) }
+        if unsigned { return ty_uint((*tc).ty, w) }
         return ty_int((*tc).ty, w)
     }
     if e.kind == xk_float() {
@@ -677,6 +682,9 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         lt: int64 = infer_expr(tc, e.b)
         rt: int64 = infer_expr(tc, e.c)
         res: int64 = check_binary(tc, e.a, lt, rt, e.lo, e.hi)
+        // A bare literal operand takes the other operand's type, the one place a
+        // literal reaches a narrow width with no annotation to range it.
+        check_operand_lit_fits(tc, e.a, e.b, e.c, lt, rt)
         if e.a == bop_shl() || e.a == bop_shr() { check_shift_amount(tc, e.c, res, e.lo, e.hi) }
         if e.a == bop_pow() { check_pow_exponent(tc, lt, rt, e.c, e.lo, e.hi) }
         return res
@@ -703,9 +711,14 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
     }
     if e.kind == xk_index() {
         base_ty2: int64 = infer_expr(tc, e.a)
-        infer_expr(tc, e.b)
+        it0: int64 = infer_expr(tc, e.b)
         idx: ExprNode = vec_get((*a).exprs, e.b)
         bn2: TyNode = ty_get((*tc).ty, base_ty2)
+        // An index is an int64 offset, so an unsigned one is refused rather than
+        // handed to a widening that must pick its extension by a signedness the
+        // index position never states. A range answers unknown here; its two ends
+        // are checked in the range arm, where they are inferred.
+        check_index_signedness(tc, it0, idx.lo, idx.hi)
         if idx.kind == xk_range() {
             // A range slice validates against its base's length, and a raw
             // pointer has none: the fat slice it would mint claims a length no
@@ -729,8 +742,10 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         return ty_unknown((*tc).ty)
     }
     if e.kind == xk_range() {
-        infer_expr(tc, e.a)
-        infer_expr(tc, e.b)
+        rlo: int64 = infer_expr(tc, e.a)
+        rhi: int64 = infer_expr(tc, e.b)
+        check_index_signedness(tc, rlo, e.lo, e.hi)
+        check_index_signedness(tc, rhi, e.lo, e.hi)
         return ty_unknown((*tc).ty)
     }
     if e.kind == xk_tuple() { return infer_tuple(tc, e.a, e.b) }
@@ -790,7 +805,7 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         if !compat((*tc).ty, inner, actual) {
             tc_emit(tc, "the collected value's type does not match the collector element type", arg.lo, arg.hi)
         }
-        check_int_fits(tc, e.b, inner)
+        check_lit_fits_target(tc, e.b, inner)
         check_collect_mint(tc, e, inner)
         return ty_collector((*tc).ty, inner)
     }

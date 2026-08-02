@@ -3162,15 +3162,149 @@ mode check_fail
 file examples/foldarity_fail.dusk
 err_has fold takes 3 argument(s), but 4 were given
 ---
-test an_unsigned_integer_type_name_is_reserved
-mode check_fail
-file examples/uinttype_fail.dusk
-err_has unsigned integers are reserved
+test the_unsigned_widths_carry_values_across_every_shape
+mode run
+file examples/uinttype_ok.dusk
+out 42\n7\n1\n300\n11\n9\n1\n
 ---
-test an_unsigned_integer_literal_suffix_is_reserved
+test a_function_cannot_take_an_unsigned_type_name
 mode check_fail
-file examples/uintsuffix_fail.dusk
-err_has unsigned integers are reserved
+file examples/uintfunc_fail.dusk
+err_has 'uint32' is a primitive type name; a function cannot take it
+---
+test the_unsigned_literal_ranges_and_result_types_check
+mode check_ok
+file examples/uintfit_ok.dusk
+---
+test the_sign_sensitive_operators_lower_to_their_unsigned_forms
+mode run
+file examples/uintops_ok.dusk
+out 2000000000\n-147483648\n3\n-1\n1073741824\n-1073741824\n1\n0\n1\n0\n4000000001\n0\n1\n4000000000 2147483648\n4000000000 2147483648\n4000000000\n-294967296\n294967301\n0\n5\n0\n1\n
+---
+test the_unsigned_casts_extend_truncate_and_saturate
+mode run
+file examples/uintcast_ok.dusk
+out 18446744073709551615\n255\n255\n0\n255\n0\n255\n65535\n4294967295\n18446744073709551615\n0\n0\n0\n9223372036854775807\n1.84467e+19\n18446744073709551615\n18446744073709551615\n
+---
+test arithmetic_across_signedness_is_rejected
+mode check_fail
+file examples/uintmixarith_fail.dusk
+err_has arithmetic mixes int32 and uint32; cast to one signedness
+---
+test a_comparison_across_signedness_is_rejected
+mode check_fail
+file examples/uintmixcmp_fail.dusk
+err_has comparison mixes uint32 and int32; cast to one signedness
+---
+test a_bitwise_operator_across_signedness_is_rejected
+mode check_fail
+file examples/uintmixbit_fail.dusk
+err_has '&' mixes uint32 and int32; cast to one signedness
+---
+test a_power_operator_across_signedness_is_rejected
+mode check_fail
+file examples/uintmixpow_fail.dusk
+err_has '**' mixes uint32 and int32; cast to one signedness
+---
+test a_negative_literal_in_an_unsigned_annotation_is_rejected
+mode check_fail
+file examples/uintneglit_fail.dusk
+err_has literal -1 does not fit in uint32; an unsigned type holds no negative value, cast if the wrap is meant
+---
+test a_negative_literal_is_rejected_in_every_unsigned_position
+mode check_fail
+file examples/uintnegarg_fail.dusk
+err_has literal -8 does not fit in uint64
+err_has literal -1 does not fit in uint16
+err_has literal -3 does not fit in uint8
+---
+test a_literal_past_the_unsigned_top_is_rejected
+mode check_fail
+file examples/uintoverlit_fail.dusk
+err_has literal 256 does not fit in uint8
+err_has literal 70000 does not fit in uint16
+err_has literal 5000000000 does not fit in uint32
+---
+test negating_an_unsigned_value_is_rejected
+mode check_fail
+file examples/uintnegate_fail.dusk
+err_has cannot negate uint32; an unsigned value has no negation, cast to a signed width first
+---
+test an_unsigned_index_or_range_end_is_rejected
+mode check_fail
+file examples/uintindex_fail.dusk
+err_has cannot index with uint32; an index is int64, cast the index
+err_has cannot index with uint64; an index is int64, cast the index
+---
+test a_cross_signedness_bind_argument_and_result_are_rejected
+mode check_fail
+file examples/uintcross_fail.dusk
+err_has 'crossed' has a type annotation that does not match its value
+err_has argument 1 has the wrong type
+err_has 'narrowed' has a type annotation that does not match its value
+---
+test an_unsigned_generic_instantiation_is_rejected_on_the_ground_pass
+mode check_fail
+file examples/uintground_fail.dusk
+err_has arithmetic mixes uint32 and int32; cast to one signedness
+---
+test an_array_literal_element_past_its_element_width_is_rejected
+mode check_fail
+file examples/uintarrlit_fail.dusk
+err_has literal 256 does not fit in uint8
+err_has literal -1 does not fit in uint8; an unsigned type holds no negative value, cast if the wrap is meant
+err_has literal 300 does not fit in 8 bits
+err_has literal 300 does not fit in uint8
+---
+test a_destructure_binder_ranges_the_tuple_member_it_binds
+mode check_fail
+file examples/uintdestructure_fail.dusk
+err_has literal 256 does not fit in uint8
+err_has literal 300 does not fit in 8 bits
+err_has literal -1 does not fit in uint16; an unsigned type holds no negative value, cast if the wrap is meant
+---
+test a_bare_operand_literal_ranges_against_the_other_operand
+mode check_fail
+file examples/uintoperand_fail.dusk
+err_has literal -1 does not fit in uint32; an unsigned type holds no negative value, cast if the wrap is meant
+err_has literal 300 does not fit in uint8
+err_has literal 300 does not fit in 8 bits
+err_has literal -2 does not fit in uint16; an unsigned type holds no negative value, cast if the wrap is meant
+err_has literal -3 does not fit in uint64; an unsigned type holds no negative value, cast if the wrap is meant
+---
+test a_match_arm_tail_literal_ranges_against_the_binding
+mode check_fail
+file examples/uintmatcharm_fail.dusk
+err_has literal 300 does not fit in uint8
+err_has literal -1 does not fit in uint8; an unsigned type holds no negative value, cast if the wrap is meant
+err_has literal 200 does not fit in 8 bits
+---
+test a_tuple_literal_member_ranges_in_a_binding_and_a_return
+mode check_fail
+file examples/uinttuplelit_fail.dusk
+err_has literal -1 does not fit in uint16; an unsigned type holds no negative value, cast if the wrap is meant
+err_has literal -1 does not fit in uint8; an unsigned type holds no negative value, cast if the wrap is meant
+err_has literal 300 does not fit in 8 bits
+---
+test the_unsigned_top_is_writable_as_a_literal
+mode run
+file examples/uintwidelit_ok.dusk
+out 18446744073709551615\n9223372036854775808\n18446744073709551615\n18446744073709551614\n
+---
+test a_literal_past_the_unsigned_top_is_refused_by_the_lexer
+mode check_fail
+file examples/uintwidelit_fail.dusk
+err_has invalid integer literal
+---
+test a_wide_pattern_under_a_narrow_unsigned_suffix_is_rejected
+mode check_fail
+file examples/uintwidenarrow_fail.dusk
+err_has literal 18446744073709551615 does not fit in uint32
+---
+test every_aggregate_literal_at_the_edge_of_its_width_is_accepted
+mode run
+file examples/uintfitagg_ok.dusk
+out 255\n-128\n255\n255\n-128\n8\n255\n6\n4294967290\n127\n48\n0\n127\n250\n-128\n
 ---
 test a_loop_pumping_call_inside_an_async_func_is_rejected
 mode check_fail
@@ -3189,7 +3323,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.12.0\n
+out dusk 1.13.0\n
 argv version
 code 0
 ---
@@ -5152,4 +5286,79 @@ test builtin_name_scalar_ok
 mode run
 file examples/builtin_name_scalar_ok.dusk
 out keep\n42\n
+---
+test unsigned_wrap_arithmetic_and_power_use_their_own_widths
+mode run
+file examples/uintwrap113_ok.dusk
+out 0\n255\n18446744073709551615\n4\n8\n0\n
+---
+test unsigned_division_and_remainder_read_top_bit_values_by_magnitude
+mode run
+file examples/uintdivrem113_ok.dusk
+out 2147483647\n2\n-1\n-2\n
+---
+test unsigned_right_shift_and_ordering_are_not_signed_reads
+mode run
+file examples/uintshiftcmp113_ok.dusk
+out 1073741824\n1\nall_gt_zero\nzero_lt_one\ntop_after_one\nall_after_top\n
+---
+test unsigned_cast_corners_wrap_truncate_extend_saturate_and_round_trip
+mode run
+file examples/uintcastcorners113_ok.dusk
+out 44\n255\n18446744073709551615\n255\n255\n0\n0\n1.84467e+19\n18446744073709551615\n
+---
+test unsigned_println_and_f_string_render_identical_decimal_bytes
+mode run
+file examples/uintprintparity113_ok.dusk
+out 255\n255\n4000000000\n4000000000\n18446744073709551615\n18446744073709551615\n
+---
+test uint64_keys_hash_and_lookup_through_the_standard_map
+mode run
+file examples/uinthashmap113_ok.dusk
+out 3\n10\n20\n30\n-9223372036854775808\n-1\n
+---
+test mixed_unsigned_widths_round_trip_through_loops_and_aggregate_shapes
+mode run
+file examples/uintshape113_ok.dusk
+out 250\n65000\n4000000000\n4000000003\n9223372036854775808\n
+---
+test uint64_values_round_trip_through_a_csource_foreign_call
+mode run
+file examples/uintforeign113.dusk
+out 9223372036854775808\n18446744073709551615\n
+---
+test generic_division_keeps_uint32_and_int32_instantiations_distinct
+mode run
+file examples/uintgenericdiv113_ok.dusk
+out 2147483647\n2\n-1\n-2\n
+---
+test an_unsigned_top_bit_value_survives_across_an_async_await
+mode run
+file examples/uintasync113_ok.dusk
+out 2147483648\n1\n
+---
+test interface_dispatch_returns_an_unsigned_top_bit_value
+mode run
+file examples/uintinterface113_ok.dusk
+out 2147483648\nunsigned_dispatch\n
+---
+test an_unsigned_cast_builtin_with_the_wrong_arity_is_rejected
+mode check_fail
+file examples/uintcastarity113_fail.dusk
+err_has uint8(v) takes exactly one value
+---
+test an_f_string_hole_cannot_hide_mixed_signedness_arithmetic
+mode check_fail
+file examples/uintfstrmix113_fail.dusk
+err_has arithmetic mixes int32 and uint32; cast to one signedness
+---
+test an_unsigned_constant_shift_amount_is_ranged_by_width
+mode check_fail
+file examples/uintshiftamount113_fail.dusk
+err_has shift amount 8 is out of range for uint8
+---
+test an_unsigned_literal_exponent_with_the_top_bit_set_is_legal
+mode run
+file examples/uintpowexp_ok.dusk
+out 1\n0\n27\n1\n
 ---

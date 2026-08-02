@@ -158,6 +158,22 @@ func gp_display_string(s: *GenFuncState, v: Val) -> string {
     return out
 }
 
+// Whether a printed value takes the unsigned decimal path. Only an integer width
+// carries the flag; a char, a bool, or a rune keeps its own arm. The narrower
+// unsigned widths widen to i64 through coerce, which zero extends them, so the u64
+// printer is the only new runtime entry point the print family needs.
+func gp_is_unsigned(s: *GenFuncState, v: Val) -> bool {
+    return cty_is_unsigned(genctx_ctys((*s).ctx), v.ty)
+}
+
+// Widens an unsigned value to the 64 bit unsigned cty the u64 printers take. The
+// widening is a zext because the source carries the flag, so 4294967295u32 arrives
+// at the printer as 4294967295 and not as a sign extended -1.
+func gp_u64_operand(s: *GenFuncState, v: Val) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    return coerce(s, v.ty, v.op, cty_uint(c, 64))
+}
+
 // The print dispatch, type-directing a value to the right runtime printer. Its
 // non-errout, no-newline path is mirrored arm for arm by gp_fstr_value, which
 // appends the same rendering to an f-string builder; keep the two in step so
@@ -174,6 +190,12 @@ func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> vo
         } else if n.kind == ctyk_struct() {
             text0: string = gp_display_string(s, v)
             if str_len(text0) > 0 { gp_call_cstr(s, "cool_eprint_cstr", text0) }
+        } else if gp_is_unsigned(s, v) {
+            // Declared on demand, not in the prelude, so a program that spells no
+            // unsigned value emits the same declare block it did before unsigned.
+            emit_declare((*s).module, "void @cool_eprint_u64(i64)")
+            du: string = gp_u64_operand(s, v)
+            gp_call_num(s, "cool_eprint_u64", "i64", du)
         } else {
             d2: string = coerce(s, v.ty, v.op, cty_int(c, 64))
             gp_call_num(s, "cool_eprint_i64", "i64", d2)
@@ -194,6 +216,13 @@ func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> vo
             if newline { gp_call_cstr(s, "cool_println_cstr", text1) }
             else { gp_call_cstr(s, "cool_print_cstr", text1) }
         }
+    } else if gp_is_unsigned(s, v) {
+        // The unsigned decimal pair, declared on demand so a signed-only program's
+        // declare block is byte identical to what it was before unsigned existed.
+        emit_declare((*s).module, "void @cool_print_u64(i64)")
+        emit_declare((*s).module, "void @cool_println_u64(i64)")
+        du2: string = gp_u64_operand(s, v)
+        if str_eq(suffix, "ln") { gp_call_num(s, "cool_println_u64", "i64", du2) } else { gp_call_num(s, "cool_print_u64", "i64", du2) }
     } else {
         d4: string = coerce(s, v.ty, v.op, cty_int(c, 64))
         if str_eq(suffix, "ln") { gp_call_num(s, "cool_println_i64", "i64", d4) } else { gp_call_num(s, "cool_print_i64", "i64", d4) }
@@ -410,6 +439,14 @@ func gp_fstr_value(s: *GenFuncState, bh: string, v: Val) -> void {
     } else if n.kind == ctyk_struct() {
         text0: string = gp_display_string(s, v)
         if str_len(text0) > 0 { gp_fsb_cstr(s, bh, text0) }
+    } else if gp_is_unsigned(s, v) {
+        // The unsigned twin of the i64 sink, so f"{v}" and println("{}", v) write
+        // the same bytes for an unsigned value the way they already do for a signed
+        // one. Declared here rather than beside the other five in gen_fstr so an
+        // f-string over signed values only emits the original declare set.
+        emit_declare((*s).module, "void @cool_fsb_u64(ptr, i64)")
+        du: string = gp_u64_operand(s, v)
+        gp_fsb_num(s, "cool_fsb_u64", bh, "i64", du)
     } else {
         d2: string = coerce(s, v.ty, v.op, cty_int(c, 64))
         gp_fsb_num(s, "cool_fsb_i64", bh, "i64", d2)

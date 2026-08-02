@@ -49,11 +49,15 @@ func gx_int_ty(s: *GenFuncState, suffix: int64) -> int64 {
     a: *Ast = (*(*s).ctx).ast
     name: string = ast_name(a, suffix)
     if str_eq(name, "int8") || str_eq(name, "i8") { return cty_int(c, 8) }
-    if str_eq(name, "uint8") || str_eq(name, "u8") { return cty_int(c, 8) }
+    if str_eq(name, "uint8") || str_eq(name, "u8") { return cty_uint(c, 8) }
     if str_eq(name, "int16") || str_eq(name, "i16") { return cty_int(c, 16) }
-    if str_eq(name, "uint16") || str_eq(name, "u16") { return cty_int(c, 16) }
+    if str_eq(name, "uint16") || str_eq(name, "u16") { return cty_uint(c, 16) }
     if str_eq(name, "int32") || str_eq(name, "i32") { return cty_int(c, 32) }
-    if str_eq(name, "uint32") || str_eq(name, "u32") { return cty_int(c, 32) }
+    if str_eq(name, "uint32") || str_eq(name, "u32") { return cty_uint(c, 32) }
+    // The 64 bit unsigned spellings need their own arm: falling through to the
+    // signed default would hand a u64 literal the signed twin, and every operator
+    // downstream reads the operand's flag to pick its form.
+    if str_eq(name, "uint64") || str_eq(name, "u64") { return cty_uint(c, 64) }
     return cty_int(c, 64)
 }
 
@@ -107,24 +111,50 @@ func gx_cmp_line(s: *GenFuncState, instr: string, pred: string, ty: int64, lhs: 
     return Val { ty: cty_bool(genctx_ctys((*s).ctx)), op: dest }
 }
 
-func gx_arith_opcode(op: int64, is_float: bool) -> string {
+// The opcode an arithmetic operator lowers to. Add, subtract, and multiply are
+// sign-agnostic in two's complement and take one form; divide and remainder are
+// not, so an unsigned operand pair takes udiv and urem. is_unsigned is read from
+// the operand type, never from the destination.
+func gx_arith_opcode(op: int64, is_float: bool, is_unsigned: bool) -> string {
     if op == bop_add() { if is_float { return "fadd" } return "add" }
     if op == bop_sub() { if is_float { return "fsub" } return "sub" }
     if op == bop_mul() { if is_float { return "fmul" } return "mul" }
-    if op == bop_div() { if is_float { return "fdiv" } return "sdiv" }
+    if op == bop_div() {
+        if is_float { return "fdiv" }
+        if is_unsigned { return "udiv" }
+        return "sdiv"
+    }
     if is_float { return "frem" }
+    if is_unsigned { return "urem" }
     return "srem"
 }
 
-func gx_cmp_pred(op: int64, is_float: bool) -> string {
+// The icmp or fcmp predicate a comparison lowers to. Equality and inequality are
+// sign-agnostic bit compares; the four ordered predicates are not, so an unsigned
+// operand pair takes the u-forms and 0 < 4294967295u32 answers true instead of
+// reading the operand as a negative.
+func gx_cmp_pred(op: int64, is_float: bool, is_unsigned: bool) -> string {
     if op == bop_eq() { if is_float { return "oeq" } return "eq" }
     // Float != is unordered on purpose: NaN != x must be true, the IEEE
     // negation of oeq. The ordered one would answer false for a NaN operand.
     if op == bop_ne() { if is_float { return "une" } return "ne" }
-    if op == bop_lt() { if is_float { return "olt" } return "slt" }
-    if op == bop_le() { if is_float { return "ole" } return "sle" }
-    if op == bop_gt() { if is_float { return "ogt" } return "sgt" }
+    if op == bop_lt() {
+        if is_float { return "olt" }
+        if is_unsigned { return "ult" }
+        return "slt"
+    }
+    if op == bop_le() {
+        if is_float { return "ole" }
+        if is_unsigned { return "ule" }
+        return "sle"
+    }
+    if op == bop_gt() {
+        if is_float { return "ogt" }
+        if is_unsigned { return "ugt" }
+        return "sgt"
+    }
     if is_float { return "oge" }
+    if is_unsigned { return "uge" }
     return "sge"
 }
 
@@ -195,19 +225,47 @@ func gx_short_circuit(s: *GenFuncState, op: int64, lhs: int64, rhs: int64) -> Va
     return Val { ty: cty_bool(c), op: out }
 }
 
-func gx_binary_vals(s: *GenFuncState, op: int64, av: Val, rhs: int64) -> Val {
+// Retypes a left operand to the right operand's unsigned type when the pair is an
+// integer meeting an unsigned width. An unsuffixed literal lowers as a signed
+// int64 because nothing at the literal says otherwise, so on the LEFT of an
+// unsigned operand the whole operation would otherwise run signed and 64 bits
+// wide: `5 - u` on a uint32 would answer -5 where the checked type uint32 says
+// 4294967291, and `5 / m` on a uint64 past int64's top would divide by a negative.
+// The checker refuses to mix a real signed integer with a real unsigned one at any
+// width, so an integer-versus-unsigned pair can only be a literal meeting an
+// unsigned value, exactly the case the checker's own result rule (a width 0
+// operand takes the other side's signedness and width) types by the non-literal
+// side. This carries that rule into codegen. Every other pair, including a char or
+// a bool left operand, is returned untouched, so no signed program's lowering moves.
+func gx_lift_to_unsigned(s: *GenFuncState, av: Val, bty: int64) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    if !cty_is_unsigned(c, bty) { return av }
+    if cty_is_unsigned(c, av.ty) { return av }
+    if vec_get(cty_nodes(c), av.ty).kind != ctyk_int() { return av }
+    return Val { ty: bty, op: coerce(s, av.ty, av.op, bty) }
+}
+
+func gx_binary_vals(s: *GenFuncState, op: int64, av0: Val, rhs: int64) -> Val {
     a: *Ast = (*(*s).ctx).ast
     bv: Val = gen_expr(s, rhs)
-    ty: int64 = av.ty
     c: *CTyArena = genctx_ctys((*s).ctx)
+    av: Val = gx_lift_to_unsigned(s, av0, bv.ty)
+    ty: int64 = av.ty
     if op == bop_pow() {
         if !cty_is_float(c, ty) {
             a64: string = coerce(s, av.ty, av.op, cty_int(c, 64))
             e64: string = coerce(s, bv.ty, bv.op, cty_int(c, 64))
             d: string = next_tmp((*s).fb)
             b: *StringBuilder = alloc(sb_new())
+            mut pow_fn: string = "@cool_pow_i64"
+            if cty_is_unsigned(c, ty) {
+                pow_fn = "@cool_pow_u64"
+                emit_declare((*s).module, "i64 @cool_pow_u64(i64, i64)")
+            }
             sb_push(b, d)
-            sb_push(b, " = call i64 @cool_pow_i64(i64 ")
+            sb_push(b, " = call i64 ")
+            sb_push(b, pow_fn)
+            sb_push(b, "(i64 ")
             sb_push(b, a64)
             sb_push(b, ", i64 ")
             sb_push(b, e64)
@@ -280,15 +338,18 @@ func gx_binary_vals(s: *GenFuncState, op: int64, av: Val, rhs: int64) -> Val {
         }
     }
     is_float: bool = cty_is_float(c, ty)
+    // The operand type carries the signedness the checker proved, and the right
+    // operand was just coerced to it, so one read serves both sides.
+    is_unsigned: bool = cty_is_unsigned(c, ty)
     if op <= bop_mod() {
-        r: string = gx_op_line(s, gx_arith_opcode(op, is_float), ty, av.op, bo)
+        r: string = gx_op_line(s, gx_arith_opcode(op, is_float, is_unsigned), ty, av.op, bo)
         return Val { ty: ty, op: r }
     }
     if op >= bop_eq() {
         if op <= bop_ge() {
             mut instr: string = "icmp"
             if is_float { instr = "fcmp" }
-            return gx_cmp_line(s, instr, gx_cmp_pred(op, is_float), ty, av.op, bo)
+            return gx_cmp_line(s, instr, gx_cmp_pred(op, is_float, is_unsigned), ty, av.op, bo)
         }
     }
     if op == bop_and() {
@@ -306,7 +367,14 @@ func gx_binary_vals(s: *GenFuncState, op: int64, av: Val, rhs: int64) -> Val {
         re: ExprNode = vec_get((*a).exprs, rhs)
         if !gx_shift_safe(a, re, ty, c) { gx_shift_check(s, bo, ty) }
         mut sop: string = "shl"
-        if op == bop_shr() { sop = "ashr" }
+        // Left shift is sign-agnostic. Right shift is not: an unsigned value
+        // shifts its top bit down as a zero (lshr), a signed one replicates the
+        // sign (ashr), so a uint32 with the high bit set halves rather than
+        // staying negative.
+        if op == bop_shr() {
+            sop = "ashr"
+            if is_unsigned { sop = "lshr" }
+        }
         return Val { ty: ty, op: gx_op_line(s, sop, ty, av.op, bo) }
     }
     if op == bop_pow() {

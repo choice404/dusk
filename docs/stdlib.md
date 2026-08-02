@@ -13,7 +13,7 @@ Imported names are flat. After `@import std.io` you call `print_int` and `print_
 
 Console output over the `print` and `println` builtins, plus typed line input that reads a line and parses it.
 
-`print` and `println` are builtins, available everywhere without an import. `print` writes a value with no newline and `println` appends one, each handling a string, an int, a float, a bool, or a char. Build a line piece by piece with `print`, then close it with `println`.
+`print` and `println` are builtins, available everywhere without an import. `print` writes a value with no newline and `println` appends one, each handling a string, an integer of any width, signed or unsigned, a float, a bool, or a char. An unsigned value writes unsigned decimal, so a `uint64` at the top of its range prints `18446744073709551615` rather than `-1`, and a `{}` hole and an f-string hole render it the same bytes. Build a line piece by piece with `print`, then close it with `println`.
 
 ```text
 print("score: ")
@@ -335,7 +335,7 @@ free(v)
 
 ## std.map
 
-A hash map generic over both its key type K and its value type V. A key is any hashable type: an integer of any width, a `char`, a `rune`, or a `string`. Keys hash through the `hash` builtin and compare with `==`, so a string key hashes and compares by its content and a scalar key by its value; a struct, pointer, or float key is rejected by name, `cannot hash <type>; a map key is an integer, char, rune, or string`. The map uses open addressing with linear probing over heap buffers that double and rehash once the table is half full. Pass the map by pointer so inserts and growth persist across calls.
+A hash map generic over both its key type K and its value type V. A key is any hashable type: an integer of any width, signed or unsigned, a `char`, a `rune`, or a `string`. Keys hash through the `hash` builtin and compare with `==`, so a string key hashes and compares by its content and a scalar key by its value; a `Map<uint64, V>` keys across the whole unsigned width, since an unsigned key hashes by zero extension and compares by magnitude; a struct, pointer, or float key is rejected by name, `cannot hash <type>; a map key is an integer, char, rune, or string`. The map uses open addressing with linear probing over heap buffers that double and rehash once the table is half full. Pass the map by pointer so inserts and growth persist across calls.
 
 | Function                                                | Description                              |
 | ------------------------------------------------------- | ---------------------------------------- |

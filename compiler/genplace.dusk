@@ -56,9 +56,11 @@ func gp_iface_method_ret(s: *GenFuncState, iface_name: string, method: string) -
     return cty_void(c)
 }
 
-// The cty a cast builtin (int8..int64, char, rune, float32, float64) yields, or void when
-// the name is not a cast. Lets static_expr_ty size a match arm or aggregate member spelled
-// as a cast call, `float64(n)`, which the value dispatch already lowers.
+// The cty a cast builtin (int8..int64, uint8..uint64, char, rune, float32, float64)
+// yields, or void when the name is not a cast. Lets static_expr_ty size a match arm or
+// aggregate member spelled as a cast call, `float64(n)`, which the value dispatch already
+// lowers. The unsigned arms must answer the unsigned cty, not the same-width signed one,
+// or a `uint32(v)` member would size right and compare wrong.
 func gp_cast_ret(c: *CTyArena, name: string) -> int64 {
     if str_eq(name, "float64") { return cty_f64(c) }
     if str_eq(name, "float32") { return cty_f32(c) }
@@ -66,6 +68,10 @@ func gp_cast_ret(c: *CTyArena, name: string) -> int64 {
     if str_eq(name, "int16") { return cty_int(c, 16) }
     if str_eq(name, "int32") { return cty_int(c, 32) }
     if str_eq(name, "int64") { return cty_int(c, 64) }
+    if str_eq(name, "uint8") { return cty_uint(c, 8) }
+    if str_eq(name, "uint16") { return cty_uint(c, 16) }
+    if str_eq(name, "uint32") { return cty_uint(c, 32) }
+    if str_eq(name, "uint64") { return cty_uint(c, 64) }
     if str_eq(name, "char") { return cty_char(c) }
     if str_eq(name, "rune") { return cty_int(c, 32) }
     return cty_void(c)
@@ -99,9 +105,15 @@ func gp_lit_ty(s: *GenFuncState, id: int64) -> int64 {
         // suffixed tuple and a suffixed match arm both read wrong. e.b is the suffix name.
         if e.b >= 0 {
             sn: string = ast_name(a, e.b)
-            if str_eq(sn, "int8") || str_eq(sn, "i8") || str_eq(sn, "uint8") || str_eq(sn, "u8") { return cty_int(c, 8) }
-            if str_eq(sn, "int16") || str_eq(sn, "i16") || str_eq(sn, "uint16") || str_eq(sn, "u16") { return cty_int(c, 16) }
-            if str_eq(sn, "int32") || str_eq(sn, "i32") || str_eq(sn, "uint32") || str_eq(sn, "u32") { return cty_int(c, 32) }
+            if str_eq(sn, "int8") || str_eq(sn, "i8") { return cty_int(c, 8) }
+            if str_eq(sn, "int16") || str_eq(sn, "i16") { return cty_int(c, 16) }
+            if str_eq(sn, "int32") || str_eq(sn, "i32") { return cty_int(c, 32) }
+            // The unsigned suffixes keep their flag through the aggregate slot, so a
+            // tuple member spelled 5u32 is a uint32 slot and reads back unsigned.
+            if str_eq(sn, "uint8") || str_eq(sn, "u8") { return cty_uint(c, 8) }
+            if str_eq(sn, "uint16") || str_eq(sn, "u16") { return cty_uint(c, 16) }
+            if str_eq(sn, "uint32") || str_eq(sn, "u32") { return cty_uint(c, 32) }
+            if str_eq(sn, "uint64") || str_eq(sn, "u64") { return cty_uint(c, 64) }
         }
         return cty_int(c, 64)
     }

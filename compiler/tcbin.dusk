@@ -8,6 +8,7 @@
 @import ty
 @import tysigs
 @import tcstate
+@import tcown
 
 func binop_spelling(op: int64) -> string {
     if op == bop_add() { return "+" }
@@ -51,6 +52,39 @@ func max_width(a: int64, b: int64) -> int64 {
     return b
 }
 
+// The tail a mixing diagnostic ends with. Two integers that disagree on width are
+// told to match the widths, the rule that predates unsigned; two that agree on
+// width and disagree on signedness are told to cast, since no implicit conversion
+// crosses the flag. Returns "" when the pair is fine.
+func int_mix_tail(ta: TyNode, tb: TyNode) -> string {
+    if ta.w == 0 || tb.w == 0 { return "" }
+    if ta.w != tb.w { return "; match the widths" }
+    if ta.a != tb.a { return "; cast to one signedness" }
+    return ""
+}
+
+// The result type of an integer operation on a compatible pair. The signedness
+// comes from the operand that has one: an unsuffixed literal is width 0 and takes
+// the other side's flag, so `u + 1` is unsigned and never silently a signed twin
+// that codegen would then divide, shift, and compare the wrong way.
+func int_result(tc: *TypeChecker, ta: TyNode, tb: TyNode) -> int64 {
+    mut sign: int64 = ta.a
+    if ta.w == 0 { sign = tb.a }
+    if sign == 1 { return ty_uint((*tc).ty, max_width(ta.w, tb.w)) }
+    return ty_int((*tc).ty, max_width(ta.w, tb.w))
+}
+
+func negate_unsigned_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot negate ")
+    sb_push(b, rendered)
+    sb_push(b, "; an unsigned value has no negation, cast to a signed width first")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 export func check_unary(tc: *TypeChecker, op: int64, t: int64, lo: int64, hi: int64) -> int64 {
     n: TyNode = ty_get((*tc).ty, t)
     if op == uop_deref() {
@@ -64,6 +98,13 @@ export func check_unary(tc: *TypeChecker, op: int64, t: int64, lo: int64, hi: in
         return ty_unknown((*tc).ty)
     }
     if op == uop_neg() {
+        // Negating an unsigned value is almost always a width bug: the result
+        // wraps to the top of the range rather than going below zero. The cast
+        // spells that out when the wrap really is the intent.
+        if ty_is_unsigned((*tc).ty, t) {
+            tc_emit(tc, negate_unsigned_msg(ty_render((*tc).ty, t)), lo, hi)
+            return ty_unknown((*tc).ty)
+        }
         if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_unknown() { return t }
         tc_emit(tc, "unary minus needs a numeric operand", lo, hi)
         return ty_unknown((*tc).ty)
@@ -118,8 +159,9 @@ export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: in
             return ty_str((*tc).ty)
         }
         if ta.kind == tyk_int() && tb.kind == tyk_int() {
-            if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_int((*tc).ty, max_width(ta.w, tb.w)) }
-            tc_emit(tc, mix_msg(tc, "arithmetic mixes ", a, b, "; match the widths"), lo, hi)
+            tail: string = int_mix_tail(ta, tb)
+            if str_len(tail) == 0 { return int_result(tc, ta, tb) }
+            tc_emit(tc, mix_msg(tc, "arithmetic mixes ", a, b, tail), lo, hi)
             return ty_unknown((*tc).ty)
         }
         if ta.kind == tyk_float() && tb.kind == tyk_float() {
@@ -162,7 +204,17 @@ export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: in
             }
             return ty_bool((*tc).ty)
         }
-        if !compat((*tc).ty, a, b) { tc_emit(tc, "comparison needs two operands of the same type", lo, hi) }
+        if !compat((*tc).ty, a, b) {
+            // Two integers that disagree get the same mixing wording the
+            // arithmetic operators use, naming which pair and which rule broke;
+            // everything else keeps the general message.
+            ctail: string = int_mix_tail(ta, tb)
+            if ta.kind == tyk_int() && tb.kind == tyk_int() && str_len(ctail) > 0 {
+                tc_emit(tc, mix_msg(tc, "comparison mixes ", a, b, ctail), lo, hi)
+            } else {
+                tc_emit(tc, "comparison needs two operands of the same type", lo, hi)
+            }
+        }
         return ty_bool((*tc).ty)
     }
     if op == bop_and() || op == bop_or() {
@@ -179,7 +231,8 @@ export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: in
             return a
         }
         if ta.kind == tyk_int() && tb.kind == tyk_int() {
-            if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_int((*tc).ty, max_width(ta.w, tb.w)) }
+            btail: string = int_mix_tail(ta, tb)
+            if str_len(btail) == 0 { return int_result(tc, ta, tb) }
             sb: *StringBuilder = alloc(sb_new())
             sb_push_char(sb, 39)
             sb_push(sb, binop_spelling(op))
@@ -187,7 +240,7 @@ export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: in
             sb_push(sb, ty_render((*tc).ty, a))
             sb_push(sb, " and ")
             sb_push(sb, ty_render((*tc).ty, b))
-            sb_push(sb, "; match the widths")
+            sb_push(sb, btail)
             out: string = substring(sb_cstr(sb), 0, sb_size(sb))
             sb_free(sb)
             free(sb)
@@ -206,8 +259,9 @@ export func check_binary(tc: *TypeChecker, op: int64, a: int64, b: int64, lo: in
         return a
     }
     if ta.kind == tyk_int() && tb.kind == tyk_int() {
-        if ta.w == tb.w || ta.w == 0 || tb.w == 0 { return ty_int((*tc).ty, max_width(ta.w, tb.w)) }
-        tc_emit(tc, mix_msg(tc, "'**' mixes ", a, b, "; match the widths"), lo, hi)
+        ptail: string = int_mix_tail(ta, tb)
+        if str_len(ptail) == 0 { return int_result(tc, ta, tb) }
+        tc_emit(tc, mix_msg(tc, "'**' mixes ", a, b, ptail), lo, hi)
         return ty_unknown((*tc).ty)
     }
     if ta.kind == tyk_float() && tb.kind == tyk_float() {
@@ -225,6 +279,13 @@ export func int_suffix_width(s: string) -> int64 {
     if str_eq(s, "i32") || str_eq(s, "u32") { return 32 }
     if str_eq(s, "i64") || str_eq(s, "u64") { return 64 }
     return 0
+}
+
+// Whether an integer literal suffix names an unsigned width. The `u` spellings
+// pin the literal's type the same way the `i` ones do, so 5u32 is a uint32 and
+// never an int32 that happens to be positive.
+export func int_suffix_unsigned(s: string) -> bool {
+    return str_eq(s, "u8") || str_eq(s, "u16") || str_eq(s, "u32") || str_eq(s, "u64")
 }
 
 export func float_suffix_width(s: string) -> int64 {
@@ -246,7 +307,79 @@ func literal_fit_msg(val: int64, w: int64) -> string {
     return out
 }
 
-export func check_int_value_fits(tc: *TypeChecker, val: int64, w: int64, lo: int64, hi: int64) -> void {
+// The two unsigned literal rejects name the type rather than a bit count, since
+// the bit count alone reads as if the bit pattern were the question: -1 does fit
+// in 8 bits, it just is not a uint8 value. The negative form names the cast, which
+// is how a deliberate wrap is written.
+func uint_fit_msg(val: int64, w: int64, negative: bool) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "literal ")
+    sb_push_int(b, val)
+    sb_push(b, " does not fit in uint")
+    sb_push_int(b, w)
+    if negative {
+        sb_push(b, "; an unsigned type holds no negative value, cast if the wrap is meant")
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The inclusive upper bound of an unsigned width, or -1 when the width has no bound
+// an int64 can name: every int64 pattern is a uint64 value, so width 64 has no top
+// to compare against and only ever rejects a written negative.
+func uint_high(w: int64) -> int64 {
+    if w == 8 { return 255 }
+    if w == 16 { return 65535 }
+    if w == 32 { return 4294967295 }
+    return -1
+}
+
+// Pushes a 64 bit pattern read as unsigned. A nonnegative value spells itself; a
+// negative one is a value above int64's top, so the quotient by ten is taken on the
+// logically shifted pattern, which is always nonnegative, and the last digit comes
+// back from the remainder. Without this a u64 literal past int64's top would name
+// itself in a diagnostic as the negative its pattern reads as.
+func push_uint(b: *StringBuilder, v: int64) -> void {
+    if v >= 0 {
+        sb_push_int(b, v)
+        return
+    }
+    q: int64 = ((v >> 1) & 9223372036854775807) / 5
+    last: int64 = v - q * 10
+    sb_push_int(b, q)
+    sb_push_char(b, 48 + last)
+}
+
+// The reject for a u suffixed literal whose value is past int64's top and whose
+// width is narrower than 64. The value is a bit pattern by then, so it is spelled
+// back as the unsigned decimal that was written rather than as the negative the
+// pattern reads as.
+func uint_wide_msg(val: int64, w: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "literal ")
+    push_uint(b, val)
+    sb_push(b, " does not fit in uint")
+    sb_push_int(b, w)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func check_int_value_fits(tc: *TypeChecker, val: int64, w: int64, unsigned: bool, lo: int64, hi: int64) -> void {
+    if unsigned {
+        if val < 0 {
+            tc_emit(tc, uint_fit_msg(val, w, true), lo, hi)
+            return
+        }
+        high0: int64 = uint_high(w)
+        if high0 >= 0 && val > high0 {
+            tc_emit(tc, uint_fit_msg(val, w, false), lo, hi)
+        }
+        return
+    }
     if w != 8 && w != 16 && w != 32 { return }
     mut low: int64 = -128
     mut high: int64 = 127
@@ -262,20 +395,142 @@ export func check_int_value_fits(tc: *TypeChecker, val: int64, w: int64, lo: int
     }
 }
 
-export func check_int_fits(tc: *TypeChecker, expr: int64, target: int64) -> void {
+// The range check for a suffixed literal, whose suffix already pinned its type at
+// inference. An unsigned suffix is accumulated as a bit pattern, so a value here
+// that reads negative is one above int64's top: every one of those is a uint64
+// value, and none of them fits a narrower unsigned width. Every other suffixed
+// literal ranges exactly as a written value does.
+export func check_suffix_value_fits(tc: *TypeChecker, val: int64, w: int64, unsigned: bool, lo: int64, hi: int64) -> void {
+    if unsigned && val < 0 {
+        if w == 64 { return }
+        tc_emit(tc, uint_wide_msg(val, w), lo, hi)
+        return
+    }
+    check_int_value_fits(tc, val, w, unsigned, lo, hi)
+}
+
+// The integer leaf of the fit walk: an unsuffixed literal, or a negated one, that
+// is stored as an integer target must name a value of that target's range. A
+// suffixed literal already pinned its own type and ranged itself at inference, so
+// it is left alone here, and every other expression shape carries no written value
+// to range.
+func check_int_lit_fits(tc: *TypeChecker, expr: int64, target: int64) -> void {
     nt: TyNode = ty_get((*tc).ty, target)
     if nt.kind != tyk_int() { return }
-    if nt.w != 8 && nt.w != 16 && nt.w != 32 { return }
+    unsigned: bool = nt.a == 1
+    // A signed target only has a range worth checking below 64 bits, since the
+    // literal already parsed as an int64. An unsigned target is checked at every
+    // width, because width 64 still refuses a negative.
+    if !unsigned && nt.w != 8 && nt.w != 16 && nt.w != 32 { return }
+    if unsigned && nt.w == 0 { return }
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr)
     if e.kind == xk_int() && e.b < 0 {
-        check_int_value_fits(tc, e.a, nt.w, e.lo, e.hi)
+        check_int_value_fits(tc, e.a, nt.w, unsigned, e.lo, e.hi)
     } else if e.kind == xk_unary() && e.a == uop_neg() {
         inner: ExprNode = vec_get((*a).exprs, e.b)
         if inner.kind == xk_int() && inner.b < 0 {
-            check_int_value_fits(tc, 0 - inner.a, nt.w, e.lo, e.hi)
+            check_int_value_fits(tc, 0 - inner.a, nt.w, unsigned, e.lo, e.hi)
         }
     }
+}
+
+// The one target-directed literal fit walk. A literal is ranged against the type
+// the value it writes will be held as, at whatever depth it is written: an array or
+// slice literal's elements against the element type, a tuple literal's members
+// against the member types, and a match expression's arm tails against the type the
+// match yields into. Nesting recurses, so an element of an element and a match tail
+// inside an array literal are reached too.
+//
+// Routing every fit check through here is what makes the rule uniform: a binding, an
+// argument, a return, an assignment, a struct field, a collected value, a
+// destructure binder, and an operand all hand their target to this one walk, so a
+// literal that a narrow width cannot hold is refused in each of them instead of
+// truncating or wrapping in codegen.
+//
+// Only literal syntax is read, never a name's type, so no scope has to be live and
+// an arm tail is safe to visit from outside its arm. A pairing the walk does not
+// recognize, a call result against an array or a literal against a named type,
+// falls through and rejects nothing new.
+export func check_lit_fits_target(tc: *TypeChecker, expr: int64, target: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr)
+    if e.kind == xk_match() {
+        mut ai: int64 = 0
+        while ai < e.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + ai))
+            tail: int64 = match_arm_tail(a, arm.body)
+            if tail >= 0 { check_lit_fits_target(tc, tail, target) }
+            ai = ai + 1
+        }
+        return
+    }
+    nt: TyNode = ty_get((*tc).ty, target)
+    if nt.kind == tyk_int() {
+        check_int_lit_fits(tc, expr, target)
+        return
+    }
+    if nt.kind == tyk_array() || nt.kind == tyk_slice() {
+        if e.kind != xk_array() { return }
+        mut i: int64 = 0
+        while i < e.b {
+            check_lit_fits_target(tc, vec_get((*a).kids, e.a + i), nt.a)
+            i = i + 1
+        }
+        return
+    }
+    if nt.kind == tyk_tuple() {
+        if e.kind != xk_tuple() { return }
+        if e.b != nt.len { return }
+        mut j: int64 = 0
+        while j < nt.len {
+            member: int64 = vec_get((*(*tc).ty).kids, nt.off + j)
+            check_lit_fits_target(tc, vec_get((*a).kids, e.a + j), member)
+            j = j + 1
+        }
+    }
+}
+
+// The spelling the fit sites outside this file use, kept so the return, assignment,
+// and argument checks name the rule they are enforcing. Every one of them lands in
+// the single walk above.
+export func check_int_fits(tc: *TypeChecker, expr: int64, target: int64) -> void {
+    check_lit_fits_target(tc, expr, target)
+}
+
+// Ranges an operand literal against the type its partner gives the operation. An
+// unsuffixed literal is width 0 and adopts the other operand's type, so the value it
+// names has to be a value of that type: `-1 + u` over an unsigned u wraps to the top
+// of the range and `300 + b` over an int8 b truncates, both the same silent width bug
+// the annotated forms already refuse. A shift is excluded because its right operand
+// is a bit count rather than a value of the left side's type; check_shift_amount
+// ranges that one against the result width.
+export func check_operand_lit_fits(tc: *TypeChecker, op: int64, a_expr: int64, b_expr: int64, a_ty: int64, b_ty: int64) -> void {
+    if op == bop_shl() || op == bop_shr() { return }
+    na: TyNode = ty_get((*tc).ty, a_ty)
+    nb: TyNode = ty_get((*tc).ty, b_ty)
+    if na.kind != tyk_int() || nb.kind != tyk_int() { return }
+    if na.w == 0 && nb.w != 0 { check_lit_fits_target(tc, a_expr, b_ty) }
+    if nb.w == 0 && na.w != 0 { check_lit_fits_target(tc, b_expr, a_ty) }
+}
+
+func index_unsigned_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot index with ")
+    sb_push(b, rendered)
+    sb_push(b, "; an index is int64, cast the index")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// An index and a range end are int64 offsets. An unsigned one is rejected on the
+// surface, where the cast is a one word fix, rather than left for codegen to widen
+// by a signedness the index position never states.
+export func check_index_signedness(tc: *TypeChecker, tyid: int64, lo: int64, hi: int64) -> void {
+    if !ty_is_unsigned((*tc).ty, tyid) { return }
+    tc_emit(tc, index_unsigned_msg(ty_render((*tc).ty, tyid)), lo, hi)
 }
 
 export func const_int(tc: *TypeChecker, expr: int64) -> (bool, int64) {
@@ -293,6 +548,9 @@ export func check_pow_exponent(tc: *TypeChecker, base: int64, exp: int64, exp_ex
     nb: TyNode = ty_get((*tc).ty, base)
     ne: TyNode = ty_get((*tc).ty, exp)
     if nb.kind != tyk_int() || ne.kind != tyk_int() { return }
+    // An unsigned exponent has no negative reading: a folded pattern with the
+    // top bit set is a large magnitude, not a sign, so the reject is signed only.
+    if ty_is_unsigned((*tc).ty, exp) { return }
     ok, v := const_int(tc, exp_expr)
     if ok {
         if v < 0 { tc_emit(tc, "'**' on integers needs a nonnegative exponent", lo, hi) }
@@ -314,7 +572,8 @@ export func check_shift_amount(tc: *TypeChecker, amount: int64, result: int64, l
         b: *StringBuilder = alloc(sb_new())
         sb_push(b, "shift amount ")
         sb_push_int(b, v)
-        sb_push(b, " is out of range for int")
+        sb_push(b, " is out of range for ")
+        if nr.a == 1 { sb_push(b, "uint") } else { sb_push(b, "int") }
         sb_push_int(b, w)
         out: string = substring(sb_cstr(b), 0, sb_size(b))
         sb_free(b)

@@ -115,15 +115,36 @@ void cool_eprint_f64(double v) {
     fprintf(stderr, "%g", v);
 }
 
-/* PARITY: the f-string builder (cool_fsb_i64 / cool_fsb_f64 below) must render
-   with the same PRId64 and %g formats these printers use, so f"{v}" writes the
-   same bytes println("{}", v) does. Change a format here and there together. */
+/* The unsigned decimal stderr printer. Codegen hands it the same i64 LLVM word the
+   signed one takes, already zero extended from the narrower unsigned widths, and
+   only the format differs: PRIu64 reads the full 64 bit magnitude, so u64 max
+   prints 18446744073709551615 rather than -1. */
+void cool_eprint_u64(uint64_t v) {
+    fflush(stdout);
+    fprintf(stderr, "%" PRIu64, v);
+}
+
+/* PARITY: the f-string builder (cool_fsb_i64 / cool_fsb_u64 / cool_fsb_f64 below)
+   must render with the same PRId64, PRIu64, and %g formats these printers use, so
+   f"{v}" writes the same bytes println("{}", v) does. Change a format here and
+   there together. */
 void cool_print_i64(int64_t v) {
     printf("%" PRId64, v);
 }
 
 void cool_println_i64(int64_t v) {
     printf("%" PRId64 "\n", v);
+}
+
+/* The unsigned decimal pair. An unsigned dusk value of any width arrives here
+   widened to 64 bits by a zext, so this one entry point serves uint8 through
+   uint64 the way cool_print_i64 serves the signed widths. */
+void cool_print_u64(uint64_t v) {
+    printf("%" PRIu64, v);
+}
+
+void cool_println_u64(uint64_t v) {
+    printf("%" PRIu64 "\n", v);
 }
 
 void cool_print_f64(double v) {
@@ -140,11 +161,11 @@ void cool_println_f64(double v) {
    malloc doubled on demand and freed by cool_fsb_fin after the copy, so only the
    finished string outlives the expression.
 
-   PARITY (keep in lockstep with the print family at runtime.c:118-131): cool_fsb_i64
-   formats with PRId64 and cool_fsb_f64 with %g, byte identical to cool_print_i64 and
-   cool_print_f64, so f"{v}" writes exactly the bytes println("{}", v) writes minus
-   the newline for every printable type. Changing a format here means changing it
-   there too. */
+   PARITY (keep in lockstep with the print family just above): cool_fsb_i64 formats
+   with PRId64, cool_fsb_u64 with PRIu64, and cool_fsb_f64 with %g, byte identical to
+   cool_print_i64, cool_print_u64, and cool_print_f64, so f"{v}" writes exactly the
+   bytes println("{}", v) writes minus the newline for every printable type. Changing
+   a format here means changing it there too. */
 typedef struct {
     char *buf;
     size_t len;
@@ -224,6 +245,17 @@ void cool_fsb_cstr(void *h, const char *s) {
 void cool_fsb_i64(void *h, int64_t v) {
     char tmp[32];
     int n = snprintf(tmp, sizeof(tmp), "%" PRId64, v);
+    if (n > 0) {
+        cool_fsb_bytes(h, tmp, n);
+    }
+}
+
+/* The unsigned twin of cool_fsb_i64, PRIu64 against cool_print_u64's PRIu64, so
+   f"{v}" and println("{}", v) agree byte for byte on an unsigned value. The 32
+   byte scratch covers the widest unsigned decimal, 20 digits plus the NUL. */
+void cool_fsb_u64(void *h, uint64_t v) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof(tmp), "%" PRIu64, v);
     if (n > 0) {
         cool_fsb_bytes(h, tmp, n);
     }
@@ -619,6 +651,22 @@ int64_t cool_pow_i64(int64_t base, int64_t exp) {
         }
     }
     return (int64_t)result;
+}
+
+uint64_t cool_pow_u64(uint64_t base, uint64_t exp) {
+    uint64_t result = 1;
+    uint64_t b = base;
+    uint64_t e = exp;
+    while (e > 0) {
+        if (e & 1) {
+            result *= b;
+        }
+        e >>= 1;
+        if (e > 0) {
+            b *= b;
+        }
+    }
+    return result;
 }
 
 /* Copies a NUL terminated buffer into a generationally allocated buffer and

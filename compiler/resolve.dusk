@@ -44,7 +44,7 @@ func collect_globals(r: *Resolver) -> void {
             // The primitive width names double as the cast builtins, so a
             // function cannot take one: the call form would be ambiguous
             // between the cast and the user function.
-            if str_eq(fname, "int8") || str_eq(fname, "int16") || str_eq(fname, "int32") || str_eq(fname, "int64") || str_eq(fname, "char") || str_eq(fname, "rune") || str_eq(fname, "float32") || str_eq(fname, "float64") {
+            if str_eq(fname, "int8") || str_eq(fname, "int16") || str_eq(fname, "int32") || str_eq(fname, "int64") || str_eq(fname, "uint8") || str_eq(fname, "uint16") || str_eq(fname, "uint32") || str_eq(fname, "uint64") || str_eq(fname, "char") || str_eq(fname, "rune") || str_eq(fname, "float32") || str_eq(fname, "float64") {
                 emit(r, quoted_msg("", fname, " is a primitive type name; a function cannot take it"), f.lo, f.hi)
             } else if is_builtin_name(fname) {
                 // Every other builtin call name (alloc, free, move, sizeof, hash, the
@@ -308,7 +308,6 @@ func rs_type_spelling(r: *Resolver, id: int64) -> bool {
             if map_has(vec_get(scopes4, si), n) { return false }
             si = si - 1
         }
-        if is_reserved_uint(n) { return true }
         if is_type_name(n) { return true }
         globals3: *Map<string, int64> = (*r).globals
         generics3: *Map<string, int64> = (*r).cur_generics
@@ -357,10 +356,7 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
                     n: string = ast_name(a, arg.a)
                     globals2: *Map<string, int64> = (*r).globals
                     generics: *Map<string, int64> = (*r).cur_generics
-                    if is_reserved_uint(n) {
-                        emit(r, "unsigned integers are reserved; use the signed widths", arg.lo, arg.hi)
-                        walk_arg = false
-                    } else if is_type_name(n) {
+                    if is_type_name(n) {
                         walk_arg = false
                     } else if map_has(globals2, n) {
                         walk_arg = false

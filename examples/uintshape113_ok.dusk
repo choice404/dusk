@@ -1,0 +1,36 @@
+// Mixed unsigned widths survive loops and round-trip through struct fields,
+// tuples, arrays, and slices without accidental signed reinterpretation.
+@paradigm procedural
+
+struct Packet {
+    a: uint8,
+    b: uint16,
+    c: uint32,
+    d: uint64,
+}
+
+func first(xs: uint32[]) -> uint32 {
+    return xs[0]
+}
+
+func pair(p: Packet) -> (uint16, uint64) {
+    return (p.b, p.d)
+}
+
+func main() -> int32 {
+    p := Packet { a: 250u8, b: 65000u16, c: 4000000000u32, d: 9223372036854775808u64 }
+    xs: uint32[3] = [p.c, 1u32, 2u32]
+    mut i: int64 = 0
+    mut acc: uint32 = 0u32
+    while i < 3 {
+        acc = acc + xs[i]
+        i = i + 1
+    }
+    q, r := pair(p)
+    println(p.a)
+    println(q)
+    println(first(xs[0..3]))
+    println(acc)
+    println(r)
+    return 0
+}

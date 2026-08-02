@@ -413,8 +413,36 @@ export func p_suffix_id(p: *Parser, t: Token, body_end: int64) -> int64 {
     return intern_range((*(*p).ast).interner, (*p).src, (*p).n, body_end, t.hi)
 }
 
+// The bit pattern of the base 10 digits t.lo to body_end, accumulated with the wrap
+// two's complement multiplication already gives. A u suffixed literal names a
+// pattern rather than a signed magnitude, so the values between int64's top and
+// uint64's top land exactly here where parse_int refuses them. The lexer has
+// already refused anything past the unsigned top, so no wider value arrives.
+func p_uint_pattern(p: *Parser, t: Token, body_end: int64) -> int64 {
+    mut acc: int64 = 0
+    mut i: int64 = t.lo
+    while i < body_end {
+        acc = acc * 10 + (byte_at((*p).src, (*p).n, i) - 48)
+        i = i + 1
+    }
+    return acc
+}
+
+// Whether a numeric literal's suffix names an unsigned width. Only the lead byte is
+// read; the lexer has already refused every suffix spelling but i8 through f64, and
+// u8, u16, u32, and u64 are the ones that start with a u.
+func p_has_unsigned_suffix(p: *Parser, t: Token, body_end: int64) -> bool {
+    if body_end >= t.hi {
+        return false
+    }
+    return byte_at((*p).src, (*p).n, body_end) == 117
+}
+
 export func p_int_value(p: *Parser, t: Token) -> int64 {
     body_end: int64 = p_num_body_end(p, t)
+    if p_has_unsigned_suffix(p, t, body_end) {
+        return p_uint_pattern(p, t, body_end)
+    }
     s: string = substring_n((*p).src, (*p).n, t.lo, body_end)
     v, e := parse_int(s)
     e.ignore()

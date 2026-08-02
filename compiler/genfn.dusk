@@ -277,6 +277,10 @@ export func main_is_argc_argv(ctx: *GenCtx, f: FuncNode) -> bool {
     n0: CTyNode = vec_get(cty_nodes(c), t0)
     if n0.kind != ctyk_int() { return false }
     if n0.a != 32 { return false }
+    // argc is int32, not uint32. The checker's main signature rule already says so,
+    // so this only ever restates it; reading the width alone would let a uint32
+    // first parameter take the C entry wrapper on a program the checker rejected.
+    if n0.b != 0 { return false }
     p1id: int64 = vec_get((*a).kids, f.params_off + 1)
     p1: ParamNode = vec_get((*a).params, p1id)
     t1: int64 = cty_lower_ast(c, a, p1.ty)

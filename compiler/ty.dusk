@@ -9,6 +9,11 @@
 @import intern
 @import ast
 
+// A checked type. `kind` selects the form, `w` the width or array length, `off`
+// and `len` the child span in the arena's kid vector, and `a` the single child,
+// the interned name, or, for tyk_int alone, the signedness flag: 0 signed, 1
+// unsigned. Unsigned rides tyk_int rather than a kind of its own because every
+// operation that never asks about sign stays correct without a decision point.
 export struct TyNode { kind: int64, w: int64, a: int64, off: int64, len: int64 }
 
 export struct TyArena {
@@ -62,6 +67,14 @@ export func ty_name(t: *TyArena, id: int64) -> string {
     return ""
 }
 
+// Whether a checked type is one of the unsigned integer widths. Only tyk_int
+// carries the flag, so every other form answers false; a caller that must branch
+// on signedness asks here rather than reading TyNode.a directly.
+export func ty_is_unsigned(t: *TyArena, id: int64) -> bool {
+    n: TyNode = ty_get(t, id)
+    return n.kind == tyk_int() && n.a == 1
+}
+
 func ty_leaf_code(k: int64) -> string {
     if k == tyk_bool() { return "B" }
     if k == tyk_char() { return "C" }
@@ -74,10 +87,19 @@ func ty_leaf_code(k: int64) -> string {
     return "!"
 }
 
+// The canon letter an integer renders under: 'I' signed, 'W' unsigned. The two
+// spellings are what keeps uint32 and int32 out of the same intern slot, since
+// ty_intern keys on the canon string alone and every other field of the two nodes
+// agrees. 'W' is otherwise unused in the canon alphabet.
+func int_canon_code(a: int64) -> string {
+    if a == 1 { return "W" }
+    return "I"
+}
+
 func sb_push_ty_canon(b: *StringBuilder, t: *TyArena, id: int64) -> void {
     n: TyNode = ty_get(t, id)
     if n.kind == tyk_int() {
-        sb_push(b, "I")
+        sb_push(b, int_canon_code(n.a))
         sb_push_int(b, n.w)
     } else if n.kind == tyk_float() {
         sb_push(b, "F")
@@ -120,7 +142,7 @@ func sb_push_ty_canon(b: *StringBuilder, t: *TyArena, id: int64) -> void {
 func ty_canon(t: *TyArena, n: TyNode) -> string {
     b: *StringBuilder = alloc(sb_new())
     if n.kind == tyk_int() {
-        sb_push(b, "I")
+        sb_push(b, int_canon_code(n.a))
         sb_push_int(b, n.w)
     } else if n.kind == tyk_float() {
         sb_push(b, "F")
@@ -191,6 +213,7 @@ func ty_kids(t: *TyArena, src: *Vector<int64>) -> (int64, int64) {
 }
 
 export func ty_int(t: *TyArena, w: int64) -> int64 { return ty_intern(t, TyNode { kind: tyk_int(), w: w, a: 0, off: 0, len: 0 }) }
+export func ty_uint(t: *TyArena, w: int64) -> int64 { return ty_intern(t, TyNode { kind: tyk_int(), w: w, a: 1, off: 0, len: 0 }) }
 export func ty_float(t: *TyArena, w: int64) -> int64 { return ty_intern(t, TyNode { kind: tyk_float(), w: w, a: 0, off: 0, len: 0 }) }
 export func ty_bool(t: *TyArena) -> int64 { return ty_intern(t, TyNode { kind: tyk_bool(), w: 0, a: 0, off: 0, len: 0 }) }
 export func ty_char(t: *TyArena) -> int64 { return ty_intern(t, TyNode { kind: tyk_char(), w: 0, a: 0, off: 0, len: 0 }) }
@@ -221,13 +244,13 @@ export func ty_func(t: *TyArena, ps: *Vector<int64>, ret: int64) -> int64 {
 
 export func named_ty(t: *TyArena, name: string) -> int64 {
     if str_eq(name, "int8") { return ty_int(t, 8) }
-    if str_eq(name, "uint8") { return ty_int(t, 8) }
+    if str_eq(name, "uint8") { return ty_uint(t, 8) }
     if str_eq(name, "int16") { return ty_int(t, 16) }
-    if str_eq(name, "uint16") { return ty_int(t, 16) }
+    if str_eq(name, "uint16") { return ty_uint(t, 16) }
     if str_eq(name, "int32") { return ty_int(t, 32) }
-    if str_eq(name, "uint32") { return ty_int(t, 32) }
+    if str_eq(name, "uint32") { return ty_uint(t, 32) }
     if str_eq(name, "int64") { return ty_int(t, 64) }
-    if str_eq(name, "uint64") { return ty_int(t, 64) }
+    if str_eq(name, "uint64") { return ty_uint(t, 64) }
     if str_eq(name, "float32") { return ty_float(t, 32) }
     if str_eq(name, "float64") { return ty_float(t, 64) }
     if str_eq(name, "bool") { return ty_bool(t) }
@@ -284,7 +307,15 @@ export func compat(t: *TyArena, a: int64, b: int64) -> bool {
     na: TyNode = ty_get(t, a)
     nb: TyNode = ty_get(t, b)
     if na.kind == tyk_unknown() || nb.kind == tyk_unknown() { return true }
-    if na.kind == tyk_int() && nb.kind == tyk_int() { return na.w == 0 || nb.w == 0 || na.w == nb.w }
+    // Two integers agree when their widths agree AND their signedness agrees. A
+    // width 0 operand is an unsuffixed literal, which still adapts to either side,
+    // so `x: uint32 = 5` binds while `x: uint32 = y` with a signed y does not. This
+    // single arm is what seals cross-sign binds, arguments, returns, and stores,
+    // the same choke the width rule already used.
+    if na.kind == tyk_int() && nb.kind == tyk_int() {
+        if na.w == 0 || nb.w == 0 { return true }
+        return na.w == nb.w && na.a == nb.a
+    }
     if na.kind == tyk_float() && nb.kind == tyk_float() { return na.w == 0 || nb.w == 0 || na.w == nb.w }
     if na.kind == tyk_char() && nb.kind == tyk_int() { return true }
     if na.kind == tyk_int() && nb.kind == tyk_char() { return true }
@@ -363,7 +394,7 @@ export func ty_render(t: *TyArena, id: int64) -> string {
     if n.kind == tyk_int() {
         if n.w == 0 { return "an integer literal" }
         b: *StringBuilder = alloc(sb_new())
-        sb_push(b, "int")
+        if n.a == 1 { sb_push(b, "uint") } else { sb_push(b, "int") }
         sb_push_int(b, n.w)
         out: string = substring(sb_cstr(b), 0, sb_size(b))
         sb_free(b)
@@ -415,7 +446,11 @@ export func ty_strict_eq(t: *TyArena, a: int64, b: int64) -> bool {
     na: TyNode = ty_get(t, a)
     nb: TyNode = ty_get(t, b)
     if na.kind != nb.kind { return false }
-    if na.kind == tyk_int() || na.kind == tyk_float() { return na.w == nb.w }
+    // Signedness is part of an integer's identity here: a callback slot spelled
+    // uint32 is not satisfied by an int32 function even though both cross as i32,
+    // the same way the width must agree exactly.
+    if na.kind == tyk_int() { return na.w == nb.w && na.a == nb.a }
+    if na.kind == tyk_float() { return na.w == nb.w }
     if na.kind == tyk_named() { return str_eq(ty_name(t, a), ty_name(t, b)) }
     if na.kind == tyk_ptr() || na.kind == tyk_rawptr() || na.kind == tyk_slice() || na.kind == tyk_collector() || na.kind == tyk_future() {
         return ty_strict_eq(t, na.a, nb.a)
@@ -449,7 +484,7 @@ export func ty_src(t: *TyArena, id: int64) -> string {
 func sb_push_ty_src(b: *StringBuilder, t: *TyArena, id: int64) -> void {
     n: TyNode = ty_get(t, id)
     if n.kind == tyk_int() {
-        sb_push(b, "int")
+        if n.a == 1 { sb_push(b, "uint") } else { sb_push(b, "int") }
         if n.w == 0 { sb_push_int(b, 64) } else { sb_push_int(b, n.w) }
     } else if n.kind == tyk_float() {
         sb_push(b, "float")

@@ -17,15 +17,18 @@
 export struct GenResult { ok: bool, text: string, exports: *Vector<string> }
 
 // The C header type for an exported parameter or return: a sized int lowers to
-// intN_t (rune arrives here as an i32, so it prints int32_t), char and bool to
-// uint8_t, float64 to double, float32 to float, a raw or void pointer to void*,
-// and unit to void. This maps the same C type codegen lowered the define from, so
-// the generated prototype always matches the emitted symbol.
+// intN_t (rune arrives here as an i32, so it prints int32_t), an unsigned width to
+// uintN_t, char and bool to uint8_t, float64 to double, float32 to float, a raw or
+// void pointer to void*, and unit to void. This maps the same C type codegen
+// lowered the define from, so the generated prototype always matches the emitted
+// symbol. The unsigned spelling matters even though the LLVM type is the same
+// i<w>: the header is what a C caller compiles against, and intN_t there would
+// make the C side read a large unsigned value as negative.
 func c_header_type(c: *CTyArena, id: int64) -> string {
     n: CTyNode = vec_get(cty_nodes(c), id)
     if n.kind == ctyk_int() {
         b: *StringBuilder = alloc(sb_new())
-        sb_push(b, "int")
+        if n.b == 1 { sb_push(b, "uint") } else { sb_push(b, "int") }
         sb_push_int(b, n.a)
         sb_push(b, "_t")
         out: string = substring(sb_cstr(b), 0, sb_size(b))

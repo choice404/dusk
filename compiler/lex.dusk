@@ -74,16 +74,6 @@ func valid_suffix(s: string) -> bool {
     return false
 }
 
-// The reserved unsigned integer suffixes, refused here so a literal never silently
-// runs the signed path and yields a wrong value.
-func reserved_suffix(s: string) -> bool {
-    if str_eq(s, "u8") { return true }
-    if str_eq(s, "u16") { return true }
-    if str_eq(s, "u32") { return true }
-    if str_eq(s, "u64") { return true }
-    return false
-}
-
 // An identifier, keyword, or boolean literal. The word is scanned, then classified:
 // true and false are booleans, a reserved word is a keyword, and the rest is an
 // identifier. The kind alone is stored; the renderer reads the span for the text.
@@ -142,8 +132,53 @@ func int_overflows(s: string, n: int64, lo: int64, hi: int64) -> bool {
     return false
 }
 
+// Whether the base 10 digits s[lo, hi) name a value past the unsigned 64 bit top.
+// The test compares the digit text rather than accumulating, since no 64 bit
+// accumulator can hold the boundary it is testing: leading zeros drop out, a run of
+// digits longer than the top's is larger, a shorter one is smaller, and an equal
+// length run compares position by position.
+func uint_overflows(s: string, n: int64, lo: int64, hi: int64) -> bool {
+    top: string = "18446744073709551615"
+    width: int64 = str_len(top)
+    mut i: int64 = lo
+    mut leading: bool = true
+    while leading {
+        if i < hi && bytes.byte_at(s, n, i) == 48 {
+            i = i + 1
+        } else {
+            leading = false
+        }
+    }
+    digits: int64 = hi - i
+    if digits > width { return true }
+    if digits < width { return false }
+    mut j: int64 = 0
+    mut over: bool = false
+    mut decided: bool = false
+    while j < width && !decided {
+        d: int64 = bytes.byte_at(s, n, i + j)
+        t: int64 = int64(top[j])
+        if d > t {
+            over = true
+            decided = true
+        } else if d < t {
+            decided = true
+        }
+        j = j + 1
+    }
+    return over
+}
+
+// Whether the suffix span s[lo, hi) is one of the unsigned widths. Only the lead
+// byte has to be read: valid_suffix has already confirmed the whole spelling, and
+// u8, u16, u32, and u64 are the only ones that start with a u.
+func unsigned_suffix_span(s: string, n: int64, lo: int64, hi: int64) -> bool {
+    if lo >= hi { return false }
+    return bytes.byte_at(s, n, lo) == 117
+}
+
 // A numeric literal: digits, then an optional fractional part that makes it a
-// float, then an optional suffix. A reserved or unknown suffix is a recorded fault.
+// float, then an optional suffix. An unknown suffix is a recorded fault.
 // The kind alone is stored; the renderer reads the span for the value and suffix.
 func lx_number(lx: *Lexer, start: int64) -> void {
     mut going: bool = true
@@ -172,9 +207,7 @@ func lx_number(lx: *Lexer, start: int64) -> void {
     }
     suffix: string = lx_suffix(lx)
     if str_len(suffix) > 0 {
-        if reserved_suffix(suffix) {
-            lx_err(lx, start, "unsigned integers are reserved; use the signed widths")
-        } else if !valid_suffix(suffix) {
+        if !valid_suffix(suffix) {
             b: *StringBuilder = alloc(sb_new())
             sb_push(b, "unknown literal suffix '")
             sb_push(b, suffix)
@@ -187,10 +220,19 @@ func lx_number(lx: *Lexer, start: int64) -> void {
         free(suffix)
     }
     // A base 10 integer literal that overflows i64 is a fault, the same as stage0's
-    // i64 parse failure. A float never faults here; an out of range float parses to
-    // an infinity, which is a value, not an error.
+    // i64 parse failure. A u suffixed literal is not a signed magnitude though: it
+    // names a bit pattern, so it ranges against the unsigned top instead, which is
+    // what lets 18446744073709551615u64 be written at all. A float never faults
+    // here; an out of range float parses to an infinity, which is a value, not an
+    // error.
     if !is_float {
-        if int_overflows((*lx).src, (*lx).n, start, int_end) {
+        mut too_wide: bool = false
+        if unsigned_suffix_span((*lx).src, (*lx).n, int_end, lx_pos(lx)) {
+            too_wide = uint_overflows((*lx).src, (*lx).n, start, int_end)
+        } else {
+            too_wide = int_overflows((*lx).src, (*lx).n, start, int_end)
+        }
+        if too_wide {
             lx_err(lx, start, "invalid integer literal")
         }
     }

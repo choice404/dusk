@@ -1,0 +1,48 @@
+// The unsigned cast matrix. Widening takes its extension from the SOURCE type, so
+// int8(-1) reaches uint64 as the all ones pattern while uint8(-1) reaches it as
+// 255; narrowing truncates; a same width cross sign cast is a bit reinterpretation
+// that moves nothing; an integer crosses to a float by its own signedness; and a
+// float to an unsigned width saturates into [0, 2^w - 1], with a NaN landing on
+// zero rather than on whatever a bare conversion would leave.
+@paradigm procedural
+
+func nan() -> float64 {
+    z: float64 = 0.0
+    return z / z
+}
+
+// A value past the top of every integer width, built by repeated multiplication
+// so no literal has to name it.
+func over64() -> float64 {
+    mut v: float64 = 1.0
+    mut i: int64 = 0
+    while i < 40 {
+        v = v * 10.0
+        i = i + 1
+    }
+    return v
+}
+
+func main() -> int32 {
+    println(uint64(int8(-1)))
+    println(uint64(uint8(-1)))
+    println(int64(uint8(-1)))
+    println(uint8(4000000000u32))
+
+    println(uint8(300.0))
+    println(uint8(-5.0))
+    println(uint8(255.9))
+    println(uint16(70000.0))
+    println(uint32(5000000000.0))
+    println(uint64(over64()))
+    println(uint64(-1.0))
+    println(uint8(nan()))
+    println(uint64(nan()))
+    println(int64(over64()))
+
+    maxu: uint64 = 0u64 - 1u64
+    println(float64(maxu))
+    println(maxu)
+    println(f"{maxu}")
+    return 0
+}
