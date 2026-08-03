@@ -1,6 +1,6 @@
 # dusk Language Specification
 
-## Status, the 1.4.0 surface
+## Status
 
 This is the language reference for dusk. It describes the language as of 1.13.0: the paradigm system and the type system, signed and unsigned integer widths that never mix silently, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, Unicode strings with the `rune` primitive, and a foreign boundary that now crosses in both directions, reaching variadic C functions, third party libraries, and structs by value, taking a dusk function as a C callback, and compiling a dusk module into a C library any C ABI language can link. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
 
@@ -52,7 +52,7 @@ A source file has two kinds of top of file syntax. Directives start with `@` and
 
 dusk has two comment forms. A line comment starts with `//` and runs to the end of the line. A block comment starts with `/*`, ends with `*/`, and nests: each `/*` inside an open block comment opens another level, and the comment ends only when every level has closed, so a block comment can comment out code that itself contains block comments. Both forms are stripped before parsing and produce no tokens.
 
-```dusk
+```text
 // a line comment
 /* a block comment */
 /* nests: /* inner */ still inside, now closed */
@@ -71,7 +71,7 @@ Comments interleave freely with the directive prologue, and a directive inside a
 
 A block comment that opens with `/**`, with the next byte after the second star neither `*` nor `/`, is a doc comment: `/**/` is an empty plain comment, and `/***/` or a `/****` banner stays plain. In every other way it is an ordinary block comment, nesting and terminating by the same rules and producing no token, so a doc comment never changes what `check`, `build`, or `ir` does. What it adds is a binding: the compiler remembers the block and attaches it to the declaration it precedes.
 
-```dusk
+```text
 /** Scales every element in place.
  * @param v the vector to scale
  * @param k the factor applied to each element
@@ -80,7 +80,7 @@ A block comment that opens with `/**`, with the next byte after the second star 
 export func scale(v: *Vector<int64>, k: int64) -> int64 {
 ```
 
-Binding follows the token gap: a doc block binds to the item whose first token is the next token after it, including a modifier like `export`, and blank lines or plain comments between the doc and the item do not break the binding, since neither adds a token. A block on the same line as the item's first token binds the same way. A doc block before the directive prologue is the module's doc; in a file with no directives a leading doc block binds to the first item instead, since there is no prologue to document. The bindable targets are a function, a struct, an enum, an interface, an interface method signature, an impl method, a monad method, and a foreign function head inside a `foreign` block. A doc block anywhere else, inside a function body, before an `impl` or `foreign` or `monad` block head, or trailing at the end of the file, binds nothing and is dangling, and a dangling doc inside a `foreign` block is reported like any other.
+Binding follows the token gap: a doc block binds to the item whose first token is the next token after it, including a modifier like `export`, and blank lines or plain comments between the doc and the item do not break the binding, since neither adds a token. A block on the same line as the item's first token binds the same way. A doc block before the directive prologue is the module's doc; in a file with no directives a leading doc block binds to the first item instead, since there is no prologue to document. The bindable targets are a function, a struct, an enum, an interface, an interface method signature, an `impl` head, an impl method, a monad method, and a foreign function head inside a `foreign` block. An `impl` head takes a doc since 1.7.0, so a block documenting the whole implementation binds to it and `dusk doc` renders it above the impl's methods. A doc block anywhere else, inside a function body, before a `foreign` or `monad` block head, or trailing at the end of the file, binds nothing and is dangling, and a dangling doc inside a `foreign` block is reported like any other.
 
 The body carries prose, not facts: the compiler already knows every name, type, and signature from the declaration itself, so the doc never restates them and cannot drift from them. The first paragraph is the summary and later paragraphs are the body. Three tags are recognized at the start of a line: `@param <name> <description>` describes one parameter, `@return <description>` describes the return value, and `@example` opens a verbatim block that runs to the next tag or the end of the comment: an unknown `@` word inside example code is content, while a line that starts with one of the three tag words ends the example. A leading gutter of aligned `*` columns is stripped; without one, the common indentation is.
 
@@ -811,6 +811,25 @@ Take asserts ownership rather than proving it. Pushing a borrowed pointer into a
 The tree free contract is heap strings only. `free` of a string that is a literal rather than a heap allocation is undefined: the runtime hands the pointer to the allocator undetected, so a deep free is safe only over a tree whose every string is heap allocated, which every `json_parse` result is. A hand built tree carrying a literal string payload frees that payload into undefined behavior at the `free`, and the contract names the requirement rather than checking it.
 
 The standard library ships this deep free as `std.json`'s `json_free(root)`, the worklist walk moved verbatim, the first standard library code to call the owning takes. It consumes `root`, freeing every node, string payload, object key, and backing buffer, so no pointer into the tree is valid afterward and a later dereference of any freed block faults named through the generational check. It requires a fully heap allocated tree, which every `json_parse` result is, and a hand built tree carrying a literal string payload frees that payload into undefined behavior at its `free`, the same heap strings only contract above. A subtree reachable from two parents double frees, and the second free faults named rather than corrupting silently.
+
+### Borrowing With a `ref` Binding
+
+A binding normally takes its ownership from what initialized it, so a name bound from `alloc` owns the allocation and a name bound from another owner would copy it, which is refused. `ref` is the opt out: `ref alias: *Box = owner` and `ref alias := owner` both declare that the new name is a borrow of what the initializer already owns, so the alias reads and writes through the pointer while the original name stays the single owner that frees it.
+
+```text
+owner: *Box = alloc(Box { n: 1 })
+ref alias: *Box = owner
+println((*alias).n)
+free(owner)
+```
+
+The word is the sanctioned answer to the copy of an owner reject. Writing `b: *Box = owner` is refused, ``cannot copy an owning pointer; bind a `ref` alias or `move` it``, and the message names the two legal outcomes: `ref b := owner` keeps one owner and adds a view, `b := move(owner)` transfers the ownership and retires the old name. A `ref` binding carries the obligations of any other borrow, so `free(alias)` is refused with `cannot free a borrowed pointer; only its owner frees it` and `move(alias)` with `cannot move a borrowed pointer; only its owner can be moved`. Chaining is transitive: `ref c := alias` is a borrow of a borrow, and no name in the chain but the original may free.
+
+`ref` is a contextual word, not a reserved keyword. It introduces a borrowing binding only when the very next token is an identifier that begins one, so `ref` remains an ordinary name everywhere else and `ref: int64 = 5` declares a variable called `ref`. It does not stack with `mut`: `mut ref x := p` is a parse error, since a borrowing alias is a second view of one value rather than a slot to reassign, and a second view is written as a second `ref` binding.
+
+Two limits are named rather than hidden. Over a value with no ownership to track, a scalar among them, the marker is inert: `ref n := 7` is accepted and records nothing, since a scalar copies freely and owns nothing to borrow from. And the marker applies to a single binding: a destructuring binding, `ref a, b := pair`, takes the word grammatically and records no borrow for either name, so a member that must stay a borrow is bound on its own line. Neither admits a silent corruption; a free laundered through the destructuring form faults at the later use through the generational check, `fatal: use of a freed or stale pointer at path:line`.
+
+A collected value refuses the word outright, `a collected value is not borrowed with ref; copy it directly`, since a `collector<T>` has no owner to borrow from and no explicit release to protect. See [The Collected Heap and `collector<T>`](#the-collected-heap-and-collectort).
 
 ### Declaring an Owning Func
 
@@ -1636,13 +1655,14 @@ Awaiting a networking future is subject to the same rule as any other await: it 
 @import std.async.net
 
 async func serve(lfd: int64) -> int64 {
-    cfd, ae := tcp_accept(lfd)
+    cfd, ae := await tcp_accept(lfd)
     ae.ignore()
-    buf: *raw int64 = alloc_bytes(64)
-    n, re := tcp_read(cfd, buf, 64)
+    buf: *raw char = alloc_bytes(64)
+    n, re := await tcp_read(cfd, buf, 64)
     re.ignore()
-    w, we := tcp_write(cfd, buf, n)
+    w, we := await tcp_write(cfd, buf, n)
     we.ignore()
+    free(buf)
     ce := tcp_close(cfd)
     ce.ignore()
     return w
@@ -1667,6 +1687,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | ---------------------- | --------------------------------------------------------------- |
 | std.io                 | print, println, printerr, file I/O                              |
 | std.logging            | level gated logging to stderr, Debug through Error               |
+| std.memory.allocator   | the Allocator interface and the two allocators implementing it  |
 | std.memory.arena       | arena allocator                                                 |
 | std.memory.collector   | control and gauges for the collected heap behind `collector<T>` |
 | std.functional.maybe   | Maybe<T> monad                                                  |
@@ -1683,6 +1704,9 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax. 
 | std.unicode            | UTF-8 decode, encode, and validation over the byte view string  |
 | std.math               | libm's scalar functions over float64, pi, e, is_nan, is_inf     |
 | std.rand               | xoshiro256** pseudorandom generator, seeded through splitmix64  |
+| std.os                 | the process environment, the command shell, and the errno read  |
+| std.process            | runs a shell command as a child and reads its output back       |
+| std.fs                 | files, directories, and paths over the libc calls               |
 | std.concurrent.atomic  | sequentially consistent int64 atomics                           |
 | std.concurrent.channel | bounded thread safe queue between threads                       |
 | std.concurrent.pool    | the global thread pool behind the submit builtin                |

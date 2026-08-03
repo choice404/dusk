@@ -89,17 +89,15 @@ if err.exists() {
 print_line(name)
 ```
 
-dusk has no `break`, so read until end of input with a done flag.
+Read until end of input by breaking out of the loop on the error.
 
 ```text
-mut done: bool = false
-while !done {
+while true {
     line, e := read_line()
     if e.exists() {
-        done = true
-    } else {
-        print_line(line)
+        break
     }
+    print_line(line)
 }
 ```
 
@@ -165,7 +163,6 @@ Helpers over NUL terminated strings: length and comparison, searching, trimming,
 | `int_to_hex16(n: int64) -> string`                    | The `0x` prefixed, 16 digit, uppercase hex of `n` read as a 64 bit word. |
 | `parse_int(s: string) -> (int64, error)`              | Parse a signed base 10 integer.             |
 | `parse_int_radix(s: string, base: int64) -> (int64, error)` | Parse a signed integer in a base from 2 to 36. |
-| `parse_float(s: string) -> (float64, error)`          | Parse a base 10 float.                      |
 | `str_from_chars(cs: char[]) -> string`                | Copy a char slice into a fresh heap string the caller owns. |
 | `cbuf(s: string) -> *raw char`                        | Copy `s` into a fresh NUL terminated raw buffer for a foreign call to read. |
 
@@ -180,6 +177,9 @@ e.ignore()
 h, he := parse_int_radix("0xFF", 16)   // 255
 he.ignore()
 
+f, fe := parse_float("2.5")  // 2.5, a builtin, no import needed
+fe.ignore()
+
 a: char[5] = "Hello"
 s := str_from_chars(a[0..5])   // "Hello", a heap string
 free(s)
@@ -190,6 +190,8 @@ free(s)
 `cbuf` is the bridge the other way, out to a foreign call. A `string` is a fat view typed apart from a raw pointer, so a foreign signature, which takes only a scalar, a `*raw T`, or a `*void`, cannot read one directly; `cbuf` copies the bytes into a fresh, NUL terminated, heap allocated buffer the caller owns and frees once the call that reads it has returned. `std.os`'s `run` and `env` both cross this way.
 
 `parse_int` takes a base 10 string, so a `0x`, `0o`, or `0b` prefix fails on the prefix letter. `parse_int_radix` takes the base and accepts the matching prefix, `0x` for 16, `0o` for 8, `0b` for 2, but never infers the base from the prefix. Each parser returns the value with an error you must handle.
+
+Float parsing is not a `std.string` export. `parse_float(s: string) -> (float64, error)` is a builtin, available everywhere with no import and gated behind no paradigm, the same way `read_file` is, and it returns the value with an error on the same must handle rule the integer parsers follow. `std.io`'s `read_float` and `std.json`'s number parse both go through it.
 
 `str_split` and `str_join` are inverse shapes over a `*Vector<string>`, which is why `std.string` imports `std.vector`; the vector and every element it holds are fresh heap allocations the caller frees. The case folds and the trim family are ASCII only by design, a byte at 128 or above passes through untouched, so a multibyte UTF-8 scalar survives them intact and a full Unicode fold stays out of the string module, the same posture the unicode tables took.
 
@@ -247,6 +249,7 @@ A growable array, generic over its element type. The buffer lives on the heap an
 | `vec_new<T>() -> Vector<T>`                | A new empty vector.                    |
 | `vec_push<T>(v: *Vector<T>, x: T) -> void` | Append one element, growing if needed. |
 | `vec_get<T>(v: *Vector<T>, i: int64) -> T` | The element at index `i`.              |
+| `vec_set<T>(v: *Vector<T>, i: int64, x: T) -> void` | Overwrite the element at index `i` in place. |
 | `vec_pop<T>(v: *Vector<T>) -> void`        | Drop the last element. A no op on an empty vector. |
 | `vec_len<T>(v: *Vector<T>) -> int64`       | The element count.                     |
 | `vec_free<T>(v: *Vector<T>) -> void`       | Free the backing buffer.               |
@@ -274,6 +277,8 @@ free(v)
 ```
 
 Capacity starts at 4 on the first push and doubles from there.
+
+`vec_set` writes over the element already at `i`, bounds checked exactly as `vec_get`, a negative index or one at or past the length printing `fatal: vector index out of bounds` and aborting. The prior element is overwritten rather than freed, so a managed pointer element the caller means to replace is freed before the call or its object leaks; `vec_take` is the shape that hands the old element back instead.
 
 Added in 1.4.2, `vec_sort` takes an ordering closure, negative when its first argument sorts before its second, zero when the two are equal, positive when the first sorts after, and reorders `v`'s backing data in place. It runs a bottom up, iterative merge sort: passes double a merged run width from 1 up past `v`'s length, each pass merging adjacent runs into one scratch buffer sized to `v` and copying the whole buffer back before the next pass starts, so a pass always merges from data untouched by itself. The sort is stable, a tie always favors the earlier run, and deterministic, two calls over the same data and comparator always produce the same output order; a vector of fewer than two elements returns immediately with `cmp` uncalled.
 
@@ -346,6 +351,8 @@ A hash map generic over both its key type K and its value type V. A key is any h
 | `map_remove<K, V>(m: *Map<K, V>, k: K) -> bool`         | Remove a key, true when it was present.  |
 | `map_take<K, V>(m: *Map<K, V>, k: K) -> V`              | Remove a key and hand its value back as the caller's own; fault on a miss. |
 | `map_len<K, V>(m: *Map<K, V>) -> int64`                 | The entry count.                         |
+| `map_key_at<K, V>(m: *Map<K, V>, i: int64) -> K`        | The key at insertion order position `i`, borrowed from the map. |
+| `map_val_at<K, V>(m: *Map<K, V>, i: int64) -> V`        | The value stored for that key, borrowed from the map. |
 | `map_keys<K, V>(m: *Map<K, V>) -> *Vector<K>`           | The keys in insertion order, a fresh owned vector. |
 | `map_free<K, V>(m: *Map<K, V>) -> void`                 | Free the backing buffers.                |
 | `map_hash(s: string) -> int64`                          | The old string hash, now a thin wrapper over `hash`. |
@@ -368,6 +375,22 @@ println(unwrap_or(map_get(byid, 42), "?"))  // answer
 ```
 
 `map_get` returns a `Maybe<V>`, so import `std.functional.maybe` to unwrap it. Capacity starts at 8 and doubles each time the map fills to half. The map stores keys by value: a scalar key carries no lifetime, and a string key is the caller's pointer, which must outlive the map; `map_free` releases the buffers, never a key string. `map_keys` returns the keys in the order they were first inserted, so iteration is a pure function of the insert sequence rather than the hash layout. A key appears once, at its first insertion; an overwrite does not move it and a grow rehashes without disturbing it. The returned vector is a fresh copy the caller owns and frees with `vec_free` and `free`, independent of the map, so there is no shared owner. Import `std.vector` to walk it with `vec_len` and `vec_get`.
+
+`map_key_at` and `map_val_at` walk a map by position without allocating the copy `map_keys` returns. Position `i` runs from 0 to `map_len(m) - 1` and visits every live key exactly once in the order the keys first entered, the same order `map_keys` reports, and both are bounds checked through `vec_get` so an `i` outside the range faults rather than reading a stale slot. Both hand back a borrow the map still owns, so a string key read this way is not freed and a managed value is drained with `map_take` when the caller needs it as its own.
+
+```text
+@import std.map
+
+mut i: int64 = 0
+while i < map_len(m) {
+    k := map_key_at(m, i)
+    v := map_val_at(m, i)
+    println("{} = {}", k, v)
+    i = i + 1
+}
+```
+
+The `for k, v in m` loop is the same walk written as a statement, lowered into exactly this index loop over the map's own accessors.
 
 One inference note: a map read whose map argument is a struct field, nested directly inside another generic call such as `unwrap_or`, may fail to pin K, `cannot infer the type parameter 'K' for 'map_get'`. Rebind the field to a locally annotated variable first, `mm: *Map<string, V> = (*s).field`, then call through `mm`; a map held in a local or a parameter infers directly.
 
@@ -448,8 +471,8 @@ Added in 1.4.2. Runs a shell command as a child process and reads its output bac
 | Function                                        | Description                                                       |
 | ------------------------------------------------ | ------------------------------------------------------------------- |
 | `proc_open(cmd: string) -> (Proc, error)`       | Runs `cmd` through the platform shell and opens a readable pipe to its combined stdout. |
-| `proc_read_line(p: Proc) -> (string, bool)`     | The next line without its trailing newline; `false` once the stream is exhausted. |
-| `proc_close(p: Proc) -> (int64, error)`         | Closes the stream, reaps the child, and decodes its exit status.  |
+| `proc_read_line(p: *Proc) -> (string, bool)`    | The next line without its trailing newline; `false` once the stream is exhausted. |
+| `proc_close(p: *Proc) -> (int64, error)`        | Closes the stream, reaps the child, and decodes its exit status.  |
 | `run_capture(cmd: string) -> (string, int64, error)` | Runs `cmd` to completion and returns its whole output, its exit code, and any error. |
 
 ```text
@@ -460,6 +483,8 @@ e.ignore()
 println(out)   // "hello"
 println(code)  // 0
 ```
+
+`proc_read_line` and `proc_close` take the `Proc` by pointer, not by value, so the stream cannot be copied and advanced from two aliases: a `Proc` names one OS stream that a single owner reads and closes. `proc_open` returns the `Proc` by value, so the caller stages it on the heap, `pp: *Proc = alloc(p)`, and frees that allocation once after the last close.
 
 `proc_open` opens `cmd` through `popen(cmd, "r")`, POSIX shell semantics (`/bin/sh -c`); a failure to open reports `strerror`'s text through the returned `error` and hands back a zeroed `Proc` that is never valid to read from or close. `proc_read_line` reassembles a line across as many internal reads as it takes when a line outruns the 4096 byte read chunk, so no line length silently truncates; a hard read error reports the same `false` as a clean end of stream, since the function carries no error channel of its own. `proc_close` decodes `pclose`'s wait status the way `std.os`'s `run` decodes `system`'s: the low 7 bits name a terminating signal, reported as 128 plus the signal number, and a normal exit reports the shifted down exit code; `pclose` failing outright, a bad handle or a wait failure, reports through the returned `error` instead of a decoded status. `run_capture` is the convenience wrapper over all three: it opens, reads every line into one newline joined string, closes, and hands back the output alongside the decoded exit code, reporting an open failure immediately with a `-1` exit code and no output.
 
@@ -523,17 +548,17 @@ Added in 1.4.0. libm's scalar functions over `float64`, bound straight through t
 
 | Function                                     | Description                                  |
 | --------------------------------------------- | --------------------------------------------- |
-| `sin(x)`, `cos(x)`, `tan(x) -> float64`      | The trigonometric functions, `x` in radians. |
-| `asin(x)`, `acos(x)`, `atan(x) -> float64`   | Their inverses.                              |
-| `atan2(y, x) -> float64`                     | The angle of the point `(x, y)`.             |
-| `exp(x) -> float64`                          | `e` raised to `x`.                           |
-| `log(x)`, `log2(x)`, `log10(x) -> float64`   | Natural, base 2, and base 10 logarithm.      |
-| `sqrt(x)`, `cbrt(x) -> float64`              | Square root and cube root.                   |
-| `floor(x)`, `ceil(x)`, `round(x)`, `trunc(x) -> float64` | Round down, up, to nearest, and toward zero. |
-| `fmod(x, y) -> float64`                      | The floating point remainder of `x / y`.     |
-| `fabs(x) -> float64`                         | The absolute value.                          |
-| `hypot(x, y) -> float64`                     | `sqrt(x*x + y*y)`, without the intermediate overflow. |
-| `fmin(a, b)`, `fmax(a, b) -> float64`        | The lesser and the greater of two values.    |
+| `sin(x: float64)`, `cos(x: float64)`, `tan(x: float64) -> float64` | The trigonometric functions, `x` in radians. |
+| `asin(x: float64)`, `acos(x: float64)`, `atan(x: float64) -> float64` | Their inverses.                   |
+| `atan2(y: float64, x: float64) -> float64`   | The angle of the point `(x, y)`.             |
+| `exp(x: float64) -> float64`                 | `e` raised to `x`.                           |
+| `log(x: float64)`, `log2(x: float64)`, `log10(x: float64) -> float64` | Natural, base 2, and base 10 logarithm. |
+| `sqrt(x: float64)`, `cbrt(x: float64) -> float64` | Square root and cube root.              |
+| `floor(x: float64)`, `ceil(x: float64)`, `round(x: float64)`, `trunc(x: float64) -> float64` | Round down, up, to nearest, and toward zero. |
+| `fmod(x: float64, y: float64) -> float64`    | The floating point remainder of `x / y`.     |
+| `fabs(x: float64) -> float64`                | The absolute value.                          |
+| `hypot(x: float64, y: float64) -> float64`   | `sqrt(x*x + y*y)`, without the intermediate overflow. |
+| `fmin(a: float64, b: float64)`, `fmax(a: float64, b: float64) -> float64` | The lesser and the greater of two values. |
 | `pi() -> float64`                            | Archimedes' constant, to `float64` precision. |
 | `e() -> float64`                             | Euler's number, to `float64` precision.      |
 | `is_nan(x: float64) -> bool`                 | Whether `x` is NaN.                          |
@@ -1005,6 +1030,247 @@ match r {
 }
 ```
 
+## std.concurrent.thread
+
+Helpers around the `spawn` and `join` builtins. The builtins themselves need no import: `spawn f(args)` starts `f` on a fresh OS thread and yields a typed handle, and `join` on that handle blocks until the thread returns and hands back its value, so a thread carries any return type across the join. This module holds what rides beside them, which today is sleep.
+
+| Function                    | Description                                                        |
+| ---------------------------- | ------------------------------------------------------------------- |
+| `sleep_ms(ms: int64) -> void` | Block the calling thread for `ms` milliseconds against the wall clock. |
+
+```text
+@import std.concurrent.thread
+
+worker := spawn compute(input)
+sleep_ms(10)
+result := join worker
+```
+
+`sleep_ms` parks a real OS thread, so a task on the event loop uses `std.async.time`'s `sleep_async` instead, which yields the loop while it waits. A non positive duration returns at once.
+
+## std.concurrent.sync
+
+A mutex and a condition variable over pthread, the sanctioned way to mutate shared memory between threads. The blessed shape is a `*raw` buffer guarded by one `Mutex`: lock, touch the buffer, unlock, and inside a function body prefer `lock(m)` followed by `defer unlock(m)`. Both handles are one word and copy freely, so every copy names the same lock or variable.
+
+```text
+struct Mutex {
+    h: *void,
+}
+
+struct Condvar {
+    h: *void,
+}
+```
+
+| Function                                  | Description                                                       |
+| ------------------------------------------ | ------------------------------------------------------------------- |
+| `mutex_new() -> Mutex`                    | A fresh mutex.                                                    |
+| `lock(m: Mutex) -> void`                  | Acquire, blocking until the mutex is free.                        |
+| `unlock(m: Mutex) -> void`                | Release.                                                          |
+| `mutex_free(m: Mutex) -> void`            | Free the mutex once no thread holds or contends it.               |
+| `cond_new() -> Condvar`                   | A fresh condition variable.                                       |
+| `cond_wait(cv: Condvar, m: Mutex) -> void`| Release `m`, sleep until a signal or broadcast, reacquire `m`.    |
+| `cond_signal(cv: Condvar) -> void`        | Wake one waiter, if any thread is waiting.                        |
+| `cond_broadcast(cv: Condvar) -> void`     | Wake every waiter.                                                |
+| `cond_free(cv: Condvar) -> void`          | Free the variable once no thread waits on it.                     |
+
+```text
+@import std.concurrent.sync
+
+m := mutex_new()
+lock(m)
+defer unlock(m)
+balance[0] = balance[0] + 1
+```
+
+The mutex is the error checking kind, so relocking by the holder, unlocking by a non holder, and freeing a held mutex all fault by name instead of hanging or corrupting. An `unlock` happens before the next `lock` of the same mutex, which is the ordering that makes the guarded memory safe to touch. `cond_wait` requires the caller to hold the mutex and wakeups can be spurious, so always wait inside a loop that rechecks the predicate.
+
+```text
+lock(m)
+while ready[0] == 0 {
+    cond_wait(cv, m)
+}
+unlock(m)
+```
+
+## std.concurrent.atomic
+
+A sequentially consistent `int64` atomic over a heap word, the way to share a mutable counter between threads without a mutex. The handle copies by value and every copy names the same word, so a spawned thread that receives a copy increments the shared counter.
+
+```text
+struct AtomicInt {
+    p: *raw int64,
+}
+```
+
+| Function                                                        | Description                                          |
+| ---------------------------------------------------------------- | ------------------------------------------------------ |
+| `atomic_new(v: int64) -> AtomicInt`                             | Allocate a counter initialized to `v`.               |
+| `atomic_load(a: AtomicInt) -> int64`                            | The value observed at this point.                    |
+| `atomic_store(a: AtomicInt, v: int64) -> void`                  | Overwrite the value.                                 |
+| `atomic_add(a: AtomicInt, d: int64) -> int64`                   | Add `d`, which may be negative, and return the new value. |
+| `atomic_cas(a: AtomicInt, expect: int64, desired: int64) -> bool` | Compare and swap; true when the counter held `expect`. |
+| `atomic_free(a: AtomicInt) -> void`                             | Free the counter's word.                             |
+
+```text
+@import std.concurrent.atomic
+
+counter := atomic_new(0)
+worker := spawn increment_many(counter)
+atomic_add(counter, 1)
+join worker
+total := atomic_load(counter)
+atomic_free(counter)
+```
+
+The atomics order the accesses they mediate, so a counter touched only through this surface is race free. Exhaustion at `atomic_new` is fatal, the allocator's contract, and freeing the word while any thread still touches it is fatal too, so free after the last join.
+
+## std.concurrent.channel
+
+A bounded, thread safe queue for handing values between threads. A send blocks while the channel is full, a receive blocks while it is empty, and closing wakes everyone. The handle is one word and copies freely, including into a spawned lambda's captures, and every copy names the same channel. The sanctioned shutdown order is close, then join every thread that touches the channel, then free.
+
+```text
+struct Channel<T> {
+    h: *void,
+}
+```
+
+| Function                                                    | Description                                                     |
+| ------------------------------------------------------------ | ----------------------------------------------------------------- |
+| `chan_new<T>(cap: int64) -> Channel<T>`                     | A channel holding at most `cap` elements, `cap` at least one.   |
+| `chan_send<T>(c: Channel<T>, x: T) -> error`                | Send, blocking while full; the error exists on a closed channel. |
+| `chan_recv<T>(c: Channel<T>) -> (T, error)`                 | Receive the oldest value, blocking while empty; the error exists once closed and drained. |
+| `chan_try_send<T>(c: Channel<T>, x: T) -> error`            | Send only if there is room right now, never blocking.           |
+| `chan_try_recv<T>(c: Channel<T>) -> (T, error)`             | Receive only if a value is ready right now, never blocking.     |
+| `chan_recv_timeout<T>(c: Channel<T>, ms: int64) -> (T, error)` | Receive, blocking at most `ms` milliseconds against a monotonic clock. |
+| `chan_recv_async<T>(c: Channel<T>) -> Future<T>`            | A loop future completing with what `chan_recv` would return, without parking the loop thread. |
+| `chan_close<T>(c: Channel<T>) -> void`                      | Close and wake every blocked sender and receiver. Idempotent.   |
+| `chan_free<T>(c: Channel<T>) -> void`                       | Free the channel after every touching thread has joined.        |
+
+```text
+@import std.concurrent.channel
+
+jobs: Channel<int64> = chan_new(8)
+producer := spawn worker(jobs)
+e := chan_send(jobs, 42)
+e.ignore()
+chan_close(jobs)
+join producer
+chan_free(jobs)
+```
+
+`chan_new` sizes the element from the binding annotation, the same rule `alloc` uses, so a bare `jobs := chan_new(8)` cannot pin `T` and is a compile error. A capacity below one or exhausted memory is fatal rather than an error. The refusals read differently by wording: `send on a closed channel`, `channel is full`, `receive on a closed, drained channel`, `channel is empty`, and `receive timed out`, and the value beside any receive error is the zero pattern for `T`. A value crosses by copy, so hand a managed pointer over with `chan_send(c, move(p))` and let the receiver own it; a moved value refused by a closed channel never entered the ring and its record leaks, so finish sending before anyone closes. Managed pointers still buffered at `chan_free` are dropped as raw bytes and leak, so drain before freeing when elements own heap records. An element type containing a slice, a closure, or an interface value is rejected at compile time, since each may view the sending frame.
+
+`chan_recv_async` is the bridge to the event loop: a detached helper blocks in the same receive off thread and completes a loop future when a value or the drained close arrives, so `await`ing it yields exactly the pair `chan_recv` would return. Import `std.async.future` for the `Future<T>` it hands back, and pin the element with the binding annotation, `f: Future<int64> = chan_recv_async(c)`.
+
+## std.concurrent.pool
+
+The global thread pool behind the `submit` builtin. The pool is a process singleton with a fixed worker count and an unbounded queue, so a submission never blocks the submitter. Start it once, submit work with `submit`, and shut it down before `main` returns; the shutdown drains everything already queued. After a shutdown the pool stays down for the rest of the process.
+
+| Function                            | Description                                                       |
+| ------------------------------------ | ------------------------------------------------------------------- |
+| `pool_start(workers: int64) -> error` | Start the pool with a fixed worker count of at least one.        |
+| `pool_shutdown() -> void`           | Stop accepting submissions, run everything queued, join the workers. |
+| `ncpu() -> int64`                   | The number of processors online, never below one.                 |
+
+```text
+@import std.concurrent.pool
+
+e := pool_start(ncpu())
+e.ignore()
+submit render_tile(0)
+submit render_tile(1)
+pool_shutdown()
+```
+
+`pool_start`'s error exists when the count is below one, the pool is already running, it was already shut down, or the operating system refuses a worker thread; a refused start leaves the pool pristine, so a later attempt can succeed. `pool_shutdown` is idempotent and a no op before the pool starts, and when callers race, every one of them returns only after the drain completes. Calling it from inside a pool task is fatal by name.
+
+## std.async.loop
+
+The event loop's lifecycle. The loop is a process singleton like the thread pool, owned by the thread that initialized it. Futures are minted, awaited, polled, and freed on that thread only, while completion is legal from any thread; touching the loop off its thread faults by name. Initialize the loop before the first future and free it after the last completer has finished, the close, join, free discipline.
+
+| Function                | Description                                                       |
+| ------------------------ | ------------------------------------------------------------------- |
+| `loop_init() -> error`  | Start the loop on the calling thread, which becomes its owner.    |
+| `loop_free() -> void`   | Free the loop.                                                    |
+
+```text
+@import std.async.loop
+@import std.async.time
+@import std.async.future
+
+e := loop_init()
+e.ignore()
+v, te := await(sleep_async(5))
+te.ignore()
+println(v)
+loop_free()
+```
+
+`loop_init`'s error exists when the loop is already running or the operating system refuses the resources. Pending timer futures leak their records at `loop_free`, so consume or free futures first and shut the pool down before it. After the free a completer that fires anyway faults on the not running loop instead of corrupting memory.
+
+## std.async.future
+
+The one shot completion future over the event loop. A future is minted pending on the loop thread, completed exactly once from any thread, and consumed exactly once on the loop thread by `await`, a timed await, or a ready poll. The record lives in the generational heap, so consuming it retires it and a second consume faults by name, the double join contract. The handle is a plain pair of words and copies freely; every copy names the same future.
+
+```text
+struct Future<T> {
+    h: *void,
+    gen: int64,
+}
+```
+
+| Function                                                              | Description                                                     |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `future_new<T>() -> Future<T>`                                        | Mint a pending future; the binding annotation pins `T`.         |
+| `future_wrap<T>(h: *void) -> Future<T>`                               | Wrap a live runtime completion handle into a typed future.      |
+| `complete<T>(f: Future<T>, v: T, e: error) -> error`                   | Complete with a value and an error, from any thread.            |
+| `complete_raw<T>(h: *void, gen: int64, v: T, e: error) -> error`       | The same completion addressed by the two raw handle words.      |
+| `await<T>(f: Future<T>) -> (T, error)`                                | Wait until the future completes, then consume it.               |
+| `await_timeout<T>(f: Future<T>, ms: int64) -> (T, error)`             | Wait at most `ms` milliseconds; the future stays live on timeout. |
+| `try_poll<T>(f: Future<T>) -> (T, error)`                             | Poll without parking; the future stays live while pending.      |
+| `future_free<T>(f: Future<T>) -> void`                                | Release a future that will never be consumed.                   |
+
+```text
+@import std.async.future
+
+f: Future<int64> = future_new()
+h := f.h
+gen := f.gen
+w := spawn produce(h, gen)
+v, e := await(f)
+e.ignore()
+println(v)
+join w
+```
+
+Exactly one completion wins and a late loser is refused and dropped, whether it arrives before or after the awaiter consumes the future, so racing completers never need to outrun the awaiter. The error a completer passes is payload for the awaiter rather than a failure at the completion site. `complete_raw` is the completer surface a thread carries when the typed future belongs to the loop thread: `h` and `gen` are the struct's own fields lifted out before the spawn, so the completion crosses without capturing a future, which is rejected wherever it would cross a thread boundary.
+
+`await_timeout` reports `await timed out` and `try_poll` reports `future is pending`, and in both cases the value is the zero pattern for `T` and the future stays live, so the caller retries, polls, or frees it. A blocking `await` with nothing left that could complete the future, no timer pending, no spawned thread alive, no pool task in flight, is a deadlock and faults by name instead of hanging. A consumed future needs no free and freeing it faults, the double free family.
+
+The three pumping primitives, `await`, `await_timeout`, and `try_poll`, crank the loop themselves, so calling one directly inside an `async func` is a compile error; the `await` statement is the suspension inside a task. `future_new` refuses an element that could view a frame, a slice, a closure, or an interface value, the same ban a channel element carries.
+
+## std.async.time
+
+Timers over the event loop. A timer is an ordinary future the loop's heap completes at its deadline, measured on the monotonic clock, so awaiting one parks without holding a thread hostage the way `sleep_ms` does. Timers sharing a deadline complete in creation order.
+
+| Function                                | Description                                                    |
+| ---------------------------------------- | ---------------------------------------------------------------- |
+| `sleep_async(ms: int64) -> Future<int64>` | A future that completes with 0 after `ms` milliseconds.       |
+
+```text
+@import std.async.time
+@import std.async.future
+
+async func tick() -> int64 {
+    v, e := await sleep_async(50)
+    e.ignore()
+    return v
+}
+```
+
+A non positive wait completes on the next await or poll, where all timers fire. Timers are minted on the loop thread only. Await one, poll it, or race it against another future with `await_timeout`. Outside an async func the `await` keyword is not available, so a synchronous caller waits through the plain call, `v, e := await(sleep_async(50))`, the same surface `std.async.future` exports.
+
 ## std.async.io
 
 The readiness reactor and the non blocking byte surface it watches. The reactor is one C thread that turns file descriptor readiness into a one shot `Future<int64>` on the event loop; it runs no user code and touches no user memory. Pipes are the deterministic rig to exercise it. Start the loop, then the reactor, before arming any watch, and stop the reactor before freeing the loop.
@@ -1072,13 +1338,32 @@ TCP over the readiness reactor. Sockets are non blocking file descriptors the re
 | --------------------------------------------------------------- | -------------------------------------------------------------- |
 | `tcp_listen(port: int64, backlog: int64) -> (int64, error)`      | Bind and listen on loopback; port 0 lets the OS assign one.    |
 | `tcp_local_port(fd: int64) -> (int64, error)`                    | The ephemeral port a listener was assigned.                    |
-| `tcp_accept(fd: int64) -> (int64, error)`                        | Await a connection and return the client descriptor. Async.    |
-| `tcp_connect(host: string, port: int64) -> (int64, error)`       | Connect to a literal IPv4 address, completing the handshake and surfacing a refusal. Async. |
-| `tcp_read(fd: int64, buf: *void, cap: int64) -> (int64, error)`  | Await readability and read once; 0 is end of stream. Async.    |
-| `tcp_write(fd: int64, buf: *void, n: int64) -> (int64, error)`   | Write every byte, awaiting writability as needed. Async.       |
+| `async func tcp_accept(fd: int64) -> (int64, error)`             | Await a connection and return the client descriptor.           |
+| `async func tcp_connect(host: string, port: int64) -> (int64, error)` | Connect to a literal IPv4 address, completing the handshake and surfacing a refusal. |
+| `async func tcp_read(fd: int64, buf: *void, cap: int64) -> (int64, error)` | Await readability and read once; 0 is end of stream. |
+| `async func tcp_write(fd: int64, buf: *void, n: int64) -> (int64, error)` | Write every byte, awaiting writability as needed.     |
 | `tcp_close(fd: int64) -> error`                                  | Close a descriptor.                                            |
 
-Awaiting any of the async calls is legal only inside an `async func`; a server accept loop and its clients run as tasks under `async_run`.
+The four `async func` heads are shown as declared: a call to one mints a task and a future rather than running the body, so it is `await`ed inside another `async func`, and awaiting it is legal nowhere else. A server accept loop and its clients run as tasks under `async_run`.
+
+```text
+@paradigm procedural
+@import std.async.net
+
+async func serve(lfd: int64) -> int64 {
+    cfd, ae := await tcp_accept(lfd)
+    ae.ignore()
+    buf: *raw char = alloc_bytes(64)
+    n, re := await tcp_read(cfd, buf, 64)
+    re.ignore()
+    w, we := await tcp_write(cfd, buf, n)
+    we.ignore()
+    free(buf)
+    ce := tcp_close(cfd)
+    ce.ignore()
+    return w
+}
+```
 
 ## Async keywords
 

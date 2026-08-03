@@ -1,0 +1,298 @@
+// astdumpexpr: expression rendering for the canonical parse dump.
+
+@paradigm procedural
+@import std.string
+@import std.vector
+@import ast
+@import astdumpty
+@import astdump2
+
+func render_expr_kind(out: *StringBuilder, a: *Ast, e: ExprNode, level: int64) -> void {
+    if e.kind == xk_int() {
+        sb_push(out, "Int(\n")
+        ad_ind(out, level + 1)
+        sb_push_int(out, e.a)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_suffix(out, a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_float() {
+        sb_push(out, "Float(\n")
+        ad_ind(out, level + 1)
+        h: string = int_to_hex16(e.a)
+        sb_push(out, h)
+        free(h)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_suffix(out, a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_str() {
+        sb_push(out, "Str(\n")
+        ad_ind(out, level + 1)
+        push_str_body(out, ast_name(a, e.a))
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_char() {
+        sb_push(out, "Char(\n")
+        ad_ind(out, level + 1)
+        sb_push_char(out, 39)
+        push_scalar(out, e.a)
+        sb_push_char(out, 39)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_rune() {
+        sb_push(out, "Rune(\n")
+        ad_ind(out, level + 1)
+        sb_push_char(out, 39)
+        push_scalar(out, e.a)
+        sb_push_char(out, 39)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_bool() {
+        sb_push(out, "Bool(\n")
+        ad_ind(out, level + 1)
+        ad_push_bool(out, e.a != 0)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_ident() {
+        sb_push(out, "Ident(\n")
+        ad_ind(out, level + 1)
+        push_string(out, ast_name(a, e.a))
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_unary() {
+        sb_push(out, "Unary(\n")
+        ad_ind(out, level + 1)
+        sb_push(out, uop_name(e.a))
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_binary() {
+        sb_push(out, "Binary(\n")
+        ad_ind(out, level + 1)
+        sb_push(out, bop_name(e.a))
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.c, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_call() {
+        sb_push(out, "Call(\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_expr_list(out, a, e.b, e.c, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_field() {
+        sb_push(out, "Field(\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        push_string(out, ast_name(a, e.b))
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_index() {
+        sb_push(out, "Index(\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_range() {
+        sb_push(out, "Range(\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        ad_push_bool(out, e.c != 0)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_tuple() {
+        sb_push(out, "Tuple(\n")
+        ad_ind(out, level + 1)
+        render_expr_list(out, a, e.a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_array() {
+        sb_push(out, "Array(\n")
+        ad_ind(out, level + 1)
+        render_expr_list(out, a, e.a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_fstr() {
+        sb_push(out, "FStr(\n")
+        ad_ind(out, level + 1)
+        render_expr_list(out, a, e.a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_struct_lit() {
+        sb_push(out, "StructLit(\n")
+        ad_ind(out, level + 1)
+        push_string(out, ast_name(a, e.a))
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_field_pairs(out, a, e.b, e.c, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_lambda() {
+        sb_push(out, "Lambda(\n")
+        ad_ind(out, level + 1)
+        render_lambda_value(out, a, e, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_match() {
+        sb_push(out, "Match(\n")
+        ad_ind(out, level + 1)
+        render_match_value(out, a, e.a, e.b, e.c, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_do() {
+        sb_push(out, "Do(\n")
+        ad_ind(out, level + 1)
+        render_optional_name(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        render_do_bind_list(out, a, e.b, e.c, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_await() {
+        sb_push(out, "Await(\n")
+        ad_ind(out, level + 1)
+        render_expr(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        if e.b < 0 {
+            sb_push(out, "None")
+        } else {
+            sb_push(out, "Some(\n")
+            ad_ind(out, level + 2)
+            render_type(out, a, e.b, level + 2)
+            sb_push(out, ",\n")
+            ad_ind(out, level + 1)
+            sb_push_char(out, 41)
+        }
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_sizeof_type() {
+        sb_push(out, "SizeofType(\n")
+        ad_ind(out, level + 1)
+        render_type(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 41)
+        return
+    }
+    if e.kind == xk_collect() {
+        sb_push(out, "Collect {\n")
+        ad_ind(out, level + 1)
+        sb_push(out, "ty: ")
+        render_type(out, a, e.a, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level + 1)
+        sb_push(out, "arg: ")
+        render_expr(out, a, e.b, level + 1)
+        sb_push(out, ",\n")
+        ad_ind(out, level)
+        sb_push_char(out, 125)
+        return
+    }
+    sb_push(out, "Ident(\n")
+    ad_ind(out, level + 1)
+    push_string(out, "")
+    sb_push(out, ",\n")
+    ad_ind(out, level)
+    sb_push_char(out, 41)
+}
+
+export func render_expr(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
+    e: ExprNode = vec_get((*a).exprs, id)
+    sb_push(out, "Expr {\n")
+    ad_ind(out, level + 1)
+    sb_push(out, "kind: ")
+    render_expr_kind(out, a, e, level + 1)
+    sb_push(out, ",\n")
+    ad_ind(out, level + 1)
+    sb_push(out, "span: ")
+    render_span(out, e.lo, e.hi, level + 1)
+    sb_push(out, ",\n")
+    ad_ind(out, level)
+    sb_push_char(out, 125)
+}

@@ -1,0 +1,463 @@
+// tccallcheck: Call safety and callback checks.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tcbin
+@import tciface
+@import tcown
+@import tcesc
+@import tcesc2
+@import tccallshape
+@import tcexprprep
+@import tcesccap
+
+func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_future() { return true }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_slice() || n.kind == tyk_array() {
+        return ptr_reaches_future_ty(tc, n.a, seen)
+    }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if ptr_reaches_future_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        embeds: *Map<string, TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if ptr_reaches_future_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
+                j = j + 1
+            }
+        }
+    }
+    return false
+}
+
+func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_collector() { return true }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_slice() || n.kind == tyk_array() {
+        return ptr_reaches_collector_ty(tc, n.a, seen)
+    }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if ptr_reaches_collector_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        embeds: *Map<string, TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if ptr_reaches_collector_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
+                j = j + 1
+            }
+        }
+    }
+    return false
+}
+
+func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_future() || n.kind == tyk_collector() || n.kind == tyk_slice() || n.kind == tyk_func() {
+        return false
+    }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+        fseen: *Map<string, int64> = alloc(map_new())
+        cseen: *Map<string, int64> = alloc(map_new())
+        return !ptr_reaches_future_ty(tc, n.a, fseen) && !ptr_reaches_collector_ty(tc, n.a, cseen)
+    }
+    if n.kind == tyk_array() { return spawn_capturable_ty(tc, n.a, seen) }
+    if n.kind == tyk_tuple() {
+        mut i: int64 = 0
+        while i < n.len {
+            if !spawn_capturable_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return false }
+            i = i + 1
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        ifaces: *Map<string, int64> = (*tc).ifaces
+        if map_has(ifaces, name) { return false }
+        if map_has(seen, name) { return true }
+        map_put(seen, name, 1)
+        embeds: *Map<string, TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            mut j: int64 = 0
+            while j < list.len {
+                if !spawn_capturable_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return false }
+                j = j + 1
+            }
+        }
+    }
+    return true
+}
+
+export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    if arg_len != 1 {
+        tc_emit(tc, task_one_arg_msg(name), lo, hi)
+        mut i: int64 = 0
+        while i < arg_len {
+            infer_expr(tc, vec_get((*a).kids, arg_off + i))
+            i = i + 1
+        }
+        return
+    }
+    arg_id: int64 = vec_get((*a).kids, arg_off)
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind != xk_lambda() {
+        tc_emit(tc, task_literal_msg(name), arg.lo, arg.hi)
+        infer_expr(tc, arg_id)
+        return
+    }
+    ret: int64 = tc_type(tc, arg.c)
+    rn: TyNode = ty_get((*tc).ty, ret)
+    if arg.b != 0 || rn.kind != tyk_unit() {
+        tc_emit(tc, task_shape_msg(name), arg.lo, arg.hi)
+    }
+    caps: *Vector<string> = lambda_captures(tc, arg)
+    borrowed: *Vector<string> = alloc(vec_new())
+    mut cidx: int64 = 0
+    while cidx < vec_len(caps) {
+        cap: string = vec_get(caps, cidx)
+        t: int64 = lookup(tc, cap)
+        seen: *Map<string, int64> = alloc(map_new())
+        fseen: *Map<string, int64> = alloc(map_new())
+        cseen: *Map<string, int64> = alloc(map_new())
+        reaches_collector: bool = ptr_reaches_collector_ty(tc, t, cseen)
+        if ptr_reaches_future_ty(tc, t, fseen) {
+            tc_emit(tc, task_future_msg(name, cap), arg.lo, arg.hi)
+        } else if reaches_collector {
+            tc_emit(tc, task_collector_msg(name, cap), arg.lo, arg.hi)
+        } else if !spawn_capturable_ty(tc, t, seen) || str_len(iface_bind_name(tc, cap)) > 0 {
+            tc_emit(tc, task_view_msg(name, cap), arg.lo, arg.hi)
+        } else if is_esc_slice(tc, cap) || is_esc_closure(tc, cap) {
+            fp: *Map<string, FlowProv> = (*tc).flow_prov
+            if map_has(fp, cap) {
+                prov: FlowProv = unwrap_or(map_get(fp, cap), FlowProv { lo: arg.lo, hi: arg.hi, src: 0, dst: 0 })
+                tc_emit(tc, task_flow_msg(name, cap, prov.src, prov.dst), prov.lo, prov.hi)
+            } else {
+                tc_emit(tc, task_holds_view_msg(name, cap), arg.lo, arg.hi)
+            }
+        }
+        // A borrowed managed capture is re-declared a borrow inside the task lambda so
+        // freeing or moving it there rejects. A bare type-parameter capture is treated
+        // the same: at some instantiation T is a managed pointer the enclosing frame
+        // owns, and the concrete twin already rejects the free inside the lambda. T lowers
+        // to a hole, so the capture's declared AST type is consulted through its name.
+        if is_managed_or_typaram_name(tc, t, cap) && own_of(tc, cap) != own_moved() {
+            vec_push(borrowed, cap)
+        }
+        cidx = cidx + 1
+    }
+    infer_lambda_with_borrows(tc, arg, borrowed)
+}
+
+export func self_value_in_ptr_position(tc: *TypeChecker, arg_id: int64, expected: int64) -> bool {
+    if !(*tc).in_method { return false }
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, arg_id)
+    if e.kind != xk_ident() { return false }
+    if !str_eq(ast_name(a, e.a), "self") { return false }
+    en: TyNode = ty_get((*tc).ty, expected)
+    st: TyNode = ty_get((*tc).ty, lookup(tc, "self"))
+    if en.kind == tyk_ptr() && st.kind == tyk_named() {
+        tc_emit(tc, "cannot use 'self' where a pointer is required; 'self' is the receiver value, not a pointer to it", e.lo, e.hi)
+        return true
+    }
+    return false
+}
+
+export func pump_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' pumps the event loop and cannot be called inside an async func; use the await statement")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func variadic_count_msg(want: int64, got: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "expected at least ")
+    sb_push_int(b, want)
+    sb_push(b, " argument(s), found ")
+    sb_push_int(b, got)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func variadic_reject_msg(argno: int64, what: string, advice: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, " to a variadic foreign function is ")
+    sb_push(b, what)
+    sb_push(b, "; ")
+    sb_push(b, advice)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The rejection message for a value passed beyond a variadic foreign function's
+// fixed parameters, or the empty string when the value promotes cleanly across
+// the C boundary. Only scalars (integer families, float, char, bool, rune) and
+// raw pointers (*raw T, *void) may ride a C vararg; every managed or aggregate
+// value is named and refused, since C reads a vararg positionally with no type
+// information and a fat or generation carrying value would corrupt the read.
+func variadic_arg_msg(tc: *TypeChecker, tyid: int64, argno: int64) -> string {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    k: int64 = n.kind
+    if k == tyk_int() || k == tyk_float() || k == tyk_char() || k == tyk_bool() || k == tyk_rune() {
+        return ""
+    }
+    if k == tyk_rawptr() || k == tyk_unknown() {
+        return ""
+    }
+    if k == tyk_ptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        if inner.kind == tyk_unit() {
+            return ""
+        }
+        return variadic_reject_msg(argno, "a managed pointer", "pass a *raw T or *void, since a managed *T carries a generation C cannot read")
+    }
+    if k == tyk_str() {
+        return variadic_reject_msg(argno, "a string", "pass a *raw char, a string view cannot cross a C vararg directly")
+    }
+    if k == tyk_slice() {
+        return variadic_reject_msg(argno, "a slice", "pass its backing as a *raw T")
+    }
+    if k == tyk_array() {
+        return variadic_reject_msg(argno, "an array", "pass its backing as a *raw T")
+    }
+    if k == tyk_func() {
+        return variadic_reject_msg(argno, "a closure", "a variadic foreign function takes only scalars and raw pointers")
+    }
+    if k == tyk_collector() {
+        return variadic_reject_msg(argno, "a collected value", "a variadic foreign function takes only scalars and raw pointers")
+    }
+    if k == tyk_future() {
+        return variadic_reject_msg(argno, "a future", "a variadic foreign function takes only scalars and raw pointers")
+    }
+    if k == tyk_error() {
+        return variadic_reject_msg(argno, "an error value", "handle it before the call and pass a scalar")
+    }
+    if k == tyk_tuple() {
+        return variadic_reject_msg(argno, "a tuple", "pass its elements individually")
+    }
+    if k == tyk_named() {
+        nm: string = ty_name((*tc).ty, tyid)
+        ifaces: *Map<string, int64> = (*tc).ifaces
+        if map_has(ifaces, nm) {
+            return variadic_reject_msg(argno, "an interface value", "a variadic foreign function takes only scalars and raw pointers")
+        }
+        return variadic_reject_msg(argno, "a struct value", "pass a pointer to it")
+    }
+    return variadic_reject_msg(argno, "an unsupported type", "a variadic foreign function takes only scalars and raw pointers")
+}
+
+// Checks a call to a variadic foreign function: the arity must reach the fixed
+// parameter count, the fixed arguments are checked against their declared types,
+// and each argument beyond them must be a value the C boundary can carry.
+export func check_variadic_call(tc: *TypeChecker, cn: TyNode, arg_off: int64, arg_len: int64, arg_tys: *Vector<int64>, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    if arg_len < cn.len {
+        tc_emit(tc, variadic_count_msg(cn.len, arg_len), lo, hi)
+        return
+    }
+    mut i: int64 = 0
+    while i < cn.len {
+        p: int64 = vec_get((*(*tc).ty).kids, cn.off + i)
+        av: int64 = vec_get(arg_tys, i)
+        arg_id: int64 = vec_get((*a).kids, arg_off + i)
+        arg: ExprNode = vec_get((*a).exprs, arg_id)
+        if !compat((*tc).ty, p, av) {
+            tc_emit(tc, arg_wrong_msg(i), arg.lo, arg.hi)
+        }
+        check_int_fits(tc, arg_id, p)
+        check_slice_covariance(tc, p, av, arg_id, arg.lo, arg.hi)
+        i = i + 1
+    }
+    while i < arg_len {
+        av2: int64 = vec_get(arg_tys, i)
+        arg_id2: int64 = vec_get((*a).kids, arg_off + i)
+        arg2: ExprNode = vec_get((*a).exprs, arg_id2)
+        msg: string = variadic_arg_msg(tc, av2, i)
+        if str_len(msg) > 0 {
+            tc_emit(tc, msg, arg2.lo, arg2.hi)
+        }
+        i = i + 1
+    }
+}
+
+func callback_capture_msg(var: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "this callback captures '")
+    sb_push(b, var)
+    sb_push(b, "'; C has no environment for it, pass state through the *void user data argument the API carries")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func callback_sig_msg(tc: *TypeChecker, argno: int64, expected: int64, actual: int64) -> string {
+    esrc: string = ty_src((*tc).ty, expected)
+    asrc: string = ty_src((*tc).ty, actual)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "callback argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, ": expected ")
+    sb_push(b, esrc)
+    sb_push(b, ", found ")
+    sb_push(b, asrc)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(esrc)
+    free(asrc)
+    return out
+}
+
+func callback_form_msg(argno: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "callback argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, " must be a capture-free lambda literal or the name of a top-level function; a closure value has no bare C function pointer")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func callback_generic_msg(argno: int64, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "callback argument ")
+    sb_push_int(b, argno + 1)
+    sb_push(b, " cannot be the generic function '")
+    sb_push(b, name)
+    sb_push(b, "'; a C callback needs one concrete function, and a generic function has none until it is instantiated")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func top_fn_is_generic(tc: *TypeChecker, name: string) -> bool {
+    a: *Ast = (*tc).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if str_eq(ast_name(a, f.name), name) { return f.generics_len > 0 }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Checks a C callback argument: a foreign function parameter of function type
+// is a bare code pointer, so the argument must be a capture-free lambda literal
+// or the name of a top-level, non-generic dusk function whose signature matches
+// the callback exactly. A capturing lambda, a closure value, a generic function
+// name, or a signature mismatch is refused with a message naming the cause.
+export func check_callback_arg(tc: *TypeChecker, cbty: int64, av: int64, arg_id: int64, argno: int64) -> void {
+    a: *Ast = (*tc).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind == xk_lambda() {
+        caps: *Vector<string> = lambda_captures(tc, arg)
+        if vec_len(caps) > 0 {
+            tc_emit(tc, callback_capture_msg(vec_get(caps, 0)), arg.lo, arg.hi)
+        }
+        if !ty_strict_eq((*tc).ty, cbty, av) {
+            tc_emit(tc, callback_sig_msg(tc, argno, cbty, av), arg.lo, arg.hi)
+        }
+        return
+    }
+    if arg.kind == xk_ident() {
+        name: string = ast_name(a, arg.a)
+        if !is_local(tc, name) && sig_has_fn((*tc).sigtab, name) && !sig_is_foreign((*tc).sigtab, name) {
+            if top_fn_is_generic(tc, name) {
+                tc_emit(tc, callback_generic_msg(argno, name), arg.lo, arg.hi)
+                return
+            }
+            if !ty_strict_eq((*tc).ty, cbty, av) {
+                tc_emit(tc, callback_sig_msg(tc, argno, cbty, av), arg.lo, arg.hi)
+            }
+            return
+        }
+        tc_emit(tc, callback_form_msg(argno), arg.lo, arg.hi)
+        return
+    }
+    tc_emit(tc, callback_form_msg(argno), arg.lo, arg.hi)
+}
+
+// Whether free or move of a call result must be refused because the call hands back
+// a value a container still holds. Only a read-back through an argument condemns the
+// result: reads_through names a parameter whose storage the result was read out of
+// (vec_get returning data[i]), so the value still lives inside the container and
+// freeing it double frees a live element. A result that carries an argument itself
+// (returns_alias, without a read-back) is the caller's own value or a runtime
+// backstopped forgery: move hands its argument straight back, alloc boxes a pointer
+// into a fresh cell, a passthrough returns what it was given; none of these leaves a
+// live element behind, so returns_alias never condemns and no builtin whitelist is
+// needed. An owning call (a func head marked owning, vec_take and map_take among
+// them) is exempt outright. A method
+// callee is judged by the resolved receiver type's computed summary; with no static
+// summary (interface dynamic dispatch, an unknown receiver) it stays accepted. An
+// opaque plain callee and a callee that reads nothing back stay accepted, so free of
+// a fresh-pointer-returning call, direct or through a method, stays legal.
+export func free_call_arg_aliases(tc: *TypeChecker, e: ExprNode) -> bool {
+    if is_owning_call(tc, e) { return false }
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind == xk_field() {
+        me: MethodEsc = method_call_esc(tc, e.a)
+        if !me.has_summary { return false }
+        return me.reads_through != 0
+    }
+    ce: CalleeEsc = tc_callee_esc(tc, e.a)
+    if ce.opaque { return false }
+    return ce.sum.reads_through != 0
+}
+
+export func alias_result_msg(verb: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot ")
+    sb_push(b, verb)
+    sb_push(b, " a call result that may alias its arguments; vec_take or map_take removes an element as its owner")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

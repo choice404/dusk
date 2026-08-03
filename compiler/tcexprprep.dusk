@@ -1,0 +1,422 @@
+// tcexprprep: Expression inference preparation helpers.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tcbin
+@import tccall
+@import tciface
+@import tcmatch
+@import tcown
+@import tcesc
+@import tcesc2
+@import tcexpr
+
+export func ident_variant_value_msg(en: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "use the qualified form '")
+    sb_push(b, en)
+    sb_push_char(b, 46)
+    sb_push(b, name)
+    sb_push(b, "' to name an enum value; the unqualified variant name is not one")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func ty_is_named_struct(tc: *TypeChecker, id: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, id)
+    if n.kind != tyk_named() { return false }
+    structs: *Map<string, StructSig> = (*tc).structs
+    return map_has(structs, ty_name((*tc).ty, id))
+}
+
+// Whether a foreign function's signature carries a struct by value in a
+// parameter or the return: a call to such a function is lowered through the C
+// ABI, splitting the struct into register pieces or a byval slot. Taken as a
+// value it would instead flow through a funcval thunk that calls with the plain
+// struct type and drops the ABI, so the type layer refuses it as a value.
+export func foreign_takes_struct(tc: *TypeChecker, name: string) -> bool {
+    if !sig_is_foreign((*tc).sigtab, name) { return false }
+    fs: FnSig = sig_fn((*tc).sigtab, name)
+    if ty_is_named_struct(tc, fs.raw_ret) { return true }
+    p: TyList = fs.raw_params
+    mut i: int64 = 0
+    while i < p.len {
+        if ty_is_named_struct(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func ty_is_func(tc: *TypeChecker, id: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, id)
+    return n.kind == tyk_func()
+}
+
+// Whether a foreign function's signature carries a C callback (a function type)
+// in a parameter or the return. A direct call lowers such an argument to a bare
+// C function pointer, but taken as a value the function flows through a funcval
+// thunk that passes the callback as a `{ptr, fn}` closure, so C reads one word
+// where two were pushed and the call is silently miscompiled. The type layer
+// refuses these as values for the same reason it refuses variadic and struct
+// passing foreigns.
+export func foreign_takes_callback(tc: *TypeChecker, name: string) -> bool {
+    if !sig_is_foreign((*tc).sigtab, name) { return false }
+    fs: FnSig = sig_fn((*tc).sigtab, name)
+    if ty_is_func(tc, fs.raw_ret) { return true }
+    p: TyList = fs.raw_params
+    mut i: int64 = 0
+    while i < p.len {
+        if ty_is_func(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func field_dup_msg(fname: string, sname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "field '")
+    sb_push(b, fname)
+    sb_push(b, "' is set more than once in '")
+    sb_push(b, sname)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func no_field_msg(sname: string, fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, sname)
+    sb_push(b, "' has no field '")
+    sb_push(b, fname)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func wrong_field_msg(sname: string, fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "field '")
+    sb_push(b, fname)
+    sb_push(b, "' of '")
+    sb_push(b, sname)
+    sb_push(b, "' is set to a value of the wrong type")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func missing_field_msg(sname: string, fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "struct literal for '")
+    sb_push(b, sname)
+    sb_push(b, "' is missing field '")
+    sb_push(b, fname)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func array_field_msg(fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a fixed array has no field '")
+    sb_push(b, fname)
+    sb_push(b, "'; only '.len' is available")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func error_field_msg(fname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "error has no field '")
+    sb_push(b, fname)
+    sb_push(b, "'; it carries only 'message'")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64 {
+    sigs: *TypeSigs = (*tc).sigtab
+    mut i: int64 = 0
+    while i < st.len {
+        f: FieldSig = vec_get((*sigs).fields, st.off + i)
+        if str_eq(f.name, fname) { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
+    structs: *Map<string, StructSig> = (*tc).structs
+    if !map_has(structs, sname) { return ty_unknown((*tc).ty) }
+    st: StructSig = sig_struct((*tc).sigtab, sname)
+    idx: int64 = struct_field_index(tc, st, fname)
+    if idx < 0 { return ty_unknown((*tc).ty) }
+    f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + idx)
+    return f.ty
+}
+
+func base_named_field_ty(tc: *TypeChecker, base_ty: int64, fname: string) -> int64 {
+    n: TyNode = ty_get((*tc).ty, base_ty)
+    if n.kind == tyk_named() {
+        return struct_field_ty(tc, ty_name((*tc).ty, base_ty), fname)
+    }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+        inner: TyNode = ty_get((*tc).ty, n.a)
+        if inner.kind == tyk_named() {
+            return struct_field_ty(tc, ty_name((*tc).ty, n.a), fname)
+        }
+    }
+    return ty_unknown((*tc).ty)
+}
+
+export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    vals: *Vector<int64> = alloc(vec_new())
+    mut vi: int64 = 0
+    while vi < len {
+        val_id: int64 = vec_get((*a).kids, off + vi + 1)
+        vec_push(vals, infer_expr(tc, val_id))
+        vi = vi + 2
+    }
+    structs: *Map<string, StructSig> = (*tc).structs
+    if !map_has(structs, name) { return }
+    st: StructSig = sig_struct((*tc).sigtab, name)
+    mut i: int64 = 0
+    while i < len {
+        fname: string = ast_name(a, vec_get((*a).kids, off + i))
+        mut j: int64 = i + 2
+        while j < len {
+            if str_eq(fname, ast_name(a, vec_get((*a).kids, off + j))) {
+                tc_emit(tc, field_dup_msg(fname, name), lo, hi)
+            }
+            j = j + 2
+        }
+        i = i + 2
+    }
+    mut k: int64 = 0
+    while k < len {
+        fname2: string = ast_name(a, vec_get((*a).kids, off + k))
+        val_id2: int64 = vec_get((*a).kids, off + k + 1)
+        val: ExprNode = vec_get((*a).exprs, val_id2)
+        idx: int64 = struct_field_index(tc, st, fname2)
+        if idx < 0 {
+            tc_emit(tc, no_field_msg(name, fname2), val.lo, val.hi)
+        } else if !st.is_gen {
+            fld: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + idx)
+            actual: int64 = vec_get(vals, k / 2)
+            if !compat((*tc).ty, fld.ty, actual) {
+                tc_emit(tc, wrong_field_msg(name, fname2), val.lo, val.hi)
+            }
+            check_lit_fits_target(tc, val_id2, fld.ty)
+            embeds: *Map<string, TyList> = (*tc).embed_fields
+            if map_has(embeds, name) {
+                raws: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+                raw: int64 = sig_ty_at((*tc).sigtab, raws, idx)
+                check_slice_covariance(tc, raw, actual, val_id2, val.lo, val.hi)
+                reject_collector_iface_box(tc, raw, actual, val.lo, val.hi)
+            }
+        }
+        k = k + 2
+    }
+    mut m: int64 = 0
+    while m < st.len {
+        fld2: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + m)
+        mut found: bool = false
+        mut n: int64 = 0
+        while n < len {
+            if str_eq(fld2.name, ast_name(a, vec_get((*a).kids, off + n))) { found = true }
+            n = n + 2
+        }
+        if !found { tc_emit(tc, missing_field_msg(name, fld2.name), lo, hi) }
+        m = m + 1
+    }
+}
+
+export func infer_array(tc: *TypeChecker, off: int64, len: int64) -> int64 {
+    mut elem: int64 = ty_unknown((*tc).ty)
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        elem = infer_expr(tc, vec_get((*a).kids, off + i))
+        i = i + 1
+    }
+    return ty_slice((*tc).ty, elem)
+}
+
+export func infer_tuple(tc: *TypeChecker, off: int64, len: int64) -> int64 {
+    xs: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        vec_push(xs, infer_expr(tc, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return ty_tuple((*tc).ty, xs)
+}
+
+func infer_args(tc: *TypeChecker, off: int64, len: int64) -> *Vector<int64> {
+    out: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        vec_push(out, infer_expr(tc, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return out
+}
+
+export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *Vector<string>) -> int64 {
+    a: *Ast = (*tc).ast
+    ps: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < e.b {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
+        if p.is_using {
+            tc_emit(tc, "a lambda cannot take a using parameter; a lambda body has no ambient allocator, so allocate in the enclosing function or use the default heap", e.lo, e.hi)
+        }
+        vec_push(ps, tc_type(tc, p.ty))
+        i = i + 1
+    }
+    saved_ret: int64 = (*tc).cur_ret
+    saved_raw_ret: int64 = (*tc).cur_raw_ret
+    saved_ret_ast: int64 = (*tc).cur_ret_ast
+    saved_depth: int64 = (*tc).branch_depth
+    saved_loops: int64 = (*tc).loop_depth
+    // A lambda lowers to its own function with no `using` parameter, so it has no
+    // ambient allocator: bare alloc and free in its body use the default heap, not
+    // the enclosing function's allocator. Clearing the allocator name here lets a
+    // lambda body bind or take a parameter named like the outer allocator without a
+    // false shadow reject, and restores it when the lambda closes.
+    saved_alloc: string = (*tc).cur_allocator
+    (*tc).cur_ret = tc_raw_type(tc, e.c)
+    (*tc).cur_raw_ret = tc_raw_type(tc, e.c)
+    (*tc).cur_ret_ast = e.c
+    (*tc).branch_depth = 0
+    (*tc).loop_depth = 0
+    (*tc).cur_allocator = ""
+    push_scope(tc)
+    mut j: int64 = 0
+    while j < e.b {
+        p2: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + j))
+        pname: string = ast_name(a, p2.name)
+        declare(tc, pname, vec_get(ps, j))
+        reject_builtin_binding(tc, pname, vec_get(ps, j), true, e.lo, e.hi)
+        declare_binding_ast(tc, pname, p2.ty)
+        set_esc(tc, pname, false, false)
+        // A lambda parameter of a bare type parameter is a borrow, the same rule a
+        // function parameter follows: the caller owns the value the lambda is handed, so
+        // freeing or moving it inside the lambda rejects. A managed parameter is already a
+        // borrow through the task-capture path when this lambda is a task; this covers the
+        // generic hole where the type is unprovable on the surface.
+        if !(*tc).types_only && is_typaram_ast(tc, p2.ty) {
+            declare_own(tc, pname, own_borrow())
+        }
+        j = j + 1
+    }
+    mut b: int64 = 0
+    while b < vec_len(borrowed) {
+        declare_own(tc, vec_get(borrowed, b), own_borrow())
+        b = b + 1
+    }
+    check_block_no_scope(tc, e.d)
+    pop_scope(tc)
+    ret: int64 = (*tc).cur_ret
+    rn: TyNode = ty_get((*tc).ty, ret)
+    if rn.kind != tyk_unit() && !block_returns(a, e.d) {
+        tc_emit(tc, "not all paths in this lambda return a value", e.lo, e.hi)
+    }
+    (*tc).cur_ret = saved_ret
+    (*tc).cur_raw_ret = saved_raw_ret
+    (*tc).cur_ret_ast = saved_ret_ast
+    (*tc).branch_depth = saved_depth
+    (*tc).loop_depth = saved_loops
+    (*tc).cur_allocator = saved_alloc
+    return ty_func((*tc).ty, ps, ret)
+}
+
+export func infer_lambda_sig(tc: *TypeChecker, e: ExprNode) -> int64 {
+    borrowed: *Vector<string> = alloc(vec_new())
+    return infer_lambda_with_borrows(tc, e, borrowed)
+}
+
+// A match expression arm that yields a lambda literal is refused: codegen cannot
+// lower a lambda into the match result slot, and there is no name to bind it to. The
+// binding-position ownership verdict lives in binding_own; this only rejects the one
+// tail shape that has no legal lowering, on the surface pass.
+export func check_match_arm_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < e.c {
+        arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
+        tail_id: int64 = match_arm_tail(a, arm.body)
+        if tail_id >= 0 {
+            tail: ExprNode = vec_get((*a).exprs, tail_id)
+            if tail.kind == xk_lambda() {
+                tc_emit(tc, "a match arm cannot yield a lambda; bind the function to a name outside the match", tail.lo, tail.hi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Whether a value-yielding match arm whose block has no expression tail nonetheless
+// leaves the match legally: it returns, or its last statement is a loop break/continue.
+// Every other tail-less arm falls off the end without storing a result, so it reads an
+// uninitialized result slot; the every-arm-yields check rejects it.
+// Whether a statement guarantees the arm never falls through to its end: a return, a loop
+// break or continue, an if whose branches all diverge, or a statement match whose arms all
+// diverge. Mirrors stmt_returns but treats break/continue as divergence, so a value-less arm
+// that ends in one of these legally yields nothing into the result slot.
+func stmt_diverges(a: *Ast, sid: int64) -> bool {
+    s: StmtNode = vec_get((*a).stmts, sid)
+    if s.kind == sk_return() || s.kind == sk_break() || s.kind == sk_continue() { return true }
+    if s.kind == sk_if() {
+        if s.c < 0 { return false }
+        return block_diverges(a, s.b) && block_diverges(a, s.c)
+    }
+    if s.kind == sk_match() {
+        if s.c == 0 { return false }
+        mut i: int64 = 0
+        while i < s.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
+            if !block_diverges(a, arm.body) { return false }
+            i = i + 1
+        }
+        return true
+    }
+    return false
+}
+
+export func block_diverges(a: *Ast, bid: int64) -> bool {
+    b: BlockNode = vec_get((*a).blocks, bid)
+    mut i: int64 = 0
+    while i < b.len {
+        if stmt_diverges(a, vec_get((*a).kids, b.off + i)) { return true }
+        i = i + 1
+    }
+    return false
+}

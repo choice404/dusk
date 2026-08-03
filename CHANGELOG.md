@@ -2,6 +2,26 @@
 
 Notable changes to the dusk compiler, the standard library, and the dawn package tool. Each entry matches a tagged release, newest first. Commit messages carry the highlights and this file carries the detail.
 
+## 1.13.1
+
+The split and the audit. No language surface changes and no behavior changes: this release reshapes the compiler source for the work ahead and squares the documentation with the implementation.
+
+The split.
+
+- The eight compiler files that had grown past 800 lines are each split along a domain seam, every move a verbatim relocation: `parseexpr.dusk` keeps the expression grammar and `parsestmt.dusk` takes the statement, block, control, and `do` grammar; `gencall.dusk` keeps call dispatch and `genfcall.dusk` takes the foreign and ABI call lowering; `astdump2.dusk` keeps the statement renderers and `astdumpexpr.dusk` takes expression rendering; `loadfold.dusk` keeps the shift and qualified call walkers and `loadcopy.dusk` takes the AST copy walker; `tccall.dusk` keeps call inference dispatch while `tccallshape.dusk` takes the builtin, cast, and constructor shapes and `tccallcheck.dusk` the task, variadic, callback, and alias checks; `tciface.dusk` keeps interface conformance and `tcifaceforeign.dusk` takes the foreign signature and async boundary checks; `tcesc.dusk` keeps the escape roots and walks and `tcesccap.dusk` takes captures, alias binding, and collect checks; `tcexpr.dusk` keeps expression dispatch and match walking and `tcexprprep.dusk` takes aggregate and lambda inference. The largest compiler file drops from 1354 lines to 543. Two shared render helpers took an `ad_` prefix to clear an existing export name; nothing else about any function changed.
+- Because a file's private names carry a per file suffix in the emitted IR, splitting shifts that spelling once; the stage ladder re-proves the fixpoint on the new shape and the golden suite pins behavior across it.
+
+The audit.
+
+- The spec and the standard library reference were read against the implementation and corrected where they disagreed. The async network functions are documented as the `async func` declarations they are and their example awaits its calls; `proc_read_line` and `proc_close` take the `*Proc` they really take; `parse_float` is documented as the builtin it is rather than a `std.string` export; the doc comment section agrees with itself about an `impl` head.
+- `ref` bindings get a spec section of their own after shipping since 1.7.0 with only a diagnostic mentioning them, including their two named limits as they stand today.
+- The reference gains the tables it was missing: `std.async.future`, `std.async.loop`, `std.async.time`, the five `std.concurrent` modules, `vec_set`, and the positional map accessors container loops lower onto. The module table names every module that ships. Math signatures carry their parameter types, and the status heading no longer names a version.
+
+Numbers.
+
+- `testrun tests/goldens.manifest` passes all 1012 records, unchanged from 1.13.0: a source reshape with a green suite before and after is the whole claim.
+- The stage ladder re-fixed on the split shape: stage1, stage2, and stage3 share one binary sha256 (`075b8601c63f7a405ef15221c9d37c8463a3e11826734c1e82d3e2627b164568`) and one compiler IR sha256 (`c17836d95c87c68fd280a846a69347b2ca43ec1ff12a365ef0b65c4c2f1d28f8`). The ratchet holds: the `v1.13.0` release binary builds the 1.13.1 source and the freshly built compiler passes the full suite.
+
 ## 1.13.0
 
 The unsigned width. The four unsigned integer types dusk reserved through the whole bootstrap become real surface: `uint8`, `uint16`, `uint32`, and `uint64`, the `u8` through `u64` literal suffixes, and four new cast builtins. Signedness rides the integer type as a flag rather than as a new type kind, so every lowering that never asks about sign stays correct by construction, add, subtract, multiply, the bitwise trio, `<<`, and equality among them, and the sign sensitive list stays short and auditable: divide, remainder, right shift, the four ordered comparisons, widening, both float conversions, printing, and `hash`. The surface rule is one word, the same word width already carried: signedness never mixes. This is a widening only change, four type names and four suffixes no legal program could spell before, and the compiler, the standard library, and the tools in this tree spell none of them, so the previous release builds this source unchanged; the adoption sweep comes later.

@@ -1,0 +1,490 @@
+// tccallshape: Call shape inference and constructor checks.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tcbin
+@import tciface
+@import tcown
+@import tcesc
+@import tcesc2
+
+export func call_msg_count(want: int64, got: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "expected ")
+    sb_push_int(b, want)
+    sb_push(b, " argument(s), found ")
+    sb_push_int(b, got)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func arg_wrong_msg(i: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "argument ")
+    sb_push_int(b, i + 1)
+    sb_push(b, " has the wrong type")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func free_ground_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "free takes a heap pointer, not ")
+    sb_push(b, rendered)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The argument type an argument check should compare, correcting the one shape that
+// reaches the check untyped: a field access. infer_expr leaves a struct field's type
+// unknown, and compat wildcards unknown against every parameter, so a field of the
+// wrong type slipped past the check and died in clang (str_eq(n.name, "x") with an
+// int64 field). When the base is a concrete struct the field type is known; resolve it
+// through the ownership chain resolver and check against it, exactly as a named local
+// is checked. A generic or otherwise unresolved field stays unknown and permissive.
+export func field_arg_ty(tc: *TypeChecker, arg_id: int64, av: int64) -> int64 {
+    an: TyNode = ty_get((*tc).ty, av)
+    if an.kind != tyk_unknown() { return av }
+    a: *Ast = (*tc).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind != xk_field() { return av }
+    ft: int64 = own_chain_ty(tc, arg_id)
+    fn: TyNode = ty_get((*tc).ty, ft)
+    if fn.kind == tyk_unknown() { return av }
+    return ft
+}
+
+export func func_builtin_ret(tc: *TypeChecker, name: string) -> int64 {
+    t: *TyArena = (*tc).ty
+    if str_eq(name, "read_file") || str_eq(name, "read_line") || str_eq(name, "read_all") {
+        xs: *Vector<int64> = alloc(vec_new())
+        vec_push(xs, ty_str(t))
+        vec_push(xs, ty_error(t))
+        return ty_tuple(t, xs)
+    }
+    if str_eq(name, "parse_float") {
+        ys: *Vector<int64> = alloc(vec_new())
+        vec_push(ys, ty_float(t, 64))
+        vec_push(ys, ty_error(t))
+        return ty_tuple(t, ys)
+    }
+    if str_eq(name, "write_file") { return ty_error(t) }
+    if str_eq(name, "cstr") { return ty_str(t) }
+    if str_eq(name, "sizeof") { return ty_int(t, 64) }
+    return -1
+}
+
+// The target type of a width cast builtin, or -1 for any other name.
+export func cast_target_ty(tc: *TypeChecker, name: string) -> int64 {
+    t: *TyArena = (*tc).ty
+    if str_eq(name, "int8") { return ty_int(t, 8) }
+    if str_eq(name, "int16") { return ty_int(t, 16) }
+    if str_eq(name, "int32") { return ty_int(t, 32) }
+    if str_eq(name, "int64") { return ty_int(t, 64) }
+    if str_eq(name, "uint8") { return ty_uint(t, 8) }
+    if str_eq(name, "uint16") { return ty_uint(t, 16) }
+    if str_eq(name, "uint32") { return ty_uint(t, 32) }
+    if str_eq(name, "uint64") { return ty_uint(t, 64) }
+    if str_eq(name, "char") { return ty_char(t) }
+    if str_eq(name, "rune") { return ty_rune(t) }
+    if str_eq(name, "float32") { return ty_float(t, 32) }
+    if str_eq(name, "float64") { return ty_float(t, 64) }
+    return -1
+}
+
+// Whether a type may be a hash key: an integer of any width, a char, a rune, or a
+// string, the same set map keys are drawn from. This mirrors comparable() minus
+// float and bool: a float breaks hash and equality coherence, since NaN is never
+// equal to itself, and bool is left out of the key set for now. The named-type arm
+// is permissive the way comparable() is, so a generic parameter passes the surface
+// pass and the ground pass rejects a concrete non-hashable instantiation.
+export func hashable(tc: *TypeChecker, tyid: int64) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_int() || n.kind == tyk_char() || n.kind == tyk_rune() || n.kind == tyk_str() || n.kind == tyk_unknown() {
+        return true
+    }
+    if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        structs: *Map<string, StructSig> = (*tc).structs
+        if map_has(structs, name) { return false }
+        enums: *Map<string, EnumSig> = (*tc).enums
+        if map_has(enums, name) { return false }
+        ifaces: *Map<string, int64> = (*tc).ifaces
+        if map_has(ifaces, name) { return false }
+        return true
+    }
+    return false
+}
+
+export func hash_operand_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot hash ")
+    sb_push(b, rendered)
+    sb_push(b, "; a map key is an integer, char, rune, or string")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func cast_arity_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, "(v) takes exactly one value")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func cast_operand_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a numeric cast takes an integer, char, rune, or float value; ")
+    sb_push(b, rendered)
+    sb_push(b, " does not cast")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func builtin_arity(tc: *TypeChecker, name: string, got: int64, lo: int64, hi: int64) -> bool {
+    mut want: int64 = -1
+    if str_eq(name, "fold") { want = 3 }
+    if str_eq(name, "map") || str_eq(name, "filter") || str_eq(name, "reduce") || str_eq(name, "foreach") { want = 2 }
+    if want < 0 { return false }
+    if got != want {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, name)
+        sb_push(b, " takes ")
+        sb_push_int(b, want)
+        sb_push(b, " argument(s), but ")
+        sb_push_int(b, got)
+        sb_push(b, " were given")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, out, lo, hi)
+    }
+    return true
+}
+
+func base_lookup(tc: *TypeChecker, id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        return lookup(tc, ast_name(a, e.a))
+    }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        pt: int64 = base_lookup(tc, e.b)
+        pn: TyNode = ty_get((*tc).ty, pt)
+        if pn.kind == tyk_ptr() || pn.kind == tyk_rawptr() { return pn.a }
+    }
+    return ty_unknown((*tc).ty)
+}
+
+func enum_contains_variant(tc: *TypeChecker, en: string, v: string) -> bool {
+    enums: *Map<string, EnumSig> = (*tc).enums
+    es: EnumSig = unwrap_or(map_get(enums, en), EnumSig { off: 0, len: 0 })
+    sigs: *TypeSigs = (*tc).sigtab
+    mut i: int64 = 0
+    while i < es.len {
+        if str_eq(vec_get((*sigs).names, es.off + i), v) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func ctor_arity_msg(en: string, v: string, want: int64, got: int64) -> string {
+    disp: string = base_type_name(en)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, disp)
+    sb_push_char(b, 46)
+    sb_push(b, v)
+    sb_push(b, "' takes ")
+    sb_push_int(b, want)
+    sb_push(b, " argument(s), but ")
+    sb_push_int(b, got)
+    sb_push(b, " were given")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(disp)
+    return out
+}
+
+func no_variant_msg(en: string, v: string) -> string {
+    disp: string = base_type_name(en)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, disp)
+    sb_push(b, "' has no variant '")
+    sb_push(b, v)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(disp)
+    return out
+}
+
+func ctor_arg_msg(en: string, v: string, i: int64) -> string {
+    disp: string = base_type_name(en)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "argument ")
+    sb_push_int(b, i + 1)
+    sb_push(b, " to '")
+    sb_push(b, disp)
+    sb_push_char(b, 46)
+    sb_push(b, v)
+    sb_push(b, "' has the wrong type")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(disp)
+    return out
+}
+
+export func check_variant_ctor_args(tc: *TypeChecker, en: string, v: string, arg_off: int64, arg_len: int64, arg_tys: *Vector<int64>, span_lo: int64, span_hi: int64) -> void {
+    // A qualified constructor naming a variant the enum lacks (Maybe.Just) used to
+    // early-return here and then die at codegen with an unsupported field expression.
+    // Report it in the arity check's voice, gated the same way (both passes; the
+    // surface pass owns the non-generic report, a generic enum stays unresolved at
+    // surface and its ground copy owns it post-mono).
+    if !enum_contains_variant(tc, en, v) {
+        tc_emit(tc, no_variant_msg(en, v), span_lo, span_hi)
+        return
+    }
+    vs: VariantSig = sig_variant_for_enum((*tc).sigtab, en, v)
+    if vs.len != arg_len {
+        tc_emit(tc, ctor_arity_msg(en, v, vs.len, arg_len), span_lo, span_hi)
+        return
+    }
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < vs.len {
+        p: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
+        arg_id: int64 = vec_get((*a).kids, arg_off + i)
+        arg: ExprNode = vec_get((*a).exprs, arg_id)
+        av: int64 = field_arg_ty(tc, arg_id, vec_get(arg_tys, i))
+        pn: TyNode = ty_get((*tc).ty, p)
+        mut skip_plain: bool = false
+        if pn.kind == tyk_named() {
+            ifaces: *Map<string, int64> = (*tc).ifaces
+            if map_has(ifaces, ty_name((*tc).ty, p)) {
+                skip_plain = true
+            }
+            structs: *Map<string, StructSig> = (*tc).structs
+            enums: *Map<string, EnumSig> = (*tc).enums
+            pname: string = ty_name((*tc).ty, p)
+            if !map_has(structs, pname) && !map_has(enums, pname) {
+                skip_plain = true
+            }
+        }
+        if pn.kind == tyk_slice() {
+            pe: TyNode = ty_get((*tc).ty, pn.a)
+            if pe.kind == tyk_named() {
+                ifaces2: *Map<string, int64> = (*tc).ifaces
+                if map_has(ifaces2, ty_name((*tc).ty, pn.a)) {
+                    skip_plain = true
+                }
+            }
+        }
+        if !skip_plain {
+            check_int_fits(tc, arg_id, p)
+            if !compat((*tc).ty, p, av) {
+                tc_emit(tc, ctor_arg_msg(en, v, i), arg.lo, arg.hi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+export func unqualified_ctor_msg(en: string, v: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "use the qualified form '")
+    sb_push(b, en)
+    sb_push_char(b, 46)
+    sb_push(b, v)
+    sb_push(b, "' to construct an enum value; the unqualified variant name is not a constructor")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func enum_method_msg(en: string, mname: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, mname)
+    sb_push(b, "' is not defined; methods on the enum '")
+    sb_push(b, en)
+    sb_push(b, "' are not supported, match on it instead")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func async_name_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is async; call it with await or start it with async_run")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func infer_async_run(tc: *TypeChecker, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> int64 {
+    if (*tc).in_async {
+        tc_emit(tc, "async_run cannot be called inside an async func; await the call instead", lo, hi)
+    }
+    a: *Ast = (*tc).ast
+    mut async_name: string = ""
+    if arg_len == 1 {
+        first_id: int64 = vec_get((*a).kids, arg_off)
+        first: ExprNode = vec_get((*a).exprs, first_id)
+        if first.kind == xk_call() {
+            callee: ExprNode = vec_get((*a).exprs, first.a)
+            if callee.kind == xk_ident() {
+                name: string = ast_name(a, callee.a)
+                asyncs: *Map<string, int64> = (*tc).async_fns
+                if map_has(asyncs, name) && !is_local(tc, name) {
+                    async_name = name
+                }
+            }
+        }
+    }
+    if str_len(async_name) > 0 {
+        asyncs2: *Map<string, int64> = (*tc).async_fns
+        return unwrap_or(map_get(asyncs2, async_name), ty_unknown((*tc).ty))
+    }
+    tc_emit(tc, "async_run takes a direct call of an async func, written at the call site", lo, hi)
+    return ty_unknown((*tc).ty)
+}
+
+export func infer_call_args(tc: *TypeChecker, off: int64, len: int64) -> *Vector<int64> {
+    out: *Vector<int64> = alloc(vec_new())
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < len {
+        vec_push(out, infer_expr(tc, vec_get((*a).kids, off + i)))
+        i = i + 1
+    }
+    return out
+}
+
+export func task_one_arg_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " takes one argument, a lambda literal of type () -> void")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func task_literal_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " takes a lambda literal written at the call site; wrap a closure variable as lambda () -> void { g() }")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func task_shape_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a lambda passed to ")
+    sb_push(b, name)
+    sb_push(b, " takes no parameters and returns void; pass data by capture and results through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func task_future_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': a future belongs to the event loop thread")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func task_collector_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': a collected value stays on the main thread; it cannot cross to another thread")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func task_view_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "'; a slice, closure, or interface value may view the spawning frame, so move the data to the heap or send it through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func task_flow_msg(name: string, cap: string, src: int64, dst: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': argument ")
+    sb_push_int(b, src + 1)
+    sb_push(b, "'s view was stored into argument ")
+    sb_push_int(b, dst + 1)
+    sb_push(b, " here, leaving '")
+    sb_push(b, cap)
+    sb_push(b, "' viewing the spawning frame; move the backing to the heap")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func task_holds_view_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "': it holds a view of the spawning frame, which the task outlives; move the backing to the heap or send it through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
