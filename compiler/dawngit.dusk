@@ -12,6 +12,11 @@
  *  locked object, so the detach that fails falls back to a whole clone rather than
  *  leaving a tree at a commit nobody asked for.
  *
+ *  Two questions are asked of a checkout dawn already made, and neither leaves the
+ *  machine: which commit its head is at, and whether anything under it has been
+ *  changed since. They are what a fetch reads before it takes a directory at its
+ *  stamp's word.
+ *
  *  git's own stderr rides back on every failure, because git says why better than a
  *  wrapper guessing at it can. */
 
@@ -251,7 +256,7 @@ func clone_into(scratch: string, url: string, ref: string, dir: string, shallow:
 
 /** Puts dir at commit, with the detached head advice off since a checkout dawn made
  *  is always detached and the note is for a person who typed one. */
-func detach_to(scratch: string, dir: string, commit: string) -> DawnShell {
+export func dawn_git_detach(scratch: string, dir: string, commit: string) -> DawnShell {
     qd: string = quote(dir)
     qc: string = quote(commit)
     line: string = "git -C " + qd + " -c advice.detachedHead=false checkout --quiet --detach " + qc
@@ -278,7 +283,7 @@ export func dawn_git_checkout(scratch: string, url: string, ref: string, commit:
         return DawnClone { ok: false, detail: detail }
     }
     dawn_shell_free(first)
-    put: DawnShell = detach_to(scratch, dir, commit)
+    put: DawnShell = dawn_git_detach(scratch, dir, commit)
     if put.code == 0 {
         dawn_shell_free(put)
         return DawnClone { ok: true, detail: "" }
@@ -299,7 +304,7 @@ export func dawn_git_checkout(scratch: string, url: string, ref: string, commit:
         return DawnClone { ok: false, detail: detail }
     }
     dawn_shell_free(whole)
-    last: DawnShell = detach_to(scratch, dir, commit)
+    last: DawnShell = dawn_git_detach(scratch, dir, commit)
     if last.code != 0 {
         detail: string = substring(last.err, 0, str_len(last.err))
         dawn_shell_free(last)
@@ -307,4 +312,80 @@ export func dawn_git_checkout(scratch: string, url: string, ref: string, commit:
     }
     dawn_shell_free(last)
     return DawnClone { ok: true, detail: "" }
+}
+
+/** Whether a status line is the stamp dawn writes inside the checkout. The stamp
+ *  belongs to no commit of the package's own, so it reports as untracked, or as ignored
+ *  when the package's own .gitignore happens to cover it, and neither is a change to
+ *  the tree. */
+func stamp_line(one: string) -> bool {
+    if str_eq(one, "?? .dawn") {
+        return true
+    }
+    return str_eq(one, "!! .dawn")
+}
+
+/** Whether captured status output describes a working tree with nothing changed in it.
+ *  Every line but the stamp's own is a change, whether it edits, drops, or adds a file,
+ *  and a file the package's .gitignore covers is one too: an ignored path is invisible
+ *  to a plain status, so a checkout with a file dropped into a directory the package
+ *  ignores would otherwise read as untouched and be compiled as if it were the commit. */
+func status_clean(out: string) -> bool {
+    lines: *Vector<string> = str_split(out, "\n")
+    mut clean: bool = true
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        one: string = trim(vec_get(lines, i))
+        if str_len(one) > 0 {
+            if !stamp_line(one) {
+                clean = false
+            }
+        }
+        free(one)
+        i = i + 1
+    }
+    while vec_len(lines) > 0 {
+        s: string = vec_take(lines, vec_len(lines) - 1)
+        free(s)
+    }
+    vec_free(lines)
+    free(lines)
+    return clean
+}
+
+/** Whether the working tree at dir is the one a stamp claims: a git repository whose
+ *  head is exactly commit and whose tracked content has not been touched since it was
+ *  checked out, ignored files counted. A directory that is no repository, one detached
+ *  somewhere else, and one edited by hand all answer false, and the fetch that asked then
+ *  replaces it. The two questions are local, so asking them of every cached dependency
+ *  costs no network. */
+export func dawn_git_intact(scratch: string, dir: string, commit: string) -> bool {
+    qd: string = quote(dir)
+    head: string = "git -C " + qd + " rev-parse HEAD"
+    h: DawnShell = dawn_shell(scratch, head)
+    free(head)
+    if h.code != 0 {
+        dawn_shell_free(h)
+        free(qd)
+        return false
+    }
+    at: string = trim(h.out)
+    dawn_shell_free(h)
+    same: bool = str_eq(at, commit)
+    free(at)
+    if !same {
+        free(qd)
+        return false
+    }
+    line: string = "git -C " + qd + " status --porcelain --ignored=matching"
+    free(qd)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        dawn_shell_free(r)
+        return false
+    }
+    clean: bool = status_clean(r.out)
+    dawn_shell_free(r)
+    return clean
 }

@@ -308,11 +308,67 @@ void cool_log_level_set(int64_t l) {
     __atomic_store_n(&cool_log_level, l, __ATOMIC_RELAXED);
 }
 
+/* The program image guard, the check that keeps a free of a constant from dying
+   by signal. A string literal, and every other constant the compiler parks in the
+   program image, carries no allocation header, so the generational retire's read
+   of the size word sixteen bytes ahead of the payload and its bump of the
+   generation word eight bytes ahead of it land in read only memory and take the
+   process down with no name on the fault. The linker names the whole loaded
+   image, [__executable_start, _end), and neither the brk heap nor an mmap region
+   ever falls inside that range, so an address in it was never handed out by any
+   allocator and freeing it is a misuse the runtime can name at the free itself.
+   Both symbols are weak, so a linker that does not define them leaves the guard
+   inert rather than failing the link, and the guard compiles out entirely off
+   ELF, on wasm and on Mach-O, where neither symbol exists and a free of a
+   constant keeps its older undefined behavior. */
+#if defined(__ELF__) && !defined(__wasm__) && !defined(__APPLE__) && \
+    (defined(__linux__) || defined(__unix__))
+#define COOL_IMAGE_GUARD 1
+extern char __executable_start[] __attribute__((weak));
+extern char _end[] __attribute__((weak));
+#endif
+
+/* Every free runs this, and the runtime is compiled with no optimization flag, so
+   it is forced inline: a call frame per free is real time in a program that frees
+   millions of strings, and the test itself is two comparisons. */
+__attribute__((always_inline)) static inline int cool_in_image(const void *p) {
+#ifdef COOL_IMAGE_GUARD
+    /* Compared as integers rather than as pointers, since the C rule for a
+       relational operator covers two pointers into one object and these name
+       three unrelated ones. A bound of zero is a symbol the linker did not
+       define, and either one missing reads the whole guard inert: a defined
+       _end over an undefined start would otherwise call every low address a
+       constant. */
+    uintptr_t lo = (uintptr_t)(const void *)__executable_start;
+    uintptr_t hi = (uintptr_t)(const void *)_end;
+    uintptr_t q = (uintptr_t)p;
+    return lo != 0 && hi > lo && q - lo < hi - lo;
+#else
+    (void)p;
+    return 0;
+#endif
+}
+
+/* Reports a free of an address inside the program image. Both free entry points
+   test the range before they touch the block, so the misuse aborts by name at the
+   free itself instead of faulting namelessly one word ahead of the pointer the
+   program handed in. */
+static void cool_const_free_fault(void) {
+    fflush(stdout);
+    fputs("fatal: free of a string literal or other constant; it was never allocated\n", stderr);
+    abort();
+}
+
 void *cool_alloc(size_t n) {
     return malloc(n);
 }
 
 void cool_free(void *p) {
+    // A constant was never allocated, so libc has no block to reclaim and the
+    // misuse gets a name here rather than an allocator abort or worse.
+    if (cool_in_image(p)) {
+        cool_const_free_fault();
+    }
     // A collected address is owned by the collector, not libc; freeing one here
     // would hand a live collected block back to the allocator.
     if (cool_gc_is_collected(p)) {
@@ -528,6 +584,11 @@ static void cool_gen_free_locked(void *p) {
 void cool_gen_free(void *p) {
     if (!p) {
         return;
+    }
+    // A string literal or other constant has no header in front of it, so the
+    // retire below would read a size and bump a generation in read only memory.
+    if (cool_in_image(p)) {
+        cool_const_free_fault();
     }
     // A collected address is reclaimed by the collector's sweep, never parked on
     // the generational free list, so retiring one here is a no op.

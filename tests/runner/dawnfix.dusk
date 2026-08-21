@@ -50,6 +50,14 @@ func cap_dir(root: string) -> string {
     return root + "/target/testrun/dawncap"
 }
 
+// Where the package tool keeps its bare mirrors while a special runs. It sits inside
+// the special's own work directory, which is made empty before the special starts, so
+// one check can never fetch out of a mirror another check left behind and every check
+// starts with a cold cache.
+export func cache_dir(c: Ctx) -> string {
+    return c.work + "/dawncache"
+}
+
 // Appends one single quoted word to a command line.
 func qpush(b: *StringBuilder, word: string) -> void {
     q: string = quote(word)
@@ -179,10 +187,11 @@ export func ctx_new(name: string, bin: string) -> Ctx {
     return Ctx { root: root, dusk: duskp, dawn: fd.path, work: work, err: "" }
 }
 
-// Runs one command line with the working directory set to dir and DUSK_HOME set to
-// the absolute repository root, capturing stdout, stderr, and the child's own exit
-// code. The whole line runs inside a brace group so a failed change of directory is
-// captured too rather than running the command somewhere unintended.
+// Runs one command line with the working directory set to dir, DUSK_HOME set to the
+// absolute repository root, and DAWN_CACHE set inside the special's own work
+// directory, capturing stdout, stderr, and the child's own exit code. The whole line
+// runs inside a brace group so a failed change of directory is captured too rather
+// than running the command somewhere unintended.
 export func sh(c: Ctx, dir: string, line: string) -> Shell {
     cap: string = cap_dir(c.root)
     b: *StringBuilder = alloc(sb_new())
@@ -196,6 +205,8 @@ export func sh(c: Ctx, dir: string, line: string) -> Shell {
     qpush(b, dir)
     sb_push(b, " && export DUSK_HOME=")
     qpush(b, c.root)
+    sb_push(b, " && export DAWN_CACHE=")
+    qpush(b, cache_dir(c))
     sb_push(b, " && ")
     sb_push(b, line)
     sb_push(b, "; } > ")

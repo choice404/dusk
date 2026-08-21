@@ -1,0 +1,363 @@
+// testrun dawnkeep: the dawn checks over what the tool keeps outside the project it
+// was run in, and what it makes of what it finds when it comes back. Three things are
+// proved here. A source is mirrored once per machine, so a second project requiring it
+// fetches with no reachable source at all. The graph a project already has can be
+// printed back from the files on disk, with the requirement nothing has locked marked
+// as such. And a checkout that no longer holds what its stamp claims is replaced rather
+// than taken at its word, whether it was edited, moved to another commit, or deleted.
+//
+// Every fixture here is a local git repository required through a file URL and a cache
+// directory inside the special's own work directory, so a check reaches nothing outside
+// target/testrun and starts from a cold cache.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import exec
+@import compare
+@import dawnfix
+@import dawnproj
+
+// Writes a project at an arbitrary directory, for a check that needs a second
+// consuming project beside the one every special gets.
+func project_at(c: Ctx, dir: string, requires: string, main_src: string) -> string {
+    fe: string = fresh_dir(dir)
+    if str_len(fe) > 0 {
+        return fe
+    }
+    me: string = put_file(dir + "/package.dawn", pkg_text("app", requires))
+    if str_len(me) > 0 {
+        return me
+    }
+    return put_file(dir + "/src/main.dusk", main_src)
+}
+
+// The captured output as lines, with the indentation each one carries left alone, since
+// depth in a printed graph is the indentation. The empty tail after the last newline is
+// dropped, so a well formed capture yields exactly one entry per printed line.
+func out_lines(text: string) -> *Vector<string> {
+    raw: *Vector<string> = str_split(text, "\n")
+    out: *Vector<string> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < vec_len(raw) {
+        one: string = vec_get(raw, i)
+        if i + 1 < vec_len(raw) || str_len(one) > 0 {
+            vec_push(out, one)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// How many spaces a line opens with.
+func indent_of(line: string) -> int64 {
+    mut n: int64 = 0
+    while n < str_len(line) {
+        if line[n] != 32 {
+            return n
+        }
+        n = n + 1
+    }
+    return n
+}
+
+// Checks one line of a printed graph: the depth it sits at, and the alias, source, and
+// ref it names. The commit is read by the caller, which knows what the lock pinned.
+func graph_line_bad(line: string, indent: int64, alias: string, source: string, ref: string) -> string {
+    if indent_of(line) != indent {
+        return "the line '" + escape_show(line) + "' is indented " + int_to_string(indent_of(line)) + " spaces, want " + int_to_string(indent)
+    }
+    w: *Vector<string> = split_ws(line)
+    if vec_len(w) < 4 {
+        return "the line '" + escape_show(line) + "' has " + int_to_string(vec_len(w)) + " fields, want at least 4: <alias> <source> <ref> <commit>"
+    }
+    if !str_eq(vec_get(w, 0), alias) {
+        return "the line '" + escape_show(line) + "' names alias '" + vec_get(w, 0) + "', want '" + alias + "'"
+    }
+    if !str_eq(vec_get(w, 1), source) {
+        return "the line '" + escape_show(line) + "' names source '" + vec_get(w, 1) + "', want '" + source + "'"
+    }
+    if !str_eq(vec_get(w, 2), ref) {
+        return "the line '" + escape_show(line) + "' names ref '" + vec_get(w, 2) + "', want '" + ref + "'"
+    }
+    return ""
+}
+
+// The fourth field of a graph line, which is the commit or the mark standing in for it.
+func graph_mark(line: string) -> string {
+    w: *Vector<string> = split_ws(line)
+    if vec_len(w) < 4 {
+        return ""
+    }
+    return vec_get(w, 3)
+}
+
+// Checks that a graph line carries the first twelve characters of the commit the lock
+// pinned for that alias.
+func graph_commit_bad(c: Ctx, line: string, alias: string) -> string {
+    locked: string = lock_commit(lock_line_for(c, alias))
+    if !is_hex40(locked) {
+        return "dawn.lock pins '" + locked + "' for '" + alias + "', which is not a 40 character git object id"
+    }
+    want: string = substring(locked, 0, 12)
+    got: string = graph_mark(line)
+    if !str_eq(got, want) {
+        return "the line '" + escape_show(line) + "' shows '" + got + "' for '" + alias + "', want the locked commit's first twelve characters '" + want + "'"
+    }
+    return ""
+}
+
+// dawn_cache_offline_get: the first fetch of a source mirrors it under DAWN_CACHE, and
+// a second project requiring that same source fetches out of the mirror, which is
+// proved by taking the source away first: nothing the second get could reach is left,
+// so a get that still lands the package and runs it came from the cache alone.
+func cache_offline_get(bin: string) -> string {
+    c: Ctx = ctx_new("cache_offline", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    // A mirror is named for the source it holds and closed with the hash of that
+    // source's identity, so the check is for a directory named dep-<hash>.git rather
+    // than for one exact name.
+    mirrors: Shell = sh(c, c.root, "find " + qw(cache_dir(c)) + " -type d -name 'dep-*.git'")
+    if !str_contains(mirrors.out, "/dep-") {
+        return "after dawn get the cache at '" + cache_dir(c) + "' holds no mirror named dep-<hash>.git, only '" + escape_show(clip(mirrors.out, 400)) + "'"
+    }
+    hide: Shell = sh(c, c.root, "mv " + qw(dep.path) + " " + qw(dep.path + ".hidden"))
+    if hide.code != 0 {
+        return shell_detail("taking the fixture repository out of reach", hide)
+    }
+    other: string = c.work + "/other"
+    oe: string = project_at(c, other, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(oe) > 0 {
+        return oe
+    }
+    og: Shell = sh(c, other, dawn_cmd(c, "get"))
+    if og.code != 0 {
+        return "dawn get in a second project with the source out of reach did not fetch from the cache: " + shell_detail("that dawn get", og)
+    }
+    lines: *Vector<string> = lines_of(other + "/dawn.lock")
+    if vec_len(lines) != 1 {
+        return "the offline project's dawn.lock holds " + int_to_string(vec_len(lines)) + " lines, want 1"
+    }
+    lb: string = lock_line_bad(vec_get(lines, 0), "dep", dep.source, "v0.1.0")
+    if str_len(lb) > 0 {
+        return lb
+    }
+    stamp: string = other + "/dawn_modules/dep/.dawn"
+    if !exists(stamp) {
+        return "the offline fetch left no clone stamp at '" + stamp + "'"
+    }
+    r: Shell = sh(c, other, dawn_cmd(c, "run"))
+    if r.code != 0 {
+        return shell_detail("dawn run in the offline project", r)
+    }
+    if !str_contains(r.out, "dep v1\n") {
+        return "the offline project printed '" + escape_show(r.out) + "', want the line 'dep v1' from the package the cache supplied"
+    }
+    return ""
+}
+
+// dawn_tree_prints_graph: tree prints the package and its version, then every
+// requirement under it with the source, the ref, and the commit the lock pinned, one
+// step of indentation per level of the graph, reading a fetched package's own manifest
+// for what it requires in turn. A requirement nothing has locked is marked rather than
+// silently shown as if it were resolved.
+func tree_prints_graph(bin: string) -> string {
+    c: Ctx = ctx_new("tree", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    leaf: Repo = module_repo(c, "b", "", "leaf", leaf_module(), "v0.1.0")
+    if str_len(leaf.err) > 0 {
+        return leaf.err
+    }
+    mid: Repo = module_repo(c, "a", req_line("b", leaf.source, "v0.1.0"), "lib", lib_module(), "v0.1.0")
+    if str_len(mid.err) > 0 {
+        return mid.err
+    }
+    ghost: Repo = plain_repo(c, "c", "", "v0.1.0")
+    if str_len(ghost.err) > 0 {
+        return ghost.err
+    }
+    pe: string = app_project(c, req_line("a", mid.source, "v0.1.0"), app_main_lib())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    t: Shell = sh(c, app, dawn_cmd(c, "tree"))
+    if t.code != 0 {
+        return shell_detail("dawn tree", t)
+    }
+    lines: *Vector<string> = out_lines(t.out)
+    if vec_len(lines) != 3 {
+        return "dawn tree printed " + int_to_string(vec_len(lines)) + " lines for a root with one requirement that has one of its own, want 3: '" + escape_show(t.out) + "'"
+    }
+    if !str_eq(vec_get(lines, 0), "app 0.1.0") {
+        return "dawn tree opened with '" + escape_show(vec_get(lines, 0)) + "', want the package and its version, 'app 0.1.0'"
+    }
+    ab: string = graph_line_bad(vec_get(lines, 1), 2, "a", mid.source, "v0.1.0")
+    if str_len(ab) > 0 {
+        return ab
+    }
+    ac: string = graph_commit_bad(c, vec_get(lines, 1), "a")
+    if str_len(ac) > 0 {
+        return ac
+    }
+    bb: string = graph_line_bad(vec_get(lines, 2), 4, "b", leaf.source, "v0.1.0")
+    if str_len(bb) > 0 {
+        return bb
+    }
+    bc: string = graph_commit_bad(c, vec_get(lines, 2), "b")
+    if str_len(bc) > 0 {
+        return bc
+    }
+    // A requirement written into the manifest and never fetched has no pin to show, and
+    // a checkout deleted behind the tool's back has one with nothing on disk under it.
+    requires: string = req_line("a", mid.source, "v0.1.0") + req_line("c", ghost.source, "v0.1.0")
+    me: string = put_file(app + "/package.dawn", pkg_text("app", requires))
+    if str_len(me) > 0 {
+        return me
+    }
+    rm: Shell = sh(c, c.root, "rm -rf " + qw(module_dir(c, "b")))
+    if rm.code != 0 {
+        return shell_detail("deleting a fetched package's checkout", rm)
+    }
+    t2: Shell = sh(c, app, dawn_cmd(c, "tree"))
+    if t2.code != 0 {
+        return shell_detail("dawn tree after the manifest grew a requirement", t2)
+    }
+    l2: *Vector<string> = out_lines(t2.out)
+    if vec_len(l2) != 4 {
+        return "dawn tree printed " + int_to_string(vec_len(l2)) + " lines for a root with two requirements, want 4: '" + escape_show(t2.out) + "'"
+    }
+    if !str_contains(vec_get(l2, 2), "(not fetched)") {
+        return "with the checkout of 'b' deleted its line reads '" + escape_show(vec_get(l2, 2)) + "', want it marked '(not fetched)'"
+    }
+    cb: string = graph_line_bad(vec_get(l2, 3), 2, "c", ghost.source, "v0.1.0")
+    if str_len(cb) > 0 {
+        return cb
+    }
+    if !str_contains(vec_get(l2, 3), "(not locked)") {
+        return "the requirement nothing has locked reads '" + escape_show(vec_get(l2, 3)) + "', want it marked '(not locked)'"
+    }
+    return ""
+}
+
+// dawn_tampered_checkout_refreshed: a checkout is vouched for by what is in it and not
+// by the stamp beside it, so a fetch asks the tree itself. A file edited under it, a
+// head moved off the locked commit, and a checkout deleted outright are each noticed by
+// the next get, which replaces the tree and says so rather than reporting it as cached.
+func tampered_checkout_refreshed(bin: string) -> string {
+    c: Ctx = ctx_new("tamper", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    locked: string = lock_commit(lock_line_for(c, "dep"))
+    if !is_hex40(locked) {
+        return "after dawn get the lock pins '" + locked + "', which is not a 40 character git object id"
+    }
+    module: string = module_dir(c, "dep") + "/src/greet.dusk"
+    want: string = slurp(module)
+    if str_len(want) == 0 {
+        return "the fetched package carries no module at '" + module + "'"
+    }
+    we: string = put_file(module, "// something else entirely\n")
+    if str_len(we) > 0 {
+        return we
+    }
+    edited: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if edited.code != 0 {
+        return shell_detail("dawn get over an edited checkout", edited)
+    }
+    if !str_contains(edited.out, "refreshing dep") {
+        return "dawn get over an edited checkout printed '" + escape_show(edited.out) + "', want it to say it is refreshing 'dep'"
+    }
+    back: string = slurp(module)
+    if !str_eq(back, want) {
+        return "the refreshed checkout carries '" + escape_show(clip(back, 200)) + "', want the package's own module back"
+    }
+    se: string = stamp_bad(c, "dep", dep.source, "v0.1.0", locked)
+    if str_len(se) > 0 {
+        return se
+    }
+    // A head moved off the locked commit is the same fault by another route: the tree is
+    // whole and belongs to the package, and it is not what the lock pins.
+    moved: Shell = sh(c, c.root, "git -C " + qw(module_dir(c, "dep")) + " -c advice.detachedHead=false checkout --quiet --detach HEAD~1")
+    if moved.code != 0 {
+        return shell_detail("moving the checkout's head off the locked commit", moved)
+    }
+    again: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if again.code != 0 {
+        return shell_detail("dawn get over a moved head", again)
+    }
+    if !str_contains(again.out, "refreshing dep") {
+        return "dawn get over a checkout detached at another commit printed '" + escape_show(again.out) + "', want it to say it is refreshing 'dep'"
+    }
+    head: Shell = sh(c, c.root, "git -C " + qw(module_dir(c, "dep")) + " rev-parse HEAD")
+    if !str_eq(trim(head.out), locked) {
+        return "after the refresh the checkout is at '" + escape_show(trim(head.out)) + "', want the locked commit '" + locked + "'"
+    }
+    // A checkout that is not there at all is not a refresh but a fetch, and the next get
+    // says so and puts it back.
+    rm: Shell = sh(c, c.root, "rm -rf " + qw(module_dir(c, "dep")))
+    if rm.code != 0 {
+        return shell_detail("deleting the checkout", rm)
+    }
+    third: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if third.code != 0 {
+        return shell_detail("dawn get with the checkout deleted", third)
+    }
+    if !str_contains(third.out, "fetching dep") {
+        return "dawn get with the checkout deleted printed '" + escape_show(third.out) + "', want it to fetch 'dep' again"
+    }
+    return stamp_bad(c, "dep", dep.source, "v0.1.0", locked)
+}
+
+// Dispatches the dawn checks this module owns. An unrecognized name fails here, the end
+// of the dawn dispatch chain, since a dawn special that matches nothing must never pass
+// as a no op.
+export func run_dawn_keep(name: string, bin: string) -> string {
+    if str_eq(name, "dawn_cache_offline_get") {
+        return cache_offline_get(bin)
+    }
+    if str_eq(name, "dawn_tree_prints_graph") {
+        return tree_prints_graph(bin)
+    }
+    if str_eq(name, "dawn_tampered_checkout_refreshed") {
+        return tampered_checkout_refreshed(bin)
+    }
+    return "unknown dawn special '" + name + "'"
+}

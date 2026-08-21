@@ -1,0 +1,244 @@
+/** loaddirs: the C boundary directives a load collects. A source file's @link and
+ *  @csource and a package.dawn's own are folded into two module wide ordered tables the
+ *  driver hands to clang, first appearance winning, with a csource resolved against the
+ *  directory of whatever declared it and deduplicated on the file it actually names
+ *  rather than on the spelling. A dependency is held to more than the project is: what it
+ *  contributes has to be inside the checkout its lock stands behind, and it may name a
+ *  library but not a path. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import source
+@import diag
+@import pathnorm
+@import manifest
+@import loaderpkg
+@import prescan
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+func has_slash(s: string) -> bool {
+    mut i: int64 = 0
+    while s[i] != 0 {
+        if s[i] == 47 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The parent directory of a path, the base a value declared beside a file resolves
+// against. A bare filename has the empty path for a parent, and a run of separators before
+// the final component collapses, so two spellings of one directory answer the same.
+func dir_of(path: string) -> string {
+    n: int64 = str_len(path)
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if path[i] == 47 {
+            last = i
+        }
+        i = i + 1
+    }
+    if last < 0 {
+        return substring(path, 0, 0)
+    }
+    mut end: int64 = last
+    mut stripping: bool = end > 0
+    while stripping {
+        if path[end - 1] == 47 {
+            end = end - 1
+            stripping = end > 0
+        } else {
+            stripping = false
+        }
+    }
+    return substring(path, 0, end)
+}
+
+func located_diag(path: string, src: string, n: int64, t: *LineTable, e: Located) -> LoadDiag {
+    return load_diag_span(path, src, n, t, e.lo, e.hi, e.msg)
+}
+
+// The path a @csource value names, resolved against the directory of whatever
+// declared it, a source file or a manifest. An absolute value is taken as it stands.
+// The result is lexically cleaned, so two spellings of one file dedup as one rather
+// than compiling it twice into duplicate symbols.
+func resolve_csource(dir: string, raw: string) -> string {
+    mut joined: string = ""
+    if str_len(raw) > 0 && raw[0] == 47 {
+        joined = copy_string(raw)
+    } else {
+        joined = path_join(dir, raw)
+    }
+    out: string = normalize_path(joined)
+    free(joined)
+    return out
+}
+
+// Where a resolved csource actually is, the key its dedup turns on. Two files that
+// resolve to one file, one named from a source file against the invocation root and one
+// named from a manifest against the manifest's own directory, key the same here and
+// compile in once rather than twice into duplicate symbols. A path naming no file keys
+// by its cleaned text, which is what it keyed by before, and clang reports the miss.
+func csource_key(resolved: string) -> string {
+    real: string = source_realpath(resolved)
+    if str_len(real) > 0 {
+        return real
+    }
+    free(real)
+    return copy_string(resolved)
+}
+
+// Folds one resolved csource path into the module wide table, first appearance winning.
+// The resolved path is what reaches clang; the key is only ever the dedup's own.
+func add_csource(csources: *Vector<string>, seen_csources: *Map<string, int64>, resolved: string) -> void {
+    key: string = csource_key(resolved)
+    if map_has(seen_csources, key) {
+        free(key)
+        free(resolved)
+        return
+    }
+    map_put(seen_csources, key, 1)
+    vec_push(csources, resolved)
+}
+
+// The fault a dependency's @csource earns by naming a file outside the checkout the
+// lock stands behind. A dependency contributes C to a build, so the file it contributes
+// has to be one the commit in dawn.lock actually carries.
+func dep_csource_fault(shown: string, alias: string) -> LoadDiag {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dependency '")
+    sb_push(b, alias)
+    sb_push(b, "' names a C source outside its checkout; fix @csource in its package.dawn")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return load_diag_plain(shown, out)
+}
+
+// The fault a dependency's @link earns by naming a path rather than a library. A link
+// value that carries a separator reaches the linker as a file resolved against the
+// working directory of the build, not against the checkout, so it names a file no lock
+// line vouches for. The project's own @link keeps naming a path, since the project is
+// what the person running the build wrote.
+func dep_link_fault(shown: string, alias: string) -> LoadDiag {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dependency '")
+    sb_push(b, alias)
+    sb_push(b, "' names a link path; a dependency may only link a library by name")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return load_diag_plain(shown, out)
+}
+
+// Folds one package's own @link and @csource values into the module wide tables, once
+// per package, as its first file registers. A manifest's values are read exactly as a
+// source file's are, with a csource resolved against the directory of the manifest
+// that declared it, so a dependency's C source is found wherever its checkout landed.
+export func collect_pkg_directives(ps: *PkgSet, pkg: int64, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>, errors: *Vector<LoadDiag>) -> void {
+    if !pkg_take_directives(ps, pkg) {
+        return
+    }
+    m: *Manifest = pkg_manifest(ps, pkg)
+    alias: string = pkg_alias(ps, pkg)
+    dep: bool = str_len(alias) > 0
+    lv: *Vector<string> = (*m).links
+    mut i: int64 = 0
+    while i < vec_len(lv) {
+        v: string = vec_get(lv, i)
+        mut allowed: bool = true
+        if dep {
+            if has_slash(v) {
+                vec_push(errors, dep_link_fault(pkg_manifest_display(ps, pkg), alias))
+                allowed = false
+            }
+        }
+        if allowed {
+            if !map_has(seen_links, v) {
+                // The manifest is released at the end of the load and the link table
+                // outlives it in the Program, so the value travels as a copy.
+                c: string = copy_string(v)
+                map_put(seen_links, c, 1)
+                vec_push(links, c)
+            }
+        }
+        i = i + 1
+    }
+    cv: *Vector<string> = (*m).csources
+    mut j: int64 = 0
+    while j < vec_len(cv) {
+        resolved: string = resolve_csource((*m).dir, vec_get(cv, j))
+        mut usable: bool = true
+        if dep {
+            // A dependency's C source has to be inside the checkout the lock records.
+            // The value is cleaned before the test, so a path climbing out with ".."
+            // and an absolute one naming somewhere else are both caught here rather
+            // than reaching clang.
+            inside: string = path_under(pkg_dir(ps, pkg), resolved)
+            usable = str_len(inside) > 0
+            free(inside)
+            if !usable {
+                vec_push(errors, dep_csource_fault(pkg_manifest_display(ps, pkg), alias))
+                free(resolved)
+            }
+        }
+        if usable {
+            add_csource(csources, seen_csources, resolved)
+        }
+        j = j + 1
+    }
+}
+
+// Runs the pre scan over one loaded file and folds its @link and @csource
+// directives into the module wide ordered dedup tables. A link value is carried
+// verbatim, since the driver decides between a -l flag and a file argument; a
+// csource path is resolved against the declaring file's directory here, at load
+// time, so the linker receives a path relative to the invocation root. First
+// appearance wins, and a value already seen in an earlier file is skipped, which
+// keeps the tables in the loader's deterministic module walk order. file is the
+// file's physical path, since a csource is found beside the file as it sits on disk,
+// and disp is the spelling a directive fault is reported under.
+export func collect_directives(src: string, len: int64, file: string, disp: string, errors: *Vector<LoadDiag>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>) -> void {
+    p: Prescan = prescan(src, len)
+    // Prescan validates each directive as it reads it, a bad link or csource
+    // value among them; those faults reach the build here, not only the scan
+    // dump, so an illegal directive fails a check the same as a parse error.
+    pe: *Vector<Located> = p.errors
+    if vec_len(pe) > 0 {
+        // One line table for this file's directive faults, built only when it has
+        // some, so a clean file never allocates one.
+        t: *LineTable = line_table_new()
+        mut d: int64 = 0
+        while d < vec_len(pe) {
+            vec_push(errors, located_diag(disp, src, len, t, vec_get(pe, d)))
+            d = d + 1
+        }
+    }
+    lv: *Vector<string> = p.links
+    mut i: int64 = 0
+    while i < vec_len(lv) {
+        v: string = vec_get(lv, i)
+        if !map_has(seen_links, v) {
+            map_put(seen_links, v, 1)
+            vec_push(links, v)
+        }
+        i = i + 1
+    }
+    cv: *Vector<string> = p.csources
+    dir: string = dir_of(file)
+    mut j: int64 = 0
+    while j < vec_len(cv) {
+        add_csource(csources, seen_csources, resolve_csource(dir, vec_get(cv, j)))
+        j = j + 1
+    }
+}
+

@@ -1,0 +1,25 @@
+@paradigm procedural
+@import std.fs
+@import std.string
+
+// path_dirname and path_extension each carry a branch that used to hand back a string
+// literal while their contract says the caller owns and frees the result. Freeing a
+// constant is a named abort now rather than a quiet pass over read only memory, so both
+// fallbacks return a heap copy like every other branch: a caller frees what it got
+// without asking which branch produced it. All four frees below run clean.
+func main() -> int32 {
+    d: string = path_dirname("file.txt")         // no separator, the "." branch
+    println(d)
+    free(d)
+    e: string = path_extension("dir/README")     // no dot, the empty branch
+    println(str_len(e))
+    free(e)
+    d2: string = path_dirname("a/b/c.txt")
+    println(d2)
+    free(d2)
+    e2: string = path_extension("a/b/c.txt")
+    println(e2)
+    free(e2)
+    println("ok")
+    return 0
+}

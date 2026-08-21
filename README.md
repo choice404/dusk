@@ -88,7 +88,7 @@ A project is a directory holding a `package.dawn` manifest, a package is a git r
 @require maybe github.com/choice404/dusk-maybe v0.3.0
 ```
 
-An import spells the alias first, then a dotted path under that package's root directory, the same shape a stdlib or local import has.
+An import spells the alias first, then a dotted path under that package's root directory, the same shape a stdlib or local import has. An export belongs to the package that declares it, so a name is in scope bare in the files that import it, `maybe.unwrap(x)` reaches it from anywhere, and two packages exporting one name coexist.
 
 ```text
 @import std.io
@@ -100,9 +100,10 @@ target/dusk-out/dawn init myapp                                   # write packag
 target/dusk-out/dawn add maybe github.com/choice404/dusk-maybe v0.3.0
 target/dusk-out/dawn get                                          # fetch and lock
 target/dusk-out/dawn run                                          # build and run the root
+target/dusk-out/dawn tree                                         # print the graph, offline
 ```
 
-dawn owns the network and shells out to the system `git`, so git has to be on your path to fetch. The compiler never fetches: `dusk build`, `dusk run`, and `dusk check` read the manifest, the lock, and the checkouts and stay offline, and with no file argument they take the manifest's root. Commit `package.dawn` and `dawn.lock`, ignore `dawn_modules/`. The quoted git import from earlier releases, `@import "github.com/user/repo/module"`, still resolves outside a project this release, against a cache nothing fills any more, and goes away in 1.15.0.
+dawn owns the network and shells out to the system `git`, so git has to be on your path to fetch. It clones each source once per machine, keeping a bare mirror under `$DAWN_CACHE` or `~/.dawn/cache` and cloning every checkout after the first out of that, so a package this machine has already seen is fetched again with no network at all. The compiler never fetches: `dusk build`, `dusk run`, and `dusk check` read the manifest, the lock, and the checkouts and stay offline, and with no file argument they take the manifest's root. Commit `package.dawn` and `dawn.lock`, ignore `dawn_modules/`. The quoted git import from earlier releases, `@import "github.com/user/repo/module"`, still resolves outside a project this release, against a cache nothing fills any more, and goes away in 1.15.0.
 
 See [dawn.md](dawn.md) for the manifest grammar, the lock, the resolution rules, and the tradeoffs.
 

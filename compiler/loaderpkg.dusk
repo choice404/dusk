@@ -480,6 +480,22 @@ func read_pkg_lock(dir: string) -> *Lock {
     return l
 }
 
+// Whether a checked out dependency's own package.dawn names a language surface this
+// toolchain has, reporting the floor it asks for under the dependency's own file when it
+// does not. A package pins the surface it was written against, so a dependency asking for
+// a newer dusk is not resolved through: what is on disk is source for a language this
+// compiler does not speak. The reading is manifest_floor_fault, the same one the project's
+// manifest gets, so a malformed floor is named the same way in either place. The display
+// path and the sentence are both borrowed by the diagnostic and outlive the load.
+func check_dep_floor(alias: string, m: *Manifest, errors: *Vector<LoadDiag>) -> bool {
+    fault: string = manifest_floor_fault(m)
+    if str_len(fault) == 0 {
+        return true
+    }
+    push_project_fault(errors, pkg_file_display(alias, "package.dawn"), fault)
+    return false
+}
+
 // The fault an import through a dependency alias earns. The message outlives the load,
 // since the diagnostic borrows it.
 func dep_fault(importer: string, alias: string, tail: string) -> LoadDiag {
@@ -508,14 +524,17 @@ export func pkg_dep_index(ps: *PkgSet, from: int64, alias: string, importer: str
     mut fault: string = why
     m, has_m := read_pkg_manifest(depdir)
     l: *Lock = read_pkg_lock(depdir)
-    // A dependency whose own package.dawn or dawn.lock does not read is not resolved
-    // through. A half read lock still holds the lines that parsed, and resolving an
-    // import through one would answer it with whatever survived the parse rather than
-    // with what the file says. The faults are the dependency's own, so they are reported
-    // under its own files, spelled manifest relative like every other path a checkout
-    // contributes.
+    // A dependency whose own package.dawn or dawn.lock does not read, or whose manifest
+    // asks for a dusk this toolchain is not, is not resolved through. A half read lock
+    // still holds the lines that parsed, and resolving an import through one would answer
+    // it with whatever survived the parse rather than with what the file says. The faults
+    // are the dependency's own, so they are reported under its own files, spelled manifest
+    // relative like every other path a checkout contributes.
     if vec_len((*m).errors) > 0 {
         push_faults(errors, (*m).path, pkg_file_display(alias, "package.dawn"), (*m).errors)
+        ok = false
+    }
+    if !check_dep_floor(alias, m, errors) {
         ok = false
     }
     if vec_len((*l).errors) > 0 {
@@ -647,12 +666,15 @@ func collision_fault(disp: string, name: string, prior: string) -> LoadDiag {
     return load_diag_plain(disp, out)
 }
 
-/** Records the exported names one file brings into the merged module and reports the
- *  ones another package already exported. Exports are global in 1.14.0, so two
- *  packages exporting a name is a program that cannot be built; within one package it
- *  stays a duplicate definition, which resolve reports against the offending item. The
- *  first file to claim a name keeps it, so a third file colliding is reported against
- *  the same file the second one was. */
+/** Records the exported names one file brings into the merged module under the spelling
+ *  they keep, and reports the ones another package already spelled that way. Since 1.14.1
+ *  a dependency's exports are scoped to the packages that import them, so the caller hands
+ *  only the names the scoping could not move: an `export "C"` function, whose name is the
+ *  symbol a C host calls, and the do protocol pair, which a desugar long after the loader
+ *  reaches by its bare spelling. Two packages exporting one of those is still a program
+ *  that cannot be built. Within one package a repeated name stays a duplicate definition,
+ *  which resolve reports against the offending item. The first file to claim a name keeps
+ *  it, so a third file colliding is reported against the same file the second one was. */
 export func pkg_check_exports(owner_file: *Map<string, string>, owner_pkg: *Map<string, int64>, ex: *Map<string, int64>, disp: string, pkg: int64, errors: *Vector<LoadDiag>) -> void {
     keys: *Vector<string> = map_keys(ex)
     mut i: int64 = 0

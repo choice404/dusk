@@ -1,0 +1,458 @@
+/** loadrename: the import scoped half of the rename, run once over the merged module
+ *  after the worklist has emptied.
+ *
+ *  privatize does the first half as each file is parsed: a dependency's exported names
+ *  take that package's alias as a suffix, and the declaring file's own references follow
+ *  them. It cannot do more than that, because a file is parsed before the files it
+ *  imports are, so at that moment nothing is known about what those imports export. This
+ *  pass is where the rest lands. Every file gets a map from the bare names it may spell
+ *  to the scoped spellings they became, built from its own package and its own imports,
+ *  and the same walker privatize uses rewrites its item range through that map.
+ *
+ *  What a file may spell bare is a scope, and the scope has three layers. Its own package
+ *  is one: every file of a package reaches every sibling's export, renamed or not, with no
+ *  import between them. Its own imports are the second: a dependency's export answers here
+ *  only because this file asked for that package. And the standard library is the third,
+ *  reachable from anywhere, except that a std module only a dependency imported is in the
+ *  program without the project ever having reached for it, and that one does not get to
+ *  answer a name the project scoped to a dependency.
+ *
+ *  Four names are refused rather than renamed: one two of a file's imports both export,
+ *  one a package exports that this file never imported, one a package exports that this
+ *  file's own package does not even require, and one the project declares that a
+ *  dependency spelled. All four are raised at the reference that spelled them.
+ *
+ *  The fold in loadfold runs first, per file and with that file's own imports in hand,
+ *  because a qualified call names a module by the alias it was required under and the
+ *  alias can be spelled exactly like one of that package's exports. Renaming first would
+ *  rewrite the alias out from under the fold. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.os
+@import std.functional.maybe
+@import ast
+@import diag
+@import privatize
+@import loadfold
+@import loadns
+@import loadscope
+
+func new_set() -> *Map<string, int64> {
+    return alloc(map_new())
+}
+
+func new_text_map() -> *Map<string, string> {
+    return alloc(map_new())
+}
+
+
+// The prefix scope one file's own imports describe: which package each dotted module path
+// it named belongs to, and which of that module's exports the scope moved.
+func file_scope(m: *FileMeta) -> FoldNs {
+    t: FoldNs = fold_ns_new()
+    imps: *Vector<ImportRes> = (*m).imports
+    mut i: int64 = 0
+    while i < vec_len(imps) {
+        r: ImportRes = vec_get(imps, i)
+        if r.has_mod_ns {
+            fold_ns_add(t, r.mod_ns, r.suffix, r.moving)
+        }
+        i = i + 1
+    }
+    return t
+}
+
+// The prefix scope every import in the program describes together, the fallback a
+// qualified call through a module this file did not itself import falls to. Two imports
+// that gave one prefix two meanings mark it, and the fold refuses it there rather than
+// picking one.
+func program_scope(metas: *Vector<*FileMeta>) -> FoldNs {
+    t: FoldNs = fold_ns_new()
+    mut i: int64 = 0
+    while i < vec_len(metas) {
+        m: *FileMeta = vec_get(metas, i)
+        imps: *Vector<ImportRes> = (*m).imports
+        mut j: int64 = 0
+        while j < vec_len(imps) {
+            r: ImportRes = vec_get(imps, j)
+            if r.has_mod_ns {
+                fold_ns_add(t, r.mod_ns, r.suffix, r.moving)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return t
+}
+
+// Every export this file reaches that no rename moved: the ones its own package declared
+// and the ones its imports brought in. A C symbol is the shape that lands here, and it
+// answers to the name it was declared under, so a reference to one is already resolved
+// and is not a name nothing put in scope.
+func reachable_fixed(m: *FileMeta, pkg_fixed: *Map<string, *Map<string, int64>>) -> *Map<string, int64> {
+    out: *Map<string, int64> = new_set()
+    if str_len((*m).suffix) > 0 {
+        load_add_keys(out, load_lookup_set(pkg_fixed, (*m).suffix))
+    }
+    imps: *Vector<ImportRes> = (*m).imports
+    mut i: int64 = 0
+    while i < vec_len(imps) {
+        r: ImportRes = vec_get(imps, i)
+        load_add_keys(out, r.fixed)
+        i = i + 1
+    }
+    return out
+}
+
+// What one file's rename map is built through: the map itself, which suffix each name was
+// first claimed by, and the messages for the names a claim could not settle.
+struct ScopeMap {
+    names: *Map<string, int64>,
+    claim: *Map<string, string>,
+    ambiguous: *Map<string, string>,
+}
+
+
+// Claims one bare name for one package scope. moves says whether the scope renamed it: an
+// export a package suffix moved gets a scoped spelling here, and one it could not move, a C
+// symbol or the do protocol pair, is claimed without one, since the reference already
+// resolves to the name as written. Either way the claim is what a second scope collides
+// with. A second claim by the same package is the same name and nothing happens; a second
+// claim by a different one leaves the name naming neither, so the first claim comes back
+// out of the map and the reference is refused. A file's own package claims first and every
+// name it claims is dropped from the map afterwards by its shadow, which is what keeps a
+// package's own declaration winning over an import of its files without a word.
+func claim_as(sm: ScopeMap, a: *Ast, name: string, suffix: string, moves: bool) -> void {
+    if map_has(sm.claim, name) {
+        prior: string = unwrap_or(map_get(sm.claim, name), "")
+        if !str_eq(prior, suffix) {
+            map_remove(sm.names, name).ignore()
+            if !map_has(sm.ambiguous, name) {
+                map_put(sm.ambiguous, name, load_both_msg(name, prior, suffix))
+            }
+        }
+        return
+    }
+    map_put(sm.claim, name, suffix)
+    if moves {
+        map_put(sm.names, name, intern_owned((*a).interner, load_scoped_name(name, suffix)))
+    }
+}
+
+func claim_all(sm: ScopeMap, a: *Ast, names: *Map<string, int64>, suffix: string, moves: bool) -> void {
+    keys: *Vector<string> = map_keys(names)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        claim_as(sm, a, vec_get(keys, i), suffix, moves)
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+}
+
+// Drops every name in shadow from the map, since the file reaches those spellings without
+// any import and a rename would take its own scope away from it.
+func drop_shadowed(sm: ScopeMap, shadow: *Map<string, int64>) -> void {
+    keys: *Vector<string> = map_keys(shadow)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        k: string = vec_get(keys, i)
+        map_remove(sm.names, k).ignore()
+        map_remove(sm.claim, k).ignore()
+        map_remove(sm.ambiguous, k).ignore()
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+}
+
+// One file's rename map: every name its own package exports, then every name each of its
+// imports puts in scope, minus everything it reaches without an import at all. The order
+// is the file's own import order, so an ambiguity message names the packages the way the
+// manifest and the file did.
+func scope_map_for(a: *Ast, m: *FileMeta, pkg_moving: *Map<string, *Map<string, int64>>, pkg_fixed: *Map<string, *Map<string, int64>>) -> ScopeMap {
+    sm: ScopeMap = ScopeMap { names: new_set(), claim: new_text_map(), ambiguous: new_text_map() }
+    suffix: string = (*m).suffix
+    if str_len(suffix) > 0 {
+        claim_all(sm, a, load_lookup_set(pkg_moving, suffix), suffix, true)
+        claim_all(sm, a, load_lookup_set(pkg_fixed, suffix), suffix, false)
+    }
+    imps: *Vector<ImportRes> = (*m).imports
+    mut i: int64 = 0
+    while i < vec_len(imps) {
+        r: ImportRes = vec_get(imps, i)
+        if str_len(r.suffix) > 0 {
+            if r.has_leaf {
+                // A leaf import names one symbol, so it brings that one and no other.
+                if map_has(r.moving, r.leaf) {
+                    claim_as(sm, a, r.leaf, r.suffix, true)
+                } else if map_has(r.fixed, r.leaf) {
+                    claim_as(sm, a, r.leaf, r.suffix, false)
+                }
+            } else {
+                claim_all(sm, a, r.moving, r.suffix, true)
+                // An export the package could not rename is claimed too, without a scoped
+                // spelling. Two packages exporting one name, one of them a C symbol, is
+                // still two names behind one word, and a bare use of it names neither.
+                claim_all(sm, a, r.fixed, r.suffix, false)
+            }
+        }
+        i = i + 1
+    }
+    return sm
+}
+
+// The names this file's map claims from an import that the standard library already
+// declares bare. A std module is in the program because somebody imported it, and which
+// somebody is not something a bare word in this file should follow, so neither name is
+// picked: both are named and the claim is dropped. A claim from the file's own package is
+// not in here, since a package is the innermost scope a file has and its own export wins
+// over anything the program pulled in around it.
+func collide_for(sm: ScopeMap, own: string, outside: *Map<string, int64>, where_of: *Map<string, string>) -> *Map<string, string> {
+    out: *Map<string, string> = new_text_map()
+    keys: *Vector<string> = map_keys(sm.names)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        k: string = vec_get(keys, i)
+        if map_has(outside, k) {
+            claimant: string = unwrap_or(map_get(sm.claim, k), "")
+            mut mine: bool = false
+            if str_len(own) > 0 {
+                mine = str_eq(claimant, own)
+            }
+            if !mine {
+                map_put(out, k, load_also_declared_msg(k, claimant, unwrap_or(map_get(where_of, k), "")))
+            }
+        }
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+    drop_shadowed(sm, out_keys(out))
+    return out
+}
+
+// The key set of a message table, as a plain set.
+func out_keys(t: *Map<string, string>) -> *Map<string, int64> {
+    out: *Map<string, int64> = new_set()
+    keys: *Vector<string> = map_keys(t)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        map_put(out, vec_get(keys, i), 1)
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+    return out
+}
+
+// The names this file spells bare that no scope of its puts there. A name some package
+// exports names the package to import, or the @require to write first when this file's own
+// package never asked for it; a name only the project declares is one a package cannot
+// reach at all.
+func unreachable_for(m: *FileMeta, sm: ScopeMap, collide: *Map<string, string>, owners: *Map<string, string>, app: *Map<string, int64>, std_all: *Map<string, int64>, shadow: *Map<string, int64>, fixed: *Map<string, int64>, folded: *Map<string, int64>) -> *Map<string, string> {
+    out: *Map<string, string> = new_text_map()
+    dep: bool = str_len((*m).suffix) > 0
+    cand: *Map<string, int64> = new_set()
+    keys0: *Vector<string> = map_keys(owners)
+    mut z: int64 = 0
+    while z < vec_len(keys0) {
+        map_put(cand, vec_get(keys0, z), 1)
+        z = z + 1
+    }
+    vec_free(keys0)
+    free(keys0)
+    if dep {
+        load_add_keys(cand, app)
+    }
+    keys: *Vector<string> = map_keys(cand)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        k: string = vec_get(keys, i)
+        mut reachable: bool = map_has(sm.names, k)
+        if map_has(sm.ambiguous, k) { reachable = true }
+        if map_has(collide, k) { reachable = true }
+        if map_has(shadow, k) { reachable = true }
+        // The standard library answers a bare name from anywhere, the way it always has.
+        if map_has(std_all, k) { reachable = true }
+        if map_has(fixed, k) { reachable = true }
+        if map_has(folded, k) { reachable = true }
+        if !reachable {
+            if map_has(owners, k) {
+                alias: string = unwrap_or(map_get(owners, k), "")
+                if map_has((*m).requires, alias) {
+                    map_put(out, k, load_import_it_msg(k, alias))
+                } else {
+                    map_put(out, k, load_require_first_msg(k, alias))
+                }
+            } else {
+                map_put(out, k, load_project_only_msg(k))
+            }
+        }
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+    return out
+}
+
+// A vector of n zeroes, the coverage bitset over one arena.
+func zeroes(n: int64) -> *Vector<int64> {
+    v: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < n {
+        vec_push(v, 0)
+        i = i + 1
+    }
+    return v
+}
+
+/** Whether the coverage check runs. It is on by default and DUSK_RENAME_ASSERT=0 turns it
+ *  off, which is the escape hatch for a build that hits a walker gap and needs to get its
+ *  work done while the gap is fixed. */
+export func rename_assert_on() -> bool {
+    v: string = env("DUSK_RENAME_ASSERT")
+    if str_len(v) == 0 {
+        return true
+    }
+    return !str_eq(v, "0")
+}
+
+// Proves the walk reached every name bearing node in one renamed range. A node it did not
+// reach is a reference the rename could not have moved, which is the one way this pass
+// fails quietly, so it is checked rather than trusted.
+func check_coverage(a: *Ast, m: *FileMeta, seen_expr: *Vector<int64>, seen_type: *Vector<int64>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
+    exprs: *Vector<ExprNode> = (*a).exprs
+    mut i: int64 = (*m).exprs_lo
+    while i < (*m).exprs_hi {
+        e: ExprNode = vec_get(exprs, i)
+        mut named: bool = e.kind == xk_ident()
+        if e.kind == xk_struct_lit() { named = true }
+        if named {
+            if vec_get(seen_expr, i) == 0 {
+                vec_push(errors, load_diag_global(files, e.lo, e.hi, load_missed_msg("name", ast_name(a, e.a))))
+            }
+        }
+        i = i + 1
+    }
+    types: *Vector<TypeNode> = (*a).types
+    mut j: int64 = (*m).types_lo
+    while j < (*m).types_hi {
+        t: TypeNode = vec_get(types, j)
+        if t.kind == tk_named() {
+            if vec_get(seen_type, j) == 0 {
+                vec_push(errors, load_diag_plain((*m).disp, load_missed_msg("type", ast_name(a, t.a))))
+            }
+        }
+        j = j + 1
+    }
+}
+
+// The set of names this file reaches with no import in front of them: its own package for
+// a dependency, the project for a file of the project. The standard library is not in
+// here, deliberately: a claim landing on a std name is a collision to name rather than a
+// claim to drop, and dropping it silently is what made a bare word's meaning follow
+// somebody else's import list.
+func shadow_for(m: *FileMeta, pkg_globals: *Map<string, *Map<string, int64>>, rt: RootTables) -> *Map<string, int64> {
+    out: *Map<string, int64> = new_set()
+    if str_len((*m).suffix) > 0 {
+        load_add_keys(out, load_lookup_set(pkg_globals, (*m).suffix))
+        return out
+    }
+    load_add_keys(out, rt.app)
+    return out
+}
+
+/** Folds every file's qualified calls and rewrites every file's references into the
+ *  scoped spellings the rename gave them. One pass per file over its own item range, fold
+ *  first so an alias spelled like one of its package's exports is still read as the alias.
+ *  A program with no dependency has no renamed name anywhere, and then every map here is
+ *  empty and no file is walked at all.
+ *  @param a the merged module
+ *  @param metas one record per registered file, in the order they registered
+ *  @param ns the module namespaces a qualified call may name
+ *  @param ns_exports what each of those modules exports, for the private symbol fault
+ *  @param files the span table a diagnostic resolves against
+ *  @param errors the load diagnostics collected so far */
+export func load_rename_module(a: *Ast, metas: *Vector<*FileMeta>, ns: *Map<string, int64>, ns_exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
+    pt: PkgTables = load_package_tables(a, metas)
+    load_check_export_dups(a, metas, pt, files, errors)
+    owners: *Map<string, string> = load_dep_export_owners(metas)
+    scoped: bool = map_len(owners) > 0
+    all: FoldNs = program_scope(metas)
+    rt: RootTables = load_root_tables(a, metas)
+    declarers: *Map<string, string> = load_std_declarers(a, metas)
+    mark: bool = scoped && rename_assert_on()
+    mut n_expr: int64 = 0
+    mut n_type: int64 = 0
+    if mark {
+        n_expr = vec_len((*a).exprs)
+        n_type = vec_len((*a).types)
+    }
+    seen_expr: *Vector<int64> = zeroes(n_expr)
+    seen_type: *Vector<int64> = zeroes(n_type)
+    // The folds' own record, sized whenever a package is in play, since the scope has
+    // something to say only then and this is what tells it when to stay quiet.
+    mut n_fold: int64 = 0
+    if scoped {
+        n_fold = vec_len((*a).exprs)
+    }
+    folded_at: *Vector<int64> = zeroes(n_fold)
+    mut i: int64 = 0
+    while i < vec_len(metas) {
+        m: *FileMeta = vec_get(metas, i)
+        // Only a file the rename actually rewrote is proved covered. Every one of those
+        // reached the merged arenas through the copy walker, so every node in its range is
+        // reachable from an item and a node the walk misses is a real gap. The root file's
+        // own arena is the parser's, which is not held to that.
+        covered: bool = mark && str_len((*m).suffix) > 0
+        own: FoldNs = file_scope(m)
+        folded: *Map<string, int64> = new_set()
+        load_fold_range(a, ns, ns_exports, own, all, files, errors, seen_expr, covered, folded, folded_at, (*m).items_lo, (*m).items_hi)
+        shadow: *Map<string, int64> = shadow_for(m, pt.globals, rt)
+        sm: ScopeMap = scope_map_for(a, m, pt.moving, pt.fixed)
+        drop_shadowed(sm, shadow)
+        collide: *Map<string, string> = collide_for(sm, (*m).suffix, rt.std_all, declarers)
+        fixed: *Map<string, int64> = reachable_fixed(m, pt.fixed)
+        unreachable: *Map<string, string> = unreachable_for(m, sm, collide, owners, rt.app, rt.std_all, shadow, fixed, folded)
+        mut walk: bool = map_len(sm.names) > 0
+        if map_len(sm.ambiguous) > 0 { walk = true }
+        if map_len(collide) > 0 { walk = true }
+        if map_len(unreachable) > 0 { walk = true }
+        if covered { walk = true }
+        if walk {
+            add_messages(sm.ambiguous, collide)
+            sink: *RenSink = ren_sink_report(sm.ambiguous, unreachable, files, errors, seen_expr, seen_type, covered, folded_at)
+            r: *Renamer = renamer_new(a, sm.names, new_set(), sink)
+            items: *Vector<ItemNode> = (*a).items
+            mut j: int64 = (*m).items_lo
+            while j < (*m).items_hi {
+                ren_item(r, vec_get(items, j))
+                j = j + 1
+            }
+            if covered {
+                check_coverage(a, m, seen_expr, seen_type, files, errors)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Folds one message table into another, first message winning.
+func add_messages(dst: *Map<string, string>, src: *Map<string, string>) -> void {
+    keys: *Vector<string> = map_keys(src)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        k: string = vec_get(keys, i)
+        if !map_has(dst, k) {
+            map_put(dst, k, unwrap_or(map_get(src, k), ""))
+        }
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+}

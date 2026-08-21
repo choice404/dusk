@@ -627,6 +627,8 @@ Added in 1.4.1. Files, directories, and paths. The low level `foreign` block bin
 | `path_basename(p: string) -> string`                        | Everything after the last `/`, or the whole string.                |
 | `path_extension(p: string) -> string`                       | The final component's extension, without its leading `.`, or `""`. |
 
+`path_join`, `path_dirname`, `path_basename`, and `path_extension` each return a fresh heap string the caller frees, the fallback branches included: the `"."` a path with no separator yields and the empty extension are heap copies like every other result, so a caller frees what it got without asking which branch produced it.
+
 `o_rdonly()`, `o_wronly()`, `o_rdwr()`, `o_creat()`, `o_excl()`, `o_trunc()`, and `o_append()` are `open`'s Linux/glibc flag values, bitwise ORed together; `seek_set()`, `seek_cur()`, and `seek_end()` are `lseek`'s whence values; `mode_0644()` and `mode_0755()` are the common create permission modes, spelled out so a caller never hand converts octal to decimal.
 
 ```text

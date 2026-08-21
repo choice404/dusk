@@ -1,0 +1,21 @@
+@paradigm procedural
+
+// A string literal lives in the program image, not on the heap, so it carries none
+// of the allocation header the generational retire expects: the size word and the
+// generation word sit eight and sixteen bytes in front of a real payload, and in
+// front of a constant they are read only memory. Freeing one used to die by signal
+// with no name on it. The runtime now tests the pointer against the loaded image
+// before it touches the block, so the misuse aborts by name at the free itself.
+// The heap string frees normally right above it, which is the point: the guard
+// names the constant and leaves every real allocation alone.
+func main() -> int32 {
+    heap: string = "ab" + "cd"
+    println(heap)
+    free(heap)
+    println("heap ok")
+    lit: string = "lit"
+    println(lit)
+    free(lit)                  // fault: a constant was never allocated
+    println("unreachable")
+    return 0
+}

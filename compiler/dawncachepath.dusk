@@ -1,0 +1,244 @@
+/** dawncachepath: where a mirror lives. The cache root comes from DAWN_CACHE, and from
+ *  ~/.dawn/cache when that names nothing, and one source takes one path under it,
+ *  <host>/<owner>/<repo>-<hash>.git.
+ *
+ *  A source reduces to its identity first: the scheme comes off, a user or a token
+ *  written before the host is dropped rather than filed away, and the .git a clone URL
+ *  may carry is taken off. So an https source and the git@ spelling of the same
+ *  repository reduce to one identity and share one mirror, and anything that differs
+ *  anywhere reduces to two.
+ *
+ *  The path is then two things at once. The readable half is that identity with every
+ *  component reduced to letters, digits, and the three marks a repository name carries,
+ *  every other byte becoming an underscore and a component that is nothing but dots
+ *  going the same way, so no derived path can climb out of the cache root or mean
+ *  anything to a shell whatever a manifest wrote as its source. That reduction is many
+ *  to one, and two sources differing only in a byte it folds would otherwise share a
+ *  mirror and each be handed the other's repository. The deciding half is a hash of the
+ *  identity itself, before any folding, appended to the last component: the readable
+ *  part names the mirror for a person reading the cache, and the hash is what makes it
+ *  one source's and no other's. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import home
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+/** The directory every mirror sits under: DAWN_CACHE when it names one, and
+ *  ~/.dawn/cache otherwise. The empty string means this machine has nowhere to keep a
+ *  cache, which is not a fault: the fetch simply goes to the remote. */
+export func dawn_cache_root() -> string {
+    named: string = env("DAWN_CACHE")
+    if str_len(named) > 0 {
+        return named
+    }
+    free(named)
+    where: string = env("HOME")
+    if str_len(where) == 0 {
+        free(where)
+        return copy_string("")
+    }
+    out: string = path_join(where, ".dawn/cache")
+    free(where)
+    return out
+}
+
+/** Whether c may stand in a mirror path as itself: a letter, a digit, and the three
+ *  marks a repository name commonly carries. */
+func plain_byte(c: char) -> bool {
+    if c >= 48 && c <= 57 { return true }
+    if c >= 97 && c <= 122 { return true }
+    if c >= 65 && c <= 90 { return true }
+    if c == 46 { return true }
+    if c == 45 { return true }
+    if c == 95 { return true }
+    return false
+}
+
+/** One path component with every byte a mirror path may not carry replaced by an
+ *  underscore. A component that is nothing but dots, "." and ".." among them, would
+ *  stand still or climb in a directory walk rather than name anything, so its dots go
+ *  the same way and the component keeps its length and its distinctness. */
+func safe_part(part: string) -> string {
+    n: int64 = str_len(part)
+    mut all_dots: bool = n > 0
+    mut i: int64 = 0
+    while i < n {
+        if part[i] != 46 {
+            all_dots = false
+        }
+        i = i + 1
+    }
+    b: *StringBuilder = alloc(sb_new())
+    mut j: int64 = 0
+    while j < n {
+        c: char = part[j]
+        if all_dots {
+            sb_push_char(b, 95)
+        } else if plain_byte(c) {
+            sb_push_char(b, c)
+        } else {
+            sb_push_char(b, 95)
+        }
+        j = j + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** The URL with its scheme and any user before the host taken off, so what is left is
+ *  the host and the path under it. A git@host:owner/repo source spells the boundary
+ *  with a colon rather than a slash, so that one colon becomes the separator and the
+ *  form shares its mirror with the https spelling of the same repository. A user or a
+ *  token written into the URL is dropped rather than sanitized, since it names who is
+ *  asking and not what is being asked for. */
+func url_tail(url: string) -> string {
+    if starts_with(url, "git@") {
+        body: string = substring(url, 4, str_len(url))
+        cut: int64 = str_find(body, ":")
+        if cut > 0 {
+            head: string = substring(body, 0, cut)
+            rest: string = substring(body, cut + 1, str_len(body))
+            out: string = head + "/" + rest
+            free(head)
+            free(rest)
+            free(body)
+            return out
+        }
+        return body
+    }
+    mut body: string = substring(url, 0, str_len(url))
+    cut: int64 = str_find(body, "://")
+    if cut > 0 {
+        rest: string = substring(body, cut + 3, str_len(body))
+        free(body)
+        body = rest
+    }
+    slash: int64 = str_find(body, "/")
+    at: int64 = str_find(body, "@")
+    if at >= 0 {
+        if slash < 0 || at < slash {
+            rest: string = substring(body, at + 1, str_len(body))
+            free(body)
+            body = rest
+        }
+    }
+    return body
+}
+
+/** The tail with the trailing separators and the .git a clone URL may carry taken off,
+ *  so the one this file appends is the only one a mirror path holds. */
+func drop_git_suffix(tail: string) -> string {
+    mut n: int64 = str_len(tail)
+    mut cutting: bool = n > 0
+    while cutting {
+        if tail[n - 1] == 47 {
+            n = n - 1
+            cutting = n > 0
+        } else {
+            cutting = false
+        }
+    }
+    head: string = substring(tail, 0, n)
+    if ends_with(head, ".git") {
+        out: string = substring(head, 0, str_len(head) - 4)
+        free(head)
+        return out
+    }
+    return head
+}
+
+/** What a source is, apart from how it was spelled: the host and the path under it,
+ *  with no scheme, no user, and no .git. Two spellings of one repository reduce to one
+ *  of these and so to one mirror. */
+func canonical(url: string) -> string {
+    tail: string = url_tail(url)
+    out: string = drop_git_suffix(tail)
+    free(tail)
+    return out
+}
+
+/** The eight hex digits that stand for an identity, the low half of the string hash's
+ *  word. It rides on the last component of a mirror path, so two sources the sanitizer
+ *  folds together are still two mirrors. */
+func identity_mark(canon: string) -> string {
+    hex: string = int_to_hex16(hash(canon))
+    out: string = substring(hex, 10, 18)
+    free(hex)
+    return out
+}
+
+/** The path under the cache root that mirrors this URL, without the .git the caller
+ *  appends. Every component is sanitized and every empty one dropped, and the hash of
+ *  the unfolded identity closes it, so the result is a plain relative path that belongs
+ *  to exactly one source, or the empty string when the URL held nothing nameable. */
+func cache_key(url: string) -> string {
+    trimmed: string = canonical(url)
+    parts: *Vector<string> = str_split(trimmed, "/")
+    b: *StringBuilder = alloc(sb_new())
+    mut wrote: int64 = 0
+    mut i: int64 = 0
+    while i < vec_len(parts) {
+        one: string = vec_get(parts, i)
+        if str_len(one) > 0 {
+            safe: string = safe_part(one)
+            if str_len(safe) > 0 {
+                if wrote > 0 {
+                    sb_push_char(b, 47)
+                }
+                sb_push(b, safe)
+                wrote = wrote + 1
+            }
+            free(safe)
+        }
+        i = i + 1
+    }
+    if wrote > 0 {
+        mark: string = identity_mark(trimmed)
+        sb_push_char(b, 45)
+        sb_push(b, mark)
+        free(mark)
+    }
+    free(trimmed)
+    while vec_len(parts) > 0 {
+        s: string = vec_take(parts, vec_len(parts) - 1)
+        free(s)
+    }
+    vec_free(parts)
+    free(parts)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Where this machine mirrors url, or the empty string when there is no cache to
+ *  mirror it into. The result is a fresh heap string the caller owns. */
+export func dawn_mirror_path(url: string) -> string {
+    root: string = dawn_cache_root()
+    if str_len(root) == 0 {
+        free(root)
+        return copy_string("")
+    }
+    key: string = cache_key(url)
+    if str_len(key) == 0 {
+        free(root)
+        free(key)
+        return copy_string("")
+    }
+    base: string = path_join(root, key)
+    free(root)
+    free(key)
+    out: string = base + ".git"
+    free(base)
+    return out
+}

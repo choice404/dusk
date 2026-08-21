@@ -12,6 +12,12 @@
  *  second get quiet and offline. dawn update is this same pass with the lock ignored
  *  for one alias or for all of them, which is the only way a pin ever moves.
  *
+ *  What reaches a source goes through this machine's mirror of it, which dawncache
+ *  keeps: a repository is cloned from the network once per machine and out of that
+ *  mirror every time after, so a package this machine has already seen is fetched again
+ *  with no network at all. The mirror is an optimization, so a fetch it cannot serve
+ *  falls back to asking the remote directly and the pass reads the same either way.
+ *
  *  Two kinds of file are written, at different moments. Each checkout is stamped as it
  *  lands, since the stamp is what says which commit that tree holds and a tree with no
  *  stamp is a tree dawn cannot vouch for. dawn.lock is written once, at the end, only
@@ -39,15 +45,20 @@
 @import dawnout
 @import dawnpkg
 @import dawngit
+@import dawncache
 @import dawnres
 
 /** A ref resolved to the commit a checkout will be put at. from_lock records where
  *  the commit came from, since a checkout that fails at a commit the lock supplied
- *  has a different fix from one that fails at a commit the remote just named. */
+ *  has a different fix from one that fails at a commit the remote just named.
+ *  cache_ok is false once the cache has faulted over this source, so the checkout that
+ *  follows goes straight to the remote rather than asking a mirror that has just said
+ *  it cannot be kept and reporting the same fault twice. */
 struct Settled {
     ok: bool,
     commit: string,
     from_lock: bool,
+    cache_ok: bool,
 }
 
 func copy_string(s: string) -> string {
@@ -95,14 +106,23 @@ func push_requires(queue: *Vector<*DawnWant>, m: *Manifest, origin: string, from
     }
 }
 
-/** The commit this claim resolves to, from the lock when it still applies and from
- *  the remote otherwise. A failure has already been reported when ok is false. */
+/** The commit this claim resolves to: the lock when its pin still applies, then this
+ *  machine's mirror of the source, then the remote itself. The mirror answering is what
+ *  lets a second project, or a machine with no connection at all, resolve a ref the
+ *  machine has already seen; an update asks the remote first, since moving a pin is the
+ *  one thing a stale mirror must not decide. A failure has already been reported when
+ *  ok is false. */
 func settle(w: *DawnWant, l: *Lock, url: string, scratch: string, force_all: bool, force_alias: string) -> Settled {
-    if !forced(force_all, force_alias, (*w).alias) {
+    must_fetch: bool = forced(force_all, force_alias, (*w).alias)
+    if !must_fetch {
         pinned: string = locked_commit(l, w)
         if str_len(pinned) > 0 {
-            return Settled { ok: true, commit: pinned, from_lock: true }
+            return Settled { ok: true, commit: pinned, from_lock: true, cache_ok: true }
         }
+    }
+    c: DawnCached = dawn_cache_commit(scratch, url, (*w).alias, (*w).ref, must_fetch)
+    if str_len(c.commit) > 0 {
+        return Settled { ok: true, commit: c.commit, from_lock: false, cache_ok: c.usable }
     }
     rr: DawnRef = dawn_git_resolve(scratch, url, (*w).ref)
     if !rr.ok {
@@ -111,47 +131,82 @@ func settle(w: *DawnWant, l: *Lock, url: string, scratch: string, force_all: boo
         free(msg)
         dawn_detail(rr.detail)
         dawn_ref_free(rr)
-        return Settled { ok: false, commit: "", from_lock: false }
+        return Settled { ok: false, commit: "", from_lock: false, cache_ok: c.usable }
     }
     out: string = copy_string(rr.commit)
     dawn_ref_free(rr)
-    return Settled { ok: true, commit: out, from_lock: false }
+    return Settled { ok: true, commit: out, from_lock: false, cache_ok: c.usable }
 }
 
-/** Puts the dependency on disk at commit and stamps what landed. A checkout already
- *  holding the commit is left alone, so a second get touches no remote and rewrites
- *  no working tree; its stamp is written again all the same, which costs nothing and
- *  repairs a stamp whose ref text drifted from the manifest. */
-func place(m: *Manifest, w: *DawnWant, commit: string, from_lock: bool, url: string, scratch: string) -> int32 {
+/** Puts the dependency on disk at commit, out of this machine's mirror when it holds
+ *  the commit and off the remote when it does not. Either way the checkout replaces its
+ *  directory rather than updating it, so a clone that died leaves no tree at all. */
+func fetch_into(w: *DawnWant, commit: string, from_lock: bool, url: string, scratch: string, dir: string, cache_ok: bool) -> int32 {
+    if cache_ok {
+        if dawn_cache_checkout(scratch, url, (*w).alias, commit, dir) {
+            return 0
+        }
+    }
+    c: DawnClone = dawn_git_checkout(scratch, url, (*w).ref, commit, dir)
+    if !c.ok {
+        mut msg: string = "cannot check out '" + (*w).ref + "' of '" + (*w).source + "' for '" + (*w).alias + "'"
+        if from_lock {
+            msg += "; dawn.lock pins commit " + commit + ", so run dawn update " + (*w).alias + " to resolve the ref again"
+        }
+        dawn_fail(msg)
+        free(msg)
+        dawn_detail(c.detail)
+        dawn_clone_free(c)
+        return 1
+    }
+    dawn_clone_free(c)
+    return 0
+}
+
+/** Puts the dependency on disk at commit and stamps what landed. A checkout that is
+ *  already the commit is left alone, so a second get touches no remote and rewrites no
+ *  working tree; its stamp is written again all the same, which costs nothing and
+ *  repairs a stamp whose ref text drifted from the manifest.
+ *
+ *  What "already the commit" means is read off the tree and not off the stamp alone. A
+ *  stamp is a claim dawn wrote, and a directory it names can be moved to another commit,
+ *  edited, gutted, or replaced by something that is no repository at all, none of which
+ *  changes the file that vouches for it. So the checkout itself is asked, locally,
+ *  which commit it is at and whether anything under it has changed, and a tree that
+ *  does not answer with the commit it is stamped for is taken as no checkout and
+ *  replaced. A build reads the same three files a fetch left behind, so a tree the
+ *  fetch would not vouch for is not one a build should compile. */
+func place(m: *Manifest, w: *DawnWant, commit: string, from_lock: bool, url: string, scratch: string, cache_ok: bool) -> int32 {
     dir: string = dep_dir(m, (*w).alias)
     st: Stamp = stamp_read(dir)
-    mut have: bool = false
+    mut stamped: bool = false
     if st.ok {
         if str_eq(st.commit, commit) {
-            have = true
+            stamped = true
         }
     }
     stamp_free(st)
+    mut have: bool = false
+    if stamped {
+        have = dawn_git_intact(scratch, dir, commit)
+    }
     if have {
         dawn_note("dawn: cached ", (*w).alias)
     } else {
-        note: string = (*w).alias + " from " + url
-        dawn_note("dawn: fetching ", note)
-        free(note)
-        c: DawnClone = dawn_git_checkout(scratch, url, (*w).ref, commit, dir)
-        if !c.ok {
-            mut msg: string = "cannot check out '" + (*w).ref + "' of '" + (*w).source + "' for '" + (*w).alias + "'"
-            if from_lock {
-                msg += "; dawn.lock pins commit " + commit + ", so run dawn update " + (*w).alias + " to resolve the ref again"
-            }
-            dawn_fail(msg)
-            free(msg)
-            dawn_detail(c.detail)
-            dawn_clone_free(c)
-            free(dir)
-            return 1
+        // A tree that is stamped for this commit and did not answer for it is one the
+        // fetch replaces rather than one it never had, and the line says which.
+        if stamped {
+            dawn_note("dawn: refreshing ", (*w).alias)
+        } else {
+            note: string = (*w).alias + " from " + url
+            dawn_note("dawn: fetching ", note)
+            free(note)
         }
-        dawn_clone_free(c)
+        fcode: int32 = fetch_into(w, commit, from_lock, url, scratch, dir, cache_ok)
+        if fcode != 0 {
+            free(dir)
+            return fcode
+        }
     }
     sp: string = stamp_path(dir)
     text: string = stamp_text((*w).source, (*w).ref, commit)
@@ -203,7 +258,7 @@ func admit(m: *Manifest, l: *Lock, w: *DawnWant, queue: *Vector<*DawnWant>, deps
         free(url)
         return 1
     }
-    pcode: int32 = place(m, w, s.commit, s.from_lock, url, scratch)
+    pcode: int32 = place(m, w, s.commit, s.from_lock, url, scratch, s.cache_ok)
     free(url)
     if pcode != 0 {
         free(s.commit)

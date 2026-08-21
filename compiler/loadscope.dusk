@@ -1,0 +1,537 @@
+/** loadscope: what a file may spell bare, read off the load.
+ *
+ *  Three layers make one file's scope. Its own package: every file of a package reaches
+ *  every sibling's export, renamed or not, with no import between them. Its own imports: a
+ *  dependency's export answers here only because this file asked for that package. And the
+ *  standard library, reachable from anywhere, with one cut that matters, since a std module
+ *  only a dependency imported is in the program without the project ever having reached for
+ *  it and must not quietly answer a name the project scoped to a package.
+ *
+ *  This file holds the records the loader fills as it walks, the tables those records are
+ *  folded into once the walk is done, and the sentences a name no layer settles earns. The
+ *  rewrite itself is in loadrename. */
+
+@paradigm procedural
+
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.os
+@import std.functional.maybe
+@import ast
+@import diag
+@import loadns
+
+func new_set() -> *Map<string, int64> {
+    return alloc(map_new())
+}
+
+func new_text_map() -> *Map<string, string> {
+    return alloc(map_new())
+}
+
+/** One import a file resolved, kept for the questions asked after the load: which package
+ *  scope a qualified call through this prefix folds into, which bare names this import
+ *  puts in the importing file's scope, and which file it reached, so the standard library
+ *  the project itself reaches can be told from the standard library a dependency pulled in
+ *  for its own use. mod_ns is the module path the import named, absent for the quoted git
+ *  form which names no module. suffix is the package scope of the file it resolved to,
+ *  empty for the project and the standard library. moving is that file's exports the
+ *  rename moved and fixed the ones it could not; a leaf import contributes only the one
+ *  symbol it named. target is the index of the resolved file's record, or -1 when the file
+ *  never registered. */
+export struct ImportRes {
+    mod_ns: string,
+    has_mod_ns: bool,
+    suffix: string,
+    has_leaf: bool,
+    leaf: string,
+    moving: *Map<string, int64>,
+    fixed: *Map<string, int64>,
+    target: int64,
+}
+
+/** One file in the merged module. The item range is where its declarations landed, which
+ *  is contiguous because the loader appends one file at a time; the expression and type
+ *  ranges are the same span over the two arenas, and they are what the coverage check
+ *  reads. suffix is the file's package scope and moving and fixed its own exports, all
+ *  empty for the project and the standard library. priv is the per file suffix privatize
+ *  gave its unexported declarations, kept so an alias spelled like one of them is caught.
+ *  requires is the alias set of the file's package, which is what tells a package this
+ *  file could import from one it would have to declare first. */
+export struct FileMeta {
+    disp: string,
+    suffix: string,
+    priv: string,
+    is_std: bool,
+    requires: *Map<string, int64>,
+    moving: *Map<string, int64>,
+    fixed: *Map<string, int64>,
+    items_lo: int64,
+    items_hi: int64,
+    exprs_lo: int64,
+    exprs_hi: int64,
+    types_lo: int64,
+    types_hi: int64,
+    imports: *Vector<ImportRes>,
+}
+
+
+/** One resolved import, recorded against the file that wrote it. */
+export func import_res(mod_ns: string, has_mod_ns: bool, suffix: string, has_leaf: bool, leaf: string, moving: *Map<string, int64>, fixed: *Map<string, int64>, target: int64) -> ImportRes {
+    return ImportRes { mod_ns: mod_ns, has_mod_ns: has_mod_ns, suffix: suffix, has_leaf: has_leaf, leaf: leaf, moving: moving, fixed: fixed, target: target }
+}
+
+/** One registered file's record, with its arena ranges already taken. The import list
+ *  starts empty and the loader fills it as that file's imports resolve, which happens
+ *  after the record is made because the worklist reaches a file's imports later. */
+export func file_meta(disp: string, suffix: string, priv: string, is_std: bool, requires: *Map<string, int64>, moving: *Map<string, int64>, fixed: *Map<string, int64>, items_lo: int64, items_hi: int64, exprs_lo: int64, exprs_hi: int64, types_lo: int64, types_hi: int64) -> *FileMeta {
+    imports: *Vector<ImportRes> = alloc(vec_new())
+    return alloc(FileMeta {
+        disp: disp,
+        suffix: suffix,
+        priv: priv,
+        is_std: is_std,
+        requires: requires,
+        moving: moving,
+        fixed: fixed,
+        items_lo: items_lo,
+        items_hi: items_hi,
+        exprs_lo: exprs_lo,
+        exprs_hi: exprs_hi,
+        types_lo: types_lo,
+        types_hi: types_hi,
+        imports: imports,
+    })
+}
+
+/** Records one import against the file that wrote it. */
+export func file_meta_import(m: *FileMeta, r: ImportRes) -> void {
+    vec_push((*m).imports, r)
+}
+
+
+// The fault a name this file never imported earns, raised where it was spelled. The name
+// is in the program because some package exports it, and it is not in scope here because
+// this file did not import that package, which is what the message says to do.
+export func load_import_it_msg(name: string, alias: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is exported by package '")
+    sb_push(b, alias)
+    sb_push(b, "'; import it")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The same fault where the import is not even available: the package that exports the
+// name is in the build because something else pulled it in, and this file's own package
+// never asked for it, so there is a manifest line to write before there is an import.
+export func load_require_first_msg(name: string, alias: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is exported by package '")
+    sb_push(b, alias)
+    sb_push(b, "', which this package does not require; add a @require for it, then import it")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The fault a name two of this file's imports both export earns. Neither package owns the
+// bare spelling here, so the reference has to say which one it means, and both are named
+// so the answer is on the line.
+export func load_both_msg(name: string, first: string, second: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is exported by both '")
+    sb_push(b, first)
+    sb_push(b, "' and '")
+    sb_push(b, second)
+    sb_push(b, "'; qualify it")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The fault a name earns when this file imported a package that exports it and something
+// else in the build already declares it bare, a std module only a dependency imported
+// being the shape that raises it. Nothing here can pick one silently: the file asked for
+// the package, and the other declaration is in the program without the file ever having
+// reached for it. Importing the module that declares it, or qualifying the call, says
+// which one is meant.
+export func load_also_declared_msg(name: string, alias: string, where: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is exported by package '")
+    sb_push(b, alias)
+    sb_push(b, "' and declared by '")
+    sb_push(b, where)
+    sb_push(b, "'; import one or qualify it")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The fault a dependency earns for spelling a name only the project declares. A package
+// is compiled into the program that requires it, so the project's names are physically
+// there, but the dependency was written without them and cannot depend on them.
+export func load_project_only_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is declared by the project, not by this package; a package cannot reach it")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The fault an alias earns for being spelled like a suffix the loader gives a file's own
+// private names. The two would produce one symbol from two declarations, so the alias is
+// refused rather than left to surface as a duplicate definition at a position in someone
+// else's file.
+func alias_clash_msg(alias: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "alias '")
+    sb_push(b, alias)
+    sb_push(b, "' collides with an internal name; choose another alias")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The fault the coverage check raises when the walk did not reach a name bearing node in
+// a range it renamed. Nothing a program can write produces this: it means the walker has
+// a gap and some reference kept a spelling the declaration no longer has.
+export func load_missed_msg(kind: string, name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "internal: the import rename walk did not reach the ")
+    sb_push(b, kind)
+    sb_push(b, " '")
+    sb_push(b, name)
+    sb_push(b, "'; report this")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+
+/** Adds every key of src to dst. */
+export func load_add_keys(dst: *Map<string, int64>, src: *Map<string, int64>) -> void {
+    keys: *Vector<string> = map_keys(src)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        map_put(dst, vec_get(keys, i), 1)
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+}
+
+// The bucket a key names in a table of sets, made empty on first use.
+func bucket(t: *Map<string, *Map<string, int64>>, key: string) -> *Map<string, int64> {
+    if !map_has(t, key) {
+        map_put(t, key, new_set())
+    }
+    empty: *Map<string, int64> = new_set()
+    return unwrap_or(map_get(t, key), empty)
+}
+
+/** The set a key names in a table of sets, empty when the table has nothing under it. */
+export func load_lookup_set(t: *Map<string, *Map<string, int64>>, key: string) -> *Map<string, int64> {
+    if map_has(t, key) {
+        empty: *Map<string, int64> = new_set()
+        return unwrap_or(map_get(t, key), empty)
+    }
+    return new_set()
+}
+
+/** The three per package tables the scope rules read: every renamed export of a package,
+ *  every export it could not rename, and every top level name its files declare, each
+ *  keyed by the package's suffix. Files of one package share one suffix, so these are what
+ *  make a package one scope, and the third is what makes a package's own declaration beat
+ *  an export it imported from somewhere else. */
+export struct PkgTables {
+    moving: *Map<string, *Map<string, int64>>,
+    fixed: *Map<string, *Map<string, int64>>,
+    globals: *Map<string, *Map<string, int64>>,
+}
+
+/** The three per package tables the scope rules read, keyed by the package suffix. */
+export func load_package_tables(a: *Ast, metas: *Vector<*FileMeta>) -> PkgTables {
+    moving: *Map<string, *Map<string, int64>> = alloc(map_new())
+    fixed: *Map<string, *Map<string, int64>> = alloc(map_new())
+    globals: *Map<string, *Map<string, int64>> = alloc(map_new())
+    mut i: int64 = 0
+    while i < vec_len(metas) {
+        m: *FileMeta = vec_get(metas, i)
+        s: string = (*m).suffix
+        if str_len(s) > 0 {
+            load_add_keys(bucket(moving, s), (*m).moving)
+            load_add_keys(bucket(fixed, s), (*m).fixed)
+            load_range_globals(a, bucket(globals, s), (*m).items_lo, (*m).items_hi)
+        }
+        i = i + 1
+    }
+    return PkgTables { moving: moving, fixed: fixed, globals: globals }
+}
+
+// Which package first exported each renamed name, over the whole program. A file that
+// spells one of these bare and has not imported the package is told which one to import.
+/** The scoped spelling of one name: the bare name, two underscores, and the package suffix,
+ *  exactly the spelling privatize gave the declaration. */
+export func load_scoped_name(name: string, suffix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, "__")
+    sb_push(b, suffix)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The fault one package earns for exporting a name twice, once under a spelling a package
+// scope moves and once under one it cannot. The two land as two symbols and every file
+// that reaches the name gets whichever of them its own scope answers with, which is a
+// program whose meaning follows the shape of its imports rather than its declarations.
+func exported_twice_msg(name: string, alias: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is exported twice by package '")
+    sb_push(b, alias)
+    sb_push(b, "', once as export \"C\"; a package exports a name once")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The spans of every top level declaration in one item range whose name is either spelling
+// of a bare name: the name as written, and the name with the package suffix the rename
+// gave it.
+func decl_spans(a: *Ast, lo: int64, hi: int64, bare: string, scoped: string, out: *Vector<int64>) -> void {
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = lo
+    while i < hi {
+        it: ItemNode = vec_get(items, i)
+        mut nm: string = ""
+        mut dlo: int64 = -1
+        mut dhi: int64 = -1
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            nm = ast_name(a, f.name)
+            dlo = f.lo
+            dhi = f.hi
+        } else if it.kind == ik_struct() {
+            st: StructNode = vec_get((*a).structs, it.id)
+            nm = ast_name(a, st.name)
+            dlo = st.lo
+            dhi = st.hi
+        } else if it.kind == ik_enum() {
+            en: EnumNode = vec_get((*a).enums, it.id)
+            nm = ast_name(a, en.name)
+            dlo = en.lo
+            dhi = en.hi
+        } else if it.kind == ik_interface() {
+            ifc: InterfaceNode = vec_get((*a).interfaces, it.id)
+            nm = ast_name(a, ifc.name)
+            dlo = ifc.lo
+            dhi = ifc.hi
+        }
+        if dlo >= 0 {
+            mut hit: bool = str_eq(nm, bare)
+            if str_eq(nm, scoped) { hit = true }
+            if hit {
+                vec_push(out, dlo)
+                vec_push(out, dhi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+/** Reports a package that exports one name twice, once under a spelling its package scope
+ *  moves and once under one it cannot, an `export \"C\"` function beside an ordinary one being
+ *  the shape that reaches here. Renaming only one of the two leaves two symbols behind one
+ *  word, and which one a file reaches then follows that file's imports; 1.14.0 called this
+ *  a duplicate definition and it stays refused. The fault is raised at the second
+ *  declaration, in the order the loader registered the package's files. */
+export func load_check_export_dups(a: *Ast, metas: *Vector<*FileMeta>, pt: PkgTables, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
+    suffixes: *Vector<string> = map_keys(pt.moving)
+    mut i: int64 = 0
+    while i < vec_len(suffixes) {
+        sfx: string = vec_get(suffixes, i)
+        moving: *Map<string, int64> = load_lookup_set(pt.moving, sfx)
+        fixed: *Map<string, int64> = load_lookup_set(pt.fixed, sfx)
+        names: *Vector<string> = map_keys(moving)
+        mut j: int64 = 0
+        while j < vec_len(names) {
+            n: string = vec_get(names, j)
+            if map_has(fixed, n) {
+                spans: *Vector<int64> = alloc(vec_new())
+                scoped: string = load_scoped_name(n, sfx)
+                mut k: int64 = 0
+                while k < vec_len(metas) {
+                    m: *FileMeta = vec_get(metas, k)
+                    if str_eq((*m).suffix, sfx) {
+                        decl_spans(a, (*m).items_lo, (*m).items_hi, n, scoped, spans)
+                    }
+                    k = k + 1
+                }
+                if vec_len(spans) >= 4 {
+                    vec_push(errors, load_diag_global(files, vec_get(spans, 2), vec_get(spans, 3), exported_twice_msg(n, sfx)))
+                } else {
+                    vec_push(errors, load_diag_plain(sfx, exported_twice_msg(n, sfx)))
+                }
+            }
+            j = j + 1
+        }
+        vec_free(names)
+        free(names)
+        i = i + 1
+    }
+    vec_free(suffixes)
+    free(suffixes)
+}
+
+/** Which package first exported each renamed name, over the whole program. */
+export func load_dep_export_owners(metas: *Vector<*FileMeta>) -> *Map<string, string> {
+    out: *Map<string, string> = new_text_map()
+    mut i: int64 = 0
+    while i < vec_len(metas) {
+        m: *FileMeta = vec_get(metas, i)
+        s: string = (*m).suffix
+        if str_len(s) > 0 {
+            keys: *Vector<string> = map_keys((*m).moving)
+            mut j: int64 = 0
+            while j < vec_len(keys) {
+                k: string = vec_get(keys, j)
+                if !map_has(out, k) {
+                    map_put(out, k, s)
+                }
+                j = j + 1
+            }
+            vec_free(keys)
+            free(keys)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+/** The two pkg 0 name sets kept apart. app is every top level name the project's own files
+ *  declare, which is one scope every project file reaches with no import between them.
+ *  std_all is everything the standard library contributes to this program, a reading of
+ *  the whole build rather than of any one scope: a std module only a dependency imported
+ *  is still in the program and a bare name it declares is still what a reference reaches.
+ *  That is why a package export claiming a std name is refused rather than resolved either
+ *  way, in a dependency's file as much as in the project's. A std module nothing imported
+ *  contributes nothing here, so a package export whose name this program's standard
+ *  library never spells is renamed and answers as it should. */
+export struct RootTables {
+    app: *Map<string, int64>,
+    std_all: *Map<string, int64>,
+}
+
+/** The project's own declarations and everything the standard library brought in. */
+export func load_root_tables(a: *Ast, metas: *Vector<*FileMeta>) -> RootTables {
+    app: *Map<string, int64> = new_set()
+    std_all: *Map<string, int64> = new_set()
+    mut i: int64 = 0
+    while i < vec_len(metas) {
+        m: *FileMeta = vec_get(metas, i)
+        if (*m).is_std {
+            load_range_globals(a, std_all, (*m).items_lo, (*m).items_hi)
+        } else if str_len((*m).suffix) == 0 {
+            load_range_globals(a, app, (*m).items_lo, (*m).items_hi)
+        }
+        i = i + 1
+    }
+    return RootTables { app: app, std_all: std_all }
+}
+
+// Reports an alias spelled exactly like the suffix the loader gives some file's private
+// names. Both would produce one symbol from two declarations, so it is named here, once
+// per alias, rather than left to surface as a duplicate definition somewhere else.
+/** Reports an alias spelled exactly like the suffix the loader gives some file's private
+ *  names. Both would produce one symbol from two declarations, so it is named here, once
+ *  per alias, rather than left to surface as a duplicate definition in a file that has
+ *  nothing to do with either. Only an alias some package actually contributed a file under
+ *  can collide, so an alias declared and never imported is left alone. The fault is raised
+ *  at the @require line that chose the alias when the manifest reading is at hand, and
+ *  against the file whose private names it collides with otherwise. */
+export func load_check_alias_clash(metas: *Vector<*FileMeta>, alias_file: *Map<string, string>, alias_line: *Map<string, int64>, errors: *Vector<LoadDiag>) -> void {
+    loaded: *Map<string, int64> = new_set()
+    mut z: int64 = 0
+    while z < vec_len(metas) {
+        mz: *FileMeta = vec_get(metas, z)
+        if str_len((*mz).suffix) > 0 {
+            map_put(loaded, (*mz).suffix, 1)
+        }
+        z = z + 1
+    }
+    seen: *Map<string, int64> = new_set()
+    mut i: int64 = 0
+    while i < vec_len(metas) {
+        m: *FileMeta = vec_get(metas, i)
+        p: string = (*m).priv
+        if str_len(p) > 0 {
+            if map_has(loaded, p) {
+                if !map_has(seen, p) {
+                    map_put(seen, p, 1)
+                    if map_has(alias_file, p) {
+                        vec_push(errors, load_diag_at(unwrap_or(map_get(alias_file, p), ""), unwrap_or(map_get(alias_line, p), 0), alias_clash_msg(p)))
+                    } else {
+                        vec_push(errors, load_diag_plain((*m).disp, alias_clash_msg(p)))
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Which file declares each name of the standard library, so a collision message can name
+// the module to import. First declaration wins, which is the one a bare use would have
+// reached.
+/** Which standard library file declares each of its names, so a collision message can name the module to import. */
+export func load_std_declarers(a: *Ast, metas: *Vector<*FileMeta>) -> *Map<string, string> {
+    out: *Map<string, string> = new_text_map()
+    mut i: int64 = 0
+    while i < vec_len(metas) {
+        m: *FileMeta = vec_get(metas, i)
+        if (*m).is_std {
+            one: *Map<string, int64> = new_set()
+            load_range_globals(a, one, (*m).items_lo, (*m).items_hi)
+            keys: *Vector<string> = map_keys(one)
+            mut j: int64 = 0
+            while j < vec_len(keys) {
+                k: string = vec_get(keys, j)
+                if !map_has(out, k) {
+                    map_put(out, k, (*m).disp)
+                }
+                j = j + 1
+            }
+            vec_free(keys)
+            free(keys)
+        }
+        i = i + 1
+    }
+    return out
+}
+

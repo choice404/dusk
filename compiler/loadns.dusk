@@ -1,9 +1,12 @@
-/** loadns: the export and namespace bookkeeping the merged module is built from. Two
- *  tables come out of a load: which names each file exports, which is what tells a
+/** loadns: the export and namespace bookkeeping the merged module is built from. Three
+ *  readings come out of a load. Which names each file exports, which is what tells a
  *  qualified call reaching into a module from one reaching a name that module keeps to
- *  itself, and which dotted prefixes name a module at all, which is what tells
- *  json.parse() as a call into an imported module from json.parse() as a method call on
- *  a value named json. The fold in loadfold consumes both. */
+ *  itself. Which dotted prefixes name a module at all, which is what tells json.parse() as
+ *  a call into an imported module from json.parse() as a method call on a value named
+ *  json. And, since 1.14.1, which of a file's exports an import scoped rename may move and
+ *  which keep their bare spelling wherever they came from, which is the split the rename
+ *  in privatize and the collision check in loaderpkg divide the work along. The fold in
+ *  loadfold and the rename in loadrename consume all three. */
 
 @paradigm procedural
 
@@ -12,6 +15,7 @@
 @import std.map
 @import std.functional.maybe
 @import ast
+@import resolveexpr
 
 func new_set() -> *Map<string, int64> {
     return alloc(map_new())
@@ -127,4 +131,174 @@ export func load_extend_ns_exports(ns_exports: *Map<string, *Map<string, int64>>
         map_put(ns_exports, modpath, target)
         copy_export_keys(target, ex)
     }
+}
+
+/** Whether a name carries a dot, the spelling a monad member is declared under. */
+export func load_name_has_dot(s: string) -> bool {
+    mut i: int64 = 0
+    while s[i] != 0 {
+        if s[i] == 46 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/** Whether an exported function keeps its bare name through an import scoped rename.
+ *  Three shapes cannot move. An `export "C"` function is the symbol a C host calls, so
+ *  its name is the one thing a package cannot scope. A monad member is declared inside
+ *  a `monad Type { ... }` block and lands under the spelling `Type.bind`, which the do
+ *  desugar rebuilds from the keyword long after the loader has finished, so a suffix on
+ *  it would name a function nothing calls. And the bare `bind` and `unit` pair is the
+ *  generic do protocol that same desugar reaches for when a `do { ... }` names no monad.
+ *  Everything else an exported item spells is renamed per package. */
+export func load_export_is_fixed(a: *Ast, f: FuncNode) -> bool {
+    if f.abi_export {
+        return true
+    }
+    n: string = ast_name(a, f.name)
+    if load_name_is_fixed(n) {
+        return true
+    }
+    // A monad member is declared inside a `monad Type { ... }` block and lands under the
+    // spelling `Type.member`, which the do desugar rebuilds from the keyword long after
+    // the loader has finished, so a package suffix on it would name a function nothing
+    // calls. Keeping it to the file it was written in is a different question: a member
+    // the block did not export stays private, suffix and all, and a `do` over it from
+    // another file is the undefined name it should be.
+    return load_name_has_dot(n)
+}
+
+/** Whether a name keeps its bare spelling through every rename, the file suffix privatize
+ *  gives an unexported declaration and the package suffix an import scope gives an export
+ *  alike. Two shapes qualify. The bare `bind` and `unit` pair is the generic do protocol,
+ *  which the desugar reaches for by that spelling long after the loader has finished, so a
+ *  suffix on either leaves a `do { ... }` in the declaring file itself calling a name
+ *  nothing answers to. And a builtin name, the cast widths among them, is refused at the
+ *  declaration by resolve, which only ever sees the spelling the declaration kept: a
+ *  dependency exporting a `print` or a `free` renamed to `print__evil` would slip past the
+ *  reservation and then answer every bare `print` and `free` in the file that imported it,
+ *  with the `free` becoming a leak. */
+export func load_name_is_fixed(n: string) -> bool {
+    if str_eq(n, "bind") {
+        return true
+    }
+    if str_eq(n, "unit") {
+        return true
+    }
+    return is_builtin_name(n)
+}
+
+/** One file's exports split by whether an import scoped rename may move them. The first
+ *  set is what a package suffix is appended to, so it is what a file reaches only through
+ *  its own imports; the second keeps its bare spelling whatever package it came from, so
+ *  it stays what two packages cannot both export. Both are keyed by the bare name and
+ *  read before privatize renames anything, which is what keeps the loader's tables and
+ *  the rename itself agreeing on one set. */
+export func load_export_split(a: *Ast) -> (*Map<string, int64>, *Map<string, int64>) {
+    moving: *Map<string, int64> = new_set()
+    fixed: *Map<string, int64> = new_set()
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            if f.exported {
+                if load_export_is_fixed(a, f) {
+                    map_put(fixed, ast_name(a, f.name), 1)
+                } else {
+                    map_put(moving, ast_name(a, f.name), 1)
+                }
+            }
+        } else if it.kind == ik_struct() {
+            s: StructNode = vec_get((*a).structs, it.id)
+            if s.exported {
+                if load_name_is_fixed(ast_name(a, s.name)) {
+                    map_put(fixed, ast_name(a, s.name), 1)
+                } else {
+                    map_put(moving, ast_name(a, s.name), 1)
+                }
+            }
+        } else if it.kind == ik_enum() {
+            e: EnumNode = vec_get((*a).enums, it.id)
+            if e.exported {
+                if load_name_is_fixed(ast_name(a, e.name)) {
+                    map_put(fixed, ast_name(a, e.name), 1)
+                } else {
+                    map_put(moving, ast_name(a, e.name), 1)
+                }
+            }
+        } else if it.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            if iface.exported {
+                if load_name_is_fixed(ast_name(a, iface.name)) {
+                    map_put(fixed, ast_name(a, iface.name), 1)
+                } else {
+                    map_put(moving, ast_name(a, iface.name), 1)
+                }
+            }
+        }
+        i = i + 1
+    }
+    return (moving, fixed)
+}
+
+/** Every name one file's item range declares at the top level, read after privatize has
+ *  renamed what it renames, so these are the spellings that actually reach the merged
+ *  module. An enum contributes its variants too, the way resolve's own global collection
+ *  does, since a bare variant name is reached without naming its enum. This is what a
+ *  file's own declarations beat an imported package's export with. */
+export func load_range_globals(a: *Ast, out: *Map<string, int64>, lo: int64, hi: int64) -> void {
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = lo
+    while i < hi {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_func() {
+            f: FuncNode = vec_get((*a).funcs, it.id)
+            map_put(out, ast_name(a, f.name), 1)
+        } else if it.kind == ik_struct() {
+            s: StructNode = vec_get((*a).structs, it.id)
+            map_put(out, ast_name(a, s.name), 1)
+        } else if it.kind == ik_enum() {
+            e: EnumNode = vec_get((*a).enums, it.id)
+            map_put(out, ast_name(a, e.name), 1)
+            mut j: int64 = 0
+            while j < e.variants_len {
+                v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + j))
+                map_put(out, ast_name(a, v.name), 1)
+                j = j + 1
+            }
+        } else if it.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            map_put(out, ast_name(a, iface.name), 1)
+        } else if it.kind == ik_foreign() {
+            fb: ForeignNode = vec_get((*a).foreigns, it.id)
+            mut k: int64 = 0
+            while k < fb.funcs_len {
+                ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
+                map_put(out, ast_name(a, ff.name), 1)
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+/** Every dotted prefix of every module path a file imports, the set a qualified call's
+ *  prefix is matched against. This is the file's own reading, taken straight from the
+ *  import directives before anything is resolved, which is what privatize needs: it runs
+ *  as the file is parsed, long before the loader has walked those imports and built the
+ *  program wide namespace table. An import naming a file plus a leaf symbol contributes
+ *  the leaf as a prefix too, which can only ever leave one more name unrenamed. */
+export func load_import_prefixes(a: *Ast) -> *Map<string, int64> {
+    out: *Map<string, int64> = new_set()
+    imps: *Vector<int64> = (*a).imports
+    mut i: int64 = 0
+    while i < vec_len(imps) {
+        load_add_namespace(out, ast_name(a, vec_get(imps, i)))
+        i = i + 1
+    }
+    return out
 }

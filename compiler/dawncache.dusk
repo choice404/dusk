@@ -1,0 +1,426 @@
+/** dawncache: the bare mirror a fetch goes through, and the layout those mirrors sit
+ *  in. A source is cloned once per machine rather than once per project. The first
+ *  fetch of a repository makes a bare mirror of it under the cache, and every fetch
+ *  after that, in this project or in any other, clones the working tree out of that
+ *  mirror instead of off the network. Two projects requiring one package cost one
+ *  trip to the remote, and a machine that has already seen a repository can fetch it
+ *  again with no network at all, which is what makes an offline get work.
+ *
+ *  The cache lives at DAWN_CACHE, and under ~/.dawn/cache when that names nothing.
+ *  Each source takes one directory named after the URL it came from,
+ *  <host>/<owner>/<repo>.git, so a mirror is findable by hand and two spellings of one
+ *  repository, an https URL and a git@ one, share it. A file:// source is a local
+ *  repository and takes the sanitized form of its path under the same root, and every
+ *  byte a URL uses for its own structure becomes an underscore, so a mirror path can
+ *  neither climb out of the cache nor mean anything to a shell.
+ *
+ *  The cache is an optimization and never a gate. Every fault it can raise, a cache
+ *  that cannot be written, a mirror that will not update, a clone out of one that
+ *  fails, is reported and then stepped around: the fetch falls back to asking the
+ *  remote directly, which is what dawn did before there was a cache. A broken cache
+ *  costs a slower fetch and never a failed one.
+ *
+ *  Two rules keep a mirror from meaning something the remote would not. A ref resolves
+ *  through the tag and branch namespaces alone, exactly where ls-remote is asked to
+ *  look, so no manifest can pin a lock line to a revision only a local repository can
+ *  name. And a mirror is written under a lock of its own, so two fetches running at once
+ *  on one machine take turns over it rather than writing it between them.
+ *
+ *  One thing is traded for the offline path. A get whose ref already resolves inside
+ *  the mirror does not ask the remote, so a tag that moved after this machine last
+ *  fetched it resolves to what the mirror holds. dawn update always fetches first and
+ *  is the only command that moves a pin, so the stale answer never reaches a lock line
+ *  that was not already being rewritten. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import home
+@import source
+@import dawnout
+@import dawngit
+@import dawncachepath
+@import dawncachelock
+
+/** A mirror that is on disk and usable. synced is true when this call already asked
+ *  the remote, so a caller that comes up empty knows a second fetch would answer with
+ *  exactly what it just read. */
+struct Mirror {
+    ok: bool,
+    synced: bool,
+}
+
+/** One cache fault: the sentence naming the alias and the source it could not be kept
+ *  for, then git's own account of it. It is printed and not returned, since the caller
+ *  goes on to the remote and the command itself has not failed. */
+func cache_fault(alias: string, url: string, detail: string) -> void {
+    msg: string = "cannot update the cache for '" + alias + "' at " + url
+    dawn_warn(msg)
+    free(msg)
+    dawn_detail(detail)
+}
+
+/** Whether a directory holds a git repository dawn made. A mirror is bare, so its HEAD
+ *  sits at the top; a directory a failed clone left behind carries none and is treated
+ *  as no mirror at all. */
+func mirror_exists(mpath: string) -> bool {
+    h: string = path_join(mpath, "HEAD")
+    ok: bool = source_is_file(h)
+    free(h)
+    return ok
+}
+
+/** Whether the mirror already names this URL as its origin. Two URLs that sanitize to
+ *  one path would otherwise share a mirror holding the wrong repository, so the URL
+ *  the mirror was made from is read back rather than assumed. */
+func mirror_names(scratch: string, mpath: string, url: string) -> bool {
+    qm: string = quote(mpath)
+    line: string = "git -C " + qm + " config --get remote.origin.url"
+    free(qm)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        dawn_shell_free(r)
+        return false
+    }
+    have: string = trim(r.out)
+    dawn_shell_free(r)
+    same: bool = str_eq(have, url)
+    free(have)
+    return same
+}
+
+/** Points an existing mirror at url, for the mirror whose origin drifted from what the
+ *  manifest asks for. */
+func mirror_repoint(scratch: string, mpath: string, url: string, alias: string) -> bool {
+    qm: string = quote(mpath)
+    qu: string = quote(url)
+    line: string = "git -C " + qm + " remote set-url origin " + qu
+    free(qm)
+    free(qu)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        cache_fault(alias, url, r.err)
+        dawn_shell_free(r)
+        return false
+    }
+    dawn_shell_free(r)
+    return true
+}
+
+/** Brings a mirror up to what the remote holds right now, refs and objects both, and
+ *  drops the refs the remote no longer has. */
+func mirror_update(scratch: string, mpath: string, url: string, alias: string) -> bool {
+    qm: string = quote(mpath)
+    line: string = "git -C " + qm + " fetch --quiet --prune"
+    free(qm)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        cache_fault(alias, url, r.err)
+        dawn_shell_free(r)
+        return false
+    }
+    dawn_shell_free(r)
+    return true
+}
+
+/** Makes the mirror when there is none, and makes sure the one that is there names
+ *  this URL. must_fetch asks the remote even when the mirror could answer without it,
+ *  which is what an update is. */
+func mirror_ready(scratch: string, mpath: string, url: string, alias: string, must_fetch: bool) -> Mirror {
+    if !mirror_exists(mpath) {
+        dawn_rm_rf(mpath)
+        qu: string = quote(url)
+        qm: string = quote(mpath)
+        line: string = "git clone --mirror --quiet " + qu + " " + qm
+        free(qu)
+        free(qm)
+        r: DawnShell = dawn_shell(scratch, line)
+        free(line)
+        if r.code != 0 {
+            cache_fault(alias, url, r.err)
+            dawn_shell_free(r)
+            dawn_rm_rf(mpath)
+            return Mirror { ok: false, synced: false }
+        }
+        dawn_shell_free(r)
+        return Mirror { ok: true, synced: true }
+    }
+    mut want_fetch: bool = must_fetch
+    if !mirror_names(scratch, mpath, url) {
+        if !mirror_repoint(scratch, mpath, url, alias) {
+            return Mirror { ok: false, synced: false }
+        }
+        want_fetch = true
+    }
+    if want_fetch {
+        if !mirror_update(scratch, mpath, url, alias) {
+            return Mirror { ok: false, synced: false }
+        }
+        return Mirror { ok: true, synced: true }
+    }
+    return Mirror { ok: true, synced: false }
+}
+
+/** The commit a revision names inside the mirror, or the empty string when it names
+ *  none. Every revision that reaches here is built from a full object id git itself
+ *  produced, never from a manifest's text, so the revision grammar this reads has
+ *  nothing of a manifest's in it; --end-of-options closes the option list before it all
+ *  the same. The answer must be a full object name and a commit, so an id that peels to
+ *  no commit resolves to nothing rather than to something no checkout can be put at. */
+func mirror_object(scratch: string, mpath: string, rev: string) -> string {
+    qm: string = quote(mpath)
+    qr: string = quote(rev)
+    line: string = "git -C " + qm + " rev-parse --verify --quiet --end-of-options " + qr
+    free(qm)
+    free(qr)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        dawn_shell_free(r)
+        return ""
+    }
+    out: string = trim(r.out)
+    dawn_shell_free(r)
+    if !dawn_is_hex40(out) {
+        if str_len(out) > 0 { free(out) }
+        return ""
+    }
+    return out
+}
+
+/** The object a ref of exactly this name holds in the mirror, or the empty string when
+ *  the mirror has no such ref. This is asked with show-ref rather than rev-parse because
+ *  the two read their argument in different languages: rev-parse reads git's revision
+ *  grammar, where a name is only the start of an expression and refs/heads/main~1,
+ *  refs/tags/v1^0, and an abbreviated object id all resolve, while show-ref --verify
+ *  reads a ref name and nothing else and refuses every one of those. A manifest's text
+ *  reaches here, so it is read as the ref it claims to be. */
+func mirror_ref(scratch: string, mpath: string, refname: string) -> string {
+    qm: string = quote(mpath)
+    qr: string = quote(refname)
+    line: string = "git -C " + qm + " show-ref --verify --end-of-options " + qr
+    free(qm)
+    free(qr)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        dawn_shell_free(r)
+        return ""
+    }
+    body: string = trim(r.out)
+    dawn_shell_free(r)
+    cut: int64 = str_find(body, " ")
+    if cut < 0 {
+        free(body)
+        return ""
+    }
+    out: string = substring(body, 0, cut)
+    free(body)
+    if !dawn_is_hex40(out) {
+        free(out)
+        return ""
+    }
+    return out
+}
+
+/** The commit a mirror resolves a manifest's ref to, looking exactly where the remote
+ *  is asked to look and nowhere else: the tag of that name, then the branch of that
+ *  name. That restriction is the whole point of this function rather than an
+ *  optimization of it. A mirror is a local repository and git's revision grammar reads
+ *  far past a ref inside one, so an unqualified name there resolves a HEAD, a main~1, a
+ *  v1.0.0^0, and an abbreviated object id, none of which ls-remote will answer; a mirror
+ *  that took them would pin a lock line to whatever this machine happened to hold, and
+ *  the same manifest on a machine with no cache would be refused. Asking for a ref by
+ *  name means the mirror and the remote answer one ref with one commit, or both refuse
+ *  it. Stricter than the remote is safe, since a mirror that finds nothing falls through
+ *  to asking the remote; looser is what must not happen.
+ *
+ *  What a ref names is then peeled to a commit, which is the peeled line ls-remote is
+ *  asked for on an annotated tag and the ref's own line on a lightweight tag or a
+ *  branch. The object id peeled is git's own answer and not a manifest's text. */
+func mirror_rev(scratch: string, mpath: string, ref: string) -> string {
+    tagname: string = "refs/tags/" + ref
+    tag: string = mirror_ref(scratch, mpath, tagname)
+    free(tagname)
+    if str_len(tag) > 0 {
+        out: string = peel_to_commit(scratch, mpath, tag)
+        free(tag)
+        if str_len(out) > 0 {
+            return out
+        }
+    }
+    headname: string = "refs/heads/" + ref
+    head: string = mirror_ref(scratch, mpath, headname)
+    free(headname)
+    if str_len(head) == 0 {
+        return ""
+    }
+    out: string = peel_to_commit(scratch, mpath, head)
+    free(head)
+    return out
+}
+
+/** The commit an object id stands for: itself for a commit, and what it points at for
+ *  an annotated tag. An object that is no commit and peels to none, a tag on a tree
+ *  among them, answers with the empty string rather than a pin no checkout could use. */
+func peel_to_commit(scratch: string, mpath: string, oid: string) -> string {
+    if !dawn_is_hex40(oid) {
+        return ""
+    }
+    want: string = oid + "^{commit}"
+    out: string = mirror_object(scratch, mpath, want)
+    free(want)
+    return out
+}
+
+/** Whether the mirror already holds this commit as an object of its own. The commit is
+ *  a full object name the lock or a resolve produced, never a manifest's ref, so it is
+ *  asked for as the object it is rather than through a ref namespace. */
+func mirror_holds(scratch: string, mpath: string, commit: string) -> bool {
+    if !dawn_is_hex40(commit) {
+        return false
+    }
+    want: string = commit + "^{commit}"
+    got: string = mirror_object(scratch, mpath, want)
+    free(want)
+    held: bool = str_len(got) > 0
+    if held { free(got) }
+    return held
+}
+
+/** What the cache had to say about a ref. commit is the answer and is empty when there
+ *  was none, and is a fresh heap string the caller owns when there was. usable is false
+ *  only when the cache itself faulted, which it has already reported: the caller goes
+ *  to the remote either way, and a caller that is about to ask the cache a second
+ *  question in the same breath knows not to bother. */
+export struct DawnCached {
+    usable: bool,
+    commit: string,
+}
+
+/** The commit ref names, read through this machine's mirror of url. An empty answer
+ *  means the cache had none, for want of a cache, a mirror, or the ref, and the caller
+ *  then asks the remote itself. must_fetch updates the mirror before it is read, which
+ *  is what dawn update wants; without it a ref the mirror already resolves costs no
+ *  network at all. */
+func commit_locked(scratch: string, mpath: string, url: string, alias: string, ref: string, must_fetch: bool) -> DawnCached {
+    m: Mirror = mirror_ready(scratch, mpath, url, alias, must_fetch)
+    if !m.ok {
+        return DawnCached { usable: false, commit: "" }
+    }
+    mut got: string = mirror_rev(scratch, mpath, ref)
+    if str_len(got) == 0 && !m.synced {
+        if !mirror_update(scratch, mpath, url, alias) {
+            return DawnCached { usable: false, commit: "" }
+        }
+        got = mirror_rev(scratch, mpath, ref)
+    }
+    return DawnCached { usable: true, commit: got }
+}
+
+export func dawn_cache_commit(scratch: string, url: string, alias: string, ref: string, must_fetch: bool) -> DawnCached {
+    if dawn_is_hex40(ref) {
+        return DawnCached { usable: true, commit: "" }
+    }
+    mpath: string = dawn_mirror_path(url)
+    if str_len(mpath) == 0 {
+        free(mpath)
+        return DawnCached { usable: true, commit: "" }
+    }
+    if !dawn_mirror_lock(scratch, mpath) {
+        free(mpath)
+        return DawnCached { usable: false, commit: "" }
+    }
+    out: DawnCached = commit_locked(scratch, mpath, url, alias, ref, must_fetch)
+    dawn_mirror_unlock(mpath)
+    free(mpath)
+    return out
+}
+
+/** Clones the working tree out of the mirror and puts it at commit. The checkout's
+ *  origin is set to the source itself rather than left naming this machine's mirror,
+ *  so a person who runs git inside a fetched package talks to the repository the
+ *  manifest names. */
+func clone_from_mirror(scratch: string, mpath: string, url: string, alias: string, commit: string, dir: string) -> bool {
+    if !dawn_rm_rf(dir) {
+        return false
+    }
+    qm: string = quote(mpath)
+    qd: string = quote(dir)
+    line: string = "git clone --quiet " + qm + " " + qd
+    free(qm)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        cache_fault(alias, url, r.err)
+        dawn_shell_free(r)
+        dawn_rm_rf(dir)
+        free(qd)
+        return false
+    }
+    dawn_shell_free(r)
+    qu: string = quote(url)
+    point: string = "git -C " + qd + " remote set-url origin " + qu
+    free(qu)
+    p: DawnShell = dawn_shell(scratch, point)
+    free(point)
+    free(qd)
+    if p.code != 0 {
+        cache_fault(alias, url, p.err)
+        dawn_shell_free(p)
+        dawn_rm_rf(dir)
+        return false
+    }
+    dawn_shell_free(p)
+    d: DawnShell = dawn_git_detach(scratch, dir, commit)
+    if d.code != 0 {
+        cache_fault(alias, url, d.err)
+        dawn_shell_free(d)
+        dawn_rm_rf(dir)
+        return false
+    }
+    dawn_shell_free(d)
+    return true
+}
+
+/** Puts a working tree at dir holding exactly commit, out of this machine's mirror of
+ *  url. False means the cache could not do it and the caller clones from the remote
+ *  instead; the directory is left cleared rather than half written either way. */
+func checkout_locked(scratch: string, mpath: string, url: string, alias: string, commit: string, dir: string) -> bool {
+    m: Mirror = mirror_ready(scratch, mpath, url, alias, false)
+    if !m.ok {
+        return false
+    }
+    mut have: bool = mirror_holds(scratch, mpath, commit)
+    if !have && !m.synced {
+        if mirror_update(scratch, mpath, url, alias) {
+            have = mirror_holds(scratch, mpath, commit)
+        }
+    }
+    if !have {
+        return false
+    }
+    return clone_from_mirror(scratch, mpath, url, alias, commit, dir)
+}
+
+export func dawn_cache_checkout(scratch: string, url: string, alias: string, commit: string, dir: string) -> bool {
+    mpath: string = dawn_mirror_path(url)
+    if str_len(mpath) == 0 {
+        free(mpath)
+        return false
+    }
+    if !dawn_mirror_lock(scratch, mpath) {
+        free(mpath)
+        return false
+    }
+    ok: bool = checkout_locked(scratch, mpath, url, alias, commit, dir)
+    dawn_mirror_unlock(mpath)
+    free(mpath)
+    return ok
+}

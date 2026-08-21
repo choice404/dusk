@@ -168,8 +168,10 @@ single run line. The special's name selects its handler.
   holding a `package.dawn` manifest. Each of these builds its own git fixture
   repositories and its own consuming project under `target/testrun/dawn_<name>/`,
   requires the fixtures through a `file://` URL so no check touches the network, and
-  reads the result off disk. An unrecognized special name, `dawn_*` or not, fails
-  rather than passing as a no op.
+  reads the result off disk. `DAWN_CACHE` is pointed at `dawncache` inside that same
+  work directory, which is emptied before the check runs, so the tool's bare mirror
+  cache never reads or writes the machine's own and every check starts cold. An
+  unrecognized special name, `dawn_*` or not, fails rather than passing as a no op.
 
 The tool under test is `DAWN_BIN`, or the file named `dawn` beside the compiler under
 test when `DAWN_BIN` is unset, since the suite builds both into the same output
@@ -193,6 +195,9 @@ DUSK_HOME=$PWD target/dusk-out/dusk build compiler/dawn.dusk
 | `dawn_init_layout` | `dawn init <name>` writes a manifest declaring `@package <name>`, a `.gitignore` holding `dawn_modules/`, and a root that runs and prints a line naming the package |
 | `dawn_ir_parity` | one fetched project copied into two directories emits byte identical IR, the required module's fault locations are spelled under `dawn_modules/<alias>/` relative to the manifest rather than by absolute path, and `dusk build` with no file argument takes the manifest root |
 | `dawn_alias_collision` | one alias claimed by two different sources, one of them through a transitive require, is refused by that alias instead of resolved to whichever arrived last |
+| `dawn_cache_offline_get` | the first fetch of a source leaves a bare mirror under `DAWN_CACHE`, and with the fixture repository moved out of reach a second project requiring that same source still fetches, locks, and runs, which only the mirror can answer |
+| `dawn_tree_prints_graph` | `dawn tree` prints the package and its version, then every requirement at one step of indentation per level with the source, the ref, and the first twelve of the locked commit, marking a deleted checkout `(not fetched)` and a requirement no lock line pins `(not locked)` |
+| `dawn_tampered_checkout_refreshed` | a checkout edited under the tool, detached at another commit, or deleted outright is replaced by the next `get`, which says `refreshing <alias>` rather than reporting the tree as cached on the strength of its stamp |
 
 A refusal is read on stderr, where dawn and the compiler both put their error lines,
 and its exit code must be non zero. Two of the legs above are the compiler's side of

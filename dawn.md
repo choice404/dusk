@@ -4,13 +4,14 @@ Dawn is the package tool for the dusk language. A project is a directory holding
 
 ## Usage
 
-Dawn has seven commands. Each one runs from inside the project, the directory holding `package.dawn` or any directory under it.
+Dawn has eight commands. Each one runs from inside the project, the directory holding `package.dawn` or any directory under it.
 
 ```sh
 dawn init [name]              # write package.dawn, a hello root, and a .gitignore line
 dawn get                      # resolve every requirement, clone it, write dawn.lock
 dawn add <alias> <src> <ref>  # add a requirement to the manifest, then fetch it
 dawn update [alias]           # re-resolve one requirement, or all of them
+dawn tree                     # print the dependency graph the lock describes
 dawn build                    # build the manifest's root with dusk
 dawn run [args...]            # build it and run it, forwarding the args
 dawn version                  # print the tool version
@@ -62,6 +63,23 @@ dawn update          # re-resolve all of them
 
 Naming something the manifest does not require is `no package named 'nope' is required here`.
 
+See what the project already has.
+
+```sh
+dawn tree
+```
+
+`tree` reads `package.dawn`, `dawn.lock`, and the stamp inside each checkout, and touches nothing else, so it answers the same on a machine with no connection. The root prints as its package and version, and every requirement under it as the alias, the source, the reference, and the first twelve characters of the commit the lock pinned, one step of indentation per level of the graph.
+
+```text
+app 0.1.0
+  mid file:///tmp/mid.git v0.1.0 4c1b90e7a5f6
+    leaf file:///tmp/leaf.git v0.1.0 8e14b7a03f95
+  ghost github.com/a/ghost v9.9.9 (not locked)
+```
+
+Depth comes from reading each fetched package's own manifest, so what a dependency requires prints under it even though every checkout is a sibling in the flat `dawn_modules`, and an alias already printed with its requirements under it is not expanded a second time, so a diamond prints once at depth and a cycle cannot run away. A requirement no lock line pins prints `(not locked)` where the commit would be, and one the lock pins with nothing on disk holding it prints `(not fetched)` after it. Both are states a build refuses, and each names the fetch that clears it, so `tree` reports them rather than failing on them and exits 0 whatever the project turns out to look like.
+
 Build and run.
 
 ```sh
@@ -72,7 +90,7 @@ dawn run input.json --verbose
 Both take the root from the manifest's `@root`, so neither takes a file argument, and running either outside a project is `no package.dawn found from /tmp/x upward; run dawn init`. A build prints its artifact the way the compiler does, `[dawn] target/dawn-out/app`. `run` forwards its trailing arguments to the program's `argv`. Both are thin: they check the lock and the checkouts, then hand the root to the dusk compiler, which is the same pipeline `dusk build` and `dusk run` walk. Once a project is fetched you can skip dawn entirely and call `dusk build` yourself, since the compiler reads the manifest, the lock, and `dawn_modules/` on its own.
 
 ```sh
-dawn version    # dawn 1.14.0
+dawn version    # dawn 1.14.1
 ```
 
 Dawn's version is the toolchain's version. `dusk version` and `dawn version` print the same number from this release forward, since the two tools are built from one tree and a mismatch would mean nothing good.
@@ -93,7 +111,7 @@ The manifest is a directive file. Every line is blank, a comment, or one `@direc
 
 - `@package` names the package. It is what `dusk doc` prints, what dawn reports, and the header stem `dusk build --lib` writes, so it is letters, digits, `_`, and `-` and nothing else: `@package value '../evil' is not a package name; use letters, digits, _ and -`. It is not what a dependent spells at an import; that is the alias, and the alias belongs to whoever depends on you.
 - `@version` is informational. Dawn suggests it as the tag when you cut a release. Nothing parses it as semver, because nothing resolves against it.
-- `@dusk` is the oldest compiler the package builds with, major and minor compared numerically: an older compiler refuses the build by name, `package.dawn asks for dusk 1.99, this is 1.14.0`, rather than failing somewhere in the middle of it. The floor is a major and a minor and nothing else, so `@dusk 1.14.0` is `@dusk value '1.14.0' is not a version like 1.14`. Only the root project's floor is checked; a dependency's own is read and not enforced.
+- `@dusk` is the oldest compiler the package builds with, major and minor compared numerically: an older compiler refuses the build by name, `package.dawn asks for dusk 1.99, this is 1.14.1`, rather than failing somewhere in the middle of it. The floor is a major and a minor and nothing else, so `@dusk 1.14.0` is `@dusk value '1.14.0' is not a version like 1.14`. A dependency's own floor is checked too since 1.14.1, when its alias is first reached and under its own manifest, `dawn_modules/greet/package.dawn: package.dawn asks for dusk 9.9, this is 1.14.1`, since a package pins the language surface it was written against and reading it as if it were this one's is the worse answer.
 - `@root` is the entry file for a program, or the file whose exports the package presents to a dependent, resolved against the manifest's directory. Leave it out and the root is `main.dusk`, then `src/main.dusk`; with none of the three there it is `no root file; add @root, or put the entry at main.dusk or src/main.dusk`, and a path that names nothing is `@root names 'src/gone.dusk', which is not a file`.
 - `@require` declares one dependency per line: an alias, a source, and a reference. The alias is an identifier, `'9bad' is not a valid alias; an alias is an identifier like my_pkg`, `std` and `dawn_modules` are reserved, and one alias twice in one manifest is `duplicate alias 'x'`. The source is `host/owner/repo`, where https is assumed, or a full URL beginning `https://`, `git@`, `ssh://`, or `file://`. The reference is a tag, a branch, or a commit.
 - `@link` and `@csource` are the package wide form of the two source file directives. They fold into the build's one deduplicated link line in manifest order, after the runtime's own C sources, and a `@csource` path resolves against the manifest that declares it, so a dependency's C source is found wherever its checkout landed. One C source named twice, by a manifest and by a source file, compiles once, deduplicated on the real path.
@@ -143,7 +161,17 @@ myproject/
       src/maybe.dusk
 ```
 
-The `.dawn` stamp is how a build tells a checkout that matches the lock from one that does not, without running git to ask: a missing directory is `dependency 'maybe' is not fetched; run dawn get` and a stamp that disagrees with the lock is `dependency 'maybe' does not match dawn.lock; run dawn get`. The stamp is a contract, not a hint, so a checkout that is stamped but gutted underneath is taken at its word and fails on what is missing, `dependency 'util' has no root file; add @root to its package.dawn`.
+The `.dawn` stamp is how a build tells a checkout that matches the lock from one that does not, without running git to ask: a missing directory is `dependency 'maybe' is not fetched; run dawn get` and a stamp that disagrees with the lock is `dependency 'maybe' does not match dawn.lock; run dawn get`. The stamp is a contract, not a hint, so a checkout that is stamped but gutted underneath is taken at its word by a build and fails on what is missing, `dependency 'util' has no root file; add @root to its package.dawn`.
+
+A fetch asks more than the stamp. Since 1.14.1 a `get` that finds a stamp naming the commit it wants puts two local questions to the tree itself, `rev-parse HEAD` for the commit it holds and `status --porcelain --ignored=matching` for whether anything under it changed, the one line naming the stamp as untracked excepted since the stamp belongs to no commit of the package's own. An ignored file counts as a change, since a file a package's own `.gitignore` matches is still a file the build would compile, and a tamper hiding behind an ignore rule is the one most worth catching. A tree detached at another commit, edited by hand, gutted, or no repository at all fails that pair and is replaced, and the line says which happened.
+
+```text
+dawn: fetching maybe from https://github.com/choice404/dusk-maybe
+dawn: refreshing util
+dawn: cached leaf
+```
+
+So a checkout you edited to try something out is not silently compiled into the next build, and `dawn get` is the command that puts it back. Both questions are local, so asking them of every dependency on every `get` costs no network.
 
 Flat means a dependency of a dependency is a sibling, not a nesting, and that has consequences worth stating. A source and reference pair two dependents share is fetched once. The other three cases are errors that name both manifests that asked, so you can see who wants what.
 
@@ -159,11 +187,38 @@ dawn: 'github.com/a/p' at 'v1.0.0' is required under two aliases, 'p' by package
 
 The middle one is the version conflict, and the fix in it is the whole policy: a `@require` in the root manifest wins over what a dependency asked for, so you settle a diamond by pinning it yourself. The alias namespace is one namespace across the whole graph in this release.
 
+## The mirror cache
+
+A source is cloned from the network once per machine, not once per project. Since 1.14.1 the first fetch of a repository leaves a bare mirror of it under the cache root, and every fetch after that, in this project or in any other, clones its working tree out of that mirror. Two projects requiring one package cost one trip to the remote, and a machine that has already seen a repository can fetch it again with no network at all.
+
+The cache root is `$DAWN_CACHE` when that names one and `~/.dawn/cache` otherwise, and each source takes one directory under it named after the source it came from.
+
+```text
+~/.dawn/cache/
+  github.com/choice404/dusk-maybe-6b1f4c02.git
+```
+
+One source takes one path, and the path is derived rather than trusted. What a source is, apart from how it was spelled, is the host and the path under it: the scheme comes off, a user or a token written before the host is dropped rather than filed away, and the `.git` a clone URL may carry is taken off so the one dawn appends is the only one. That identity is what `https://github.com/a/b`, `https://github.com/a/b.git`, and `git@github.com:a/b` all reduce to, so the three share one mirror. The directories under the root are the sanitized components of it, each keeping its letters, digits, and the three marks a repository name carries while every other byte, a `:port` among them, becomes an underscore, and a component that is nothing but dots goes the same way, so no derived path can climb out of the cache root or mean anything to a shell. Eight hex digits of that identity's hash close the last component, which is what keeps two genuinely different sources the sanitizer would fold onto one name in two mirrors. A `file://` source is a local repository and goes through the same reduction.
+
+A `get` puts its questions to the mirror before it reaches the network, and it asks the mirror exactly what it would ask the remote. A reference is looked for as a ref of that name and nothing else, `show-ref --verify` on `refs/tags/<ref>` and then on `refs/heads/<ref>`, and whatever that names is peeled to a commit, which is the answer `ls-remote`'s peeled line gives. The restriction is the point rather than an optimization of it. A mirror is a local repository and git's revision grammar reads far past a ref inside one, so an unqualified name there would also resolve `HEAD`, `main~1`, `v1.0.0^0`, and an abbreviated object id, none of which `ls-remote` will answer, and taking one of those would pin a lock line to whatever this machine happened to hold while the same manifest was refused on a machine with no cache. A mirror may be stricter than the remote, since a miss falls through to asking the remote, and it must never be looser, so what a lock records never depends on the state of a cache. A miss updates the mirror with `fetch --prune` and asks again before the remote gets a question of its own. The checkout is a clone out of the mirror with its `origin` pointed back at the source afterward, so running git inside a fetched package talks to the repository the manifest names rather than to this machine's cache. `dawn update` always fetches first, since moving a pin is the one thing a stale mirror must not decide.
+
+The cache is shared by every project on the machine, so a mirror is locked while it is being written. The lock is a directory beside it, `<mirror>.lock`, since making a directory either succeeds or fails and no filesystem lets two processes make one twice, and it is held across a whole cache call rather than around each git command inside one. A process that cannot make it waits and tries again. A lock nothing has touched in two minutes belonged to a process that died holding it and is taken rather than waited on forever, and a process that waits out those two minutes without taking or making one gives up and fetches from the remote, which is the answer whenever the cache cannot serve. Two terminals, or two jobs of a build system, cannot write one mirror between them.
+
+The cache is an optimization and never a gate. A cache root that cannot be written, a mirror that will not clone or update, and a clone out of one that fails are each reported and then stepped around, the fetch falling back to asking the remote directly, which is what dawn did before there was a cache.
+
+```text
+dawn: cannot update the cache for 'maybe' at https://github.com/choice404/dusk-maybe
+```
+
+That line is a fault the command survives: it goes to stderr like any other, the fetch carries on, and the exit code is whatever the fetch itself earned. A broken cache costs a slower fetch and never a failed one, and a machine with no `HOME` and no `DAWN_CACHE` has nowhere to keep mirrors and simply fetches every time.
+
+One thing is traded for the offline path. A reference the mirror already resolves is not put to the remote, so a tag moved since this machine last fetched it resolves to what the mirror holds. `dawn update` fetches first and is the only command that moves a pin, so the stale answer never reaches a lock line that was not already being rewritten, and a reference this machine has never seen goes to the network like any other.
+
 ## Offline, and where the network is
 
 Dawn shells out to the system `git` and does nothing else over the network. There is no dawn server, no index, no API, and no HTTP client of its own. An SSH source is git's business, so an `ssh://` or `git@` requirement uses whatever keys and agent git already uses, and a `file://` source is a local repository, which is how the test suite exercises the whole fetch path with no network at all.
 
-The order git is driven in is fixed. A reference resolves through `ls-remote`, a peeled tag first so an annotated tag lands on the commit it points at rather than on the tag object, then a plain tag, then a branch; a 40 hex reference is already a commit and skips the round trip. The fetch is `clone --depth 1 --branch` for a named reference and a full clone for a commit, then a detached checkout at the resolved commit, and a clone that fails is removed and retried as a full clone rather than left half fetched. A failure quotes git's own stderr under dawn's message rather than replacing it with a summary.
+The order git is driven in is fixed, and what follows is the remote path, the one a fetch walks for what the mirror above could not answer. A reference resolves through `ls-remote`, a peeled tag first so an annotated tag lands on the commit it points at rather than on the tag object, then a plain tag, then a branch; a 40 hex reference is already a commit and skips the round trip. The fetch is `clone --depth 1 --branch` for a named reference and a full clone for a commit, then a detached checkout at the resolved commit, and a clone that fails is removed and retried as a full clone rather than left half fetched. A failure quotes git's own stderr under dawn's message rather than replacing it with a summary.
 
 ```text
 dawn: bad source 'not a url' for 'maybe'
@@ -171,7 +226,7 @@ dawn: cannot resolve 'v9.9.9' for 'maybe' at https://github.com/choice404/dusk-m
 dawn: cannot check out 'v0.3.0' of 'github.com/choice404/dusk-maybe' for 'maybe'
 ```
 
-The compiler's side of the line is absolute: `dusk build`, `dusk run`, and `dusk check` read the manifest, the lock, and the checkouts, and never fetch. So a build machine with no network builds a project someone else fetched, and a fetch is a thing you do knowingly by running `dawn get`, `dawn add`, or `dawn update`.
+The compiler's side of the line is absolute: `dusk build`, `dusk run`, and `dusk check` read the manifest, the lock, and the checkouts, and never fetch. `dawn tree` reads the same three files, so the graph is printable on the same machine. A build machine with no network builds a project someone else fetched, and a fetch is a thing you do knowingly by running `dawn get`, `dawn add`, or `dawn update`.
 
 One more property falls out of the layout. A dependency's files register under a manifest relative path, `dawn_modules/<alias>/<path>`, so the fault locations compiled into a program do not carry the absolute path of your checkout, and two machines with the same lock emit identical IR.
 
@@ -185,7 +240,7 @@ A version is a git tag, and dawn does not resolve version ranges. There is no `^
 
 There is no registry. A package is a repository, so publishing is pushing a tag and there is nothing to sign up for and nothing to go down, and the same gaps come with it. There is no integrity check past the commit hash the lock pins, no vendor mode that copies dependencies into your tree, no namespace that stops two people from picking one name, and no way to yank a bad release. The commit pin carries most of that weight, since a repointed tag cannot change your build, and the rest is later work.
 
-Exports are global in this release. Two packages that export the same name collide, and the loader refuses the program and names both files rather than picking one. Import scoped renaming, which lets two packages each keep a name, comes in a later release, and no program that builds today changes meaning when it lands.
+An export belongs to the package that declares it since 1.14.1. A dependency's exported names are renamed `<name>__<alias>` inside its own files, so two packages that both export `parse` coexist, and what a bare name means is decided by the file that writes it: a file spells its own declarations, every other file of the project, the standard library the project reached, and the exports of each dependency it imported, while `maybe.unwrap(x)` reaches a function anywhere with no import at all. The project wins where two of those answer one name, so adding a `@require` cannot change what a name already in your code means. A bare name a file did not import is `'parse' is exported by package 'maybe'; import it`, or `'leaf_tag' is exported by package 'leaf', which this package does not require; add a @require for it, then import it` when the package is in the build only because something else pulled it in. A name two imported packages both export is `'parse' is exported by both 'a' and 'b'; qualify it`, a qualified prefix two packages both answer to in a file that imported neither is `'util' names two modules; import the one this file means`, and a dependency reaching a name only the project declares is `'app_helper' is declared by the project, not by this package; a package cannot reach it`. Some names keep their spelling, since a rename would break what they stand for: an `export "C"` function and a `foreign` declaration, which name C symbols the linker resolves, a struct field, a method, an enum variant, a monad's `bind` and `unit`, and every builtin. Two packages colliding on one of those is still refused with both files on the line.
 
 ## Building dawn
 

@@ -414,8 +414,8 @@ export func path_join(dir: string, name: string) -> string {
  *  and libc's own dirname already owns that one. p is borrowed and this touches no
  *  filesystem.
  *  @param p the path to split
- *  @return the directory part as a fresh heap string the caller owns, or "." when p has no
- *  separator */
+ *  @return the directory part as a fresh heap string the caller owns, or a heap "." when p
+ *  has no separator */
 export func path_dirname(p: string) -> string {
     n: int64 = str_len(p)
     mut last: int64 = -1
@@ -427,7 +427,10 @@ export func path_dirname(p: string) -> string {
         i = i + 1
     }
     if last < 0 {
-        return "."
+        // A heap copy, not the literal: the return is documented owned, and a caller
+        // that frees what it owns would be freeing a constant, which the runtime
+        // aborts on by name.
+        return substring(".", 0, 1)
     }
     return substring(p, 0, last)
 }
@@ -461,7 +464,7 @@ export func path_basename(p: string) -> string {
  *  never leaks in as a false extension. p is borrowed and this touches no filesystem.
  *  @param p the path to inspect
  *  @return the extension without its leading dot as a fresh heap string the caller owns,
- *  or the empty string when there is none */
+ *  or a heap empty string when there is none */
 export func path_extension(p: string) -> string {
     n: int64 = str_len(p)
     mut start: int64 = 0
@@ -481,7 +484,9 @@ export func path_extension(p: string) -> string {
         j = j + 1
     }
     if dot < 0 {
-        return ""
+        // An owned empty string rather than the empty literal, for the same reason
+        // path_dirname's "." is a copy: the caller frees what this hands back.
+        return substring(p, n, n)
     }
     return substring(p, dot + 1, n)
 }

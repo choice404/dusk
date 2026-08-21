@@ -1,0 +1,275 @@
+/** renscope: the state one rename walk carries.
+ *
+ *  A walk needs three things besides the tree: the map from a bare name to the interned
+ *  spelling it becomes, the stack of names the function itself introduced, which is what
+ *  keeps a local from being renamed into a top level declaration, and a sink saying what
+ *  to do besides renaming. privatize's own pass wants nothing from the sink; the loader's
+ *  import scoped pass wants the package scope diagnostics and a record of which name
+ *  bearing nodes the walk actually reached. The walk itself is in privatize. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import diag
+
+/** What the walker does besides renaming. Privatize wants neither half, so it hands a
+ *  quiet sink and every test below folds away. The loader's import scoped pass wants
+ *  both: report turns on the two package scope diagnostics, keyed by the bare name a
+ *  reference spelled so the message is written once and raised at every site, and mark
+ *  records which name bearing arena nodes the walk actually reached, which is what lets
+ *  the loader prove afterwards that it reached them all. */
+export struct RenSink {
+    report: bool,
+    ambiguous: *Map<string, string>,
+    unreachable: *Map<string, string>,
+    files: *Vector<FileSrc>,
+    errors: *Vector<LoadDiag>,
+    mark: bool,
+    seen_expr: *Vector<int64>,
+    seen_type: *Vector<int64>,
+    // Which expression nodes the fold already answered. Folding a.b() rewrites the call
+    // into a bare identifier in place, and that identifier is not a name this file spelled
+    // for the scope to judge: it is a name the qualified form resolved. Judging it again by
+    // spelling refused the very form the ambiguity message tells you to write.
+    folded_at: *Vector<int64>,
+}
+
+/** The rename in progress: the module being walked, the map from a bare name to the
+ *  interned id it becomes, and what to do besides renaming. */
+export struct Renamer {
+    ast: *Ast,
+    names: *Map<string, int64>,
+    // The dotted prefixes that name a module here. An identifier at the root of a
+    // qualified path spells a module rather than a value, so it is left alone however the
+    // map would move it: a package that exports a name spelled like one of its own import
+    // aliases would otherwise have the alias renamed out from under the fold that has not
+    // run yet.
+    ns: *Map<string, int64>,
+    sink: *RenSink,
+}
+
+export func ren_new_set() -> *Map<string, int64> {
+    return alloc(map_new())
+}
+
+func new_text_map() -> *Map<string, string> {
+    return alloc(map_new())
+}
+
+/** A sink that reports nothing and records nothing, the one privatize's own pass uses. */
+export func ren_sink_quiet() -> *RenSink {
+    files: *Vector<FileSrc> = alloc(vec_new())
+    errors: *Vector<LoadDiag> = alloc(vec_new())
+    seen_expr: *Vector<int64> = alloc(vec_new())
+    seen_type: *Vector<int64> = alloc(vec_new())
+    folded_at: *Vector<int64> = alloc(vec_new())
+    return alloc(RenSink {
+        report: false,
+        ambiguous: new_text_map(),
+        unreachable: new_text_map(),
+        files: files,
+        errors: errors,
+        mark: false,
+        seen_expr: seen_expr,
+        seen_type: seen_type,
+        folded_at: folded_at,
+    })
+}
+
+/** A sink that raises a package scope diagnostic at every reference to a name in either
+ *  table and records the arena nodes it walked. ambiguous and unreachable map a bare name
+ *  to the whole rendered message, so the wording lives at one place in loadrename and a
+ *  name spelled ten times is named ten times with one string. */
+export func ren_sink_report(ambiguous: *Map<string, string>, unreachable: *Map<string, string>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>, seen_expr: *Vector<int64>, seen_type: *Vector<int64>, mark: bool, folded_at: *Vector<int64>) -> *RenSink {
+    return alloc(RenSink {
+        report: true,
+        ambiguous: ambiguous,
+        unreachable: unreachable,
+        files: files,
+        errors: errors,
+        mark: mark,
+        seen_expr: seen_expr,
+        seen_type: seen_type,
+        folded_at: folded_at,
+    })
+}
+
+/** A walker over one module with one rename map and one sink. */
+export func renamer_new(a: *Ast, names: *Map<string, int64>, ns: *Map<string, int64>, sink: *RenSink) -> *Renamer {
+    return alloc(Renamer { ast: a, names: names, ns: ns, sink: sink })
+}
+
+// Records that the walk reached one expression node. Only the name bearing kinds are
+// marked, since only those are what the coverage check afterwards looks for.
+export func ren_mark_expr(r: *Renamer, id: int64) -> void {
+    s: *RenSink = (*r).sink
+    if (*s).mark {
+        vec_set((*s).seen_expr, id, 1)
+    }
+}
+
+// Records that the walk reached one named type node.
+export func ren_mark_type(r: *Renamer, id: int64) -> void {
+    s: *RenSink = (*r).sink
+    if (*s).mark {
+        vec_set((*s).seen_type, id, 1)
+    }
+}
+
+// Raises the package scope diagnostic a bare name earns at the site that spelled it. A
+// name reachable from this file has already been renamed and never reaches here; what is
+// left is a name two of this file's imports both export, and a name some package exports
+// that this file does not import. Both messages are built once in loadrename and borrowed
+// here, so a name written ten times reports ten times against one string.
+export func ren_note(r: *Renamer, id: int64, name: int64, lo: int64, hi: int64) -> void {
+    s: *RenSink = (*r).sink
+    if !(*s).report {
+        return
+    }
+    // A node the fold answered is the qualified form's own result, not a bare word this
+    // file wrote, so the scope has nothing left to say about it.
+    fa: *Vector<int64> = (*s).folded_at
+    if id < vec_len(fa) {
+        if vec_get(fa, id) == 1 {
+            return
+        }
+    }
+    n: string = ast_name((*r).ast, name)
+    if map_has((*s).ambiguous, n) {
+        vec_push((*s).errors, load_diag_global((*s).files, lo, hi, unwrap_or(map_get((*s).ambiguous, n), "")))
+        return
+    }
+    if map_has((*s).unreachable, n) {
+        vec_push((*s).errors, load_diag_global((*s).files, lo, hi, unwrap_or(map_get((*s).unreachable, n), "")))
+    }
+}
+
+export func ren_set_add(s: *Map<string, int64>, name: string) -> void {
+    map_put(s, name, 1)
+}
+
+export func ren_set_has(s: *Map<string, int64>, name: string) -> bool {
+    return map_has(s, name)
+}
+
+export func ren_push_scope(bound: *Vector<*Map<string, int64>>) -> *Map<string, int64> {
+    s: *Map<string, int64> = ren_new_set()
+    vec_push(bound, s)
+    return s
+}
+
+export func ren_pop_scope(bound: *Vector<*Map<string, int64>>) -> void {
+    (*bound).len = (*bound).len - 1
+}
+
+export func ren_last_scope(bound: *Vector<*Map<string, int64>>) -> *Map<string, int64> {
+    return vec_get(bound, vec_len(bound) - 1)
+}
+
+export func ren_add_bound(r: *Renamer, bound: *Vector<*Map<string, int64>>, name: int64) -> void {
+    ren_set_add(ren_last_scope(bound), ast_name((*r).ast, name))
+}
+
+export func ren_is_bound(r: *Renamer, bound: *Vector<*Map<string, int64>>, name: int64) -> bool {
+    n: string = ast_name((*r).ast, name)
+    mut i: int64 = 0
+    while i < vec_len(bound) {
+        if ren_set_has(vec_get(bound, i), n) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+export func ren_renamed_id(r: *Renamer, name: int64) -> int64 {
+    n: string = ast_name((*r).ast, name)
+    return unwrap_or(map_get((*r).names, n), -1)
+}
+
+export func ren_maybe_rename_id(r: *Renamer, name: int64) -> int64 {
+    nn: int64 = ren_renamed_id(r, name)
+    if nn >= 0 {
+        return nn
+    }
+    return name
+}
+
+// The dotted spelling of a pure identifier and field path, and whether the expression was
+// one. The same reading the fold makes, kept here because the two have to agree on what a
+// module prefix looks like.
+func ren_flatten(a: *Ast, id: int64) -> (string, bool) {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        return (ast_name(a, e.a), true)
+    }
+    if e.kind == xk_field() {
+        p, ok := ren_flatten(a, e.a)
+        if !ok {
+            return ("", false)
+        }
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, p)
+        sb_push_char(b, 46)
+        sb_push(b, ast_name(a, e.b))
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        return (out, true)
+    }
+    return ("", false)
+}
+
+// The leftmost identifier of a path, the one a local binding shadows.
+func ren_path_root(a: *Ast, id: int64) -> int64 {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        return e.a
+    }
+    if e.kind == xk_field() {
+        return ren_path_root(a, e.a)
+    }
+    return -1
+}
+
+// Records the identifiers of a module path as walked without renaming any of them. The
+// path names a module, and a module is not a value the map may move.
+export func ren_mark_path(r: *Renamer, id: int64) -> void {
+    a: *Ast = (*r).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        ren_mark_expr(r, id)
+        return
+    }
+    if e.kind == xk_field() {
+        ren_mark_path(r, e.a)
+    }
+}
+
+// Whether the base of a field access spells a module this file imports. A module prefix is
+// not a value, so nothing under it is renamed; without this a file of a package that
+// exports a name matching one of its own aliases had the alias rewritten before the fold
+// ever saw it, and the qualified call read as a method call on an undefined name.
+export func ren_is_module_path(r: *Renamer, id: int64, bound: *Vector<*Map<string, int64>>) -> bool {
+    a: *Ast = (*r).ast
+    if map_len((*r).ns) == 0 {
+        return false
+    }
+    prefix, ok := ren_flatten(a, id)
+    if !ok {
+        return false
+    }
+    if !map_has((*r).ns, prefix) {
+        return false
+    }
+    root: int64 = ren_path_root(a, id)
+    if root < 0 {
+        return false
+    }
+    return !ren_is_bound(r, bound, root)
+}
+

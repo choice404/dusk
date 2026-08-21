@@ -3323,7 +3323,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.14.0\n
+out dusk 1.14.1\n
 argv version
 code 0
 ---
@@ -6812,12 +6812,13 @@ mode check_fail
 file tests/dawn/dawnmods/src/main.dusk
 err_has tests/dawn/dawnmods/src/main.dusk: 'dawn_modules.greet.src.greet' imports through dawn_modules; import a dependency through the alias its @require names
 ---
-# Exports are global in 1.14.0, so one name exported by two packages is a program that
-# cannot be built. The file that got there first keeps the name and the fault names both.
-test one_name_exported_by_two_packages_is_refused
-mode check_fail
+# An export belongs to the package that wrote it, so one name exported by a project and
+# by a package it requires is two names. The project's own declaration keeps the bare
+# spelling and the dependency's is reached through the alias the manifest bound.
+test one_name_exported_by_two_packages_resolves_by_scope
+mode run
 file tests/dawn/collide/src/main.dusk
-err_has dawn_modules/greet/src/greet.dusk: 'greet_line' is also exported by 'tests/dawn/collide/src/main.dusk'; two packages cannot export one name
+out mine\ngreetings\n
 ---
 # A @dusk floor this toolchain cannot meet stops the build rather than compiling a source
 # the package says needs a newer language. The refusal names both versions.
@@ -6944,6 +6945,17 @@ file tests/dawn/depbadmanifest/src/main.dusk
 err_has dawn_modules/greet/package.dawn:3: expected a directive
 err_absent tests/dawn/depbadmanifest/dawn_modules
 ---
+# A dependency pinning a language surface this toolchain does not have is refused before
+# a line of it is resolved through, under its own package.dawn and spelled manifest
+# relative. The project's own @dusk floor is read before an import resolves, and this is
+# that same reading one level down, so a checkout written for a newer dusk cannot be
+# compiled as if it were written for this one.
+test a_dependency_asking_for_a_newer_dusk_is_refused
+mode check_fail
+file tests/dawn/depdusktoonew/src/main.dusk
+err_has dawn_modules/greet/package.dawn: package.dawn asks for dusk 9.9, this is 
+err_absent tests/dawn/depdusktoonew/dawn_modules
+---
 # One C file named by package.dawn and by a source file under two different spellings.
 # The dedup key is the file rather than the spelling, so clang compiles it once and the
 # link sees one vendor_tag instead of failing on a duplicate symbol.
@@ -6951,4 +6963,399 @@ test one_c_file_named_by_a_manifest_and_a_source_compiles_once
 mode run
 file tests/dawn/csrcdouble/src/main.dusk
 out 7\n
+---
+# A string literal has no allocation header in front of it, so the generational retire's
+# read of the size word and its bump of the generation word land in read only memory and
+# used to take the process down by signal with nothing named. The runtime tests the
+# pointer against the loaded program image before it touches the block and aborts by
+# name at the free itself. The heap string freed one line earlier is the precision half
+# of the record: the guard names the constant and leaves a real allocation alone.
+test freeliteral_fault
+mode run_raw
+file examples/freeliteral_fault.dusk
+out abcd\nheap ok\nlit\n
+ok false
+err_has fatal: free of a string literal or other constant; it was never allocated
+---
+# Builtin fetches a fixture package, takes the fixture repository out of reach, and then
+# fetches the same source into a second project, which only the bare mirror the first
+# fetch left under DAWN_CACHE can answer.
+test dawn_a_mirrored_source_fetches_again_with_nothing_to_reach
+mode special
+special dawn_cache_offline_get
+---
+# Builtin fetches a package that requires a package of its own and asserts dawn tree
+# prints the root, both requirements at their depth with the commits the lock pinned, a
+# deleted checkout marked as not fetched, and a requirement nothing locked marked as not
+# locked.
+test dawn_tree_prints_the_graph_the_manifest_and_the_lock_describe
+mode special
+special dawn_tree_prints_graph
+---
+# Builtin edits a file inside a fetched checkout, moves its head off the locked commit,
+# and deletes it outright, asserting each time that the next get replaces the tree and
+# says so rather than taking the stamp beside it at its word.
+test dawn_a_checkout_that_no_longer_holds_its_commit_is_refetched
+mode special
+special dawn_tampered_checkout_refreshed
+---
+# An export is scoped to the package that wrote it and reaches another file only through
+# that file's own import. These records are the reading of that rule from the compiler's
+# side: what a bare name means in a file, what an alias reaches, and the two shapes that
+# no scope can tell apart because the name leaves dusk.
+
+# Two packages each export parse. The name a package exports is scoped to it, so the two
+# qualified calls name two different functions and the program prints both.
+test two_packages_exporting_one_name_are_told_apart_by_their_aliases
+mode run
+file tests/dawn/twodeps/src/main.dusk
+out a parse\nb parse\n
+---
+# The twin: one file imports both packages, so both parses are in scope under one bare
+# name. Naming it bare is refused against the two packages that exported it rather than
+# resolved to whichever import came first.
+test a_name_two_imported_packages_both_export_is_refused_bare
+mode check_fail
+file tests/dawn/twodepsbare/src/main.dusk
+err_has 'parse' is exported by both 'a' and 'b'; qualify it
+err_absent two packages cannot export one name
+---
+# An import is what puts a package's exports in scope, and once it has, the export answers
+# to its bare name with no alias in front of it.
+test an_imported_packages_export_answers_to_its_bare_name
+mode run
+file tests/dawn/bareimport/src/main.dusk
+out maybe\n
+---
+# The twin, and the one shape 1.14.0 accepted that 1.14.1 refuses: the project's helper
+# imports maybe and main does not, so the export is in scope in helper alone. Reaching it
+# from main used to work because exports were global, and now the refusal names the
+# package to import.
+test a_dependency_export_reached_without_importing_it_is_refused
+mode check_fail
+file tests/dawn/barenoimport/src/main.dusk
+err_has 'maybe_tag' is exported by package 'maybe'; import it
+---
+# A name in scope from an import is still only a name, so every local binding of it wins:
+# a parameter, a let binding, a for binder, and a match arm binder each print their own
+# value, and the dependency's function is still there through the alias.
+test a_local_binding_wins_over_an_imported_packages_export
+mode run
+file tests/dawn/shadowlocal/src/main.dusk
+out param\nlet\nfor\narm\ndep\n
+---
+# A package is one scope. Its src/b.dusk never imports its src/a.dusk and still calls that
+# sibling's export by its bare name, which is what makes a multi file package one unit
+# rather than a set of files that have to import each other.
+test a_packages_own_file_reaches_a_siblings_export_without_importing_it
+mode run
+file tests/dawn/sibling/src/main.dusk
+out b over a\n
+---
+# Every kind of name a package exports crosses the import: a struct in an annotation, in a
+# literal, and as a generic argument, a function taking it, an interface a local struct
+# implements, a method an impl in the package gave that struct, and an enum with its
+# variants named bare.
+test every_kind_of_exported_name_reaches_the_importing_file
+mode run
+file tests/dawn/deptypes/src/main.dusk
+out 3\n6\n4\n5\nred\n
+---
+# The type twin: two packages export an enum named Color and both spell a variant Red. The
+# bare name names neither, and the refusal names both packages rather than picking the
+# enum whose variant matched.
+test an_enum_two_imported_packages_both_export_is_refused_bare
+mode check_fail
+file tests/dawn/dupenum/src/main.dusk
+err_has 'Color' is exported by both 'left' and 'right'; qualify it
+err_absent two packages cannot export one name
+---
+# An export "C" function keeps the symbol a C host calls, so it is the one export a
+# package cannot scope. It stays reachable by its bare name from the importing file.
+test a_c_export_keeps_its_bare_name_across_a_package_boundary
+mode run
+file tests/dawn/cabi/src/main.dusk
+out 7\n
+---
+# The same C export named through the alias it was required under. A name that leaves dusk
+# unscoped is still reached the ordinary way, so neither spelling of the call is a program
+# the 1.14.1 scope rule takes away.
+test a_c_export_is_still_reachable_through_its_alias
+mode run
+file tests/dawn/cabiqual/src/main.dusk
+out 7\n
+---
+# Two packages export one C symbol. The linker sees both names as written, so no scope
+# tells them apart and the program cannot be built. The collision refusal that covered
+# every export in 1.14.0 is kept for exactly this class.
+test one_c_symbol_exported_by_two_packages_is_refused
+mode check_fail
+file tests/dawn/cabitwo/src/main.dusk
+err_has dawn_modules/two/src/two.dusk: 'cabi_tag' is also exported by 'dawn_modules/one/src/one.dusk'; two packages cannot export one name
+---
+# A do block over a dependency's monad: the type, its bind, and its unit all come from the
+# package, and the package's own generic do block runs inside the same program against the
+# bare bind and unit it exports.
+test a_do_block_over_a_dependencys_monad_runs
+mode run
+file tests/dawn/depmonad/src/main.dusk
+out 7\n21\n
+---
+# bind and unit are the generic do protocol and a do block reaches them by their bare
+# names, so they are the other class no scope can tell apart. Two packages exporting a
+# bind is refused the way one name exported twice always was.
+test the_do_protocol_pair_exported_by_two_packages_is_refused
+mode check_fail
+file tests/dawn/monadbind/src/main.dusk
+err_has dawn_modules/q1/src/q1.dusk: 'bind' is also exported by 'dawn_modules/p1/src/p1.dusk'; two packages cannot export one name
+---
+# The leaf form binds the one symbol it names and nothing else the package exports, so the
+# package's other export is not in scope in the importing file and the refusal names the
+# package to import.
+test a_leaf_import_does_not_bring_the_packages_other_exports
+mode check_fail
+file tests/dawn/leafother/src/main.dusk
+err_has 'greet_other' is exported by package 'greet'; import it
+---
+# path_dirname's "." branch and path_extension's empty branch each used to hand back a
+# string literal under a contract that says the caller owns and frees the result, so
+# freeing one reached into read only memory. Both fallbacks return a heap copy now, and
+# this record frees all four results, the two fallback branches and the two ordinary ones,
+# and exits clean.
+test fs_literal_free_ok
+mode run
+file examples/fs_literal_free_ok.dusk
+out .\n0\na/b\ntxt\nok\n
+---
+# The 1.14.1 reading of the scope rule at its edges: the names no rename may move, the
+# names a rename does move, and the two prefixes that name more than one thing. Each of
+# these is a static fixture under tests/dawn/, so nothing here fetches anything.
+
+# A builtin name is fixed for every rename, so a dependency's export keeps the spelling
+# resolve reserves and is refused at the declaration. Renamed, the dependency's print and
+# free would have answered every bare print and free in the file that imported it, and the
+# free would have leaked rather than freed.
+test a_dependency_exporting_a_builtins_name_is_refused
+mode check_fail
+file tests/dawn/hijack/src/main.dusk
+err_has 'print' is a builtin; a function cannot take its name
+err_has 'free' is a builtin; a function cannot take its name
+---
+# The project never imports std.string and its dependency does, exporting a trim of its
+# own. The std declaration is in the program without this file having reached for it, so
+# neither name is picked silently and the refusal names both sides.
+test a_std_name_only_a_dependency_imported_is_not_picked_bare
+mode check_fail
+file tests/dawn/stdleak/src/main.dusk
+err_has 'trim' is exported by package 'su' and declared by '
+err_has '; import one or qualify it
+---
+# The other direction of the same rule. A package is compiled into the program that
+# requires it, so the project's own parse is physically there, and the dependency was
+# written without it and cannot reach it. The refusal is spelled at the dependency's file,
+# by its manifest relative path.
+test a_package_cannot_reach_a_name_the_project_declares
+mode check_fail
+file tests/dawn/depapp/src/main.dusk
+err_has dawn_modules/p/src/p.dusk
+err_has 'parse' is declared by the project, not by this package; a package cannot reach it
+---
+# A do binder spelled like the dependency export it binds from. The call on the right of
+# the arrow is read before the name on the left is in scope, so the block binds the
+# dependency's value and the tail is the binder, and the qualified call still reaches it.
+test a_do_binder_spelled_like_the_dependency_export_it_binds
+mode run
+file tests/dawn/dobind/src/main.dusk
+out 11\n11\n
+---
+# The same shape one package in: the dependency's do block binds value() from the package
+# it imported, and the project's own function of that name, which the dependency never
+# imported, is not what the block reaches.
+test a_dependencys_do_block_binds_from_its_own_import
+mode run
+file tests/dawn/dobindmid/src/main.dusk
+out 11\n22\n
+---
+# leaf is in the build because mid required it and the project never did, so the bare name
+# earns a refusal naming the manifest line to write before there is an import to write.
+test a_transitive_packages_export_names_the_require_to_write
+mode check_fail
+file tests/dawn/trans/src/main.dusk
+err_has 'leaf_tag' is exported by package 'leaf', which this package does not require; add a @require for it, then import it
+---
+# A package's own C export against a moving export of the same name from a package one of
+# its files imported. A C name keeps its spelling and a moving one takes a package suffix,
+# so the bare call in the file is its own package's foo and prints 1.
+test a_packages_c_export_wins_over_an_imported_packages_name
+mode run
+file tests/dawn/csib/src/main.dusk
+out 1\n
+---
+# The three spellings that reach one name across a boundary: the C export bare, the same
+# C export through its alias, and a second package's moving foo through the project file
+# that imported it.
+test a_c_export_and_a_moving_export_of_one_name_both_reach
+mode run
+file tests/dawn/cfixed/src/main.dusk
+out 1\n1\n2\n
+---
+# A package exports a function named b and imports a dependency aliased b. The declaring
+# file's own rename leaves the root of a qualified path alone, so b.parse() is still read
+# as the alias and a.b() still reaches the export.
+test an_export_spelled_like_the_alias_its_own_file_imported
+mode run
+file tests/dawn/s1alias/src/main.dusk
+out 42\n
+---
+# An alias spelled exactly like the suffix the loader gives a file's private names. The
+# two would produce one symbol from two declarations, so the alias is refused by name
+# rather than surfacing later as a duplicate definition in someone else's file.
+test an_alias_spelled_like_a_private_suffix_is_refused
+mode check_fail
+file tests/dawn/sufclash/src/main.dusk
+err_has alias 'json_1' collides with an internal name; choose another alias
+---
+# bind and unit are the generic do protocol, which the desugar reaches by that bare
+# spelling long after the loader has run. A name a file keeps to itself is scoped to that
+# file all the same, so the dependency's own do block has no bind left to name. Leaving an
+# unexported pair bare is the worse trade: it would reach every other file in the program.
+test an_unexported_do_protocol_pair_is_not_reachable_by_a_generic_do
+mode check_fail
+file tests/dawn/privbind/src/main.dusk
+err_has undefined name 'bind'
+---
+# One dotted prefix given two meanings by two files of one program, the project's own
+# src/util.dusk and the dependency's src/util.dusk. This file imports neither, so the
+# prefix names two modules and is refused rather than resolved to whichever loaded first.
+test a_prefix_two_files_of_a_program_gave_two_meanings_is_refused
+mode check_fail
+file tests/dawn/twomod/src/main.dusk
+err_has 'util' names two modules; import the one this file means
+---
+# The twin: this file writes the import, so its own scope answers the prefix and the
+# program runs. The dependency's qualified call still reaches its own util, which is what
+# makes a file's imports the first place the fold looks.
+test an_import_says_which_module_an_ambiguous_prefix_means
+mode run
+file tests/dawn/twomodok/src/main.dusk
+out local util\ndep util\nlocal util\n
+---
+# A dependency's sibling file calling a bare trim its own package exports, with the
+# project having imported std.string for itself. A file's scope is the package it belongs
+# to and what that package imported, so the project's reach for std is not this file's.
+test a_projects_std_import_does_not_reach_a_dependencys_sibling_file
+mode run
+file tests/dawn/depstdsib/src/main.dusk
+out DEP-trim\n
+---
+# The twin with the project's std.string import taken away. The dependency reads the same
+# either way, which is what makes the pair say that the project's import changed nothing
+# inside the package rather than that the package happened to win a collision.
+test a_dependencys_sibling_file_binds_its_own_packages_export
+mode run
+file tests/dawn/depstdsib2/src/main.dusk
+out DEP-trim\n
+---
+# The other side of the same rule, inside one dependency's own scope: this file imported
+# std.string itself and imported a package exporting a trim, so both answers are in the
+# scope the file built and the bare name is refused there rather than picked.
+test a_dependency_that_imported_std_and_a_package_exporting_one_name_is_refused
+mode check_fail
+file tests/dawn/depstdimp/src/main.dusk
+err_has dawn_modules/a/src/a.dusk
+err_has 'trim' is exported by
+err_absent two packages cannot export one name
+---
+# One file importing the package whose foo is a C export and the package whose foo moves
+# under a package suffix. A fixed name does not win the bare spelling for being fixed, so
+# the file is told to qualify rather than handed whichever kind of export claimed first.
+test a_c_export_and_a_moving_export_of_one_name_are_refused_bare
+mode check_fail
+file tests/dawn/fixmov1/src/main.dusk
+err_has 'foo' is exported by both
+err_has '; qualify it
+err_absent two packages cannot export one name
+---
+# The same two packages in the other import order. The refusal is a property of the file's
+# scope holding two answers, not of which import the loader read first.
+test the_same_c_and_moving_pair_in_the_other_import_order_is_refused
+mode check_fail
+file tests/dawn/fixmov2/src/main.dusk
+err_has 'foo' is exported by both
+err_has '; qualify it
+err_absent two packages cannot export one name
+---
+# Two files of one project, the do protocol pair written in the one that is not the root.
+# Unexported is scoped to the file that wrote it, so neither the other file's do block nor
+# its own reaches that bind, and the program is refused instead of quietly binding it.
+test an_unexported_do_pair_in_a_project_file_serves_no_do_block
+mode check_fail
+file tests/dawn/bindpriv/src/main.dusk
+err_has undefined name 'bind'
+---
+# The pair the same program is missing, written in the root file, which is the one file no
+# suffix moves. It answers the other file's do block too, and the 1000 the private pair
+# adds is absent from both lines, which is what says whose bind ran.
+test a_root_files_do_protocol_pair_answers_every_do_block
+mode run
+file tests/dawn/bindpriv2/src/main.dusk
+out 10\n21\n
+---
+# Two packages that each wrote a private pair and a do block over it. What used to be one
+# duplicate definition out of two programs that built is now two file scoped pairs, so the
+# refusal is the desugar finding no bind, not the collision two exported pairs earn.
+test an_unexported_do_pair_in_two_packages_is_undefined_not_a_collision
+mode check_fail
+file tests/dawn/bindfix/src/main.dusk
+err_has undefined name 'bind'
+err_absent two packages cannot export one name
+---
+# The twin of the hijack case one step down in visibility. An exported hash would keep the
+# spelling the resolver reserves and be refused, and a hash a file keeps to itself is
+# scoped away from that spelling with the call beside it, so the package's own use stands.
+test a_dependencys_unexported_function_may_take_a_builtins_name
+mode run
+file tests/dawn/builtinpriv/src/main.dusk
+out 21\n
+---
+# The relief the fixmov1 refusal asks for, and the reason that refusal costs no program.
+# The same C export and moving export of one foo, with each call qualified by the alias
+# its package was required under, so both readings are named and both run.
+test the_c_and_moving_pair_refused_bare_both_run_when_qualified
+mode run
+file tests/dawn/fixmovq/src/main.dusk
+out 1\n2\n
+---
+# A package export spelled exactly like a standard library function, with the file
+# importing both. Bare, the name has two answers and is refused, and qualified it has one
+# each way: the standard library counts the one element pushed, the package returns 999.
+test a_std_name_and_a_packages_own_are_told_apart_by_qualifying
+mode run
+file tests/dawn/depvecq/src/main.dusk
+out 1\n999\n
+---
+# The leaf form of the same collision. Importing d.d_count binds that one name, so the
+# package's own vec_len never enters this file and the bare call is the standard
+# library's, while the package's reading of the name still answers inside the package.
+test a_leaf_import_leaves_the_bare_name_to_the_standard_library
+mode run
+file tests/dawn/depvecleaf/src/main.dusk
+out 1\n999\n
+---
+# One package exporting one name twice, once to C and once the ordinary way. The C name
+# keeps its spelling and the other takes the package suffix, so the two would leave the
+# package as one name with two meanings and no alias could say which. It is refused
+# against the package that wrote both.
+test one_package_exporting_one_name_to_c_and_by_suffix_is_refused
+mode check_fail
+file tests/dawn/fixown/src/main.dusk
+err_has 'foo' is exported twice by package 'p'
+---
+# The twin one step over: both files export foo the ordinary way, so both take the one
+# package suffix and the two declarations land on one name. That collision is the
+# duplicate definition it always was, reported against the item, not a package rule.
+test one_package_exporting_one_name_from_two_files_is_a_duplicate_definition
+mode check_fail
+file tests/dawn/movmov/src/main.dusk
+err_has duplicate definition of 'foo
 ---

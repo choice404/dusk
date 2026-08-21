@@ -450,8 +450,12 @@ func stamp_fault(m: *Manifest, e: *LockEntry) -> string {
 /** The floor fault a manifest earns, or the empty string. A floor that cannot be read
  *  and a toolchain too old are reported apart, since one is a mistake in the file and
  *  the other is a fact about the machine. A non empty result is a fresh heap string
- *  the caller owns. */
-func floor_fault(m: *Manifest) -> string {
+ *  the caller owns.
+ *
+ *  Every manifest in a build is read through here, the project's own before an import
+ *  resolves and a dependency's when its alias is first reached, so a package pinning a
+ *  language surface this toolchain does not have earns one sentence wherever it sits. */
+export func manifest_floor_fault(m: *Manifest) -> string {
     if str_len((*m).dusk_min) == 0 {
         return ""
     }
@@ -511,7 +515,7 @@ func dep_sentence(alias: string, tail: string) -> string {
  *  neither can come to a verdict the other would not. */
 export func verify_project(m: *Manifest, l: *Lock) -> *Vector<string> {
     out: *Vector<string> = alloc(vec_new())
-    ff: string = floor_fault(m)
+    ff: string = manifest_floor_fault(m)
     if str_len(ff) > 0 {
         vec_push(out, ff)
     }

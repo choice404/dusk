@@ -43,6 +43,18 @@ export func dawn_fail_owned(msg: string) -> int32 {
     return code
 }
 
+/** One fault that does not stop the command, the same "dawn: " line on the same
+ *  stream as any other. It is what the tool says about a piece of its own machinery
+ *  that failed while the work it was asked to do goes on: a cache that could not be
+ *  kept is reported here and then stepped around, since the fetch still has the remote
+ *  to ask and the command has not failed. Nothing is returned, so a caller cannot
+ *  mistake it for a fault that ends anything. */
+export func dawn_warn(msg: string) -> void {
+    line: string = "dawn: " + msg
+    printerr(line)
+    free(line)
+}
+
 /** A tool's own output printed under a fault, git's stderr after the sentence
  *  naming what dawn was trying to do. Nothing is printed for an empty capture, and
  *  the trailing newline the child wrote is dropped so the two do not double. */
@@ -91,6 +103,7 @@ export func dawn_usage_lines(to_err: bool) -> void {
     vec_push(lines, "  dawn get                         fetch what package.dawn requires")
     vec_push(lines, "  dawn add <alias> <source> <ref>  require a package, then fetch it")
     vec_push(lines, "  dawn update [alias]              move every pin, or one, to its ref")
+    vec_push(lines, "  dawn tree                        print the dependency graph")
     vec_push(lines, "  dawn build                       build the package root")
     vec_push(lines, "  dawn run [args...]               build the package root and run it")
     vec_push(lines, "  dawn version                     print version")

@@ -1,5 +1,10 @@
-// loadfold: arena mechanics for the P4 loader: span shifting, item copying, and
-// qualified module call folding.
+/** loadfold: arena mechanics for the P4 loader: span shifting and qualified module call
+ *  folding. A qualified call names a module by a dotted prefix, and the fold rewrites it
+ *  into a call on the merged module's flat namespace. Since 1.14.1 that namespace is not
+ *  flat by name alone: a dependency's exports carry the alias its importer pinned, so the
+ *  fold has to know which package a prefix belongs to and which of its exports the scoping
+ *  actually moved. Both come in as a FoldNs, one built from the calling file's own imports
+ *  and one from every import in the program, and the file's own is asked first. */
 
 @paradigm procedural
 
@@ -209,9 +214,114 @@ func private_msg(leaf: string, prefix: string) -> string {
 struct FoldCtx {
     ns: *Map<string, int64>,
     exports: *Map<string, *Map<string, int64>>,
+    own: FoldNs,
+    all: FoldNs,
     files: *Vector<FileSrc>,
     errors: *Vector<LoadDiag>,
     bound: *Vector<*Map<string, int64>>,
+    // The coverage record the rename pass keeps, shared so a fold that abandons the path
+    // in front of a qualified call can say it reached those nodes. Folding a.b() leaves
+    // the `a` the path was rooted at unreferenced in the arena, and the rename walk after
+    // it can never reach a node nothing points at.
+    seen: *Vector<int64>,
+    mark: bool,
+    // Every callee node this fold rewrote, so the rename pass after it knows the
+    // identifier standing there is the qualified form's answer rather than a bare word the
+    // file wrote and the scope still has to judge.
+    folded_at: *Vector<int64>,
+    // Every leaf the fold turned into a bare identifier in this file. A name a package
+    // could not scope, a C symbol among them, folds to the spelling it was declared under,
+    // and the rename pass after this one must not then read that identifier as a name
+    // nothing put in scope.
+    resolved: *Map<string, int64>,
+}
+
+/** What a dotted module prefix folds to. suffix is the package scope the module belongs
+ *  to, empty for the root project and the standard library; moving is the set of that
+ *  module's exports the scope actually renamed, so a name the rename could not move, a C
+ *  symbol or the do protocol pair, folds to its bare spelling the way it always did. One
+ *  of these is built per file from that file's own imports and one globally from every
+ *  import in the program, and the file's own is asked first. */
+export struct FoldNs {
+    suffix: *Map<string, string>,
+    moving: *Map<string, *Map<string, int64>>,
+}
+
+/** An empty prefix scope, the one a file with no import of its own carries. */
+export func fold_ns_new() -> FoldNs {
+    suffix: *Map<string, string> = alloc(map_new())
+    moving: *Map<string, *Map<string, int64>> = alloc(map_new())
+    return FoldNs { suffix: suffix, moving: moving }
+}
+
+/** The suffix a prefix takes when two imports disagree about which module it names. No
+ *  alias can spell it, so it can only ever have been written here. */
+export func fold_ns_ambiguous() -> string {
+    return "?"
+}
+
+// Records one dotted prefix as naming a module in a given package scope. A prefix already
+// recorded under a different suffix names two modules, which nothing but the importing
+// file's own import can tell apart, so it is marked and the fold refuses it there.
+func fold_ns_put_one(t: FoldNs, prefix: string, suffix: string, moving: *Map<string, int64>) -> void {
+    if map_has(t.suffix, prefix) {
+        prior: string = unwrap_or(map_get(t.suffix, prefix), "")
+        if !str_eq(prior, suffix) {
+            map_put(t.suffix, prefix, fold_ns_ambiguous())
+        }
+    } else {
+        map_put(t.suffix, prefix, suffix)
+    }
+    if map_has(t.moving, prefix) {
+        empty: *Map<string, int64> = fold_new_set()
+        target: *Map<string, int64> = unwrap_or(map_get(t.moving, prefix), empty)
+        keys: *Vector<string> = map_keys(moving)
+        mut i: int64 = 0
+        while i < vec_len(keys) {
+            map_put(target, vec_get(keys, i), 1)
+            i = i + 1
+        }
+        vec_free(keys)
+        free(keys)
+    } else {
+        target2: *Map<string, int64> = fold_new_set()
+        map_put(t.moving, prefix, target2)
+        keys2: *Vector<string> = map_keys(moving)
+        mut j: int64 = 0
+        while j < vec_len(keys2) {
+            map_put(target2, vec_get(keys2, j), 1)
+            j = j + 1
+        }
+        vec_free(keys2)
+        free(keys2)
+    }
+}
+
+/** Records a module path and every dotted prefix of it as naming a module in one package
+ *  scope, the same widening load_add_namespace does for the namespace table itself: an
+ *  import of maybe.core leaves both maybe and maybe.core folding into that package, which
+ *  is what a qualified call through either spelling has always reached. */
+export func fold_ns_add(t: FoldNs, modpath: string, suffix: string, moving: *Map<string, int64>) -> void {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while modpath[i] != 0 {
+        if modpath[i] == 46 {
+            if sb_size(b) > 0 {
+                prefix: string = substring(sb_cstr(b), 0, sb_size(b))
+                fold_ns_put_one(t, prefix, suffix, moving)
+            }
+            sb_push_char(b, 46)
+        } else {
+            sb_push_char(b, modpath[i])
+        }
+        i = i + 1
+    }
+    if sb_size(b) > 0 {
+        full: string = substring(sb_cstr(b), 0, sb_size(b))
+        fold_ns_put_one(t, full, suffix, moving)
+    }
+    sb_free(b)
+    free(b)
 }
 
 func fold_new_set() -> *Map<string, int64> {
@@ -375,6 +485,93 @@ func fold_stmt(a: *Ast, id: int64, fc: FoldCtx) -> void {
     }
 }
 
+// What one prefix folds into: whether the tables know it at all, whether two imports
+// disagreed about which module it names, the package suffix its exports carry, and which
+// of those exports the suffix actually moved.
+struct NsPick {
+    found: bool,
+    ambiguous: bool,
+    suffix: string,
+    moving: *Map<string, int64>,
+}
+
+func no_pick(found: bool, ambiguous: bool) -> NsPick {
+    return NsPick { found: found, ambiguous: ambiguous, suffix: "", moving: fold_new_set() }
+}
+
+// The moving export set a prefix carries in one scope table, empty when the table has
+// nothing under that prefix.
+func ns_moving_of(t: FoldNs, prefix: string) -> *Map<string, int64> {
+    if map_has(t.moving, prefix) {
+        empty: *Map<string, int64> = fold_new_set()
+        return unwrap_or(map_get(t.moving, prefix), empty)
+    }
+    return fold_new_set()
+}
+
+// Which package scope a prefix names here. The importing file's own imports answer first,
+// since they are the only place the question has one answer; the program wide table is the
+// fallback, and it is where two imports can have named two different modules with one
+// prefix, which nothing but an import in this file can tell apart.
+func fold_pick_ns(fc: FoldCtx, prefix: string) -> NsPick {
+    own: FoldNs = fc.own
+    if map_has(own.suffix, prefix) {
+        return NsPick { found: true, ambiguous: false, suffix: unwrap_or(map_get(own.suffix, prefix), ""), moving: ns_moving_of(own, prefix) }
+    }
+    all: FoldNs = fc.all
+    if map_has(all.suffix, prefix) {
+        s: string = unwrap_or(map_get(all.suffix, prefix), "")
+        if str_eq(s, fold_ns_ambiguous()) {
+            return no_pick(true, true)
+        }
+        return NsPick { found: true, ambiguous: false, suffix: s, moving: ns_moving_of(all, prefix) }
+    }
+    return no_pick(false, false)
+}
+
+// Records the name bearing nodes of a module path the fold is about to drop. The path is
+// one identifier under a run of field accesses, so the identifier at its root is the only
+// node the coverage record cares about.
+func fold_drop_path(a: *Ast, id: int64, fc: FoldCtx) -> void {
+    if !fc.mark {
+        return
+    }
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        vec_set(fc.seen, id, 1)
+        return
+    }
+    if e.kind == xk_field() {
+        fold_drop_path(a, e.a, fc)
+    }
+}
+
+// The scoped spelling of one export: the bare name, two underscores, and the package
+// suffix, exactly the spelling privatize gave the declaration.
+func fold_name_with_suffix(name: string, suffix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, "__")
+    sb_push(b, suffix)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The fault a prefix two different imports gave two different meanings earns, raised at
+// the call that spelled it in a file that imported neither.
+func two_modules_msg(prefix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, prefix)
+    sb_push(b, "' names two modules; import the one this file means")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 // Folds a qualified module call into a bare call on the merged module's flat namespace,
 // and reports a leaf the named module does not export. The rewrite fires only when the
 // path's root is a module name that nothing in the function has bound: a parameter, a
@@ -412,30 +609,44 @@ func fold_call_callee(a: *Ast, e: ExprNode, callee_id: int64, fc: FoldCtx) -> vo
             vec_push(fc.errors, load_diag_global(fc.files, e.lo, e.hi, msg))
         }
     }
+    pick: NsPick = fold_pick_ns(fc, prefix)
+    if pick.ambiguous {
+        vec_push(fc.errors, load_diag_global(fc.files, e.lo, e.hi, two_modules_msg(prefix)))
+        return
+    }
+    fold_drop_path(a, callee.a, fc)
     callee.kind = xk_ident()
     callee.a = callee.b
+    mut scoped: bool = false
+    if str_len(pick.suffix) > 0 {
+        if map_has(pick.moving, leaf) {
+            callee.a = intern_owned((*a).interner, fold_name_with_suffix(leaf, pick.suffix))
+            scoped = true
+        }
+    }
+    if !scoped {
+        map_put(fc.resolved, leaf, 1)
+    }
+    if callee_id < vec_len(fc.folded_at) {
+        vec_set(fc.folded_at, callee_id, 1)
+    }
     vec_set((*a).exprs, callee_id, callee)
 }
 
-// Binds every name a do block introduces, then folds each step's expression. Every
-// binder is in scope for the whole block, the same over-approximation the privatizer
-// makes: binding more names can only leave a qualified call unfolded, never fold one
-// that should have stayed a method call.
+// Folds each step of a do block with the binders of the steps before it in scope, and no
+// others. A binder is in scope only after its own step, the way the desugar's nested
+// continuations lay them out, so a `m <- m.load()` folds the qualified call on its right
+// and shadows the module for the steps that follow.
 func fold_do(a: *Ast, e: ExprNode, fc: FoldCtx) -> void {
     fold_push_scope(fc)
     mut i: int64 = 0
     while i < e.c {
         d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + i))
+        fold_expr(a, d.expr, fc)
         if d.name >= 0 {
             fold_bind(fc, a, d.name)
         }
         i = i + 1
-    }
-    mut j: int64 = 0
-    while j < e.c {
-        d2: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + j))
-        fold_expr(a, d2.expr, fc)
-        j = j + 1
     }
     fold_pop_scope(fc)
 }
@@ -521,12 +732,19 @@ func fold_func(a: *Ast, id: int64, is_method: bool, fc: FoldCtx) -> void {
     fold_pop_scope(fc)
 }
 
-export func load_fold_qualified_calls(a: *Ast, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
+/** Folds every qualified module call in one file's item range. own is that file's own
+ *  import scope and all is the program wide one, so a call reaches the module the file
+ *  itself imported before it reaches whatever else in the program spelled that prefix.
+ *  The range is [lo, hi) over the merged module's items, which the loader appends one
+ *  file at a time and so are contiguous per file. seen and mark are the rename pass's
+ *  coverage record, written here for the path nodes a fold drops, and resolved collects
+ *  the leaves this file's folds answered with a bare spelling. */
+export func load_fold_range(a: *Ast, ns: *Map<string, int64>, exports: *Map<string, *Map<string, int64>>, own: FoldNs, all: FoldNs, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>, seen: *Vector<int64>, mark: bool, resolved: *Map<string, int64>, folded_at: *Vector<int64>, lo: int64, hi: int64) -> void {
     bound: *Vector<*Map<string, int64>> = alloc(vec_new())
-    fc: FoldCtx = FoldCtx { ns: ns, exports: exports, files: files, errors: errors, bound: bound }
+    fc: FoldCtx = FoldCtx { ns: ns, exports: exports, own: own, all: all, files: files, errors: errors, bound: bound, seen: seen, mark: mark, resolved: resolved, folded_at: folded_at }
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
+    mut i: int64 = lo
+    while i < hi {
         it: ItemNode = vec_get(items, i)
         if it.kind == ik_func() {
             fold_func(a, it.id, false, fc)

@@ -1,0 +1,244 @@
+/** dawntree: printing the dependency graph a project already has. Everything on the
+ *  page is read off three files that are already on disk, package.dawn, dawn.lock, and
+ *  the stamp inside each checkout, so the command touches no remote and answers the
+ *  same on a machine with no connection. It is the read only view of what the fetching
+ *  commands wrote.
+ *
+ *  The root prints as the package and the version it declares, and every requirement
+ *  under it as the alias, the source, the ref, and the first twelve of the commit the
+ *  lock pinned, indented one step per level. Depth comes from reading each fetched
+ *  package's own package.dawn, so what a dependency requires prints under it even
+ *  though the checkout itself is a sibling in the flat dawn_modules; an alias already
+ *  printed with its own requirements under it is not expanded a second time, so a
+ *  diamond prints once at depth and a cycle cannot run away.
+ *
+ *  A requirement the lock does not pin prints "(not locked)" where the commit would be,
+ *  and one the lock pins with no matching checkout on disk prints "(not fetched)" after
+ *  it. Both are states a build refuses, and each names the fetch that clears it, so
+ *  tree reports them rather than failing on them: the command answers what the project
+ *  looks like right now, and exits 0 whatever that turns out to be. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import home
+@import source
+@import manifest
+@import manifestlock
+@import dawnout
+@import dawnpkg
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+/** The last segment of a directory path, the name a package with no @package line is
+ *  shown under. */
+func dir_name(dir: string) -> string {
+    n: int64 = str_len(dir)
+    mut start: int64 = 0
+    mut i: int64 = 0
+    while i < n {
+        if dir[i] == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start >= n {
+        return copy_string("package")
+    }
+    return substring(dir, start, n)
+}
+
+/** The line the root prints as: the package name and, when it declares one, its
+ *  version. A manifest that names no package is shown under the directory holding it,
+ *  which is the only other thing that names it. */
+func root_line(m: *Manifest) -> string {
+    mut name: string = copy_string((*m).package)
+    if str_len(name) == 0 {
+        free(name)
+        name = dir_name((*m).dir)
+    }
+    if str_len((*m).version) == 0 {
+        return name
+    }
+    out: string = name + " " + (*m).version
+    free(name)
+    return out
+}
+
+/** Whether the lock pins exactly this alias at this source and ref. A lock line under
+ *  the alias naming another source or another ref is not a pin for this requirement,
+ *  the same reading a build makes of it. */
+func pinned_commit(l: *Lock, r: *Require) -> string {
+    idx: int64 = lock_entry_index(l, (*r).alias)
+    if idx < 0 {
+        return ""
+    }
+    e: *LockEntry = vec_get((*l).entries, idx)
+    if !str_eq((*e).source, (*r).source) {
+        return ""
+    }
+    if !str_eq((*e).ref, (*r).ref) {
+        return ""
+    }
+    return copy_string((*e).commit)
+}
+
+/** Whether a checkout holding exactly this commit is on disk. A dependency directory
+ *  that was deleted, one that was never fetched, and one whose stamp records another
+ *  commit all read the same here: what the lock pins is not on disk. */
+func on_disk(m: *Manifest, alias: string, commit: string) -> bool {
+    dir: string = dep_dir(m, alias)
+    st: Stamp = stamp_read(dir)
+    free(dir)
+    mut here: bool = false
+    if st.ok {
+        if str_eq(st.commit, commit) {
+            here = true
+        }
+    }
+    stamp_free(st)
+    return here
+}
+
+/** The tail of one requirement's line: the commit the lock pinned, cut to the twelve
+ *  characters a person reads, with the state of the checkout after it when there is
+ *  nothing on disk holding that commit. */
+func status_tail(m: *Manifest, l: *Lock, r: *Require) -> string {
+    commit: string = pinned_commit(l, r)
+    if str_len(commit) == 0 {
+        return copy_string("(not locked)")
+    }
+    mut shown: string = copy_string(commit)
+    if str_len(commit) > 12 {
+        free(shown)
+        shown = substring(commit, 0, 12)
+    }
+    here: bool = on_disk(m, (*r).alias, commit)
+    free(commit)
+    if here {
+        return shown
+    }
+    out: string = shown + " (not fetched)"
+    free(shown)
+    return out
+}
+
+/** One requirement's line, indented one step per level of the graph. */
+func require_line(m: *Manifest, l: *Lock, r: *Require, depth: int64) -> string {
+    pad: string = repeat("  ", depth)
+    tail: string = status_tail(m, l, r)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, pad)
+    sb_push(b, (*r).alias)
+    sb_push_char(b, 32)
+    sb_push(b, (*r).source)
+    sb_push_char(b, 32)
+    sb_push(b, (*r).ref)
+    sb_push_char(b, 32)
+    sb_push(b, tail)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(pad)
+    free(tail)
+    return out
+}
+
+/** Whether this alias has already been printed with whatever it requires under it. */
+func already(seen: *Vector<string>, alias: string) -> bool {
+    mut i: int64 = 0
+    while i < vec_len(seen) {
+        if str_eq(vec_get(seen, i), alias) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+/** Prints what a fetched dependency requires in turn, reading its own package.dawn
+ *  inside its checkout. A dependency with no manifest requires nothing, which is what a
+ *  plain repository of dusk files looks like, and a manifest that does not read is not
+ *  this project's fault to report here, so both simply print nothing under it. */
+func walk_dep(m: *Manifest, l: *Lock, alias: string, depth: int64, seen: *Vector<string>) -> void {
+    dir: string = dep_dir(m, alias)
+    mpath: string = path_join(dir, "package.dawn")
+    free(dir)
+    if source_is_file(mpath) {
+        dm: *Manifest = manifest_read(mpath)
+        if vec_len((*dm).errors) == 0 {
+            walk(m, l, (*dm).requires, depth, seen)
+        }
+        manifest_free(dm)
+        free(dm)
+    }
+    free(mpath)
+}
+
+/** Prints one level of the graph and then whatever each package on it requires in
+ *  turn. The lock and the checkouts are the root project's throughout, since every
+ *  package in the graph lands in one flat dawn_modules however deep it was required
+ *  from. */
+func walk(m: *Manifest, l: *Lock, rs: *Vector<*Require>, depth: int64, seen: *Vector<string>) -> void {
+    mut i: int64 = 0
+    while i < vec_len(rs) {
+        r: *Require = vec_get(rs, i)
+        line: string = require_line(m, l, r, depth)
+        println(line)
+        free(line)
+        if !already(seen, (*r).alias) {
+            vec_push(seen, copy_string((*r).alias))
+            walk_dep(m, l, (*r).alias, depth + 1, seen)
+        }
+        i = i + 1
+    }
+}
+
+/** Prints the graph of the package the command was run inside. */
+export func dawn_cmd_tree(argv: string[]) -> int32 {
+    if argv.len > 2 {
+        return dawn_fail("tree takes no arguments; it prints the graph package.dawn and dawn.lock describe")
+    }
+    mpath: string = dawn_manifest_path()
+    if str_len(mpath) == 0 {
+        return 1
+    }
+    m: *Manifest = manifest_read(mpath)
+    free(mpath)
+    if dawn_manifest_faulted(m) {
+        manifest_free(m)
+        free(m)
+        return 1
+    }
+    lockp: string = lock_path_for(m)
+    l: *Lock = lock_read(lockp)
+    free(lockp)
+    if dawn_lock_faulted(l) {
+        dawn_fail("dawn.lock does not read; fix it or delete it, then run dawn get")
+        lock_free(l)
+        free(l)
+        manifest_free(m)
+        free(m)
+        return 1
+    }
+    head: string = root_line(m)
+    println(head)
+    free(head)
+    seen: *Vector<string> = alloc(vec_new())
+    walk(m, l, (*m).requires, 1, seen)
+    while vec_len(seen) > 0 {
+        s: string = vec_take(seen, vec_len(seen) - 1)
+        free(s)
+    }
+    vec_free(seen)
+    free(seen)
+    lock_free(l)
+    free(l)
+    manifest_free(m)
+    free(m)
+    return 0
+}

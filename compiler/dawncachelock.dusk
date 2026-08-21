@@ -1,0 +1,119 @@
+/** dawncachelock: one lock per mirror, so two fetches running at once on one machine
+ *  cannot write one mirror between them. The cache is shared by every project on the
+ *  machine, and nothing stops a person from running dawn in two terminals or a build
+ *  system from running it in two jobs, so a mirror that one process is cloning or
+ *  fetching is a mirror no other process may read or write until it is done.
+ *
+ *  The lock is a directory beside the mirror, since making a directory either succeeds
+ *  or fails and no filesystem lets two processes make one twice. A process that cannot
+ *  make it waits and tries again. A lock whose directory has not been touched in two
+ *  minutes belonged to a process that died holding it, and is taken rather than waited
+ *  on forever; a process that waits out those two minutes without either taking or
+ *  making one gives up and fetches from the remote directly, which is always the answer
+ *  when the cache cannot serve.
+ *
+ *  Whoever takes it releases it on the way out, on every path, which is why the two
+ *  cache entry points hold the lock across a whole call rather than around each git
+ *  command inside one. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.os
+@import home
+@import dawngit
+
+/** The directory that stands for the lock on a mirror. */
+func lock_path(mpath: string) -> string {
+    return mpath + ".lock"
+}
+
+/** Everything before the last separator of a path, or the empty string when there is
+ *  none. The mirror's parent has to exist before a lock can be made beside it, since
+ *  the first fetch of a source locks before anything has created the directory the
+ *  mirror will sit in. */
+func parent_of(path: string) -> string {
+    cut: int64 = str_rfind(path, "/")
+    if cut <= 0 {
+        return ""
+    }
+    return substring(path, 0, cut)
+}
+
+/** Whether the lock directory has sat untouched long enough that whoever made it is
+ *  gone. Two minutes is far longer than a clone of a repository this machine has
+ *  already seen and far shorter than a person's patience, and the test is the
+ *  directory's own modification time, so a live holder that is simply slow is never
+ *  mistaken for a dead one while it is still working. */
+func lock_stale(scratch: string, lockp: string) -> bool {
+    q: string = quote(lockp)
+    line: string = "find " + q + " -maxdepth 0 -mmin +2"
+    free(q)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    if r.code != 0 {
+        dawn_shell_free(r)
+        return false
+    }
+    body: string = trim(r.out)
+    dawn_shell_free(r)
+    old: bool = str_len(body) > 0
+    free(body)
+    return old
+}
+
+/** One attempt at the lock: true when this process now holds it. */
+func lock_take(scratch: string, lockp: string) -> bool {
+    q: string = quote(lockp)
+    line: string = "mkdir " + q
+    free(q)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    took: bool = r.code == 0
+    dawn_shell_free(r)
+    return took
+}
+
+/** Waits a fifth of a second, the step between two attempts. */
+func lock_pause(scratch: string) -> void {
+    r: DawnShell = dawn_shell(scratch, "sleep 0.2")
+    dawn_shell_free(r)
+}
+
+/** Takes the lock on a mirror, waiting for whoever holds it and seizing one nobody
+ *  holds any more. False means the wait ran out, and the caller then works without the
+ *  cache rather than blocking a fetch behind a lock that is not moving. */
+export func dawn_mirror_lock(scratch: string, mpath: string) -> bool {
+    parent: string = parent_of(mpath)
+    if str_len(parent) > 0 {
+        dawn_mkdir_p(parent)
+    }
+    free(parent)
+    lockp: string = lock_path(mpath)
+    mut tries: int64 = 0
+    mut held: bool = false
+    // Six hundred attempts a fifth of a second apart is the two minutes a stale lock
+    // takes to become seizable, so a wait that runs out has already had its chance to
+    // take one nobody is holding.
+    while !held && tries < 600 {
+        held = lock_take(scratch, lockp)
+        if !held {
+            if lock_stale(scratch, lockp) {
+                dawn_rm_rf(lockp)
+            } else {
+                lock_pause(scratch)
+            }
+            tries = tries + 1
+        }
+    }
+    free(lockp)
+    return held
+}
+
+/** Releases the lock this process holds on a mirror. */
+export func dawn_mirror_unlock(mpath: string) -> void {
+    lockp: string = lock_path(mpath)
+    dawn_rm_rf(lockp)
+    free(lockp)
+}

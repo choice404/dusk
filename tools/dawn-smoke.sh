@@ -9,6 +9,10 @@
 # The compiler that builds dawn is target/dusk-out/dusk, or set DUSK to point at
 # another one.
 #
+# The bare mirror cache the tool keeps is pointed inside the work directory too, so a
+# check never reads or writes the machine's own ~/.dawn/cache and every fetch here
+# starts from a cold cache.
+#
 # usage: tools/dawn-smoke.sh
 set -euo pipefail
 
@@ -22,6 +26,7 @@ dawn_bin="$repo_root/target/dusk-out/dawn"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+export DAWN_CACHE="$work/cache"
 
 pass=0
 fail=0
@@ -232,6 +237,7 @@ expect_has "help lists add" "dawn add" "$help_text"
 expect_has "help lists update" "dawn update" "$help_text"
 expect_has "help lists build" "dawn build" "$help_text"
 expect_has "help lists run" "dawn run" "$help_text"
+expect_has "help lists tree" "dawn tree" "$help_text"
 
 run_dawn "$work" bogus
 expect_code "unknown command exits 1" 1 "$code"
@@ -438,6 +444,124 @@ if [[ -f "$work/clash/dawn.lock" ]]; then
 else
     ok "the refused fetch wrote no lock"
 fi
+
+# --- the mirror cache --------------------------------------------------------
+# A source is mirrored once per machine, and the mirror is what every fetch after the
+# first clones out of. Taking the repository out of reach is what proves it: with
+# nothing left for a second project to reach, a fetch that still lands the package came
+# from the cache alone, which is the offline path a machine with no network walks.
+echo "cache:"
+
+make_repo mir "mir v1" v0.1.0
+mir_url="file://$work/mir.git"
+make_project "$work/mirone" "@require mir $mir_url v0.1.0" "$plain_root"
+run_dawn "$work/mirone" get
+expect_code "get for a mirrored source exits 0" 0 "$code"
+if [[ -n "$(find "$DAWN_CACHE" -type d -name 'mir-*.git' -print -quit 2>/dev/null)" ]]; then
+    ok "the fetch left a bare mirror under the cache"
+else
+    bad "no mirror named mir-<hash>.git under $DAWN_CACHE"
+fi
+
+mv "$work/mir.git" "$work/mir.gone"
+make_project "$work/mirtwo" "@require mir $mir_url v0.1.0" "$plain_root"
+run_dawn "$work/mirtwo" get
+expect_code "a second project fetches with the source out of reach" 0 "$code"
+expect_file "the offline fetch stamped the clone" "$work/mirtwo/dawn_modules/mir/.dawn"
+expect_eq "the offline fetch locked what the first one did" "$(cat "$work/mirone/dawn.lock")" "$(cat "$work/mirtwo/dawn.lock")"
+expect_eq "the checkout names the source and not the mirror" "$mir_url" "$(git -C "$work/mirtwo/dawn_modules/mir" config --get remote.origin.url)"
+mv "$work/mir.gone" "$work/mir.git"
+
+# Two sources whose paths differ only in a byte the mirror path folds to an underscore
+# are two sources, and each has to get its own repository back. The hash of the source's
+# identity is what keeps them apart, since the readable half of the path is the same for
+# both.
+make_repo keyplus "key plus" v0.1.0
+make_repo keyunder "key under" v0.1.0
+mv "$work/keyplus.git" "$work/a+b.git"
+mv "$work/keyunder.git" "$work/a_b.git"
+make_project "$work/keyone" "@require k file://$work/a+b.git v0.1.0" "$plain_root"
+make_project "$work/keytwo" "@require k file://$work/a_b.git v0.1.0" "$plain_root"
+run_dawn "$work/keyone" get
+expect_code "get for the first of two folded sources exits 0" 0 "$code"
+run_dawn "$work/keytwo" get
+expect_code "get for the second of two folded sources exits 0" 0 "$code"
+expect_eq "two sources one path spelling folds together keep two mirrors" "2" "$(find "$DAWN_CACHE" -type d -name 'a*b-*.git' | wc -l)"
+expect_eq "the first locked its own commit" "$(git -C "$work/a+b.git" rev-parse HEAD)" "$(awk '{print $5}' "$work/keyone/dawn.lock")"
+expect_eq "the second locked its own commit" "$(git -C "$work/a_b.git" rev-parse HEAD)" "$(awk '{print $5}' "$work/keytwo/dawn.lock")"
+expect_has "the first checked out its own tree" "key plus" "$(cat "$work/keyone/dawn_modules/k/src/greet.dusk")"
+expect_has "the second checked out its own tree" "key under" "$(cat "$work/keytwo/dawn_modules/k/src/greet.dusk")"
+
+# --- tree --------------------------------------------------------------------
+# tree reads the manifest, the lock, and the checkouts, and prints what they say. The
+# deep project above is the graph it is asked about, so a requirement of a requirement
+# prints one step further in.
+echo "tree:"
+
+mid_short=$(awk '$2 == "mid" { print substr($5, 1, 12) }' "$work/deep/dawn.lock")
+leaf_short=$(awk '$2 == "leaf" { print substr($5, 1, 12) }' "$work/deep/dawn.lock")
+run_dawn "$work/deep" tree
+expect_code "tree exits 0" 0 "$code"
+expect_eq "tree prints the root and the graph under it" "app 0.1.0
+  mid file://$work/mid.git v0.1.0 $mid_short
+    leaf file://$work/leaf.git v0.1.0 $leaf_short" "$out"
+
+printf '@require ghost file://%s/ghost.git v9.9.9\n' "$work" >> "$work/deep/package.dawn"
+run_dawn "$work/deep" tree
+expect_code "tree over a requirement nothing has locked still exits 0" 0 "$code"
+expect_has "tree marks the requirement nothing has locked" "ghost file://$work/ghost.git v9.9.9 (not locked)" "$out"
+
+# --- refresh -----------------------------------------------------------------
+# A checkout is vouched for by what is in it, not by the stamp beside it, so a fetch
+# asks the tree itself which commit it holds and whether anything under it changed.
+echo "refresh:"
+
+make_repo tamp "tamp v1" v0.1.0
+tamp_url="file://$work/tamp.git"
+make_project "$work/tampapp" "@require tamp $tamp_url v0.1.0" "$plain_root"
+run_dawn "$work/tampapp" get
+expect_code "get for the refresh project exits 0" 0 "$code"
+
+module="$work/tampapp/dawn_modules/tamp/src/greet.dusk"
+cp "$module" "$work/module.before"
+echo "// edited behind the tool's back" > "$module"
+run_dawn "$work/tampapp" get
+expect_code "get over an edited checkout exits 0" 0 "$code"
+expect_has "get says it is refreshing the edited checkout" "refreshing tamp" "$out"
+if cmp -s "$module" "$work/module.before"; then
+    ok "the refreshed checkout carries the package's own module again"
+else
+    bad "the refreshed checkout does not carry the package's own module"
+fi
+
+# A file the dependency's own .gitignore covers is invisible to a plain status, so a
+# checkout with one dropped into it would read as untouched. It is a change to the tree
+# like any other and the fetch has to see it.
+printf 'junk/\n' > "$work/tamp.git/.gitignore"
+git_fixture -C "$work/tamp.git" add -A >/dev/null
+git_fixture -C "$work/tamp.git" commit -q -m "fixture tamp ignores junk"
+git -C "$work/tamp.git" tag v0.2.0
+make_project "$work/ignapp" "@require tamp $tamp_url v0.2.0" "$plain_root"
+run_dawn "$work/ignapp" get
+expect_code "get for the ignored file project exits 0" 0 "$code"
+mkdir -p "$work/ignapp/dawn_modules/tamp/junk"
+echo "evil" > "$work/ignapp/dawn_modules/tamp/junk/evil.dusk"
+run_dawn "$work/ignapp" get
+expect_code "get over a checkout carrying an ignored file exits 0" 0 "$code"
+expect_has "an ignored file left in a checkout is a refresh" "refreshing tamp" "$out"
+if [[ -e "$work/ignapp/dawn_modules/tamp/junk/evil.dusk" ]]; then
+    bad "the ignored file survived the refresh"
+else
+    ok "the refresh cleared the ignored file"
+fi
+run_dawn "$work/ignapp" get
+expect_has "a checkout with nothing left in it reads as cached" "cached tamp" "$out"
+
+rm -rf "$work/tampapp/dawn_modules/tamp"
+run_dawn "$work/tampapp" get
+expect_code "get with the checkout deleted exits 0" 0 "$code"
+expect_has "get fetches a checkout that is not there" "fetching tamp" "$out"
+expect_file "the deleted checkout is stamped again" "$work/tampapp/dawn_modules/tamp/.dawn"
 
 # --- Verdict ----------------------------------------------------------------
 echo ""
