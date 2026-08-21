@@ -1,0 +1,153 @@
+/** dawnbuild: building the package, and the check that has to pass before anything
+ *  is compiled. dawn never guesses at a dependency. Three files have to agree first:
+ *  package.dawn says what the package wants, dawn.lock says which commit each want
+ *  resolved to, and the stamp inside each checkout says what is actually on disk. A
+ *  require the lock does not pin, or a checkout that no longer matches its pin, means
+ *  a build would compile something other than what the project asked for, so it is
+ *  refused by name with the fetch that repairs it.
+ *
+ *  The build itself is the compiler's own, through the shared pipeline, so a package
+ *  build and a plain dusk build walk the identical passes and differ only in where
+ *  the two artifacts land: dawn writes into target/dawn-out beside the manifest, so
+ *  neither tool overwrites the other's IR or binary.
+ *
+ *  The reading of those three files is verify_project, which manifestlock owns and the
+ *  compiler's own loader calls too, so dawn build and dusk build cannot come to
+ *  different verdicts about the same project. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import home
+@import manifest
+@import manifestlock
+@import driver
+@import dawnout
+@import dawnpkg
+
+foreign "C" {
+    func cool_flush() -> void
+}
+
+/** Runs the linked binary with the words the command line left for it, and hands
+ *  back its exit code untouched. A status the shell cannot report as a code, a
+ *  signal death among them, lands on 255. */
+func run_binary(bin: string, argv: string[], start: int64) -> int32 {
+    b: *StringBuilder = alloc(sb_new())
+    q: string = quote(bin)
+    sb_push(b, q)
+    free(q)
+    mut i: int64 = start
+    while i < argv.len {
+        sb_push_char(b, 32)
+        a: string = quote(argv[i])
+        sb_push(b, a)
+        free(a)
+        i = i + 1
+    }
+    line: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    rc: int64 = run(line)
+    free(line)
+    if rc < 0 {
+        return 255
+    }
+    if rc > 255 {
+        return 255
+    }
+    return int32(rc)
+}
+
+/** Compiles the manifest root and, when asked, runs what it produced. The artifacts
+ *  land beside the manifest rather than beside the working directory, so a build
+ *  from a subdirectory of the project writes where the project's own build does. */
+func build_root(m: *Manifest, argv: string[], run_it: bool) -> int32 {
+    root: string = manifest_root_file(m)
+    if str_len(root) == 0 {
+        dawn_manifest_faulted(m)
+        return 1
+    }
+    out: string = path_join((*m).dir, "target/dawn-out")
+    empty: string[] = []
+    bcode: int32 = build_module_to_pkg(argv[0], root, false, empty, 0, out, true)
+    if bcode != 0 {
+        free(out)
+        free(root)
+        return 1
+    }
+    stem: string = stem_of(root)
+    bin: string = path_join(out, stem)
+    free(out)
+    free(root)
+    // The build line names the artifact where the package keeps it rather than by
+    // the absolute path it happens to sit at, so the line reads the same on any
+    // machine and from any directory under the project.
+    shown: string = path_join("target/dawn-out", stem)
+    free(stem)
+    dawn_note("[dawn] ", shown)
+    free(shown)
+    if !run_it {
+        free(bin)
+        return 0
+    }
+    // Every dawn line reaches the shared descriptor before the child writes to it,
+    // so the program's own output follows the build line under a pipe the way it
+    // does on a terminal instead of trailing it.
+    cool_flush()
+    rc: int32 = run_binary(bin, argv, 2)
+    free(bin)
+    return rc
+}
+
+/** Builds the package the command was run inside, refusing first if the manifest,
+ *  the lock, and the checkouts do not agree. */
+export func dawn_cmd_build(argv: string[], run_it: bool) -> int32 {
+    if !run_it {
+        if argv.len > 2 {
+            return dawn_fail("build takes no arguments; it builds the root package.dawn names")
+        }
+    }
+    mpath: string = dawn_manifest_path()
+    if str_len(mpath) == 0 {
+        return 1
+    }
+    m: *Manifest = manifest_read(mpath)
+    free(mpath)
+    if dawn_manifest_faulted(m) {
+        manifest_free(m)
+        free(m)
+        return 1
+    }
+    lockp: string = lock_path_for(m)
+    l: *Lock = lock_read(lockp)
+    free(lockp)
+    if dawn_lock_faulted(l) {
+        dawn_fail("dawn.lock does not read; fix it or delete it, then run dawn get")
+        lock_free(l)
+        free(l)
+        manifest_free(m)
+        free(m)
+        return 1
+    }
+    probs: *Vector<string> = verify_project(m, l)
+    lock_free(l)
+    free(l)
+    mut code: int32 = 0
+    mut i: int64 = 0
+    while i < vec_len(probs) {
+        code = dawn_fail(vec_get(probs, i))
+        i = i + 1
+    }
+    dawn_free_messages(probs)
+    free(probs)
+    if code == 0 {
+        code = build_root(m, argv, run_it)
+    }
+    manifest_free(m)
+    free(m)
+    return code
+}

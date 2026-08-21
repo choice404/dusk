@@ -245,8 +245,28 @@ if ! DUSK_HOME="$repo_root" "$stage0" build tests/runner/testrun.dusk; then
     fail "seed compiler failed to build the test runner"
 fi
 testrun="$repo_root/target/dusk-out/testrun"
+# The dawn records in the suite drive the package tool, so each stage under
+# test builds dawn from the current source first and the suite is pointed at
+# that build through DAWN_BIN, the same trust ordering as the compiler itself.
+build_dawn_with() {
+    local builder=$1
+    local dest=$2
+    rm -f "$repo_root/target/dusk-out/dawn"
+    if ! DUSK_HOME="$repo_root" timeout 600 bash -c '
+        ulimit -v 25165824
+        ulimit -t 900
+        exec nice -n 19 "$0" build "$1"
+    ' "$builder" "$repo_root/compiler/dawn.dusk"; then
+        fail "$(basename "$builder") failed to build the package tool"
+    fi
+    [[ -x "$repo_root/target/dusk-out/dawn" ]] || fail "$(basename "$builder") produced no package tool"
+    cp "$repo_root/target/dusk-out/dawn" "$dest"
+    chmod +x "$dest"
+}
+echo "stage 1 check: build the package tool with stage1"
+build_dawn_with "$stage1" "$work/bin/dawn1"
 echo "stage 1 check: run golden suite against stage1"
-if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage1" "$testrun" tests/goldens.manifest; then
+if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage1" DAWN_BIN="$work/bin/dawn1" "$testrun" tests/goldens.manifest; then
     fail "golden suite failed against stage1"
 fi
 
@@ -331,8 +351,10 @@ echo "fixpoint check: stage3 compiler IR byte equals stage2's"
 
 # The golden suite runs once more with stage2 as the compiler under test, the
 # closing clause of the ladder: the self built compiler passes its own suite.
+echo "stage 2 check: build the package tool with stage2"
+build_dawn_with "$stage2" "$work/bin/dawn2"
 echo "stage 2 check: run golden suite against stage2"
-if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage2" "$testrun" tests/goldens.manifest; then
+if ! DUSK_HOME="$repo_root" DUSK_BIN="$stage2" DAWN_BIN="$work/bin/dawn2" "$testrun" tests/goldens.manifest; then
     fail "golden suite failed against stage2"
 fi
 

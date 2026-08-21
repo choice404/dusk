@@ -1,0 +1,312 @@
+// testrun dawnguard: the dawn checks that prove a refusal, and the one that proves
+// two machines with the same lock emit the same IR. A pin that a manifest moved
+// without a fetch, a manifest with requires and no lock, and a clone whose stamp no
+// longer matches the lock are all states where building would compile something
+// other than what the project asked for, so each must be refused by name with the
+// fix in the message rather than built. The parity check pins the other half of the
+// contract: a required package's files are spelled relative to the manifest in the
+// emitted IR, never by the absolute path the clone happens to sit at.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import exec
+@import compare
+@import dawnfix
+@import dawnproj
+
+// A git object id that is well formed and belongs to nothing, for a stamp edited
+// behind the tool's back.
+func absent_commit() -> string {
+    return "0000000000000000000000000000000000000000"
+}
+
+// Checks that a command refused: a non zero exit, and a stderr message carrying the
+// fragment that names the fix. A refusal that succeeds quietly is the failure this
+// whole family exists to catch.
+func refused(r: Shell, tag: string, needle: string) -> string {
+    if !r.infra {
+        return "the harness could not capture an exit code for " + tag
+    }
+    if r.code == 0 {
+        return tag + " succeeded, want a refusal naming '" + needle + "'"
+    }
+    if !str_contains(r.err, needle) {
+        return tag + " exited with code " + int_to_string(r.code) + " but its stderr '" + escape_show(clip(r.err, 400)) + "' carries no '" + needle + "'"
+    }
+    return ""
+}
+
+// The same, for a refusal whose message may name either of two fragments.
+func refused_either(r: Shell, tag: string, first: string, second: string) -> string {
+    if !r.infra {
+        return "the harness could not capture an exit code for " + tag
+    }
+    if r.code == 0 {
+        return tag + " succeeded, want a refusal naming '" + first + "' or '" + second + "'"
+    }
+    if str_contains(r.err, first) || str_contains(r.err, second) {
+        return ""
+    }
+    return tag + " exited with code " + int_to_string(r.code) + " but its stderr '" + escape_show(clip(r.err, 400)) + "' carries neither '" + first + "' nor '" + second + "'"
+}
+
+// dawn_update_moves_pin: with the manifest edited to a newer tag, building is
+// refused because the lock still pins the old commit; update re-resolves the ref,
+// moves the pin, and the program then prints the newer package's line.
+func update_moves_pin(bin: string) -> string {
+    c: Ctx = ctx_new("update", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    first: string = lock_commit(lock_line_for(c, "dep"))
+    if !is_hex40(first) {
+        return "after dawn get the lock pins '" + first + "', which is not a 40 character git object id"
+    }
+    re: string = dep_revise(c, dep, "dep v2", "v0.2.0")
+    if str_len(re) > 0 {
+        return re
+    }
+    me: string = put_file(app + "/package.dawn", pkg_text("app", req_line("dep", dep.source, "v0.2.0")))
+    if str_len(me) > 0 {
+        return me
+    }
+    b: Shell = sh(c, app, dawn_cmd(c, "build"))
+    bad: string = refused_either(b, "dawn build with the manifest moved to v0.2.0 and the lock still on v0.1.0", "run dawn get", "not locked")
+    if str_len(bad) > 0 {
+        return bad
+    }
+    u: Shell = sh(c, app, dawn_cmd(c, "update dep"))
+    if u.code != 0 {
+        return shell_detail("dawn update dep", u)
+    }
+    line: string = lock_line_for(c, "dep")
+    lb: string = lock_line_bad(line, "dep", dep.source, "v0.2.0")
+    if str_len(lb) > 0 {
+        return lb
+    }
+    second: string = lock_commit(line)
+    if str_eq(second, first) {
+        return "dawn update left the pin on commit '" + first + "', want the commit tag v0.2.0 resolves to"
+    }
+    se: string = stamp_bad(c, "dep", dep.source, "v0.2.0", second)
+    if str_len(se) > 0 {
+        return se
+    }
+    r: Shell = sh(c, app, dawn_cmd(c, "run"))
+    if r.code != 0 {
+        return shell_detail("dawn run after dawn update", r)
+    }
+    if !str_contains(r.out, "dep v2\n") {
+        return "after dawn update the program printed '" + escape_show(r.out) + "', want the line 'dep v2' from the moved pin"
+    }
+    return ""
+}
+
+// dawn_missing_lock_refused: a manifest that requires a package and has no lock is
+// refused by both tools, each naming the fetch that would fix it. The compiler is
+// asked with no file at all, the form that builds the manifest root.
+func missing_lock_refused(bin: string) -> string {
+    c: Ctx = ctx_new("missing_lock", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    if exists(app + "/dawn.lock") {
+        return "the fixture project already carries a lock, so this check would prove nothing"
+    }
+    b: Shell = sh(c, app, dawn_cmd(c, "build"))
+    be: string = refused(b, "dawn build with a require and no lock", "run dawn get")
+    if str_len(be) > 0 {
+        return be
+    }
+    d: Shell = sh(c, app, dusk_cmd(c, "build"))
+    return refused(d, "dusk build with a require and no lock", "run dawn get")
+}
+
+// dawn_stale_stamp_refused: a clone whose stamp no longer matches the lock is a
+// working tree the tool cannot vouch for, so building is refused by alias with the
+// fetch that would repair it.
+func stale_stamp_refused(bin: string) -> string {
+    c: Ctx = ctx_new("stale_stamp", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    stamp: string = dep.source + " v0.1.0 " + absent_commit() + "\n"
+    we: string = put_file(stamp_path(c, "dep"), stamp)
+    if str_len(we) > 0 {
+        return we
+    }
+    b: Shell = sh(c, app, dawn_cmd(c, "build"))
+    be: string = refused(b, "dawn build with the clone stamp edited away from the lock", "dawn get")
+    if str_len(be) > 0 {
+        return be
+    }
+    if !str_contains(b.err, "dep") {
+        return "the stale clone refusal '" + escape_show(clip(b.err, 400)) + "' does not name the alias 'dep'"
+    }
+    return ""
+}
+
+// Runs the compiler's IR dump for the project in dir, writing it to out. The root is
+// named by a path relative to the project, so nothing of where the copy sits reaches
+// the command line.
+func emit_ir(c: Ctx, dir: string, out: string) -> Shell {
+    return sh(c, dir, dusk_cmd(c, "ir src/main.dusk") + " > " + qw(out))
+}
+
+// Whether a file carries the fragment, through grep so a large dump is never read
+// into memory.
+func file_has(c: Ctx, path: string, needle: string) -> bool {
+    r: Shell = sh(c, c.root, "grep -F -q -- " + qw(needle) + " " + qw(path))
+    return r.code == 0
+}
+
+// dawn_ir_parity: the same project with the same lock, in two different directories,
+// emits byte identical IR, and the required package's files are spelled relative to
+// the manifest inside it. A build with no file argument then proves the compiler
+// takes the manifest root on its own.
+func ir_parity(bin: string) -> string {
+    c: Ctx = ctx_new("ir_parity", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_fault())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    one: string = c.work + "/copy_one"
+    two: string = c.work + "/copy_two"
+    cp: Shell = sh(c, c.work, "cp -r " + qw(app) + " " + qw(one) + " && cp -r " + qw(app) + " " + qw(two))
+    if cp.code != 0 {
+        return shell_detail("copying the fetched project into two directories", cp)
+    }
+    one_ll: string = c.work + "/one.ll"
+    two_ll: string = c.work + "/two.ll"
+    r1: Shell = emit_ir(c, one, one_ll)
+    if r1.code != 0 {
+        return shell_detail("dusk ir in the first copy", r1)
+    }
+    r2: Shell = emit_ir(c, two, two_ll)
+    if r2.code != 0 {
+        return shell_detail("dusk ir in the second copy", r2)
+    }
+    cmp_r: Shell = sh(c, c.work, "cmp -s " + qw(one_ll) + " " + qw(two_ll))
+    if cmp_r.code != 0 {
+        d: Shell = sh(c, c.work, "diff " + qw(one_ll) + " " + qw(two_ll) + " | head -8")
+        return "the two copies emitted different IR: " + escape_show(clip(d.out, 600))
+    }
+    if !file_has(c, one_ll, "dawn_modules/dep/") {
+        return "the emitted IR names no file under 'dawn_modules/dep/', so the required module's fault locations are not spelled relative to the manifest"
+    }
+    if file_has(c, one_ll, one) {
+        return "the emitted IR carries the absolute path '" + one + "', so it would differ on another machine"
+    }
+    if file_has(c, one_ll, two) {
+        return "the emitted IR carries the absolute path '" + two + "'"
+    }
+    nofile: Shell = sh(c, one, dusk_cmd(c, "build"))
+    if nofile.code != 0 {
+        return shell_detail("dusk build with no file argument, which builds the manifest root", nofile)
+    }
+    return ""
+}
+
+// dawn_alias_collision: two packages claiming one alias from different sources have
+// no single meaning, so the fetch is refused by the alias rather than resolved to
+// whichever arrived last.
+func alias_collision(bin: string) -> string {
+    c: Ctx = ctx_new("alias_collision", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    left: Repo = plain_repo(c, "left", "", "v0.1.0")
+    if str_len(left.err) > 0 {
+        return left.err
+    }
+    right: Repo = plain_repo(c, "right", "", "v0.1.0")
+    if str_len(right.err) > 0 {
+        return right.err
+    }
+    mid: Repo = plain_repo(c, "mid", req_line("shared", right.source, "v0.1.0"), "v0.1.0")
+    if str_len(mid.err) > 0 {
+        return mid.err
+    }
+    requires: string = req_line("shared", left.source, "v0.1.0") + req_line("mid", mid.source, "v0.1.0")
+    pe: string = app_project(c, requires, trivial_main())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    g: Shell = sh(c, app_dir(c), dawn_cmd(c, "get"))
+    ge: string = refused(g, "dawn get with the alias 'shared' claimed by two sources", "shared")
+    if str_len(ge) > 0 {
+        return ge
+    }
+    return ""
+}
+
+// Dispatches the dawn checks this module owns. An unrecognized name fails, since a
+// dawn special that matches nothing must never pass as a no op.
+export func run_dawn_guard(name: string, bin: string) -> string {
+    if str_eq(name, "dawn_update_moves_pin") {
+        return update_moves_pin(bin)
+    }
+    if str_eq(name, "dawn_missing_lock_refused") {
+        return missing_lock_refused(bin)
+    }
+    if str_eq(name, "dawn_stale_stamp_refused") {
+        return stale_stamp_refused(bin)
+    }
+    if str_eq(name, "dawn_ir_parity") {
+        return ir_parity(bin)
+    }
+    if str_eq(name, "dawn_alias_collision") {
+        return alias_collision(bin)
+    }
+    return "unknown dawn special '" + name + "'"
+}

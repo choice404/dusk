@@ -1,9 +1,9 @@
 // testrun builtins: the special modes, checks that need more than one command and
 // so cannot be expressed as a single run line. installed_layout is the first,
 // mirroring the Rust golden that proves a packaged install resolves its stdlib and
-// runtime through the share directory. The dawn family is named but not yet
-// implemented; each fails loudly rather than passing as a no op, since the dawn
-// port defines the interface those checks will drive.
+// runtime through the share directory. The dawn family lives in dawnspecial and
+// dawnguard, since each of those builds git fixtures and a project of its own; a
+// name in that family arrives here and is handed straight over.
 
 @paradigm procedural
 
@@ -12,6 +12,7 @@
 @import std.os
 @import manifest
 @import exec
+@import dawnspecial
 
 // Strips trailing blanks and newlines from a captured line, so the path mktemp
 // prints reads clean into a command.
@@ -229,9 +230,9 @@ func embed_c_fault(bin: string) -> string {
     return ""
 }
 
-// Dispatches a special record to its handler. A dawn special is named but not
-// implemented and fails loudly, and an unrecognized special name fails the same
-// way rather than silently passing.
+// Dispatches a special record to its handler. A dawn special goes to the dawn
+// family, which names the package tool it needs and fails loudly when it is
+// missing, and an unrecognized special name fails rather than silently passing.
 export func run_special(rec: Record, bin: string) -> string {
     name: string = rec.special
     if str_eq(name, "installed_layout") {
@@ -244,7 +245,7 @@ export func run_special(rec: Record, bin: string) -> string {
         return embed_c_fault(bin)
     }
     if starts_with(name, "dawn_") {
-        return "special '" + name + "' not implemented"
+        return run_dawn_special(name, bin)
     }
     return "unknown special '" + name + "'"
 }

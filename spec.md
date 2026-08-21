@@ -2,7 +2,7 @@
 
 ## Status
 
-This is the language reference for dusk. It describes the language as of 1.13.3: the paradigm system and the type system, signed and unsigned integer widths that never mix silently, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, Unicode strings with the `rune` primitive, and a foreign boundary that now crosses in both directions, reaching variadic C functions, third party libraries, and structs by value, taking a dusk function as a C callback, and compiling a dusk module into a C library any C ABI language can link. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
+This is the language reference for dusk. It describes the language as of 1.14.0: the paradigm system and the type system, signed and unsigned integer widths that never mix silently, immutability by default with `mut` to opt in, explicit memory with `alloc`, `free`, `defer`, and pointers, a generational heap that checks every managed dereference and faults on a use after free or a double free, an opt in collected heap through `collector<T>`, errors as values with a must handle rule, threads with channels, mutexes, and a thread pool, an async line with futures, an event loop, a readiness reactor, and TCP, `do` notation over any generic monad, Unicode strings with the `rune` primitive, and a foreign boundary that now crosses in both directions, reaching variadic C functions, third party libraries, and structs by value, taking a dusk function as a C callback, and compiling a dusk module into a C library any C ABI language can link, and a package system where a project is a directory holding a `package.dawn` manifest, a dependency is a git repository pinned to a reference, and a lock file makes the build repeat. The spec is kept current with each release, so where it describes a rule the rule is the one the compiler enforces today, not an earlier core.
 
 ### The bootstrap freeze
 
@@ -20,16 +20,17 @@ A shape the compiler already accepts can also be written into this spec for the 
 
 1. [Core Philosophy](#core-philosophy)
 2. [Source Files, Directives, Imports, Exports](#source-files-directives-imports-exports)
-3. [Paradigm System](#paradigm-system)
-4. [Type System](#type-system)
-5. [Expressions and Operators](#expressions-and-operators)
-6. [Memory Management](#memory-management)
-7. [Functions](#functions)
-8. [Object Oriented Concepts](#object-oriented-concepts)
-9. [Functional Concepts](#functional-concepts)
-10. [Error Handling](#error-handling)
-11. [Threads and the Memory Model](#threads-and-the-memory-model)
-12. [Builtins](#builtins)
+3. [Packages](#packages)
+4. [Paradigm System](#paradigm-system)
+5. [Type System](#type-system)
+6. [Expressions and Operators](#expressions-and-operators)
+7. [Memory Management](#memory-management)
+8. [Functions](#functions)
+9. [Object Oriented Concepts](#object-oriented-concepts)
+10. [Functional Concepts](#functional-concepts)
+11. [Error Handling](#error-handling)
+12. [Threads and the Memory Model](#threads-and-the-memory-model)
+13. [Builtins](#builtins)
 
 ---
 
@@ -91,7 +92,7 @@ The body carries prose, not facts: the compiler already knows every name, type, 
 
 Two commands emit machine readable output under a stable contract, the form a language server or an editor tool consumes. The shared rule for both: a consumer must ignore keys it does not know, which is what lets a later release add a key without breaking the contract, and the key order, indentation, and escaping are fixed, so the same input bytes always produce the same output bytes.
 
-`dusk check --json <file>` runs the same pipeline as `check` and reports the diagnostics as data. stdout carries exactly one JSON document plus one trailing newline in every outcome, clean or broken, and the exit code mirrors the human command, 0 clean and 1 on any diagnostic, a read error on the root included, reported inside the envelope. The envelope is `{"file": <the path as given>, "ok": <bool>, "diagnostics": [...]}`, each diagnostic `{"file": <the path of the file the span lands in>, "severity": "error", "message": <the message verbatim>, "span": {...} | null}`. A span carries `lo` and `hi`, byte offsets local to the named file and clamped to UTF-8 boundaries, plus `line`, `col`, `end_line`, and `end_col`, 1 based with columns counted in Unicode scalars, `line`/`col` at `lo` and the `end` pair at the true `hi`. Byte offsets are the primitive a tool converts from; the line and column pairs serve a consumer that wants them precomputed. A diagnostic with no source position, an unresolvable import for one, carries `span: null`. `severity` is always `"error"` today; the key exists so a warning can arrive later without a schema break. Diagnostics appear in the order the human command prints them.
+`dusk check --json <file>` runs the same pipeline as `check` and reports the diagnostics as data. stdout carries exactly one JSON document plus one trailing newline in every outcome, clean or broken, and the exit code mirrors the human command, 0 clean and 1 on any diagnostic, a read error on the root included, reported inside the envelope. The envelope is `{"file": <the path as given>, "ok": <bool>, "diagnostics": [...]}`, each diagnostic `{"file": <the path of the file the span lands in>, "severity": "error", "message": <the message verbatim>, "span": {...} | null}`. A span carries `lo` and `hi`, byte offsets local to the named file and clamped to UTF-8 boundaries, plus `line`, `col`, `end_line`, and `end_col`, 1 based with columns counted in Unicode scalars, `line`/`col` at `lo` and the `end` pair at the true `hi`. Byte offsets are the primitive a tool converts from; the line and column pairs serve a consumer that wants them precomputed. A diagnostic with no source position, an unresolvable import for one, carries `span: null`. A fault in a `package.dawn` or a `dawn.lock` has a line but no byte span, since the file it names is not dusk source, so it carries `span: null` beside a `"line": <n>` key, the manifest's own line number; that key appears only where there is a line and no span, so every diagnostic that had a span before is byte identical to what it was, and a consumer that does not know the key ignores it under the shared rule above. `severity` is always `"error"` today; the key exists so a warning can arrive later without a schema break. Diagnostics appear in the order the human command prints them.
 
 `dusk doc --json <file>` is described in [Doc Comments](#doc-comments); since 1.7.1 every item object carries a `span` key holding the item's name token position, `{"lo", "hi", "line", "col"}` in the same file local, scalar counted convention, the impl object carrying its `impl` keyword position, and every doc object opens with the `span` of its whole doc block, delimiters included. `dusk doc` reads a single file, so its offsets are file local by construction.
 
@@ -111,6 +112,8 @@ Directives appear at the top of the file, before declarations.
 
 - `@paradigm <name>` declares a paradigm the file uses. It can be repeated to stack paradigms. See [Paradigm System](#paradigm-system).
 - `@import <path>` brings a module or a symbol into the file. See below.
+
+Later releases add `@link` and `@csource`, described below. A project's `package.dawn` manifest carries a directive set of its own, spelled the same way and read by the same kind of line sweep, and [Packages](#packages) covers it.
 
 ### Imports
 
@@ -141,6 +144,8 @@ A dotted path resolves to one of two things.
 ```
 
 Resolution walks directories, then files, then symbols, so the compiler can tell where the file path ends and the symbol name begins.
+
+A dotted path whose first segment is an alias a `package.dawn` manifest declares resolves inside that dependency instead, by these same rules under the dependency's root directory. See [Packages](#packages).
 
 Imports are independent of paradigm directives. Importing a module does not grant any paradigm. The two systems do not interact.
 
@@ -183,6 +188,126 @@ foreign "C" {
     func add(a: int64, b: int64) -> int64
 }
 ```
+
+Since 1.14.0 a `package.dawn` manifest carries both directives too, with the same reading of a value and the same fold into the one module wide list. See [Packages](#packages).
+
+---
+
+## Packages
+
+Added in 1.14.0. A project is a directory holding a `package.dawn` manifest, and a package is a git repository with one at its root. The manifest names the package, points at its root source file, and pins every dependency to a git source and a reference; `dawn.lock` beside it records the commit each reference resolved to; `dawn_modules/` holds the checkouts those commits produced. The compiler reads all three and never opens a socket. Fetching is dawn's job and building is the compiler's, and that split is what makes a build offline by construction, with the lock the only thing standing between two machines and the same bytes.
+
+Discovery walks upward from the directory of the root source file, not from the working directory, to the filesystem root, and the first `package.dawn` found on the way up is the project's manifest. A command given no file argument has no source file to start from and starts at the working directory instead, which is the one shape where the two differ. A file with no manifest above it compiles exactly as it did before 1.14.0, so nothing in this chapter reaches a single file program or a checkout that has not adopted one.
+
+### Manifest Syntax
+
+`package.dawn` is a directive file, not dusk source, and every line in it is one of three things: blank, a comment, or a directive with its arguments. Arguments split on whitespace, a space, a tab, a carriage return, a vertical tab, and a form feed alike. A double quote opens a literal run and the next one closes it, both stripped, so whitespace inside a quoted run is part of the value; there are no escapes, so a value cannot contain a quote at all, and a quote that never closes is `unterminated quoted value; a double quote opened and never closed`. A `//` opens a comment only at an argument boundary, at the start of a line or straight after whitespace, and anywhere inside an argument it is ordinary text. That rule is what keeps a URL readable: `@require gh https://github.com/a/b v1` is three arguments and no comment, with no quoting needed. A line that is none of the three is `expected a directive`, and every diagnostic a manifest earns carries the manifest's own path and the line number.
+
+```text
+@package json
+@version 1.2.0
+@dusk 1.14
+@root src/json.dusk
+@require maybe github.com/choice404/dusk-maybe v0.3.0
+@link "m"
+@csource "vendor/fast.c"
+```
+
+| Directive  | Arguments                        | Meaning                                                     |
+| ---------- | -------------------------------- | ----------------------------------------------------------- |
+| `@package` | a name                           | the package's own name, independent of any alias            |
+| `@version` | a text                           | the package's version, informational, not parsed as semver  |
+| `@dusk`    | `<major>.<minor>`                | the oldest compiler this package builds with                |
+| `@root`    | a path relative to the manifest  | the entry file, or the library root a dependent imports     |
+| `@require` | an alias, a git source, a ref    | one dependency, one line                                    |
+| `@link`    | a library name or a path         | folded into the link line the way the source directive is   |
+| `@csource` | a path relative to the manifest  | a C source compiled and linked into a build of this package |
+
+- `@package <name>` is the name the package carries wherever a name is needed: `dusk doc`, dawn's own output, and the header stem `build --lib` writes when the build comes from a manifest. The name is letters, digits, `_`, and `-`, and nothing else, `@package value '../evil' is not a package name; use letters, digits, _ and -`, since that name reaches a file path as the header stem and a path is not a thing a manifest gets to spell there. It is not what a dependent spells at an import. That is the alias, and the alias is the dependent's to choose.
+- `@version <text>` is informational. dawn suggests it as the tag when you cut a release and prints it where a version belongs, and nothing parses it, compares it, or resolves against it. Versions are git tags, and a tag is a name a repository already has.
+- `@dusk <major.minor>` is the minimum compiler. The two numbers compare numerically against the running compiler's own and an older compiler refuses the build, `package.dawn asks for dusk 1.99, this is 1.14.0`. The floor is a major and a minor and nothing else, so a third number is refused rather than rounded off, `@dusk value '1.14.0' is not a version like 1.14`. A newer compiler is always accepted, since the language only widens. Only the root project's floor is checked in 1.14.0. A dependency's own `@dusk` is read and not enforced, which is a limit named here rather than implied.
+- `@root <path>` resolves against the manifest's directory. It is the file a bare `dusk build` compiles, and the file whose directory a dependent's dotted import walks under. Without one the root is `main.dusk`, then `src/main.dusk`, and a manifest naming neither and holding neither is `no root file; add @root, or put the entry at main.dusk or src/main.dusk`. A `@root` that names a file that is not there is `@root names 'src/gone.dusk', which is not a file`, refused at the manifest rather than deeper in a load.
+- `@require <alias> <source> <ref>` declares one dependency per line. The alias is an identifier, the name every import in this package spells, and anything else is `'9bad' is not a valid alias; an alias is an identifier like my_pkg`. Two names are reserved, `'std' is reserved` and `'dawn_modules' is reserved`, and one alias declared twice in one manifest is `duplicate alias 'x'`. The source is either `host/owner/repo`, where https is assumed, or a full URL beginning `https://`, `git@`, `ssh://`, or `file://`. The reference is a tag, a branch, or a commit, and dawn resolves whichever of the three it is to one commit.
+- `@link <value>` and `@csource <path>` are the manifest's package wide form of the two source file directives [Linking and C Sources](#linking-and-c-sources) describes, with the same reading of a value as a bare library name or a path and the same refusal to splice in an arbitrary flag. A manifest's values fold into the same module wide deduplicated list a file's do, in manifest order, after the runtime's own C sources, and a `@csource` path resolves against the directory of the manifest that declares it, so a dependency's C source is found wherever its checkout landed. One C source named twice, by a manifest and by a source file directive, deduplicates on the real path both spellings reach and compiles once.
+
+Arities are fixed. `@package`, `@version`, `@dusk`, `@root`, `@link`, and `@csource` take one argument, `@require` takes three, and `@lock` takes four, with the count named on a miss, `@package takes 1 argument, got 0` and `@require takes 3 arguments (alias source ref), got 2`. `@package`, `@version`, `@dusk`, and `@root` are single valued, so a second one is `duplicate @package` rather than a silent override, and an unknown directive is `unknown directive '@nope'`, which is deliberate: a manifest written against a later release fails loudly here rather than building with half of what it asked for. The manifest and the lock do not share a directive set either, so `@lock belongs in dawn.lock, not package.dawn` and, the other way, `dawn.lock holds @lock lines only`.
+
+### The Lock File
+
+`dawn.lock` sits beside the manifest and is committed. It carries one `@lock` line per `@require`, in declaration order, the alias, the source as the manifest wrote it, the reference as the manifest wrote it, and the 40 hex commit the reference resolved to, which is checked as it is read, `@lock commit must be a 40 character git hash`.
+
+```text
+@lock maybe github.com/choice404/dusk-maybe v0.3.0 3f2ad4c1b90e7a5f6c2d8e14b7a03f95d6e1c2b8
+```
+
+`dawn get` writes the file when it is missing and rewrites the line whose reference changed; `dawn update` re-resolves a reference to whatever it names today. Nothing else moves a lock line, so a tag repointed under you changes the build only when you ask it to. The lock mirrors the manifest only through dawn: a `@require` deleted by hand leaves its `@lock` line standing, and a lock line still asks for its checkout, `dependency 'f' is not fetched; run dawn get`, so the run that clears the stale line is the same one that would have fetched it.
+
+A `@require` with no matching `@lock` line stops a build before any source is read, in `dawn build` and in `dusk build` alike, `'maybe' is not locked; run dawn get`. The compiler has no way to resolve a reference itself, since it has no network, so an unlocked requirement has no answer other than the one that names the command that supplies it.
+
+### Layout
+
+Every dependency of the project lands in `dawn_modules/<alias>/` beside the manifest, a git checkout at the locked commit with the head detached, plus a one line stamp at `dawn_modules/<alias>/.dawn` holding the source, the reference, and the commit. The stamp is what lets a build tell a checkout that matches the lock from one that does not without running git: a directory that is not there is `dependency 'maybe' is not fetched; run dawn get`, and a stamp that disagrees with the lock is `dependency 'maybe' does not match dawn.lock; run dawn get`. A checkout that is present and stamped but has no root file to offer is `dependency 'util' has no root file; add @root to its package.dawn`. `dawn init` writes the directory into `.gitignore`, since the lock is what a repository carries and the checkouts are what the lock reproduces.
+
+```text
+myproject/
+  package.dawn
+  dawn.lock
+  src/
+    main.dusk
+  dawn_modules/
+    maybe/
+      .dawn
+      package.dawn
+      src/maybe.dusk
+```
+
+The graph is flat. dawn reads each dependency's own `package.dawn` and resolves that package's `@require` lines into the same `dawn_modules`, so a dependency of a dependency is a sibling of it rather than nested underneath. Four rules settle what happens when two manifests ask for the same thing, or for different things under one name, and each refusal names both manifests that asked. A source and reference pair already resolved is reused, so a package two dependents share is fetched and checked out once. One alias naming two different sources is refused, `alias 'p' is required from 'github.com/a/p' by package.dawn and from 'github.com/b/p' by dawn_modules/util/package.dawn; one alias names one package`. One alias naming one source at two references resolves to the root manifest's pin when the root declares that requirement, which is how a project overrides what a dependency asked for, and is refused otherwise, with the fix in the message, `alias 'p' is required at 'v1.0.0' by dawn_modules/a/package.dawn and at 'v2.0.0' by dawn_modules/b/package.dawn; add a @require for it in package.dawn to settle the version`. One source and reference reached under two different aliases is refused too, `'github.com/a/p' at 'v1.0.0' is required under two aliases, 'p' by package.dawn and 'q' by dawn_modules/util/package.dawn; one package has one alias`, since one checkout cannot answer to two names. The alias namespace is one namespace across the whole graph in 1.14.0, so a dependency's choice of alias is visible to the project resolving it.
+
+### What a Dependency May Ask For
+
+A dependency is confined to its own checkout. Its `@root` and each of its `@csource` paths normalize before they are used and must land under `dawn_modules/<alias>/`, so an absolute path and one that climbs out with `..` are both refused, `dependency 'greet' names a root outside its checkout; fix @root in its package.dawn` and `dependency 'greet' names a C source outside its checkout; fix @csource in its package.dawn`. Its `@link` may name a library and nothing else, `dependency 'greet' names a link path; a dependency may only link a library by name`, since a path in a dependency's link line would reach a file on your machine that the lock says nothing about. The root package's own `@csource` and `@link` keep the full reading [Linking and C Sources](#linking-and-c-sources) describes, path forms included: your own manifest is yours to write, and a dependency's is not.
+
+A dependency's `package.dawn` and `dawn.lock` are read by the same grammar and their faults are reported at the file they are in, spelled the way every other path from a checkout is spelled, `dawn_modules/greet/package.dawn:3: expected a directive`. A dependency whose manifest does not read does not resolve, so an import through its alias earns that error rather than a vaguer one about a module that could not be found.
+
+A dependency's own `@require` lines are checked against the lock that drove the resolution. The source and the reference a dependency asks for must be the ones the lock recorded for that alias, and a disagreement is `dependency 'util' of 'mid' does not match dawn.lock; run dawn get`, which is the case where a checkout moved underneath a lock that still describes what it used to ask for.
+
+### Importing From a Package
+
+An import through an alias is a dotted path like any other. The first segment is the alias a `@require` declared and the rest is a path under that package's `@root` directory, read by exactly the rules [Imports](#imports) states, so both the module form and the file plus leaf symbol form work through an alias the way they work locally.
+
+```text
+@require maybe github.com/choice404/dusk-maybe v0.3.0
+```
+
+```text
+@import maybe.maybe             // module: call maybe.unwrap(x)
+@import maybe.maybe.unwrap      // symbol: call unwrap(x)
+@import maybe.unwrap            // symbol exported by the root file: call unwrap(x)
+```
+
+The third form is the short one a package's root file earns. An alias followed by one name reads that name as a symbol the dependency's `@root` exports, so a package that presents its surface from one file is imported without naming that file twice. It lives beside the `alias.file.symbol` form rather than replacing it, and a name the root file does not export is refused where it is written, `import 'greet.no_such' names 'no_such', but 'greet' exports no such symbol`.
+
+An alias wins over a local file or directory of the same name. What an import means is fixed by the manifest, not by the shape of the tree the file happens to sit in, so adding a directory beside your source cannot quietly capture an import a `@require` already answers. An import whose first segment is an alias no `@require` declares is the ordinary unresolved import error.
+
+Two names are reserved everywhere, with a manifest above the file or without one. An import whose first segment is `dawn_modules` is refused, `'dawn_modules.maybe.src.maybe' imports through dawn_modules; import a dependency through the alias its @require names`, since a checkout is reached through the alias that pinned it and a path into the directory would name a file the lock does not stand behind. And a local directory named `std` no longer shadows the standard library: it is `'std' is reserved for the standard library; rename the local directory` rather than a quiet answer to an `@import std.io`. The old behavior made the meaning of a stdlib import depend on the shape of the tree around the file, which is exactly the kind of resolution a project should not have to reason about.
+
+### Exports Across Packages
+
+Exports are global in 1.14.0. A dependency's exported name is reachable bare from any file that imports it and through the alias qualified form, `maybe.unwrap(x)`, and the two spellings reach the same function. What changes here is the answer when two packages export one name: the loader refuses the program and names both files, `'maybe_tag' is also exported by 'src/main.dusk'; two packages cannot export one name`, where the old refusal reported a duplicate definition with no position at all. Import scoped renaming, which lets two packages keep a name apiece, lands in a later release; until it does, a collision is a build error you resolve by not depending on both, and no program that builds today changes meaning when the renaming arrives.
+
+### Deterministic Builds
+
+A fault location carries the path of the file it happened in, and that path is emitted into the program, so the path spelling is an input to the bytes a build produces. A dependency's files register under a manifest relative spelling, `dawn_modules/<alias>/<path>`, never the absolute path of the checkout, so two machines with the same `dawn.lock` emit identical IR for identical source however differently their home directories are laid out. The absolute path stays the key the loader deduplicates on, and only the display spelling is relative; the two are kept apart deliberately, since collapsing them would either break deduplication under a symlink or leak the checkout's location into the output. A display spelling is normalized before it is registered, a `./` prefix stripped among the other no ops, so two writings of one path cannot produce two different strings in the emitted program.
+
+The root package's own files follow the same rule in the shape where the compiler chose the file: a command given no file argument spells its root manifest relative, `src/main.dusk`, whatever directory it ran in. A command given a file argument keeps the spelling the command line wrote, since that spelling is the user's and reproducing it is what a diagnostic pointing back at the command needs.
+
+### Building From a Manifest
+
+`dusk build`, `dusk run`, `dusk check`, and `dusk ir` each take the manifest's `@root` when no file argument is given, discovering the manifest from the working directory upward, and with a file argument they compile that file and discover the manifest from its directory upward. Neither a file nor a manifest is `dusk: this command needs a file argument, or a package.dawn to build`. In all four commands and in both shapes the compiler reads the manifest, the lock, and the checkouts, and reaches the network in neither: a missing checkout, a stamp that disagrees with the lock, and an unlocked requirement are each a named error telling you to run `dawn get`, not a fetch the compiler performs on its own.
+
+### The Quoted Git Import
+
+Before 1.14.0 a dependency was named by a quoted git path at the import itself, `@import "github.com/user/repo/module"`, resolved against a global clone cache with no reference and no lock. Inside a project holding a `package.dawn` that form is refused, `'example.com/user/repo/mod' is a url import; declare it with @require in package.dawn`, since the manifest is where a dependency and its reference are written down. Outside a project the resolution against the cache still works, unchanged, for one release, but nothing fills that cache any more: dawn fetches into `dawn_modules` now, so the form reaches only a cache placed by hand or left behind by an earlier release. It is removed in 1.15.0, and a program using it moves by writing a `@require` for the repository and spelling the import through the alias.
 
 ---
 
@@ -1766,7 +1891,7 @@ The generational heap is thread safe, so `alloc` and `free` from any thread are 
 
 ## Imports and Standard Library
 
-See [Source Files](#source-files-directives-imports-exports) for import syntax. Imports are separate from paradigm directives. Importing a module does not grant any paradigm.
+See [Source Files](#source-files-directives-imports-exports) for import syntax and [Packages](#packages) for an import through a dependency's alias. Imports are separate from paradigm directives. Importing a module does not grant any paradigm.
 
 ### Standard Library Modules, Shipped and Planned
 

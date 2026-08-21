@@ -1,0 +1,102 @@
+/** version: the one place the toolchain version number lives, and the comparison a
+ *  manifest's @dusk floor needs. Every other file asks toolchain_version() rather
+ *  than spelling the number again, so a release bumps one literal. The comparison
+ *  reads only the major and minor components, the pair a package pins against: a
+ *  patch release never changes the language surface, so a floor of "1.14" is
+ *  satisfied by 1.14.0 and by every 1.14.x after it. */
+
+@paradigm procedural
+
+@import std.string
+
+/** The full toolchain version, the string dusk version and dawn version print. */
+export func toolchain_version() -> string {
+    return "1.14.0"
+}
+
+/** Whether the byte c is an ASCII digit. */
+func is_digit(c: int64) -> bool {
+    if c < 48 { return false }
+    if c > 57 { return false }
+    return true
+}
+
+/** Reads the decimal number filling s[lo, hi), returning the value and whether the
+ *  range was a non empty run of digits short enough to hold. A component longer
+ *  than nine digits is treated as malformed rather than wrapped, so no version
+ *  comparison can turn on an overflowed number. */
+func read_component(s: string, lo: int64, hi: int64) -> (int64, bool) {
+    if hi <= lo { return (0, false) }
+    if hi - lo > 9 { return (0, false) }
+    mut acc: int64 = 0
+    mut i: int64 = lo
+    while i < hi {
+        c: int64 = s[i]
+        if !is_digit(c) {
+            return (0, false)
+        }
+        acc = acc * 10 + (c - 48)
+        i = i + 1
+    }
+    return (acc, true)
+}
+
+/** The index of the first dot in s at or after lo, or the length of s when there is
+ *  none. */
+func dot_from(s: string, n: int64, lo: int64) -> int64 {
+    mut i: int64 = lo
+    while i < n {
+        if s[i] == 46 {
+            return i
+        }
+        i = i + 1
+    }
+    return n
+}
+
+/** Reads a version string as a major and minor pair. want_exact asks for exactly
+ *  two components, the shape a manifest floor must spell; the toolchain's own three
+ *  component version passes with it off. The bool reports a well formed read. */
+func parse_pair(s: string, want_exact: bool) -> (int64, int64, bool) {
+    n: int64 = str_len(s)
+    d1: int64 = dot_from(s, n, 0)
+    if d1 >= n {
+        return (0, 0, false)
+    }
+    major, ok_major := read_component(s, 0, d1)
+    if !ok_major {
+        return (0, 0, false)
+    }
+    d2: int64 = dot_from(s, n, d1 + 1)
+    minor, ok_minor := read_component(s, d1 + 1, d2)
+    if !ok_minor {
+        return (0, 0, false)
+    }
+    if want_exact {
+        if d2 < n {
+            return (0, 0, false)
+        }
+    }
+    return (major, minor, true)
+}
+
+/** Whether the running toolchain meets the floor min, a version written as
+ *  major.minor. The answer is 1 when the toolchain is at least min, 0 when the
+ *  toolchain is older, and -1 when min is not a major.minor pair of decimal
+ *  numbers, so a caller reports a malformed floor apart from an unmet one. A floor
+ *  carrying a patch component, "1.14.0", is malformed: a package pins the language
+ *  surface, which only major and minor name. */
+export func version_at_least(min: string) -> int64 {
+    want_major, want_minor, ok := parse_pair(min, true)
+    if !ok {
+        return -1
+    }
+    have_major, have_minor, have_ok := parse_pair(toolchain_version(), false)
+    if !have_ok {
+        return -1
+    }
+    if want_major < have_major { return 1 }
+    if want_major > have_major { return 0 }
+    if want_minor > have_minor { return 0 }
+    return 1
+}

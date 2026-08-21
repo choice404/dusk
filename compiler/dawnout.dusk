@@ -1,0 +1,108 @@
+/** dawnout: the lines dawn writes, and the one place the split between them lives.
+ *  Progress goes to stdout and every fault to stderr, so a shell can read a build
+ *  line without reading an error into it. A fault dawn raises itself opens with
+ *  "dawn: ", the prefix that names which tool is speaking; a fault a manifest or a
+ *  lock reader already rendered is printed exactly as it stands, since those carry
+ *  their own path and line and adding a prefix would only push the location right.
+ *
+ *  Every fault returns 1, the exit code dawn gives a command that did not do what
+ *  was asked, so a caller writes `return dawn_fail(...)` and is done. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+
+/** A progress line on stdout, a prefix and a value joined. */
+export func dawn_note(prefix: string, val: string) -> void {
+    line: string = prefix + val
+    println(line)
+    free(line)
+}
+
+/** The count line a clean fetch closes with. */
+export func dawn_ready(count: int64) -> void {
+    line: string = "dawn: " + int_to_string(count) + " package(s) ready"
+    println(line)
+    free(line)
+}
+
+/** One fault of dawn's own on stderr, opened with "dawn: ". */
+export func dawn_fail(msg: string) -> int32 {
+    line: string = "dawn: " + msg
+    printerr(line)
+    free(line)
+    return 1
+}
+
+/** The same, for a message the caller built on the heap and is done with. */
+export func dawn_fail_owned(msg: string) -> int32 {
+    code: int32 = dawn_fail(msg)
+    free(msg)
+    return code
+}
+
+/** A tool's own output printed under a fault, git's stderr after the sentence
+ *  naming what dawn was trying to do. Nothing is printed for an empty capture, and
+ *  the trailing newline the child wrote is dropped so the two do not double. */
+export func dawn_detail(text: string) -> void {
+    body: string = trim_end(text)
+    if str_len(body) > 0 {
+        printerr(body)
+    }
+    free(body)
+}
+
+/** Every fault a reader left behind, printed as it stands. Returns 1 when there was
+ *  at least one, so a caller writes `if dawn_faults(v) != 0 { return 1 }` over a
+ *  vector it still owns. */
+export func dawn_faults(errors: *Vector<string>) -> int32 {
+    mut i: int64 = 0
+    while i < vec_len(errors) {
+        printerr(vec_get(errors, i))
+        i = i + 1
+    }
+    if vec_len(errors) > 0 {
+        return 1
+    }
+    return 0
+}
+
+/** Releases every message a vector holds and the vector's own storage, the sb_free
+ *  contract: the Vector allocation itself is the caller's, so a heap vector is
+ *  released with dawn_free_messages(v) followed by free(v). */
+export func dawn_free_messages(v: *Vector<string>) -> void {
+    while vec_len(v) > 0 {
+        s: string = vec_take(v, vec_len(v) - 1)
+        free(s)
+    }
+    vec_free(v)
+}
+
+/** The usage text, printed under an unknown or misused command. It goes to stderr
+ *  there and to stdout when it is the answer to no command at all, so a user asking
+ *  for help gets it on the stream a pager reads. */
+export func dawn_usage_lines(to_err: bool) -> void {
+    mut i: int64 = 0
+    lines: *Vector<string> = alloc(vec_new())
+    vec_push(lines, "usage:")
+    vec_push(lines, "  dawn init [name]                 start a package here")
+    vec_push(lines, "  dawn get                         fetch what package.dawn requires")
+    vec_push(lines, "  dawn add <alias> <source> <ref>  require a package, then fetch it")
+    vec_push(lines, "  dawn update [alias]              move every pin, or one, to its ref")
+    vec_push(lines, "  dawn build                       build the package root")
+    vec_push(lines, "  dawn run [args...]               build the package root and run it")
+    vec_push(lines, "  dawn version                     print version")
+    while i < vec_len(lines) {
+        one: string = vec_get(lines, i)
+        if to_err {
+            printerr(one)
+        } else {
+            println(one)
+        }
+        i = i + 1
+    }
+    vec_free(lines)
+    free(lines)
+}

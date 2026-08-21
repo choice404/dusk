@@ -1,0 +1,158 @@
+/** dawncmd: the commands that are a fetch, and what each of them does before or
+ *  after one. get is the fetch alone. add writes a require into package.dawn and
+ *  then fetches, so the manifest, the lock, and the checkout all name the new
+ *  package after one command. update is the fetch with the lock ignored, for one
+ *  alias or for every one, which is the only way a pin moves once it is written.
+ *
+ *  Each of them starts by finding the package the command was run inside, walking
+ *  from the working directory up to the filesystem root, so a command works from
+ *  anywhere under a project. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import home
+@import manifest
+@import manifestline
+@import dawnout
+@import dawnpkg
+@import dawnget
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+/** Finds the package the command was run inside and fetches its graph. */
+func fetch_here(force_all: bool, force_alias: string) -> int32 {
+    mpath: string = dawn_manifest_path()
+    if str_len(mpath) == 0 {
+        return 1
+    }
+    m: *Manifest = manifest_read(mpath)
+    free(mpath)
+    mut code: int32 = 0
+    if dawn_manifest_faulted(m) {
+        code = 1
+    } else {
+        code = dawn_fetch_all(m, force_all, force_alias)
+    }
+    manifest_free(m)
+    free(m)
+    return code
+}
+
+export func dawn_cmd_get(argv: string[]) -> int32 {
+    if argv.len > 2 {
+        return dawn_fail("get takes no arguments; it fetches what package.dawn requires")
+    }
+    return fetch_here(false, "")
+}
+
+export func dawn_cmd_update(argv: string[]) -> int32 {
+    if argv.len > 3 {
+        return dawn_fail("update takes at most one argument: dawn update [alias]")
+    }
+    if argv.len == 3 {
+        return fetch_here(false, argv[2])
+    }
+    return fetch_here(true, "")
+}
+
+/** Appends one require to a manifest file, adding the newline a file that ends
+ *  without one is missing so the new line is a line of its own. */
+func append_require(mpath: string, alias: string, src: string, ref: string) -> int32 {
+    text: string = dawn_slurp(mpath)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, text)
+    n: int64 = str_len(text)
+    if n > 0 {
+        if text[n - 1] != 10 {
+            sb_push_char(b, 10)
+        }
+    }
+    line: string = dawn_require_line(alias, src, ref)
+    sb_push(b, line)
+    free(line)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    code: int32 = dawn_write(mpath, out)
+    free(out)
+    if str_len(text) > 0 { free(text) }
+    return code
+}
+
+/** The fault a value earns before it is written into a manifest, or the empty
+ *  string. The directive grammar has one grouping mark and no escape, so a value
+ *  carrying a double quote or a control byte has no spelling that reads back as
+ *  itself and is refused before the file is touched. */
+func writable_error(what: string, v: string) -> string {
+    if str_len(v) == 0 {
+        return "a @require " + what + " cannot be empty"
+    }
+    if dawn_unwritable(v) {
+        return "the " + what + " '" + v + "' holds a double quote or a control character, which a manifest cannot spell"
+    }
+    return ""
+}
+
+export func dawn_cmd_add(argv: string[]) -> int32 {
+    if argv.len != 5 {
+        return dawn_fail("add takes three arguments: dawn add <alias> <source> <ref>")
+    }
+    alias: string = argv[2]
+    src: string = argv[3]
+    ref: string = argv[4]
+    ae: string = alias_error(alias)
+    if str_len(ae) > 0 {
+        return dawn_fail_owned(ae)
+    }
+    se: string = writable_error("source", src)
+    if str_len(se) > 0 {
+        return dawn_fail_owned(se)
+    }
+    re: string = writable_error("ref", ref)
+    if str_len(re) > 0 {
+        return dawn_fail_owned(re)
+    }
+    url: string = source_url(src)
+    if str_len(url) == 0 {
+        return dawn_fail_owned("bad source '" + src + "' for '" + alias + "'")
+    }
+    free(url)
+    mpath: string = dawn_manifest_path()
+    if str_len(mpath) == 0 {
+        return 1
+    }
+    m: *Manifest = manifest_read(mpath)
+    mut code: int32 = 0
+    if dawn_manifest_faulted(m) {
+        code = 1
+    } else if require_index((*m).requires, alias) >= 0 {
+        msg: string = "'" + alias + "' is already required in " + mpath + "; run dawn update " + alias + " to move it"
+        code = dawn_fail_owned(msg)
+    } else {
+        // The fetch runs first, over a manifest carrying the new require in memory
+        // only. A ref that does not resolve, a source that is not there, and an alias
+        // the graph already claims all fail before package.dawn is touched, so a
+        // refused add leaves the file byte for byte as it was rather than leaving a
+        // require behind that every later get and build would refuse. The line is
+        // written once the package is on disk and the lock records it.
+        vec_push((*m).requires, alloc(Require {
+            alias: copy_string(alias),
+            source: copy_string(src),
+            ref: copy_string(ref),
+            line: 0,
+        }))
+        code = dawn_fetch_all(m, false, "")
+        if code == 0 {
+            code = append_require(mpath, alias, src, ref)
+        }
+    }
+    manifest_free(m)
+    free(m)
+    free(mpath)
+    return code
+}

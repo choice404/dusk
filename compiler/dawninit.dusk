@@ -1,0 +1,202 @@
+/** dawninit: starting a package. Three files make a directory into one: package.dawn,
+ *  which declares the package and what it needs; a root the compiler builds, which
+ *  init writes as a program that prints its own name so a fresh package runs before
+ *  anything is added to it; and a .gitignore line keeping fetched dependencies out of
+ *  the repository, since dawn.lock is what a repository records and dawn_modules is
+ *  what a fetch reproduces from it.
+ *
+ *  Nothing already written is overwritten. A directory that already declares a
+ *  package is refused outright, a root that is already there is left alone, and a
+ *  .gitignore is appended to rather than replaced, so running init inside an existing
+ *  tree cannot lose work. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import home
+@import source
+@import version
+@import manifest
+@import dawnout
+@import dawnpkg
+
+/** The major and minor of the running toolchain, the pair a package pins its floor
+ *  against. A patch release never moves the language surface, so the floor a fresh
+ *  package writes names only the two components a surface has. */
+func toolchain_floor() -> string {
+    v: string = toolchain_version()
+    n: int64 = str_len(v)
+    mut dots: int64 = 0
+    mut i: int64 = 0
+    while i < n {
+        if v[i] == 46 {
+            dots = dots + 1
+            if dots == 2 {
+                return substring(v, 0, i)
+            }
+        }
+        i = i + 1
+    }
+    return substring(v, 0, n)
+}
+
+/** The last segment of an absolute directory, the name a package takes when the
+ *  command line did not give one. A directory with no last segment, which is only
+ *  the filesystem root, falls back to a plain word rather than an empty name. */
+func dir_name(dir: string) -> string {
+    n: int64 = str_len(dir)
+    mut start: int64 = 0
+    mut i: int64 = 0
+    while i < n {
+        if dir[i] == 47 {
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if start >= n {
+        return substring("package", 0, 7)
+    }
+    return substring(dir, start, n)
+}
+
+/** The manifest a fresh package carries. */
+func manifest_text(name: string) -> string {
+    field: string = dawn_field(name)
+    floor: string = toolchain_floor()
+    mut s: string = "// " + name + ": a dusk package. dawn reads this file, dusk builds what @root names.\n"
+    s += "@package " + field + "\n"
+    s += "@version 0.1.0\n"
+    s += "@dusk " + floor + "\n"
+    s += "@root main.dusk\n"
+    free(field)
+    free(floor)
+    return s
+}
+
+/** The root a fresh package carries: a program that names the package, so the first
+ *  dawn run after an init prints something the person who ran it recognizes. */
+func root_text(name: string) -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "func main() -> int32 {\n"
+    s += "    println(\"hello from " + name + "\")\n"
+    s += "    return 0\n"
+    s += "}\n"
+    return s
+}
+
+/** Whether a gitignore already carries the entry, comparing whole lines so a longer
+ *  path merely containing it does not count as having it. */
+func ignores(text: string, entry: string) -> bool {
+    lines: *Vector<string> = str_split(text, "\n")
+    mut found: bool = false
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        one: string = trim(vec_get(lines, i))
+        if str_eq(one, entry) {
+            found = true
+        }
+        free(one)
+        i = i + 1
+    }
+    while vec_len(lines) > 0 {
+        s: string = vec_take(lines, vec_len(lines) - 1)
+        free(s)
+    }
+    vec_free(lines)
+    free(lines)
+    return found
+}
+
+/** Adds the dependency directory to .gitignore, creating the file when there is none
+ *  and leaving it alone when it already says so. */
+func write_gitignore() -> int32 {
+    entry: string = dawn_modules_dir() + "/"
+    path: string = ".gitignore"
+    if !source_is_file(path) {
+        code: int32 = dawn_write(path, entry + "\n")
+        if code == 0 {
+            dawn_note("dawn: wrote ", path)
+        }
+        free(entry)
+        return code
+    }
+    text: string = dawn_slurp(path)
+    if ignores(text, entry) {
+        if str_len(text) > 0 { free(text) }
+        free(entry)
+        return 0
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, text)
+    n: int64 = str_len(text)
+    if n > 0 {
+        if text[n - 1] != 10 {
+            sb_push_char(b, 10)
+        }
+    }
+    sb_push(b, entry)
+    sb_push_char(b, 10)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    code: int32 = dawn_write(path, out)
+    if code == 0 {
+        note: string = entry + " to " + path
+        dawn_note("dawn: added ", note)
+        free(note)
+    }
+    free(out)
+    if str_len(text) > 0 { free(text) }
+    free(entry)
+    return code
+}
+
+/** Writes the three files a package starts from into the working directory. */
+export func dawn_cmd_init(argv: string[]) -> int32 {
+    if argv.len > 3 {
+        return dawn_fail("init takes at most one argument: dawn init [name]")
+    }
+    if source_is_file("package.dawn") {
+        here: string = dawn_cwd()
+        code: int32 = dawn_fail_owned("package.dawn already exists in " + here)
+        free(here)
+        return code
+    }
+    mut name: string = ""
+    if argv.len == 3 {
+        name = substring(argv[2], 0, str_len(argv[2]))
+    } else {
+        here: string = dawn_cwd()
+        name = dir_name(here)
+        free(here)
+    }
+    if str_len(name) == 0 {
+        return dawn_fail("a package name cannot be empty")
+    }
+    if dawn_unwritable(name) {
+        code: int32 = dawn_fail_owned("the name '" + name + "' holds a double quote or a control character, which a manifest cannot spell")
+        free(name)
+        return code
+    }
+    mtext: string = manifest_text(name)
+    mut code: int32 = dawn_write("package.dawn", mtext)
+    free(mtext)
+    if code == 0 {
+        dawn_note("dawn: wrote ", "package.dawn")
+        if !source_is_file("main.dusk") {
+            rtext: string = root_text(name)
+            code = dawn_write("main.dusk", rtext)
+            free(rtext)
+            if code == 0 {
+                dawn_note("dawn: wrote ", "main.dusk")
+            }
+        }
+    }
+    if code == 0 {
+        code = write_gitignore()
+    }
+    free(name)
+    return code
+}

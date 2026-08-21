@@ -1,0 +1,108 @@
+/** pathnorm: the two lexical path questions the loader, the package layer, and the
+ *  manifest reader all ask. Cleaning a path is what makes two spellings of one file
+ *  dedup as one, and asking whether a path lies under a directory is what keeps a
+ *  dependency's @root and @csource inside the checkout the lock stands behind. Both are
+ *  textual and follow no symlink on purpose: a value that climbs out with ".." has left
+ *  the directory whatever the filesystem would have resolved it to. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+/** A lexically cleaned path: empty and "." segments drop, ".." pops the previous real
+ *  segment, and a run of separators collapses, so two spellings of one file, "a/b.c"
+ *  and "a/./b.c" and "a/x/../b.c", reduce to the one string that dedups them as the
+ *  same @csource rather than compiling the file twice into duplicate symbols. This is
+ *  lexical only and follows no symlink, which is what a containment test wants: a path
+ *  that climbs out of a directory with ".." is out of it whatever a symlink underneath
+ *  would have said. The result is a fresh heap string the caller owns. */
+export func normalize_path(p: string) -> string {
+    n: int64 = str_len(p)
+    absolute: bool = n > 0 && p[0] == 47
+    segs: *Vector<string> = alloc(vec_new())
+    mut start: int64 = 0
+    mut i: int64 = 0
+    while i <= n {
+        mut cut: bool = i == n
+        if !cut {
+            cut = p[i] == 47
+        }
+        if cut {
+            if i > start {
+                seg: string = substring(p, start, i)
+                if str_eq(seg, ".") {
+                    free(seg)
+                } else if str_eq(seg, "..") {
+                    mut popped: bool = false
+                    if vec_len(segs) > 0 {
+                        top: string = vec_get(segs, vec_len(segs) - 1)
+                        if !str_eq(top, "..") {
+                            (*segs).len = (*segs).len - 1
+                            popped = true
+                        }
+                    }
+                    if popped || absolute {
+                        free(seg)
+                    } else {
+                        vec_push(segs, seg)
+                    }
+                } else {
+                    vec_push(segs, seg)
+                }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    b: *StringBuilder = alloc(sb_new())
+    if absolute {
+        sb_push_char(b, 47)
+    }
+    mut k: int64 = 0
+    while k < vec_len(segs) {
+        if k > 0 {
+            sb_push_char(b, 47)
+        }
+        sb_push(b, vec_get(segs, k))
+        k = k + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    if str_len(out) == 0 {
+        free(out)
+        return copy_string(".")
+    }
+    return out
+}
+
+/** The part of path lying under dir, or the empty string when it does not lie under it
+ *  at all. Both sides are cleaned first, so "a/./b" is under "a" and "a/../b" is not,
+ *  and dir naming path itself answers empty too, since a directory is not a file inside
+ *  itself. A non empty result is a fresh heap string the caller owns. */
+export func path_under(dir: string, path: string) -> string {
+    if str_len(dir) == 0 {
+        return substring(path, 0, 0)
+    }
+    nd: string = normalize_path(dir)
+    np: string = normalize_path(path)
+    n: int64 = str_len(nd)
+    m: int64 = str_len(np)
+    mut out: string = substring(np, 0, 0)
+    if m > n + 1 {
+        if starts_with(np, nd) {
+            if np[n] == 47 {
+                free(out)
+                out = substring(np, n + 1, m)
+            }
+        }
+    }
+    free(nd)
+    free(np)
+    return out
+}

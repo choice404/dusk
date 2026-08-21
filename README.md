@@ -2,7 +2,7 @@
 
 Dusk is a small systems language that compiles to native code through textual LLVM IR. Every file picks a paradigm with `@paradigm procedural`, `functional`, or `oop`, and that choice unlocks the matching builtins. Values are immutable by default, memory is explicit, and errors are values you handle. The compiler is written in dusk itself, `compiler/*.dusk`, and links each program against a small C runtime.
 
-Dawn is an accompanying package tool, also written in dusk. A Dusk package is a git repository, inspired by the Go style of importing libraries and modules.
+Dawn is an accompanying package tool, also written in dusk. A dusk package is a git repository holding a `package.dawn` manifest, a version is a git tag pinned to a commit in a lock file, and there is no registry, an approach borrowed from the Go style of importing libraries and modules.
 
 ## Requirements
 
@@ -80,21 +80,31 @@ The standard library under `lib/std` is written in dusk. It ships `io`, `string`
 
 ## Packages with dawn
 
-An import is a stdlib or local dotted path, or a quoted git path.
+A project is a directory holding a `package.dawn` manifest, a package is a git repository with one at its root, and a version is a git tag, so there is no registry. The manifest pins each dependency under an alias, `dawn.lock` records the commit each pin resolved to, and `dawn_modules/` holds the checkouts.
+
+```text
+@package myapp
+@root src/main.dusk
+@require maybe github.com/choice404/dusk-maybe v0.3.0
+```
+
+An import spells the alias first, then a dotted path under that package's root directory, the same shape a stdlib or local import has.
 
 ```text
 @import std.io
-@import "github.com/user/repo/module"
+@import maybe.maybe
 ```
-
-The first three segments of a git path, `host/user/repo`, name the repository. The rest names a module inside it. dawn clones each repository into a cache, either `$DAWN_CACHE` or `~/.dawn/cache`, and the dusk loader resolves git imports from there. dawn shells out to the system `git`, so git has to be on your path to fetch.
 
 ```sh
-target/dusk-out/dawn get examples/app.dusk    # clone the git packages a file imports
-target/dusk-out/dawn run examples/app.dusk    # fetch, then compile and run
+target/dusk-out/dawn init myapp                                   # write package.dawn
+target/dusk-out/dawn add maybe github.com/choice404/dusk-maybe v0.3.0
+target/dusk-out/dawn get                                          # fetch and lock
+target/dusk-out/dawn run                                          # build and run the root
 ```
 
-The `dawn` binary has four commands. They are `get`, `build`, `run`, and `version`. Currently an import resolves against the latest clone in the cache. Version pinning, a lock file, and fetching across a dependency graph come in a later release.
+dawn owns the network and shells out to the system `git`, so git has to be on your path to fetch. The compiler never fetches: `dusk build`, `dusk run`, and `dusk check` read the manifest, the lock, and the checkouts and stay offline, and with no file argument they take the manifest's root. Commit `package.dawn` and `dawn.lock`, ignore `dawn_modules/`. The quoted git import from earlier releases, `@import "github.com/user/repo/module"`, still resolves outside a project this release, against a cache nothing fills any more, and goes away in 1.15.0.
+
+See [dawn.md](dawn.md) for the manifest grammar, the lock, the resolution rules, and the tradeoffs.
 
 ## Status
 

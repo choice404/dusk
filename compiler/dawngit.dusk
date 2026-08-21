@@ -1,0 +1,310 @@
+/** dawngit: the only part of dawn that reaches outside the machine. git is the whole
+ *  network layer, so everything here is a git command line built word by word and
+ *  handed to a shell with every value single quoted, and the child's two streams
+ *  captured into files under a scratch directory the fetch owns.
+ *
+ *  Two questions are asked of a remote. Resolving turns a ref into the commit it
+ *  names right now, through ls-remote, so nothing is cloned to find out what a tag
+ *  points at. Fetching puts a working tree at a known commit: a named ref clones
+ *  shallow at that ref and then detaches onto the commit, and a ref written as a
+ *  commit clones whole, since a bare object is not something --branch can name. A
+ *  shallow clone whose ref moved after the lock was written no longer carries the
+ *  locked object, so the detach that fails falls back to a whole clone rather than
+ *  leaving a tree at a commit nobody asked for.
+ *
+ *  git's own stderr rides back on every failure, because git says why better than a
+ *  wrapper guessing at it can. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import home
+@import source
+
+/** One captured child: its exit code and both of its streams. The two strings are
+ *  owned by the value and released by dawn_shell_free. */
+export struct DawnShell {
+    code: int64,
+    out: string,
+    err: string,
+}
+
+/** A resolved ref: the commit it names, or the reason it could not be read. detail
+ *  carries git's own stderr, empty when git said nothing. */
+export struct DawnRef {
+    ok: bool,
+    commit: string,
+    detail: string,
+}
+
+/** The outcome of putting a working tree on disk at a commit. */
+export struct DawnClone {
+    ok: bool,
+    detail: string,
+}
+
+export func dawn_shell_free(r: DawnShell) -> void {
+    if str_len(r.out) > 0 { free(r.out) }
+    if str_len(r.err) > 0 { free(r.err) }
+}
+
+export func dawn_ref_free(r: DawnRef) -> void {
+    if str_len(r.commit) > 0 { free(r.commit) }
+    if str_len(r.detail) > 0 { free(r.detail) }
+}
+
+export func dawn_clone_free(r: DawnClone) -> void {
+    if str_len(r.detail) > 0 { free(r.detail) }
+}
+
+func slurp_or_empty(path: string) -> string {
+    text, e := read_file(path)
+    if e.exists() {
+        return ""
+    }
+    return text
+}
+
+/** Runs one command line with both streams captured under scratch, and hands back
+ *  the child's exit code with what it wrote. The capture files are overwritten by
+ *  the next call and removed with the scratch directory when the fetch ends. */
+export func dawn_shell(scratch: string, line: string) -> DawnShell {
+    outp: string = path_join(scratch, "out")
+    errp: string = path_join(scratch, "err")
+    qo: string = quote(outp)
+    qe: string = quote(errp)
+    full: string = line + " > " + qo + " 2> " + qe
+    code: int64 = run(full)
+    out: string = slurp_or_empty(outp)
+    err: string = slurp_or_empty(errp)
+    free(full)
+    free(qo)
+    free(qe)
+    free(outp)
+    free(errp)
+    return DawnShell { code: code, out: out, err: err }
+}
+
+/** Creates a directory and every directory above it. */
+export func dawn_mkdir_p(path: string) -> bool {
+    q: string = quote(path)
+    line: string = "mkdir -p " + q
+    free(q)
+    code: int64 = run(line)
+    free(line)
+    return code == 0
+}
+
+/** Removes a directory and everything under it. A path that is not there is not a
+ *  failure, the same answer rm -rf gives. */
+export func dawn_rm_rf(path: string) -> bool {
+    q: string = quote(path)
+    line: string = "rm -rf " + q
+    free(q)
+    code: int64 = run(line)
+    free(line)
+    return code == 0
+}
+
+/** Whether s spells a full git object name: forty hexadecimal digits, either case.
+ *  An abbreviated hash is not one, since a prefix grows ambiguous as a repository
+ *  does and a pin names exactly one object. */
+export func dawn_is_hex40(s: string) -> bool {
+    if str_len(s) != 40 {
+        return false
+    }
+    mut i: int64 = 0
+    while i < 40 {
+        c: int64 = s[i]
+        mut ok: bool = false
+        if c >= 48 {
+            if c <= 57 { ok = true }
+        }
+        if c >= 97 {
+            if c <= 102 { ok = true }
+        }
+        if c >= 65 {
+            if c <= 70 { ok = true }
+        }
+        if !ok {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/** The object id ls-remote reported for the ref named want, or the empty string when
+ *  its output holds no such line. Output is one "<object>\t<ref>" record per line. */
+func sha_for_ref(out: string, want: string) -> string {
+    lines: *Vector<string> = str_split(out, "\n")
+    mut found: string = ""
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        one: string = vec_get(lines, i)
+        cut: int64 = str_find(one, "\t")
+        if cut > 0 {
+            name: string = substring(one, cut + 1, str_len(one))
+            if str_eq(name, want) {
+                if str_len(found) == 0 {
+                    found = substring(one, 0, cut)
+                }
+            }
+            free(name)
+        }
+        i = i + 1
+    }
+    while vec_len(lines) > 0 {
+        s: string = vec_take(lines, vec_len(lines) - 1)
+        free(s)
+    }
+    vec_free(lines)
+    free(lines)
+    return found
+}
+
+/** The commit the ref names on the remote right now. A ref written as a full object
+ *  name is already the answer and no remote is asked. Otherwise ls-remote is asked
+ *  for the tag, its peeled form, and the branch of that name at once, and the peeled
+ *  tag wins: an annotated tag is an object of its own, and what a checkout wants is
+ *  the commit under it. A ref that matches nothing is not an error of git's, which
+ *  exits zero over an empty answer, so an empty result is reported as unresolvable
+ *  the same way a failed connection is. */
+export func dawn_git_resolve(scratch: string, url: string, ref: string) -> DawnRef {
+    if dawn_is_hex40(ref) {
+        return DawnRef { ok: true, commit: substring(ref, 0, str_len(ref)), detail: "" }
+    }
+    qu: string = quote(url)
+    peeled: string = "refs/tags/" + ref + "^{}"
+    tag: string = "refs/tags/" + ref
+    head: string = "refs/heads/" + ref
+    qp: string = quote(peeled)
+    qt: string = quote(tag)
+    qh: string = quote(head)
+    line: string = "git ls-remote " + qu + " " + qp + " " + qt + " " + qh
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    free(qu)
+    free(qp)
+    free(qt)
+    free(qh)
+    if r.code != 0 {
+        detail: string = substring(r.err, 0, str_len(r.err))
+        dawn_shell_free(r)
+        free(peeled)
+        free(tag)
+        free(head)
+        return DawnRef { ok: false, commit: "", detail: detail }
+    }
+    mut sha: string = sha_for_ref(r.out, peeled)
+    if str_len(sha) == 0 {
+        sha = sha_for_ref(r.out, tag)
+    }
+    if str_len(sha) == 0 {
+        sha = sha_for_ref(r.out, head)
+    }
+    free(peeled)
+    free(tag)
+    free(head)
+    if str_len(sha) == 0 {
+        detail: string = substring(r.err, 0, str_len(r.err))
+        dawn_shell_free(r)
+        return DawnRef { ok: false, commit: "", detail: detail }
+    }
+    dawn_shell_free(r)
+    if !dawn_is_hex40(sha) {
+        bad: string = "git named '" + sha + "' for this ref, which is not an object id"
+        free(sha)
+        return DawnRef { ok: false, commit: "", detail: bad }
+    }
+    return DawnRef { ok: true, commit: sha, detail: "" }
+}
+
+/** Clones url into dir, shallow at ref when shallow is set. */
+func clone_into(scratch: string, url: string, ref: string, dir: string, shallow: bool) -> DawnShell {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "git clone --quiet")
+    if shallow {
+        sb_push(b, " --depth 1 --branch ")
+        qr: string = quote(ref)
+        sb_push(b, qr)
+        free(qr)
+    }
+    sb_push_char(b, 32)
+    qu: string = quote(url)
+    sb_push(b, qu)
+    free(qu)
+    sb_push_char(b, 32)
+    qd: string = quote(dir)
+    sb_push(b, qd)
+    free(qd)
+    full: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    r: DawnShell = dawn_shell(scratch, full)
+    free(full)
+    return r
+}
+
+/** Puts dir at commit, with the detached head advice off since a checkout dawn made
+ *  is always detached and the note is for a person who typed one. */
+func detach_to(scratch: string, dir: string, commit: string) -> DawnShell {
+    qd: string = quote(dir)
+    qc: string = quote(commit)
+    line: string = "git -C " + qd + " -c advice.detachedHead=false checkout --quiet --detach " + qc
+    free(qd)
+    free(qc)
+    r: DawnShell = dawn_shell(scratch, line)
+    free(line)
+    return r
+}
+
+/** Checks a working tree out at dir holding exactly commit. The tree is replaced
+ *  rather than updated, so what lands is what the commit says and nothing a previous
+ *  fetch left behind. A shallow clone that turns out not to carry the commit, which
+ *  is what a moved tag looks like from here, is thrown away and cloned whole. */
+export func dawn_git_checkout(scratch: string, url: string, ref: string, commit: string, dir: string) -> DawnClone {
+    named: bool = !dawn_is_hex40(ref)
+    if !dawn_rm_rf(dir) {
+        return DawnClone { ok: false, detail: "could not clear the checkout directory " + dir }
+    }
+    first: DawnShell = clone_into(scratch, url, ref, dir, named)
+    if first.code != 0 {
+        detail: string = substring(first.err, 0, str_len(first.err))
+        dawn_shell_free(first)
+        return DawnClone { ok: false, detail: detail }
+    }
+    dawn_shell_free(first)
+    put: DawnShell = detach_to(scratch, dir, commit)
+    if put.code == 0 {
+        dawn_shell_free(put)
+        return DawnClone { ok: true, detail: "" }
+    }
+    put_detail: string = substring(put.err, 0, str_len(put.err))
+    dawn_shell_free(put)
+    if !named {
+        return DawnClone { ok: false, detail: put_detail }
+    }
+    if str_len(put_detail) > 0 { free(put_detail) }
+    if !dawn_rm_rf(dir) {
+        return DawnClone { ok: false, detail: "could not clear the checkout directory " + dir }
+    }
+    whole: DawnShell = clone_into(scratch, url, ref, dir, false)
+    if whole.code != 0 {
+        detail: string = substring(whole.err, 0, str_len(whole.err))
+        dawn_shell_free(whole)
+        return DawnClone { ok: false, detail: detail }
+    }
+    dawn_shell_free(whole)
+    last: DawnShell = detach_to(scratch, dir, commit)
+    if last.code != 0 {
+        detail: string = substring(last.err, 0, str_len(last.err))
+        dawn_shell_free(last)
+        return DawnClone { ok: false, detail: detail }
+    }
+    dawn_shell_free(last)
+    return DawnClone { ok: true, detail: "" }
+}

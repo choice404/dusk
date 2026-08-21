@@ -306,8 +306,8 @@ func outcome_failed(o: CheckOutcome) -> bool {
 // clean, mono and the ground double pass. The gates mirror sema::check exactly, so
 // the collected outcome carries precisely the diagnostics the human path would print
 // and no more. Nothing here prints; the caller renders the outcome for its audience.
-func run_check_spine(path: string, prog: string) -> CheckOutcome {
-    p: Program = load(path, prog)
+func run_check_spine(path: string, prog: string, from_manifest: bool) -> CheckOutcome {
+    p: Program = load_project(path, prog, from_manifest)
     load_diags: *Vector<LoadDiag> = p.errors
     if vec_len(load_diags) > 0 {
         return CheckOutcome { load_diags: load_diags, has_module: p.has_module, files: p.files, resolve_errs: no_spans(), type_errs: no_spans(), mono_errs: no_spans(), ground_errs: no_spans() }
@@ -344,11 +344,12 @@ func run_check_spine(path: string, prog: string) -> CheckOutcome {
 }
 
 /** Runs load with the per-file paradigm gate, desugar, name resolution, then the
- *  S3a type layer. Resolve diagnostics render first; typeck appends after. The gated
+ *  S3a type layer. from_manifest is passed through to the load, where it decides
+ *  whether the project's own files register under a manifest relative spelling. Resolve diagnostics render first; typeck appends after. The gated
  *  spine is shared with cmd_check_json, so the two commands never diverge on which
  *  diagnostics they report; only the rendering differs. */
-export func cmd_check(path: string, prog: string) -> int32 {
-    o: CheckOutcome = run_check_spine(path, prog)
+export func cmd_check(path: string, prog: string, from_manifest: bool) -> int32 {
+    o: CheckOutcome = run_check_spine(path, prog, from_manifest)
     ld: *Vector<LoadDiag> = o.load_diags
     emit_errors(ld)
     if vec_len(ld) > 0 {
@@ -393,7 +394,7 @@ export func cmd_check(path: string, prog: string) -> int32 {
  *  newline and nothing on stderr. The exit code mirrors the human check, 0 clean and 1
  *  with any diagnostic, so a tool reads the code and the envelope and they agree. */
 export func cmd_check_json(path: string, prog: string) -> int32 {
-    o: CheckOutcome = run_check_spine(path, prog)
+    o: CheckOutcome = run_check_spine(path, prog, false)
     failed: bool = outcome_failed(o)
     ok: bool = !failed
     out: string = check_json(path, ok, o.files, o.load_diags, o.resolve_errs, o.type_errs, o.mono_errs, o.ground_errs)
@@ -475,9 +476,9 @@ export func cmd_mono(path: string, prog: string) -> int32 {
 /** Checks a source file through the same gated spine as mono, then lowers the
  *  ground module to LLVM IR. The build commands share this path so every front-end
  *  gate observes the same diagnostics before codegen runs. */
-export func compile_ir_text(path: string, prog: string, target: string) -> CliIrResult {
+export func compile_ir_text(path: string, prog: string, target: string, from_manifest: bool) -> CliIrResult {
     no_exp: *Vector<string> = alloc(vec_new())
-    p: Program = load(path, prog)
+    p: Program = load_project(path, prog, from_manifest)
     errs: *Vector<LoadDiag> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
@@ -521,8 +522,8 @@ export func compile_ir_text(path: string, prog: string, target: string) -> CliIr
 /** Emits the shared IR text to stdout, preserving the oracle-facing ir command.
  *  target is the LLVM triple to emit for: the native default, or the wasm triple
  *  when `ir --target=wasm32` is used to cross-emit the compiler for the browser. */
-export func cmd_ir(path: string, prog: string, target: string) -> int32 {
-    res: CliIrResult = compile_ir_text(path, prog, target)
+export func cmd_ir(path: string, prog: string, target: string, from_manifest: bool) -> int32 {
+    res: CliIrResult = compile_ir_text(path, prog, target, from_manifest)
     if !res.ok {
         if str_len(res.text) > 0 { printerr(res.text) }
         return 1

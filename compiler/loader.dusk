@@ -16,6 +16,10 @@
 @import home
 @import privatize
 @import loadfold
+@import loadns
+@import pathnorm
+@import manifest
+@import loaderpkg
 @import paradigm
 @import prescan
 @import loadcopy
@@ -44,17 +48,28 @@ struct ParsedFile {
     src: Source,
 }
 
+// One file's import list waiting to be walked. dir is the physical directory the
+// importing file sits in, the base a dotted import resolves against; importer is that
+// file's display path, the one a diagnostic names; and pkg is the package it belongs
+// to, which decides which aliases its imports may spell.
 struct WorkItem {
     imports: *Vector<string>,
     dir: string,
     importer: string,
+    pkg: int64,
 }
 
+// One resolved import: the physical file it names, the leaf symbol when the import
+// named one, and the package the file belongs to, which decides the spelling it
+// registers under. reported is set when the resolution failed with a fault of its own
+// already recorded, so the caller does not add a second, vaguer one over it.
 struct Resolved {
     ok: bool,
     file: string,
     has_leaf: bool,
     leaf: string,
+    pkg: int64,
+    reported: bool,
 }
 
 func new_set() -> *Map<string, int64> {
@@ -137,88 +152,11 @@ func dir_of(path: string) -> string {
     return substring(path, 0, end)
 }
 
-// A lexically cleaned path: empty and "." segments drop, ".." pops the previous
-// real segment, and a run of separators collapses, so two spellings of one file,
-// "a/b.c" and "a/./b.c" and "a/x/../b.c", reduce to the one string that dedups them
-// as the same @csource rather than compiling the file twice into duplicate symbols.
-// This is lexical only and follows no symlink, which is all the dedup needs.
-func normalize_path(p: string) -> string {
-    n: int64 = str_len(p)
-    absolute: bool = n > 0 && p[0] == 47
-    segs: *Vector<string> = alloc(vec_new())
-    mut start: int64 = 0
-    mut i: int64 = 0
-    while i <= n {
-        mut cut: bool = i == n
-        if !cut {
-            cut = p[i] == 47
-        }
-        if cut {
-            if i > start {
-                seg: string = substring(p, start, i)
-                if str_eq(seg, ".") {
-                    free(seg)
-                } else if str_eq(seg, "..") {
-                    mut popped: bool = false
-                    if vec_len(segs) > 0 {
-                        top: string = vec_get(segs, vec_len(segs) - 1)
-                        if !str_eq(top, "..") {
-                            (*segs).len = (*segs).len - 1
-                            popped = true
-                        }
-                    }
-                    if popped || absolute {
-                        free(seg)
-                    } else {
-                        vec_push(segs, seg)
-                    }
-                } else {
-                    vec_push(segs, seg)
-                }
-            }
-            start = i + 1
-        }
-        i = i + 1
-    }
-    b: *StringBuilder = alloc(sb_new())
-    if absolute {
-        sb_push_char(b, 47)
-    }
-    mut k: int64 = 0
-    while k < vec_len(segs) {
-        if k > 0 {
-            sb_push_char(b, 47)
-        }
-        sb_push(b, vec_get(segs, k))
-        k = k + 1
-    }
-    out: string = substring(sb_cstr(b), 0, sb_size(b))
-    sb_free(b)
-    free(b)
-    if str_len(out) == 0 {
-        free(out)
-        return copy_string(".")
-    }
-    return out
-}
-
 func last_slash(s: string) -> int64 {
     mut last: int64 = -1
     mut i: int64 = 0
     while s[i] != 0 {
         if s[i] == 47 {
-            last = i
-        }
-        i = i + 1
-    }
-    return last
-}
-
-func last_dot(s: string) -> int64 {
-    mut last: int64 = -1
-    mut i: int64 = 0
-    while s[i] != 0 {
-        if s[i] == 46 {
             last = i
         }
         i = i + 1
@@ -250,14 +188,30 @@ func canon(path: string) -> string {
 }
 
 func resolved_none() -> Resolved {
-    return Resolved { ok: false, file: "", has_leaf: false, leaf: "" }
+    return Resolved { ok: false, file: "", has_leaf: false, leaf: "", pkg: 0, reported: false }
+}
+
+// A failure whose own fault is already on the error list.
+func resolved_reported() -> Resolved {
+    return Resolved { ok: false, file: "", has_leaf: false, leaf: "", pkg: 0, reported: true }
+}
+
+// The same resolution, tagged with the package the file belongs to. A file found in
+// the standard library belongs to no package and carries 0, the root, which is what
+// keeps a stdlib name colliding with a project name the duplicate definition it has
+// always been rather than a cross package collision.
+func in_pkg(r: Resolved, pkg: int64) -> Resolved {
+    if !r.ok {
+        return r
+    }
+    return Resolved { ok: true, file: r.file, has_leaf: r.has_leaf, leaf: r.leaf, pkg: pkg, reported: false }
 }
 
 func resolve_in_one(rel: string, root: string) -> Resolved {
     file_rel: string = with_dusk_ext(rel)
     full: string = path_join(root, file_rel)
     if source_is_file(full) {
-        return Resolved { ok: true, file: full, has_leaf: false, leaf: "" }
+        return Resolved { ok: true, file: full, has_leaf: false, leaf: "", pkg: 0, reported: false }
     }
     idx: int64 = last_slash(rel)
     if idx >= 0 {
@@ -266,22 +220,80 @@ func resolve_in_one(rel: string, root: string) -> Resolved {
         parent_file_rel: string = with_dusk_ext(parent_rel)
         parent: string = path_join(root, parent_file_rel)
         if source_is_file(parent) {
-            return Resolved { ok: true, file: parent, has_leaf: true, leaf: leaf }
+            return Resolved { ok: true, file: parent, has_leaf: true, leaf: leaf, pkg: 0, reported: false }
         }
     }
     return resolved_none()
 }
 
-func resolve(imp: string, base: string, stdlib: string) -> Resolved {
-    if has_slash(imp) {
-        return resolve_in_one(imp, dawn_cache())
+// Resolves an import whose first segment is a dependency alias: a bare alias names that
+// package's root file, and the rest of a dotted path walks under the root file's own
+// directory by exactly the rules a local import follows, so the module form and the
+// file plus leaf symbol form both work through an alias.
+func resolve_dep(imp: string, alias: string, ps: *PkgSet, pkg: int64, importer: string, errors: *Vector<LoadDiag>) -> Resolved {
+    di: int64 = pkg_dep_index(ps, pkg, alias, importer, errors)
+    if di < 0 {
+        return resolved_reported()
     }
-    rel: string = dotted_to_rel(imp)
-    r: Resolved = resolve_in_one(rel, base)
+    rootf: string = pkg_root_file(ps, di)
+    rest: string = pkg_rest_segments(imp)
+    if str_len(rest) == 0 {
+        return Resolved { ok: true, file: copy_string(rootf), has_leaf: false, leaf: "", pkg: di, reported: false }
+    }
+    rel: string = dotted_to_rel(rest)
+    r: Resolved = in_pkg(resolve_in_one(rel, dir_of(rootf)), di)
     if r.ok {
         return r
     }
-    return resolve_in_one(rel, stdlib)
+    // One segment after the alias and no file of that name under the package: the
+    // segment names a symbol the package's own root file exports, the same shape a
+    // local import reads as a file plus a leaf. The export check that follows judges
+    // it, so an alias naming nothing at all still fails, by name.
+    if !has_slash(rel) {
+        return Resolved { ok: true, file: copy_string(rootf), has_leaf: true, leaf: rest, pkg: di, reported: false }
+    }
+    return r
+}
+
+// Resolves one import against the directory of the file that wrote it. The order is
+// deliberate: the quoted git form, then the two reserved first segments, then a
+// dependency alias the importing package declared, and only then the local tree and the
+// standard library. A reserved segment and an alias are answered before the tree is
+// read, so what an import means follows from the manifest rather than from the shape of
+// the directory the importing file happens to sit in.
+func resolve(imp: string, base: string, stdlib: string, ps: *PkgSet, pkg: int64, importer: string, errors: *Vector<LoadDiag>) -> Resolved {
+    if has_slash(imp) {
+        if pkg_has_project(ps) {
+            vec_push(errors, pkg_url_import_fault(importer, imp))
+            return resolved_reported()
+        }
+        return in_pkg(resolve_in_one(imp, dawn_cache()), 0)
+    }
+    seg: string = pkg_first_segment(imp)
+    rel: string = dotted_to_rel(imp)
+    if str_eq(seg, "std") {
+        // Reserved: the standard library answers an import under std whatever the tree
+        // holds, and a local directory that would have shadowed it is named instead of
+        // quietly winning.
+        shadow: Resolved = resolve_in_one(rel, base)
+        if shadow.ok {
+            vec_push(errors, pkg_std_shadow_fault(importer))
+            return resolved_reported()
+        }
+        return in_pkg(resolve_in_one(rel, stdlib), 0)
+    }
+    if str_eq(seg, dawn_modules_dir()) {
+        vec_push(errors, pkg_dawn_modules_fault(importer, imp))
+        return resolved_reported()
+    }
+    if pkg_is_alias(ps, pkg, seg) {
+        return resolve_dep(imp, seg, ps, pkg, importer, errors)
+    }
+    r: Resolved = in_pkg(resolve_in_one(rel, base), pkg)
+    if r.ok {
+        return r
+    }
+    return in_pkg(resolve_in_one(rel, stdlib), 0)
 }
 
 func located_diag(path: string, src: string, n: int64, t: *LineTable, e: Located) -> LoadDiag {
@@ -301,10 +313,14 @@ func read_error(path: string, e: error) -> LoadDiag {
     return load_diag_plain(path, out)
 }
 
-func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
+// Reads and parses one file. path is where the file physically is, the only thing
+// opened here; disp is the spelling every diagnostic raised against it carries, which
+// for a dependency's file is its manifest relative name rather than wherever the
+// checkout landed on this machine.
+func parse_file(path: string, disp: string, errors: *Vector<LoadDiag>) -> ParsedFile {
     s, e := source_load(path)
     if e.exists() {
-        vec_push(errors, read_error(path, e))
+        vec_push(errors, read_error(disp, e))
         return ParsedFile { ok: false, struct_ok: false, ast: ast_new(), src: s }
     }
     lx: *Lexer = lex(s.text, s.len)
@@ -319,14 +335,14 @@ func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
     lex_errs: *Vector<Located> = lx_errors(lx)
     mut i: int64 = 0
     while i < vec_len(lex_errs) {
-        vec_push(errors, located_diag(path, s.text, s.len, t, vec_get(lex_errs, i)))
+        vec_push(errors, located_diag(disp, s.text, s.len, t, vec_get(lex_errs, i)))
         ok = false
         i = i + 1
     }
     parse_errs: *Vector<Located> = p_errors(p)
     mut j: int64 = 0
     while j < vec_len(parse_errs) {
-        vec_push(errors, located_diag(path, s.text, s.len, t, vec_get(parse_errs, j)))
+        vec_push(errors, located_diag(disp, s.text, s.len, t, vec_get(parse_errs, j)))
         ok = false
         j = j + 1
     }
@@ -336,7 +352,7 @@ func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
         mut k: int64 = 0
         while k < vec_len(paradigm_errs) {
             sd: SpanDiagnostic = vec_get(paradigm_errs, k)
-            vec_push(errors, load_diag_span(path, s.text, s.len, t, sd.lo, sd.hi, sd.msg))
+            vec_push(errors, load_diag_span(disp, s.text, s.len, t, sd.lo, sd.hi, sd.msg))
             ok = false
             k = k + 1
         }
@@ -355,96 +371,14 @@ func ast_import_strings(a: *Ast) -> *Vector<string> {
     return out
 }
 
+// Adds one file to the program's span table under the spelling it is to be named by.
+// path here is the display path: it backs every rendered diagnostic and every fault
+// location the emitted IR carries, so it is the manifest relative name for a
+// dependency's file and the resolved path as written for everything else.
 func register_file(files: *Vector<FileSrc>, base: int64, path: string, src: Source, a: *Ast) -> int64 {
     load_shift_module(a, base)
     vec_push(files, FileSrc { path: path, base: base, src: src.text, len: src.len, lines: line_table_new() })
     return base + src.len + 1
-}
-
-func exported_names(a: *Ast) -> *Map<string, int64> {
-    names: *Map<string, int64> = new_set()
-    items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
-        if it.kind == ik_func() {
-            f: FuncNode = vec_get((*a).funcs, it.id)
-            if f.exported {
-                map_put(names, ast_name(a, f.name), 1)
-            }
-        } else if it.kind == ik_struct() {
-            s: StructNode = vec_get((*a).structs, it.id)
-            if s.exported {
-                map_put(names, ast_name(a, s.name), 1)
-            }
-        } else if it.kind == ik_enum() {
-            e: EnumNode = vec_get((*a).enums, it.id)
-            if e.exported {
-                map_put(names, ast_name(a, e.name), 1)
-            }
-        } else if it.kind == ik_interface() {
-            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
-            if iface.exported {
-                map_put(names, ast_name(a, iface.name), 1)
-            }
-        }
-        i = i + 1
-    }
-    return names
-}
-
-func add_namespace(ns: *Map<string, int64>, modpath: string) -> void {
-    b: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while modpath[i] != 0 {
-        if modpath[i] == 46 {
-            if sb_size(b) > 0 {
-                prefix: string = substring(sb_cstr(b), 0, sb_size(b))
-                map_put(ns, prefix, 1)
-            }
-            sb_push_char(b, 46)
-        } else {
-            sb_push_char(b, modpath[i])
-        }
-        i = i + 1
-    }
-    if sb_size(b) > 0 {
-        full: string = substring(sb_cstr(b), 0, sb_size(b))
-        map_put(ns, full, 1)
-    }
-    sb_free(b)
-    free(b)
-}
-
-func module_namespace(imp: string, has_leaf: bool) -> string {
-    if has_leaf {
-        idx: int64 = last_dot(imp)
-        if idx >= 0 {
-            return substring(imp, 0, idx)
-        }
-    }
-    return imp
-}
-
-func extend_ns_exports(ns_exports: *Map<string, *Map<string, int64>>, modpath: string, ex: *Map<string, int64>) -> void {
-    if map_has(ns_exports, modpath) {
-        empty: *Map<string, int64> = new_set()
-        target: *Map<string, int64> = unwrap_or(map_get(ns_exports, modpath), empty)
-        copy_export_keys(target, ex)
-    } else {
-        target: *Map<string, int64> = new_set()
-        map_put(ns_exports, modpath, target)
-        copy_export_keys(target, ex)
-    }
-}
-
-func copy_export_keys(target: *Map<string, int64>, ex: *Map<string, int64>) -> void {
-    keys: *Vector<string> = map_keys(ex)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        map_put(target, vec_get(keys, i), 1)
-        i = i + 1
-    }
 }
 
 func cannot_resolve(importer: string, imp: string) -> LoadDiag {
@@ -460,7 +394,7 @@ func cannot_resolve(importer: string, imp: string) -> LoadDiag {
 
 func leaf_error(importer: string, imp: string, leaf: string) -> LoadDiag {
     mut modpath: string = imp
-    dot: int64 = last_dot(imp)
+    dot: int64 = load_last_dot(imp)
     slash: int64 = last_slash(imp)
     mut cut: int64 = dot
     if slash > cut {
@@ -490,12 +424,143 @@ func pop_work(work: *Vector<WorkItem>) -> WorkItem {
     return w
 }
 
-func push_work(work: *Vector<WorkItem>, imports: *Vector<string>, dir: string, importer: string) -> void {
-    vec_push(work, WorkItem { imports: imports, dir: dir, importer: importer })
+func push_work(work: *Vector<WorkItem>, imports: *Vector<string>, dir: string, importer: string, pkg: int64) -> void {
+    vec_push(work, WorkItem { imports: imports, dir: dir, importer: importer, pkg: pkg })
 }
 
 func empty_program(errors: *Vector<LoadDiag>, files: *Vector<FileSrc>, links: *Vector<string>, csources: *Vector<string>) -> Program {
     return Program { module: ast_new(), has_module: false, errors: errors, files: files, links: links, csources: csources }
+}
+
+// The path a @csource value names, resolved against the directory of whatever
+// declared it, a source file or a manifest. An absolute value is taken as it stands.
+// The result is lexically cleaned, so two spellings of one file dedup as one rather
+// than compiling it twice into duplicate symbols.
+func resolve_csource(dir: string, raw: string) -> string {
+    mut joined: string = ""
+    if str_len(raw) > 0 && raw[0] == 47 {
+        joined = copy_string(raw)
+    } else {
+        joined = path_join(dir, raw)
+    }
+    out: string = normalize_path(joined)
+    free(joined)
+    return out
+}
+
+// Where a resolved csource actually is, the key its dedup turns on. Two files that
+// resolve to one file, one named from a source file against the invocation root and one
+// named from a manifest against the manifest's own directory, key the same here and
+// compile in once rather than twice into duplicate symbols. A path naming no file keys
+// by its cleaned text, which is what it keyed by before, and clang reports the miss.
+func csource_key(resolved: string) -> string {
+    real: string = source_realpath(resolved)
+    if str_len(real) > 0 {
+        return real
+    }
+    free(real)
+    return copy_string(resolved)
+}
+
+// Folds one resolved csource path into the module wide table, first appearance winning.
+// The resolved path is what reaches clang; the key is only ever the dedup's own.
+func add_csource(csources: *Vector<string>, seen_csources: *Map<string, int64>, resolved: string) -> void {
+    key: string = csource_key(resolved)
+    if map_has(seen_csources, key) {
+        free(key)
+        free(resolved)
+        return
+    }
+    map_put(seen_csources, key, 1)
+    vec_push(csources, resolved)
+}
+
+// The fault a dependency's @csource earns by naming a file outside the checkout the
+// lock stands behind. A dependency contributes C to a build, so the file it contributes
+// has to be one the commit in dawn.lock actually carries.
+func dep_csource_fault(shown: string, alias: string) -> LoadDiag {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dependency '")
+    sb_push(b, alias)
+    sb_push(b, "' names a C source outside its checkout; fix @csource in its package.dawn")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return load_diag_plain(shown, out)
+}
+
+// The fault a dependency's @link earns by naming a path rather than a library. A link
+// value that carries a separator reaches the linker as a file resolved against the
+// working directory of the build, not against the checkout, so it names a file no lock
+// line vouches for. The project's own @link keeps naming a path, since the project is
+// what the person running the build wrote.
+func dep_link_fault(shown: string, alias: string) -> LoadDiag {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dependency '")
+    sb_push(b, alias)
+    sb_push(b, "' names a link path; a dependency may only link a library by name")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return load_diag_plain(shown, out)
+}
+
+// Folds one package's own @link and @csource values into the module wide tables, once
+// per package, as its first file registers. A manifest's values are read exactly as a
+// source file's are, with a csource resolved against the directory of the manifest
+// that declared it, so a dependency's C source is found wherever its checkout landed.
+func collect_pkg_directives(ps: *PkgSet, pkg: int64, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>, errors: *Vector<LoadDiag>) -> void {
+    if !pkg_take_directives(ps, pkg) {
+        return
+    }
+    m: *Manifest = pkg_manifest(ps, pkg)
+    alias: string = pkg_alias(ps, pkg)
+    dep: bool = str_len(alias) > 0
+    lv: *Vector<string> = (*m).links
+    mut i: int64 = 0
+    while i < vec_len(lv) {
+        v: string = vec_get(lv, i)
+        mut allowed: bool = true
+        if dep {
+            if has_slash(v) {
+                vec_push(errors, dep_link_fault(pkg_manifest_display(ps, pkg), alias))
+                allowed = false
+            }
+        }
+        if allowed {
+            if !map_has(seen_links, v) {
+                // The manifest is released at the end of the load and the link table
+                // outlives it in the Program, so the value travels as a copy.
+                c: string = copy_string(v)
+                map_put(seen_links, c, 1)
+                vec_push(links, c)
+            }
+        }
+        i = i + 1
+    }
+    cv: *Vector<string> = (*m).csources
+    mut j: int64 = 0
+    while j < vec_len(cv) {
+        resolved: string = resolve_csource((*m).dir, vec_get(cv, j))
+        mut usable: bool = true
+        if dep {
+            // A dependency's C source has to be inside the checkout the lock records.
+            // The value is cleaned before the test, so a path climbing out with ".."
+            // and an absolute one naming somewhere else are both caught here rather
+            // than reaching clang.
+            inside: string = path_under(pkg_dir(ps, pkg), resolved)
+            usable = str_len(inside) > 0
+            free(inside)
+            if !usable {
+                vec_push(errors, dep_csource_fault(pkg_manifest_display(ps, pkg), alias))
+                free(resolved)
+            }
+        }
+        if usable {
+            add_csource(csources, seen_csources, resolved)
+        }
+        j = j + 1
+    }
 }
 
 // Runs the pre scan over one loaded file and folds its @link and @csource
@@ -504,8 +569,10 @@ func empty_program(errors: *Vector<LoadDiag>, files: *Vector<FileSrc>, links: *V
 // csource path is resolved against the declaring file's directory here, at load
 // time, so the linker receives a path relative to the invocation root. First
 // appearance wins, and a value already seen in an earlier file is skipped, which
-// keeps the tables in the loader's deterministic module walk order.
-func collect_directives(src: string, len: int64, file: string, errors: *Vector<LoadDiag>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>) -> void {
+// keeps the tables in the loader's deterministic module walk order. file is the
+// file's physical path, since a csource is found beside the file as it sits on disk,
+// and disp is the spelling a directive fault is reported under.
+func collect_directives(src: string, len: int64, file: string, disp: string, errors: *Vector<LoadDiag>, links: *Vector<string>, csources: *Vector<string>, seen_links: *Map<string, int64>, seen_csources: *Map<string, int64>) -> void {
     p: Prescan = prescan(src, len)
     // Prescan validates each directive as it reads it, a bad link or csource
     // value among them; those faults reach the build here, not only the scan
@@ -517,7 +584,7 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<L
         t: *LineTable = line_table_new()
         mut d: int64 = 0
         while d < vec_len(pe) {
-            vec_push(errors, located_diag(file, src, len, t, vec_get(pe, d)))
+            vec_push(errors, located_diag(disp, src, len, t, vec_get(pe, d)))
             d = d + 1
         }
     }
@@ -535,21 +602,7 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<L
     dir: string = dir_of(file)
     mut j: int64 = 0
     while j < vec_len(cv) {
-        raw: string = vec_get(cv, j)
-        mut joined: string = ""
-        if str_len(raw) > 0 && raw[0] == 47 {
-            joined = copy_string(raw)
-        } else {
-            joined = path_join(dir, raw)
-        }
-        resolved: string = normalize_path(joined)
-        free(joined)
-        if !map_has(seen_csources, resolved) {
-            map_put(seen_csources, resolved, 1)
-            vec_push(csources, resolved)
-        } else {
-            free(resolved)
-        }
+        add_csource(csources, seen_csources, resolve_csource(dir, vec_get(cv, j)))
         j = j + 1
     }
 }
@@ -562,6 +615,16 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<L
  *  @param prog the program name used in diagnostics
  *  @return the merged Program, with has_module false and errors populated on failure */
 export func load(root_path: string, prog: string) -> Program {
+    return load_project(root_path, prog, false)
+}
+
+/** The same load, told whether the root file was taken from a package.dawn rather than
+ *  named on the command line. That is the one shape where the project's own files
+ *  register under a manifest relative spelling: a command with no file argument left no
+ *  spelling to preserve, so the manifest's is used and two checkouts of one project at
+ *  different paths emit identical bytes. A command that names a file keeps that file's
+ *  spelling exactly, which is what the stage ladder compares on. */
+export func load_project(root_path: string, prog: string, from_manifest: bool) -> Program {
     errors: *Vector<LoadDiag> = alloc(vec_new())
     files: *Vector<FileSrc> = alloc(vec_new())
     links: *Vector<string> = alloc(vec_new())
@@ -573,9 +636,20 @@ export func load(root_path: string, prog: string) -> Program {
     exports: *Map<string, *Map<string, int64>> = alloc(map_new())
     namespaces: *Map<string, int64> = new_set()
     ns_exports: *Map<string, *Map<string, int64>> = alloc(map_new())
+    // Which package first exported each name, and the file it came from, so a name
+    // reaching the merged module from two packages is named against both files rather
+    // than surfacing later as a duplicate definition with no position at all.
+    export_pkg: *Map<string, int64> = new_set()
+    export_file: *Map<string, string> = alloc(map_new())
     mut base: int64 = 0
 
-    root: ParsedFile = parse_file(root_path, errors)
+    // The project governing this compile: the package.dawn found by walking up from
+    // the root source file, with its lock read and checked against it. A root file with
+    // no manifest above it resolves exactly as it did before 1.14.0.
+    ps: *PkgSet = pkgset_discover(root_path, from_manifest, errors)
+    root_disp: string = pkg_display_path(ps, 0, root_path)
+
+    root: ParsedFile = parse_file(root_path, root_disp, errors)
     // A structurally broken root (a lex or parse error) cannot be walked further. A root
     // that only failed the paradigm gate keeps a valid AST, so the walk continues to gate
     // its imports too: an imported module that reserves a builtin name surfaces its own
@@ -583,14 +657,18 @@ export func load(root_path: string, prog: string) -> Program {
     // every collected load diagnostic and stops before resolve, so no pass runs on the
     // gate-violating module.
     if !root.struct_ok {
+        pkgset_free(ps)
+        free(ps)
         return empty_program(errors, files, links, csources)
     }
     map_put(visited, canon(root_path), 1)
-    base = register_file(files, base, root_path, root.src, root.ast)
-    collect_directives(root.src.text, root.src.len, root_path, errors, links, csources, seen_links, seen_csources)
+    base = register_file(files, base, root_disp, root.src, root.ast)
+    collect_pkg_directives(ps, 0, links, csources, seen_links, seen_csources, errors)
+    collect_directives(root.src.text, root.src.len, root_path, root_disp, errors, links, csources, seen_links, seen_csources)
+    pkg_check_exports(export_file, export_pkg, load_exported_names(root.ast), root_disp, 0, errors)
 
     work: *Vector<WorkItem> = alloc(vec_new())
-    push_work(work, ast_import_strings(root.ast), dir_of(root_path), root_path)
+    push_work(work, ast_import_strings(root.ast), dir_of(root_path), root_disp, 0)
 
     while vec_len(work) > 0 {
         w: WorkItem = pop_work(work)
@@ -598,30 +676,41 @@ export func load(root_path: string, prog: string) -> Program {
         mut i: int64 = 0
         while i < vec_len(imps) {
             imp: string = vec_get(imps, i)
-            r: Resolved = resolve(imp, w.dir, stdlib)
+            r: Resolved = resolve(imp, w.dir, stdlib, ps, w.pkg, w.importer, errors)
             if !r.ok {
-                vec_push(errors, cannot_resolve(w.importer, imp))
+                // A resolution that failed with a fault of its own, a checkout that is
+                // not there or an import through a reserved name, has already said what
+                // is wrong; the general fault would only bury it.
+                if !r.reported {
+                    vec_push(errors, cannot_resolve(w.importer, imp))
+                }
             } else {
                 mut has_mod_ns: bool = false
                 mut mod_ns: string = ""
                 if !has_slash(imp) {
-                    mod_ns = module_namespace(imp, r.has_leaf)
-                    add_namespace(namespaces, mod_ns)
+                    mod_ns = load_module_namespace(imp, r.has_leaf)
+                    load_add_namespace(namespaces, mod_ns)
                     has_mod_ns = true
                 }
 
+                // The physical path is what the load dedups on, so one file reached
+                // two ways is read once however it was spelled; the display path is
+                // what everything a person or the IR sees is written with.
                 cfile: string = canon(r.file)
                 if !map_has(visited, cfile) {
                     map_put(visited, cfile, 1)
-                    parsed: ParsedFile = parse_file(r.file, errors)
+                    disp: string = pkg_display_path(ps, r.pkg, r.file)
+                    parsed: ParsedFile = parse_file(r.file, disp, errors)
                     if parsed.ok {
-                        ex: *Map<string, int64> = exported_names(parsed.ast)
+                        ex: *Map<string, int64> = load_exported_names(parsed.ast)
                         map_put(exports, cfile, ex)
+                        pkg_check_exports(export_file, export_pkg, ex, disp, r.pkg, errors)
                         suffix: string = suffix_for(r.file, vec_len(files))
                         privatize(parsed.ast, suffix)
-                        push_work(work, ast_import_strings(parsed.ast), dir_of(r.file), r.file)
-                        base = register_file(files, base, r.file, parsed.src, parsed.ast)
-                        collect_directives(parsed.src.text, parsed.src.len, r.file, errors, links, csources, seen_links, seen_csources)
+                        push_work(work, ast_import_strings(parsed.ast), dir_of(r.file), disp, r.pkg)
+                        base = register_file(files, base, disp, parsed.src, parsed.ast)
+                        collect_pkg_directives(ps, r.pkg, links, csources, seen_links, seen_csources, errors)
+                        collect_directives(parsed.src.text, parsed.src.len, r.file, disp, errors, links, csources, seen_links, seen_csources)
                         load_append_items(root.ast, parsed.ast)
                     }
                 }
@@ -630,7 +719,7 @@ export func load(root_path: string, prog: string) -> Program {
                     if map_has(exports, cfile) {
                         empty: *Map<string, int64> = new_set()
                         ex2: *Map<string, int64> = unwrap_or(map_get(exports, cfile), empty)
-                        extend_ns_exports(ns_exports, mod_ns, ex2)
+                        load_extend_ns_exports(ns_exports, mod_ns, ex2)
                     }
                 }
                 if r.has_leaf {
@@ -648,5 +737,10 @@ export func load(root_path: string, prog: string) -> Program {
     }
 
     load_fold_qualified_calls(root.ast, namespaces, ns_exports, files, errors)
+    // Every manifest and lock the load read is released here, after the last question
+    // asked of them. What outlives them was copied on the way out: a display path, a
+    // resolved file, a link value, a rendered fault.
+    pkgset_free(ps)
+    free(ps)
     return Program { module: root.ast, has_module: true, errors: errors, files: files, links: links, csources: csources }
 }

@@ -1,0 +1,372 @@
+// testrun dawnfix: the ground the dawn specials stand on. Every dawn check builds a
+// throwaway git repository and a consuming project under target/testrun, runs the
+// package tool against them, and reads back what landed on disk, so this module
+// carries the pieces all of that needs: a context naming the two binaries under
+// test and the work directory, a shell runner that captures a child's streams and
+// exit code, git fixture construction, and the small assertions the checks share.
+// Nothing here knows what any single special proves; the specials themselves say
+// that.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import exec
+@import compare
+
+// One captured child: its exit code, what it wrote to each stream, and whether the
+// harness itself managed to read a code back. infra is false only when the capture
+// failed, never when the child did.
+export struct Shell {
+    code: int64,
+    out: string,
+    err: string,
+    infra: bool,
+}
+
+// The setting one special runs in: the absolute repository root, the absolute path
+// of the compiler under test and of the package tool under test, and the absolute
+// work directory the special owns. err is non empty when the setting could not be
+// built, and then no other field is meaningful.
+export struct Ctx {
+    root: string,
+    dusk: string,
+    dawn: string,
+    work: string,
+    err: string,
+}
+
+// A located binary, or the message naming why it could not be found.
+struct Found {
+    path: string,
+    err: string,
+}
+
+// Where a captured child's streams land: outside the work directory, so a project
+// the special builds never sees a stray harness file.
+func cap_dir(root: string) -> string {
+    return root + "/target/testrun/dawncap"
+}
+
+// Appends one single quoted word to a command line.
+func qpush(b: *StringBuilder, word: string) -> void {
+    q: string = quote(word)
+    sb_push(b, q)
+    free(q)
+}
+
+// One single quoted word, for a caller splicing a path into a command line it
+// builds itself.
+export func qw(word: string) -> string {
+    return quote(word)
+}
+
+// The absolute working directory, which the runner requires to be the repository
+// root. The empty string means the harness could not read it.
+func cwd_abs() -> string {
+    rc: int64 = run("mkdir -p target/testrun/dawncap; pwd > target/testrun/dawncap/pwd.txt")
+    if rc != 0 {
+        return ""
+    }
+    return trim(slurp("target/testrun/dawncap/pwd.txt"))
+}
+
+// p made absolute against root, so a command that changes directory still names
+// the same file.
+export func abs_of(root: string, p: string) -> string {
+    if starts_with(p, "/") {
+        return p
+    }
+    return root + "/" + p
+}
+
+// Everything before the last slash of a path, or the empty string when it names no
+// directory at all.
+func dir_of(path: string) -> string {
+    cut: int64 = str_rfind(path, "/")
+    if cut <= 0 {
+        return ""
+    }
+    return substring(path, 0, cut)
+}
+
+// Whether the path exists at all, directory or file.
+export func exists(path: string) -> bool {
+    q: string = quote(path)
+    line: string = "test -e " + q
+    free(q)
+    rc: int64 = run(line)
+    free(line)
+    return rc == 0
+}
+
+// Whether the path is an executable file.
+func is_exec(path: string) -> bool {
+    q: string = quote(path)
+    line: string = "test -x " + q
+    free(q)
+    rc: int64 = run(line)
+    free(line)
+    return rc == 0
+}
+
+// Locates the package tool under test. DAWN_BIN names it outright; with DAWN_BIN
+// unset it is the file named dawn beside the compiler under test, since the suite
+// builds both into the same output directory. A tool that is missing or not
+// executable fails the special by name rather than passing as a skip.
+func find_dawn(root: string, bin: string) -> Found {
+    named: string = env("DAWN_BIN")
+    if str_len(named) > 0 {
+        p: string = abs_of(root, named)
+        if !is_exec(p) {
+            return Found { path: "", err: "DAWN_BIN names '" + p + "', which is not an executable file" }
+        }
+        return Found { path: p, err: "" }
+    }
+    cut: int64 = str_rfind(bin, "/")
+    if cut < 0 {
+        return Found { path: "", err: "no package tool: the compiler under test '" + bin + "' names no directory to look beside, so set DAWN_BIN" }
+    }
+    cand: string = abs_of(root, substring(bin, 0, cut)) + "/dawn"
+    if !is_exec(cand) {
+        return Found { path: "", err: "no package tool at '" + cand + "': build compiler/dawn.dusk into that directory or set DAWN_BIN" }
+    }
+    return Found { path: cand, err: "" }
+}
+
+// A failed setting carrying its reason.
+func ctx_err(msg: string) -> Ctx {
+    return Ctx { root: "", dusk: "", dawn: "", work: "", err: msg }
+}
+
+// Removes a directory and makes it again, so a special always starts from an empty
+// work directory whatever a previous run left behind.
+export func fresh_dir(path: string) -> string {
+    q: string = quote(path)
+    line: string = "rm -rf " + q + " && mkdir -p " + q
+    free(q)
+    rc: int64 = run(line)
+    free(line)
+    if rc != 0 {
+        return "could not create a clean work directory at '" + path + "'"
+    }
+    return ""
+}
+
+// Builds the setting for one special: the repository root, both binaries under
+// test, and an empty work directory named for the special. Any piece that cannot be
+// established returns a Ctx whose err names it.
+export func ctx_new(name: string, bin: string) -> Ctx {
+    root: string = cwd_abs()
+    if str_eq(root, "") {
+        return ctx_err("could not read the working directory")
+    }
+    duskp: string = abs_of(root, bin)
+    if !is_exec(duskp) {
+        return ctx_err("the compiler under test '" + duskp + "' is not an executable file")
+    }
+    fd: Found = find_dawn(root, bin)
+    if str_len(fd.err) > 0 {
+        return ctx_err(fd.err)
+    }
+    work: string = root + "/target/testrun/dawn_" + name
+    fe: string = fresh_dir(work)
+    if str_len(fe) > 0 {
+        return ctx_err(fe)
+    }
+    return Ctx { root: root, dusk: duskp, dawn: fd.path, work: work, err: "" }
+}
+
+// Runs one command line with the working directory set to dir and DUSK_HOME set to
+// the absolute repository root, capturing stdout, stderr, and the child's own exit
+// code. The whole line runs inside a brace group so a failed change of directory is
+// captured too rather than running the command somewhere unintended.
+export func sh(c: Ctx, dir: string, line: string) -> Shell {
+    cap: string = cap_dir(c.root)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "mkdir -p ")
+    qpush(b, cap)
+    sb_push(b, "; : > ")
+    qpush(b, cap + "/out.txt")
+    sb_push(b, "; : > ")
+    qpush(b, cap + "/err.txt")
+    sb_push(b, "; { cd ")
+    qpush(b, dir)
+    sb_push(b, " && export DUSK_HOME=")
+    qpush(b, c.root)
+    sb_push(b, " && ")
+    sb_push(b, line)
+    sb_push(b, "; } > ")
+    qpush(b, cap + "/out.txt")
+    sb_push(b, " 2> ")
+    qpush(b, cap + "/err.txt")
+    sb_push(b, "; echo $? > ")
+    qpush(b, cap + "/code.txt")
+    full: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    rc: int64 = run(full)
+    free(full)
+    code: int64 = slurp_int(cap + "/code.txt")
+    out: string = slurp(cap + "/out.txt")
+    err: string = slurp(cap + "/err.txt")
+    return Shell { code: code, out: out, err: err, infra: rc == 0 && code >= 0 }
+}
+
+// A command line running the package tool under test with the given argument text,
+// under a timeout so a hung fetch fails the special instead of the suite.
+export func dawn_cmd(c: Ctx, args: string) -> string {
+    q: string = quote(c.dawn)
+    line: string = "timeout 300 " + q + " " + args
+    free(q)
+    return line
+}
+
+// A command line running the compiler under test with the given argument text.
+export func dusk_cmd(c: Ctx, args: string) -> string {
+    q: string = quote(c.dusk)
+    line: string = "timeout 300 " + q + " " + args
+    free(q)
+    return line
+}
+
+// The first n bytes of a value, so a failure message carrying a captured stream
+// stays readable when the stream is long.
+export func clip(s: string, n: int64) -> string {
+    if str_len(s) <= n {
+        return s
+    }
+    return substring(s, 0, n) + "..."
+}
+
+// Names a command that did not do what the special needed, quoting its exit code
+// and both streams with their control bytes shown.
+export func shell_detail(tag: string, r: Shell) -> string {
+    if !r.infra {
+        return "the harness could not capture an exit code for " + tag
+    }
+    mut m: string = tag + " exited with code " + int_to_string(r.code)
+    if str_len(r.err) > 0 {
+        m += "; stderr: " + escape_show(clip(r.err, 400))
+    }
+    if str_len(r.out) > 0 {
+        m += "; stdout: " + escape_show(clip(r.out, 400))
+    }
+    return m
+}
+
+// Both captured streams joined, for a check that only cares that a message was
+// printed somewhere and not which stream carried it.
+export func both_streams(r: Shell) -> string {
+    return r.out + r.err
+}
+
+// Writes a file, creating the directory above it first. Returns the empty string on
+// success, or a message naming what could not be written.
+export func put_file(path: string, content: string) -> string {
+    d: string = dir_of(path)
+    if str_len(d) > 0 {
+        q: string = quote(d)
+        line: string = "mkdir -p " + q
+        free(q)
+        rc: int64 = run(line)
+        free(line)
+        if rc != 0 {
+            return "could not create the directory '" + d + "'"
+        }
+    }
+    e: error = write_file(path, content)
+    if e.exists() {
+        return "could not write '" + path + "'"
+    }
+    return ""
+}
+
+// The non empty lines of a file, so a lock or a stamp is read as records rather
+// than as one blob.
+export func lines_of(path: string) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    raw: *Vector<string> = str_split(slurp(path), "\n")
+    mut i: int64 = 0
+    while i < vec_len(raw) {
+        one: string = trim(vec_get(raw, i))
+        if str_len(one) > 0 {
+            vec_push(out, one)
+        }
+        i = i + 1
+    }
+    vec_free(raw)
+    free(raw)
+    return out
+}
+
+// Whether s is a full length git object id: forty hexadecimal digits, either case.
+// The specials check the shape rather than a literal value, since the id a fixture
+// commit lands on differs on every run.
+export func is_hex40(s: string) -> bool {
+    if str_len(s) != 40 {
+        return false
+    }
+    mut i: int64 = 0
+    while i < 40 {
+        c: char = s[i]
+        digit: bool = c >= 48 && c <= 57
+        lower: bool = c >= 97 && c <= 102
+        upper: bool = c >= 65 && c <= 70
+        if !digit && !lower && !upper {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Creates an empty git repository at path, replacing anything already there. The
+// committer identity and the default branch are pinned on the command line so the
+// fixture does not depend on the machine's git configuration.
+export func git_new_repo(c: Ctx, path: string) -> string {
+    fe: string = fresh_dir(path)
+    if str_len(fe) > 0 {
+        return fe
+    }
+    r: Shell = sh(c, c.root, "git -c init.defaultBranch=main init -q " + qw(path))
+    if r.code != 0 {
+        return shell_detail("git init for the fixture repository '" + path + "'", r)
+    }
+    return ""
+}
+
+// Stages everything in the fixture repository, commits it, and tags the commit when
+// tag is not empty.
+export func git_commit(c: Ctx, path: string, msg: string, tag: string) -> string {
+    qp: string = qw(path)
+    mut line: string = "git -C " + qp + " add -A && git -C " + qp
+    line += " -c user.email=dawn@example.invalid -c user.name='dawn fixture'"
+    line += " -c commit.gpgsign=false commit -q -m " + qw(msg)
+    if str_len(tag) > 0 {
+        line += " && git -C " + qp + " tag " + qw(tag)
+    }
+    r: Shell = sh(c, c.root, line)
+    if r.code != 0 {
+        return shell_detail("the fixture commit in '" + path + "'", r)
+    }
+    return ""
+}
+
+// The commit id at the tip of a fixture repository, or the empty string when it
+// could not be read.
+export func git_head(c: Ctx, path: string) -> string {
+    r: Shell = sh(c, c.root, "git -C " + qw(path) + " rev-parse HEAD")
+    if r.code != 0 {
+        return ""
+    }
+    return trim(r.out)
+}
+
+// The git URL a fixture repository is required through. Every fixture is local, so
+// a special never touches the network.
+export func file_url(path: string) -> string {
+    return "file://" + path
+}

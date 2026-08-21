@@ -1,0 +1,153 @@
+/** dawnpkg: finding the package a command was run inside, and the small shapes every
+ *  command needs once it has one. A project is a directory holding package.dawn, and
+ *  a command run anywhere under it works on it, so the search walks from the working
+ *  directory up to the filesystem root and takes the first manifest it meets.
+ *
+ *  A manifest that could not be read is reported here rather than at each call site:
+ *  the reader already renders every fault as "path:line: message", so the whole list
+ *  goes to stderr as it stands and the command stops. Reading never halts at the
+ *  first bad line, so one run names every mistake in the file. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import home
+@import source
+@import manifest
+@import manifestlock
+@import dawnout
+
+/** The absolute working directory, or "." when it cannot be resolved, which is only
+ *  a worse spelling of the same place and never a reason to stop. */
+export func dawn_cwd() -> string {
+    real: string = source_realpath(".")
+    if str_len(real) > 0 {
+        return real
+    }
+    free(real)
+    return substring(".", 0, 1)
+}
+
+/** The package.dawn governing the working directory, or the empty string once the
+ *  fault naming the walk has been printed. */
+export func dawn_manifest_path() -> string {
+    found: string = manifest_find(".")
+    if str_len(found) > 0 {
+        return found
+    }
+    here: string = dawn_cwd()
+    msg: string = "no package.dawn found from " + here + " upward; run dawn init"
+    free(here)
+    dawn_fail(msg)
+    free(msg)
+    return ""
+}
+
+/** Reports every fault a manifest read left behind. True means the command stops. */
+export func dawn_manifest_faulted(m: *Manifest) -> bool {
+    return dawn_faults((*m).errors) != 0
+}
+
+/** Reports every fault a lock read left behind. A lock that is simply not there is
+ *  no fault, so this only fires on a file that exists and does not parse. */
+export func dawn_lock_faulted(l: *Lock) -> bool {
+    return dawn_faults((*l).errors) != 0
+}
+
+/** The directory a package's dependencies are checked out into. */
+export func dawn_modules_path(m: *Manifest) -> string {
+    return path_join((*m).dir, dawn_modules_dir())
+}
+
+/** Where dawn keeps the streams it captures from git while a fetch runs. It sits
+ *  inside dawn_modules, which a project already ignores, and a fetch removes it on
+ *  the way out however the fetch ended. */
+export func dawn_scratch_path(m: *Manifest) -> string {
+    base: string = dawn_modules_path(m)
+    out: string = path_join(base, ".dawn-work")
+    free(base)
+    return out
+}
+
+/** Whether v can be written into a dawn file at all. The grammar has one grouping
+ *  mark and no escape, so a value carrying a double quote or a control byte has no
+ *  spelling that reads back as itself. */
+export func dawn_unwritable(v: string) -> bool {
+    n: int64 = str_len(v)
+    mut i: int64 = 0
+    while i < n {
+        c: int64 = v[i]
+        if c == 34 { return true }
+        if c < 32 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+/** The spelling of a value in a directive line: bare when it reads back as itself,
+ *  and inside double quotes when whitespace would otherwise split it in two. This is
+ *  the rule the lock writer keeps, so a manifest dawn writes and a lock dawn writes
+ *  quote the same values. */
+export func dawn_field(v: string) -> string {
+    n: int64 = str_len(v)
+    mut quoted: bool = n == 0
+    mut i: int64 = 0
+    while i < n {
+        c: int64 = v[i]
+        if c == 32 { quoted = true }
+        if c == 9 { quoted = true }
+        if c == 11 { quoted = true }
+        if c == 12 { quoted = true }
+        if c == 13 { quoted = true }
+        i = i + 1
+    }
+    if !quoted {
+        return substring(v, 0, n)
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 34)
+    sb_push(b, v)
+    sb_push_char(b, 34)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** One "@require alias source ref" line, ready to append to a manifest. */
+export func dawn_require_line(alias: string, source: string, ref: string) -> string {
+    qa: string = dawn_field(alias)
+    qs: string = dawn_field(source)
+    qr: string = dawn_field(ref)
+    out: string = "@require " + qa + " " + qs + " " + qr + "\n"
+    free(qa)
+    free(qs)
+    free(qr)
+    return out
+}
+
+/** Writes text to path, reporting a failure as dawn's own fault. Returns 0 on
+ *  success and 1 once the fault has been printed. */
+export func dawn_write(path: string, text: string) -> int32 {
+    e := write_file(path, text)
+    if e.exists() {
+        msg: string = "cannot write " + path + ": " + e.message
+        code: int32 = dawn_fail(msg)
+        free(msg)
+        return code
+    }
+    return 0
+}
+
+/** The whole text of a file, or the empty string when it cannot be read. Used only
+ *  where absence and emptiness mean the same thing to the caller. */
+export func dawn_slurp(path: string) -> string {
+    text, e := read_file(path)
+    if e.exists() {
+        return ""
+    }
+    return text
+}

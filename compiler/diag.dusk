@@ -55,13 +55,27 @@ export struct LoadDiag {
     src: string,
     len: int64,
     lines: *LineTable,
+    // The 1 based line a located diagnostic with no span sits on, or 0 when it is
+    // about the file as a whole. This is the shape a directive file's fault takes:
+    // package.dawn is read line by line and never lexed, so a fault in it has a line
+    // to name but no byte span to point a caret at.
+    line: int64,
 }
 
 // A plain loader diagnostic with no source span: the file it belongs to and the raw
 // message. The human renderer prints `path: message`, or the path alone when the
 // message is empty (a missing file names only its path).
 export func load_diag_plain(path: string, msg: string) -> LoadDiag {
-    return LoadDiag { path: path, lo: 0, hi: 0, has_span: false, msg: msg, src: "", len: 0, lines: line_table_new() }
+    return LoadDiag { path: path, lo: 0, hi: 0, has_span: false, msg: msg, src: "", len: 0, lines: line_table_new(), line: 0 }
+}
+
+/** A plain loader diagnostic that knows its line: the file it belongs to, the 1 based
+ *  line, and the raw message. The human renderer prints `path:line: message`, the form
+ *  a directive file's own reader writes, and a line of 0 falls back to `path: message`.
+ *  The path and the message stay apart, so the machine face reports the file and the
+ *  text as two fields rather than one sentence. */
+export func load_diag_at(path: string, line: int64, msg: string) -> LoadDiag {
+    return LoadDiag { path: path, lo: 0, hi: 0, has_span: false, msg: msg, src: "", len: 0, lines: line_table_new(), line: line }
 }
 
 // A span-bearing loader diagnostic: the declaring file's path, its source and length
@@ -69,7 +83,7 @@ export func load_diag_plain(path: string, msg: string) -> LoadDiag {
 // the human renderer and the JSON face both work directly against src. t is the
 // declaring file's line table, shared by every diagnostic raised against that file.
 export func load_diag_span(path: string, src: string, n: int64, t: *LineTable, lo: int64, hi: int64, msg: string) -> LoadDiag {
-    return LoadDiag { path: path, lo: lo, hi: hi, has_span: true, msg: msg, src: src, len: n, lines: t }
+    return LoadDiag { path: path, lo: lo, hi: hi, has_span: true, msg: msg, src: src, len: n, lines: t, line: 0 }
 }
 
 struct Loc {
@@ -563,6 +577,13 @@ export func render_load_diag(d: LoadDiag) -> string {
         sb_push(b, d.path)
     } else {
         sb_push(b, d.path)
+        // A fault carrying a line renders `path:line: message`, which is what a
+        // directive file's reader wrote before the loader took it apart into a path
+        // and a message; the two spellings are byte for byte the same.
+        if d.line > 0 {
+            sb_push_char(b, 58)
+            sb_push_int(b, d.line)
+        }
         sb_push(b, ": ")
         sb_push(b, d.msg)
     }

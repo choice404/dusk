@@ -1,0 +1,244 @@
+/** manifestline: the directive line grammar package.dawn and dawn.lock share, plus
+ *  the message plumbing both readers build their errors with. A dawn file is line
+ *  oriented and holds no expressions, so it never reaches the lexer: a line is
+ *  blank, a comment, or one directive followed by its arguments.
+ *
+ *  Arguments split on whitespace. A double quote opens and closes a literal run
+ *  inside an argument, and the quotes themselves are stripped, so a value carrying
+ *  a space survives as one argument. A "//" starts a comment only where an argument
+ *  could start, at the beginning of a line or right after whitespace, and then the
+ *  rest of the line is dropped. Inside an argument a "//" is ordinary text, so an
+ *  unquoted https:// source reads as itself rather than truncating at the scheme.
+ *  A comment after a value therefore needs the space before it that a reader would
+ *  write anyway.
+ *
+ *  A value cannot carry a double quote of its own: the quote is the only grouping
+ *  mark and there is no escape. That is checked where a file is written, in
+ *  lock_write, so a round trip through the writer can never produce a file the
+ *  reader disagrees with. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import bytes
+
+/** One scanned line. ok is set only for a directive line, and then args holds the
+ *  directive name at index 0, with the '@' still on it, and its arguments after.
+ *  A blank line and a comment line report ok false with no error. err is a static
+ *  message and is never freed; the args vector and its strings are owned by the
+ *  DirLine and released by dirline_free. */
+export struct DirLine {
+    ok: bool,
+    args: *Vector<string>,
+    err: string,
+}
+
+/** Whether the byte c separates arguments on a line. A carriage return counts, so a
+ *  file written with CRLF endings reads the same as one with LF endings. */
+func is_line_ws(c: int64) -> bool {
+    if c == 32 { return true }
+    if c == 9 { return true }
+    if c == 11 { return true }
+    if c == 12 { return true }
+    if c == 13 { return true }
+    return false
+}
+
+/** The first index at or after from that is not whitespace, or n at the end. */
+func skip_ws(line: string, n: int64, from: int64) -> int64 {
+    mut i: int64 = from
+    mut going: bool = true
+    while going {
+        if i >= n {
+            going = false
+        } else if is_line_ws(bytes.byte_at(line, n, i)) {
+            i = i + 1
+        } else {
+            going = false
+        }
+    }
+    return i
+}
+
+/** Whether a comment opens at index i. */
+func comment_at(line: string, n: int64, i: int64) -> bool {
+    if bytes.byte_at(line, n, i) != 47 { return false }
+    return bytes.byte_at(line, n, i + 1) == 47
+}
+
+/** Scans one argument starting at start, appending its bytes to b. Quotes toggle a
+ *  literal run and are dropped; outside a run whitespace ends the argument, and
+ *  every other byte, "//" included, is part of it. The scan only ever begins where
+ *  a comment has already been ruled out, so a "//" reached from here is text. The
+ *  returned index is the first byte after the argument, and closed reports whether
+ *  every quote that opened also closed. */
+func scan_arg(line: string, n: int64, start: int64, b: *StringBuilder) -> (int64, bool) {
+    mut i: int64 = start
+    mut in_str: bool = false
+    mut going: bool = true
+    while going {
+        if i >= n {
+            going = false
+        } else {
+            c: int64 = bytes.byte_at(line, n, i)
+            if c == 34 {
+                in_str = !in_str
+                i = i + 1
+            } else if in_str {
+                sb_push_char(b, c)
+                i = i + 1
+            } else if is_line_ws(c) {
+                going = false
+            } else {
+                sb_push_char(b, c)
+                i = i + 1
+            }
+        }
+    }
+    return (i, !in_str)
+}
+
+/** Scans one line of a dawn file. A blank line, a line whose first non blank text
+ *  is "//", and a directive line are all accepted; anything else reports the
+ *  "expected a directive" fault, since a dawn file holds directives only. */
+export func scan_directive_line(line: string) -> DirLine {
+    n: int64 = str_len(line)
+    args: *Vector<string> = alloc(vec_new())
+    mut i: int64 = skip_ws(line, n, 0)
+    if i >= n {
+        return DirLine { ok: false, args: args, err: "" }
+    }
+    if comment_at(line, n, i) {
+        return DirLine { ok: false, args: args, err: "" }
+    }
+    if bytes.byte_at(line, n, i) != 64 {
+        return DirLine { ok: false, args: args, err: "expected a directive" }
+    }
+    mut fault: string = ""
+    mut scanning: bool = true
+    while scanning {
+        i = skip_ws(line, n, i)
+        if i >= n {
+            scanning = false
+        } else if comment_at(line, n, i) {
+            scanning = false
+        } else {
+            b: *StringBuilder = alloc(sb_new())
+            ni, closed := scan_arg(line, n, i, b)
+            vec_push(args, substring(sb_cstr(b), 0, sb_size(b)))
+            sb_free(b)
+            free(b)
+            i = ni
+            if !closed {
+                fault = "unterminated quoted value; a double quote opened and never closed"
+                scanning = false
+            }
+        }
+    }
+    if str_len(fault) > 0 {
+        return DirLine { ok: false, args: args, err: fault }
+    }
+    return DirLine { ok: true, args: args, err: "" }
+}
+
+/** Releases the arguments a scanned line owns. The error message is static and is
+ *  left alone. */
+export func dirline_free(d: DirLine) -> void {
+    while vec_len(d.args) > 0 {
+        s: string = vec_take(d.args, vec_len(d.args) - 1)
+        free(s)
+    }
+    vec_free(d.args)
+    free(d.args)
+}
+
+/** How many arguments a directive takes, or -1 when the name is not a directive of
+ *  any dawn file. This is the whole directive set: package.dawn takes all of them
+ *  but @lock, and dawn.lock takes @lock alone. */
+export func directive_arity(name: string) -> int64 {
+    if str_eq(name, "@package") { return 1 }
+    if str_eq(name, "@version") { return 1 }
+    if str_eq(name, "@dusk") { return 1 }
+    if str_eq(name, "@root") { return 1 }
+    if str_eq(name, "@require") { return 3 }
+    if str_eq(name, "@link") { return 1 }
+    if str_eq(name, "@csource") { return 1 }
+    if str_eq(name, "@lock") { return 4 }
+    return -1
+}
+
+/** The argument names a multi argument directive spells out in its arity fault, so
+ *  a miscounted @require line says which three words it wanted. */
+func arity_shape(name: string) -> string {
+    if str_eq(name, "@require") { return " arguments (alias source ref), got " }
+    if str_eq(name, "@lock") { return " arguments (alias source ref commit), got " }
+    return " argument, got "
+}
+
+/** The fault for a directive given the wrong number of arguments, or the empty
+ *  string when the count is right or the name is not a directive. A non empty
+ *  result is a fresh heap string the caller owns. */
+export func arity_error(name: string, argc: int64) -> string {
+    want: int64 = directive_arity(name)
+    if want < 0 { return "" }
+    if argc == want { return "" }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " takes ")
+    sb_push_int(b, want)
+    sb_push(b, arity_shape(name))
+    sb_push_int(b, argc)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Builds a message of the shape prefix'val'suffix, the quoting every dawn fault
+ *  that names a value uses. The result is a fresh heap string the caller owns. */
+export func quote_msg(prefix: string, val: string, suffix: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    sb_push_char(b, 39)
+    sb_push(b, val)
+    sb_push_char(b, 39)
+    sb_push(b, suffix)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** The fault for a directive no dawn file knows. */
+export func unknown_directive_error(name: string) -> string {
+    return quote_msg("unknown directive ", name, "")
+}
+
+/** A fault located at one line of a file, rendered "path:line: message". The result
+ *  is a fresh heap string the caller owns. */
+export func err_at(path: string, line: int64, msg: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, path)
+    sb_push_char(b, 58)
+    sb_push_int(b, line)
+    sb_push(b, ": ")
+    sb_push(b, msg)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** A fault about a file as a whole, rendered "path: message", for the faults with
+ *  no line to point at: an unreadable file, a missing root. */
+export func err_plain(path: string, msg: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, path)
+    sb_push(b, ": ")
+    sb_push(b, msg)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

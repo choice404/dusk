@@ -164,9 +164,69 @@ single run line. The special's name selects its handler.
   hello program from inside the prefix with `DUSK_HOME` unset, so the only way the
   compiler finds its assets is the walk from its own executable up to the share
   directory. This mirrors the Rust golden of the same name.
-- The `dawn_*` family is named but not yet implemented, since the dawn package tool
-  defines the interface those checks will drive. Each fails loudly rather than
-  passing as a no op, and an unrecognized special name fails the same way.
+- The `dawn_*` family drives the dawn package tool against a project, a directory
+  holding a `package.dawn` manifest. Each of these builds its own git fixture
+  repositories and its own consuming project under `target/testrun/dawn_<name>/`,
+  requires the fixtures through a `file://` URL so no check touches the network, and
+  reads the result off disk. An unrecognized special name, `dawn_*` or not, fails
+  rather than passing as a no op.
+
+The tool under test is `DAWN_BIN`, or the file named `dawn` beside the compiler under
+test when `DAWN_BIN` is unset, since the suite builds both into the same output
+directory. A tool that is missing or not executable fails every dawn special by name,
+so build one before a full run:
+
+```sh
+DUSK_HOME=$PWD target/dusk-out/dusk build compiler/dawn.dusk
+```
+
+| special | proves |
+|---|---|
+| `dawn_get_lock` | `dawn get` clones the required package, stamps the clone in `dawn_modules/<alias>/.dawn` with the source, the ref, and the commit, writes one `@lock <alias> <source> <ref> <commit>` line whose commit is the one the tag resolves to, and a second `get` rewrites nothing |
+| `dawn_run_alias` | a root that imports a required package as `<alias>.<module>` builds into `target/dawn-out` inside the project and runs, and the value the required module returns reaches the program's output |
+| `dawn_run_args` | the words after `dawn run` reach the program as its own argv, in order |
+| `dawn_transitive` | a required package's own requires are fetched into the same flat `dawn_modules`, locked beside the direct one, and a root composed across both packages runs |
+| `dawn_update_moves_pin` | with the manifest edited to a newer tag, building is refused while the lock still pins the old commit, and `dawn update <alias>` moves the pin so the program prints the newer package's line |
+| `dawn_missing_lock_refused` | a manifest that requires a package with no lock beside it is refused by `dawn build` and by `dusk build` with no file argument, each naming `run dawn get` |
+| `dawn_stale_stamp_refused` | a clone whose stamp no longer matches the lock is refused by alias, naming `dawn get`, rather than built |
+| `dawn_add_edits_manifest` | `dawn add <alias> <source> <ref>` writes the require into the manifest and then fetches it, so the manifest, the lock, and the clone all name the new package |
+| `dawn_init_layout` | `dawn init <name>` writes a manifest declaring `@package <name>`, a `.gitignore` holding `dawn_modules/`, and a root that runs and prints a line naming the package |
+| `dawn_ir_parity` | one fetched project copied into two directories emits byte identical IR, the required module's fault locations are spelled under `dawn_modules/<alias>/` relative to the manifest rather than by absolute path, and `dusk build` with no file argument takes the manifest root |
+| `dawn_alias_collision` | one alias claimed by two different sources, one of them through a transitive require, is refused by that alias instead of resolved to whichever arrived last |
+
+A refusal is read on stderr, where dawn and the compiler both put their error lines,
+and its exit code must be non zero. Two of the legs above are the compiler's side of
+the contract rather than the tool's: a `dusk` invocation with no file argument builds
+the manifest root, and a required package's files are registered by their manifest
+relative path, so two machines with the same lock emit the same IR.
+
+## Package fixtures
+
+`tests/dawn/<case>/` holds a static fixture project, the compiler's side of the
+package contract written as ordinary records. Each case carries a `package.dawn`, a
+`dawn.lock` whose commits are invented 40 hex strings, a `src/main.dusk`, and, where
+the case needs a dependency, a `dawn_modules/<alias>/` placed in the tree by hand
+with a `.dawn` stamp whose commit matches the lock line. There is no `.git` anywhere
+under `tests/dawn/` and nothing is ever fetched, so a case is just a project that is
+already in the state a fetch would have left it in.
+
+That makes the record ordinary. A `check_fail` or a `run` record names
+`tests/dawn/<case>/src/main.dusk` as its `file`, and the compiler discovers the
+manifest by walking up from that file the way it does anywhere else.
+
+```text
+test dawn_std_shadow
+mode check_fail
+file tests/dawn/std_shadow/src/main.dusk
+err_has 'std' is reserved for the standard library
+```
+
+The two families split along the tool boundary. A static fixture proves what the
+compiler does with a manifest, a lock, and a checkout it is handed, so every reading
+rule, alias resolution, and refusal lives here and costs one process to check. A
+`dawn_*` special proves what the tool does, builds real git repositories at run time,
+and covers fetching, locking, updating, and stamping, which a static tree cannot
+show.
 
 ## The selftest
 

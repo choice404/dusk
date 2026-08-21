@@ -1,0 +1,322 @@
+// testrun dawnproj: the fixture projects the dawn specials run against. A fixture is
+// a git repository holding a dawn package, and a consuming project whose manifest
+// requires it by a file URL, so every check is hermetic and never reaches the
+// network. This module writes those trees and reads back the two files the package
+// tool is judged by, the lock and the per module stamp, leaving the verdicts to the
+// specials themselves.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import std.os
+@import exec
+@import dawnfix
+
+// A built fixture repository: where it lives, the source string a manifest requires
+// it through, and the message naming why it could not be built.
+export struct Repo {
+    path: string,
+    source: string,
+    err: string,
+}
+
+// A failed fixture carrying its reason.
+func repo_err(msg: string) -> Repo {
+    return Repo { path: "", source: "", err: msg }
+}
+
+// The manifest text of a package: its name, a version, the language line, the root
+// the compiler builds, and whatever requires the caller wants under them. The
+// comment proves a manifest carries them.
+export func pkg_text(name: string, requires: string) -> string {
+    mut s: string = "// fixture package for the dawn specials\n"
+    s += "@package " + name + "\n"
+    s += "@version 0.1.0\n"
+    s += "@dusk 1.14\n"
+    s += "@root src/main.dusk\n"
+    s += requires
+    return s
+}
+
+// One require directive line, the alias, the git source, and the ref it is pinned
+// to.
+export func req_line(alias: string, source: string, ref: string) -> string {
+    return "@require " + alias + " " + source + " " + ref + "\n"
+}
+
+// A root that does nothing, for a package that exists to be imported from rather
+// than run.
+export func trivial_main() -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "func main() -> int32 {\n"
+    s += "    return 0\n"
+    s += "}\n"
+    return s
+}
+
+// The module a required package exports: a line whose text names the version of the
+// fixture, so a moved pin shows up in the program's own output, and an indexed read
+// whose bounds check gives the module a fault location in the emitted IR.
+export func greet_module(value: string) -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "export func greet_line() -> string {\n"
+    s += "    return \"" + value + "\"\n"
+    s += "}\n\n"
+    s += "export func greet_at(i: int64) -> int64 {\n"
+    s += "    xs: int64[3] = [10, 20, 30]\n"
+    s += "    return xs[i]\n"
+    s += "}\n"
+    return s
+}
+
+// The leaf module of the transitive fixture, the package a required package itself
+// requires.
+export func leaf_module() -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "export func leaf_line() -> string {\n"
+    s += "    return \"leaf\"\n"
+    s += "}\n"
+    return s
+}
+
+// The middle module of the transitive fixture: it is imported through the consuming
+// project's alias for it, and imports the leaf through its own alias.
+export func lib_module() -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "@import b.leaf\n\n"
+    s += "export func a_line() -> string {\n"
+    s += "    return \"a+\" + leaf_line()\n"
+    s += "}\n"
+    return s
+}
+
+// A consuming root that prints the required module's line.
+export func app_main_greet() -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "@import dep.greet\n\n"
+    s += "func main() -> int32 {\n"
+    s += "    println(greet_line())\n"
+    s += "    return 0\n"
+    s += "}\n"
+    return s
+}
+
+// A consuming root that prints the required module's line and then an indexed read
+// inside the required module, so the emitted IR carries a fault location that names
+// the required module's file.
+export func app_main_fault() -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "@import dep.greet\n\n"
+    s += "func main(argc: int32, argv: string[]) -> int32 {\n"
+    s += "    println(greet_line())\n"
+    s += "    println(greet_at(int64(argc) - 1))\n"
+    s += "    return 0\n"
+    s += "}\n"
+    return s
+}
+
+// A consuming root that prints every argument after the program name, one per line,
+// so the arguments the package tool forwards are visible in the program's output.
+export func app_main_args() -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "func main(argc: int32, argv: string[]) -> int32 {\n"
+    s += "    mut i: int64 = 1\n"
+    s += "    while i < argv.len {\n"
+    s += "        println(argv[i])\n"
+    s += "        i = i + 1\n"
+    s += "    }\n"
+    s += "    return 0\n"
+    s += "}\n"
+    return s
+}
+
+// A consuming root that prints a line composed across two packages, the required one
+// and the one it requires in turn.
+export func app_main_lib() -> string {
+    mut s: string = "@paradigm procedural\n\n"
+    s += "@import a.lib\n\n"
+    s += "func main() -> int32 {\n"
+    s += "    println(a_line())\n"
+    s += "    return 0\n"
+    s += "}\n"
+    return s
+}
+
+// Builds a fixture repository holding a package with no module of its own, for a
+// check that only needs the manifest graph. requires is spliced into its manifest,
+// so this builds the middle of a dependency chain as easily as a leaf.
+export func plain_repo(c: Ctx, name: string, requires: string, tag: string) -> Repo {
+    path: string = c.work + "/" + name + ".git"
+    ie: string = git_new_repo(c, path)
+    if str_len(ie) > 0 {
+        return repo_err(ie)
+    }
+    me: string = put_file(path + "/package.dawn", pkg_text(name, requires))
+    if str_len(me) > 0 {
+        return repo_err(me)
+    }
+    re: string = put_file(path + "/src/main.dusk", trivial_main())
+    if str_len(re) > 0 {
+        return repo_err(re)
+    }
+    ce: string = git_commit(c, path, "fixture " + name, tag)
+    if str_len(ce) > 0 {
+        return repo_err(ce)
+    }
+    return Repo { path: path, source: file_url(path), err: "" }
+}
+
+// Builds a fixture repository holding a package with one module file beside its
+// root, committed and tagged. module names the file under src, body is its source.
+export func module_repo(c: Ctx, name: string, requires: string, module: string, body: string, tag: string) -> Repo {
+    r: Repo = plain_repo(c, name, requires, "")
+    if str_len(r.err) > 0 {
+        return r
+    }
+    me: string = put_file(r.path + "/src/" + module + ".dusk", body)
+    if str_len(me) > 0 {
+        return repo_err(me)
+    }
+    ce: string = git_commit(c, r.path, "fixture " + name + " module", tag)
+    if str_len(ce) > 0 {
+        return repo_err(ce)
+    }
+    return r
+}
+
+// The standard required package: one module named greet whose line carries value,
+// committed and tagged at the given ref.
+export func dep_repo(c: Ctx, name: string, value: string, tag: string) -> Repo {
+    return module_repo(c, name, "", "greet", greet_module(value), tag)
+}
+
+// Adds a second commit to a fixture repository, moving its greet module to a new
+// line and tagging the result, so a check can prove a pin moves.
+export func dep_revise(c: Ctx, r: Repo, value: string, tag: string) -> string {
+    me: string = put_file(r.path + "/src/greet.dusk", greet_module(value))
+    if str_len(me) > 0 {
+        return me
+    }
+    return git_commit(c, r.path, "fixture revision " + value, tag)
+}
+
+// Where the consuming project of a special lives.
+export func app_dir(c: Ctx) -> string {
+    return c.work + "/app"
+}
+
+// Writes the consuming project: a manifest carrying the given requires and a root
+// with the given source. The project is not a git repository, since a project is a
+// directory holding a manifest and nothing more.
+export func app_project(c: Ctx, requires: string, main_src: string) -> string {
+    dir: string = app_dir(c)
+    fe: string = fresh_dir(dir)
+    if str_len(fe) > 0 {
+        return fe
+    }
+    me: string = put_file(dir + "/package.dawn", pkg_text("app", requires))
+    if str_len(me) > 0 {
+        return me
+    }
+    return put_file(dir + "/src/main.dusk", main_src)
+}
+
+// The lock file of the consuming project, as non empty lines.
+export func lock_lines(c: Ctx) -> *Vector<string> {
+    return lines_of(app_dir(c) + "/dawn.lock")
+}
+
+// The lock line whose alias field is alias, or the empty string when the lock names
+// no such alias.
+export func lock_line_for(c: Ctx, alias: string) -> string {
+    lines: *Vector<string> = lock_lines(c)
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        one: string = vec_get(lines, i)
+        w: *Vector<string> = split_ws(one)
+        if vec_len(w) >= 2 && str_eq(vec_get(w, 1), alias) {
+            return one
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// Checks one lock line against the require it records: the directive, the alias, the
+// source, the ref, and a commit that is a full length git object id. The commit is
+// checked by shape, since its value differs on every run. Returns the empty string
+// when the line is well formed.
+export func lock_line_bad(line: string, alias: string, source: string, ref: string) -> string {
+    w: *Vector<string> = split_ws(line)
+    if vec_len(w) != 5 {
+        return "lock line '" + line + "' has " + int_to_string(vec_len(w)) + " fields, want 5: @lock <alias> <source> <ref> <commit>"
+    }
+    if !str_eq(vec_get(w, 0), "@lock") {
+        return "lock line '" + line + "' does not start with '@lock'"
+    }
+    if !str_eq(vec_get(w, 1), alias) {
+        return "lock line names alias '" + vec_get(w, 1) + "', want '" + alias + "'"
+    }
+    if !str_eq(vec_get(w, 2), source) {
+        return "lock line names source '" + vec_get(w, 2) + "', want '" + source + "'"
+    }
+    if !str_eq(vec_get(w, 3), ref) {
+        return "lock line names ref '" + vec_get(w, 3) + "', want '" + ref + "'"
+    }
+    if !is_hex40(vec_get(w, 4)) {
+        return "lock line commit '" + vec_get(w, 4) + "' is not a 40 character git object id"
+    }
+    return ""
+}
+
+// The commit field of a well formed lock line, or the empty string.
+export func lock_commit(line: string) -> string {
+    w: *Vector<string> = split_ws(line)
+    if vec_len(w) != 5 {
+        return ""
+    }
+    return vec_get(w, 4)
+}
+
+// Where a required package is cloned to, and the stamp file inside it.
+export func module_dir(c: Ctx, alias: string) -> string {
+    return app_dir(c) + "/dawn_modules/" + alias
+}
+
+export func stamp_path(c: Ctx, alias: string) -> string {
+    return module_dir(c, alias) + "/.dawn"
+}
+
+// Checks the stamp a clone leaves behind: one line naming the source, the ref, and
+// the commit the working tree is checked out at. want_commit is compared when it is
+// not empty, which is how a check ties the stamp to the lock.
+export func stamp_bad(c: Ctx, alias: string, source: string, ref: string, want_commit: string) -> string {
+    path: string = stamp_path(c, alias)
+    if !exists(path) {
+        return "no clone stamp at '" + path + "'"
+    }
+    lines: *Vector<string> = lines_of(path)
+    if vec_len(lines) != 1 {
+        return "the stamp '" + path + "' has " + int_to_string(vec_len(lines)) + " lines, want 1: <source> <ref> <commit>"
+    }
+    one: string = vec_get(lines, 0)
+    w: *Vector<string> = split_ws(one)
+    if vec_len(w) != 3 {
+        return "the stamp line '" + one + "' has " + int_to_string(vec_len(w)) + " fields, want 3: <source> <ref> <commit>"
+    }
+    if !str_eq(vec_get(w, 0), source) {
+        return "the stamp names source '" + vec_get(w, 0) + "', want '" + source + "'"
+    }
+    if !str_eq(vec_get(w, 1), ref) {
+        return "the stamp names ref '" + vec_get(w, 1) + "', want '" + ref + "'"
+    }
+    if !is_hex40(vec_get(w, 2)) {
+        return "the stamp commit '" + vec_get(w, 2) + "' is not a 40 character git object id"
+    }
+    if str_len(want_commit) > 0 && !str_eq(vec_get(w, 2), want_commit) {
+        return "the stamp commit '" + vec_get(w, 2) + "' does not match the locked commit '" + want_commit + "'"
+    }
+    return ""
+}

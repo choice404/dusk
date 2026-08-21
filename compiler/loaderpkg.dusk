@@ -1,0 +1,776 @@
+/** loaderpkg: the package layer of the loader. A project is a directory holding a
+ *  package.dawn, found by walking up from the root source file, and every dependency
+ *  that manifest pins is a checkout under dawn_modules/<alias> beside it. This file
+ *  turns an alias at the head of an import into a directory on disk, and it refuses
+ *  to do so until dawn.lock and the checkout's own stamp agree on one commit: the
+ *  compiler never fetches, so what is on disk is either what the lock records or a
+ *  named error saying to run dawn get.
+ *
+ *  Physical and display paths are kept apart deliberately. The physical path is where
+ *  a file actually is, and it is what the loader reads, canonicalizes, and dedups on.
+ *  The display path is what a diagnostic prints and what a fault location carries into
+ *  the emitted IR, and for a dependency it is always the manifest relative
+ *  dawn_modules/<alias>/<path> spelling, never the absolute location of the checkout,
+ *  so two machines holding one dawn.lock emit the same bytes however differently their
+ *  trees are laid out.
+ *
+ *  A file with no package.dawn above it never reaches any of this: the loader asks
+ *  pkg_has_project first and resolves exactly as it did before 1.14.0. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import source
+@import home
+@import diag
+@import pathnorm
+@import manifestline
+@import manifest
+@import manifestlock
+
+/** One package taking part in a load: the root project at index 0, and a dependency
+ *  for every alias reached after it. dir is the physical directory holding the
+ *  package, display the manifest relative prefix its files register under, empty for
+ *  the root project, and root_file the physical entry file a dependent's import walks
+ *  under. ok is false once the checkout has been reported unusable, so one broken
+ *  dependency is named once however many files import it, and folded records that the
+ *  manifest's own @link and @csource values have already been taken.
+ *
+ *  rooted says the package's files register relative to dir rather than under the path
+ *  they resolved to. A dependency is always rooted. The project is rooted only when the
+ *  compile started from the manifest itself, with no file named on the command line:
+ *  then there is no spelling a person chose to preserve, and a manifest relative one is
+ *  what makes two checkouts of one project emit the same bytes. */
+export struct Pkg {
+    alias: string,
+    dir: string,
+    display: string,
+    has_manifest: bool,
+    m: *Manifest,
+    lock: *Lock,
+    root_file: string,
+    ok: bool,
+    folded: bool,
+    rooted: bool,
+}
+
+/** Every package one load touches, with the lookup from alias to index. has_project
+ *  is false when no package.dawn governs the root file, and then nothing here is
+ *  consulted at all. */
+export struct PkgSet {
+    pkgs: *Vector<*Pkg>,
+    by_alias: *Map<string, int64>,
+    has_project: bool,
+}
+
+/** The file a command with no file argument compiles, and the name it builds under.
+ *  ok is false when there is no usable root: msg is empty when there is no manifest
+ *  at all, which is the caller's own usage error, and holds the manifest's rendered
+ *  fault when there is one that names no root file. stem is @package, the stem a
+ *  library archive is written from, empty when the manifest sets none. */
+export struct ProjectRoot {
+    ok: bool,
+    path: string,
+    stem: string,
+    msg: string,
+}
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+/** A manifest that was never read: no path, no directives, and the four empty vectors
+ *  manifest_free expects, so a package carrying no package.dawn is released exactly
+ *  like one that carries a real manifest. */
+func empty_manifest() -> Manifest {
+    rv: *Vector<*Require> = alloc(vec_new())
+    lv: *Vector<string> = alloc(vec_new())
+    cv: *Vector<string> = alloc(vec_new())
+    ev: *Vector<string> = alloc(vec_new())
+    return Manifest {
+        path: "",
+        dir: "",
+        package: "",
+        version: "",
+        dusk_min: "",
+        root: "",
+        requires: rv,
+        links: lv,
+        csources: cv,
+        errors: ev,
+    }
+}
+
+/** A lock that was never read, released by lock_free like any other. */
+func empty_lock() -> Lock {
+    ev: *Vector<*LockEntry> = alloc(vec_new())
+    errv: *Vector<string> = alloc(vec_new())
+    return Lock { path: "", entries: ev, errors: errv }
+}
+
+func new_pkg(alias: string, dir: string, display: string, has_manifest: bool, m: *Manifest, l: *Lock, root_file: string, ok: bool, rooted: bool) -> *Pkg {
+    return alloc(Pkg {
+        alias: alias,
+        dir: dir,
+        display: display,
+        has_manifest: has_manifest,
+        m: m,
+        lock: l,
+        root_file: root_file,
+        ok: ok,
+        folded: false,
+        rooted: rooted,
+    })
+}
+
+/** The directory portion of a path, with a file directly under the root reporting
+ *  "/". This is the manifest search's own rule, kept here rather than reached across
+ *  for, since the loader's dir_of answers a different question, the base an import
+ *  resolves against. */
+func pkg_dir_of(path: string) -> string {
+    n: int64 = str_len(path)
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if path[i] == 47 {
+            last = i
+        }
+        i = i + 1
+    }
+    if last < 0 {
+        return substring(path, 0, 0)
+    }
+    if last == 0 {
+        return copy_string("/")
+    }
+    return substring(path, 0, last)
+}
+
+/** The directory a manifest search starts from: the directory holding the root source
+ *  file in its absolute form, so a relative path and a symlinked one climb the same
+ *  real tree. A path that cannot be resolved is used as it stands, which leaves the
+ *  search over a file that is not there harmless rather than faulting. */
+func start_dir_of(root_path: string) -> string {
+    real: string = source_realpath(root_path)
+    if str_len(real) > 0 {
+        d: string = pkg_dir_of(real)
+        free(real)
+        return d
+    }
+    free(real)
+    return pkg_dir_of(root_path)
+}
+
+// The line a rendered fault names and the index its message starts at, given the path
+// the fault opens with. A manifest reader writes either "path:line: message" or
+// "path: message", so both are read back apart here rather than carried as one
+// sentence: a diagnostic that knows its file and its text apart is one a tool can act
+// on, and the human rendering is byte for byte what the reader wrote either way. ok is
+// false for text of any other shape, which no reader produces.
+func split_fault(path: string, fault: string) -> (int64, int64, bool) {
+    n: int64 = str_len(path)
+    m: int64 = str_len(fault)
+    if n >= m {
+        return (0, 0, false)
+    }
+    if !starts_with(fault, path) {
+        return (0, 0, false)
+    }
+    if fault[n] != 58 {
+        return (0, 0, false)
+    }
+    if fault[n + 1] == 32 {
+        return (0, n + 2, true)
+    }
+    mut line: int64 = 0
+    mut digits: int64 = 0
+    mut i: int64 = n + 1
+    mut scanning: bool = true
+    while scanning {
+        if i >= m {
+            scanning = false
+        } else {
+            c: int64 = fault[i]
+            if c < 48 {
+                scanning = false
+            } else if c > 57 {
+                scanning = false
+            } else {
+                line = line * 10 + (c - 48)
+                digits = digits + 1
+                i = i + 1
+            }
+        }
+    }
+    if digits == 0 {
+        return (0, 0, false)
+    }
+    if i + 1 >= m {
+        return (0, 0, false)
+    }
+    if fault[i] != 58 {
+        return (0, 0, false)
+    }
+    if fault[i + 1] != 32 {
+        return (0, 0, false)
+    }
+    return (line, i + 2, true)
+}
+
+// Appends one already rendered fault under the file it belongs to. path is a copy that
+// outlives the manifest, since the diagnostic borrows it and the manifest is released
+// at the end of the load; the message is copied out of the fault for the same reason.
+func push_fault(errors: *Vector<LoadDiag>, real: string, shown: string, fault: string) -> void {
+    line, at, ok := split_fault(real, fault)
+    if !ok {
+        vec_push(errors, load_diag_plain(copy_string(fault), ""))
+        return
+    }
+    vec_push(errors, load_diag_at(shown, line, substring(fault, at, str_len(fault))))
+}
+
+// Appends every fault a manifest or a lock recorded, each under its own file. real is
+// the path the reader wrote them with and shown the spelling they are reported under,
+// which for a dependency's own files is manifest relative, so what a person reads is the
+// same on every machine however differently the checkout is laid out underneath.
+func push_faults(errors: *Vector<LoadDiag>, real: string, shown: string, faults: *Vector<string>) -> void {
+    mut i: int64 = 0
+    while i < vec_len(faults) {
+        push_fault(errors, real, shown, vec_get(faults, i))
+        i = i + 1
+    }
+}
+
+// One sentence about a dependency: what is wrong with it and what closes it, with the
+// alias quoted the way every import fault quotes the name it is about. The result is a
+// fresh heap string the caller owns.
+func dep_sentence(alias: string, tail: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dependency '")
+    sb_push(b, alias)
+    sb_push(b, "' ")
+    sb_push(b, tail)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Appends one disagreement between a manifest and what is on disk, under the
+// manifest's path, rendering the way a fault the manifest reader raised does. Both
+// strings are borrowed by the diagnostic and must outlive the load: path is the copy
+// the caller made and msg is the fresh sentence it built, so neither is freed after
+// this.
+func push_project_fault(errors: *Vector<LoadDiag>, path: string, msg: string) -> void {
+    vec_push(errors, load_diag_at(path, 0, msg))
+}
+
+// Every way the project is out of step with what is on disk, reported before a single
+// import is resolved, each sentence under the manifest that failed to hold. The reading
+// itself lives in manifestlock, so the compiler and dawn come to one verdict over one
+// manifest, one lock, and one set of checkouts rather than two readings that could
+// drift apart.
+//
+// The sentences are borrowed by the diagnostics and have to outlive the load the way
+// every other diagnostic string here does, so only the vector's own storage is released.
+func check_project(m: *Manifest, l: *Lock, path: string, errors: *Vector<LoadDiag>) -> void {
+    faults: *Vector<string> = verify_project(m, l)
+    mut i: int64 = 0
+    while i < vec_len(faults) {
+        push_project_fault(errors, path, vec_get(faults, i))
+        i = i + 1
+    }
+    vec_free(faults)
+    free(faults)
+}
+
+/** Finds the package.dawn governing root_path and reads it with its lock, or reports
+ *  no project when the walk to the filesystem root finds none. Every fault the two
+ *  files earned, and every disagreement between them, is appended to errors already
+ *  rendered, so an unlocked requirement or a manifest older than the toolchain stops
+ *  the build before a single import is resolved.
+ *
+ *  from_manifest says the root file was taken from the manifest rather than named on
+ *  the command line, which is the one shape where the project's own files register
+ *  under a manifest relative spelling too. */
+export func pkgset_discover(root_path: string, from_manifest: bool, errors: *Vector<LoadDiag>) -> *PkgSet {
+    pkgs: *Vector<*Pkg> = alloc(vec_new())
+    by_alias: *Map<string, int64> = alloc(map_new())
+    sd: string = start_dir_of(root_path)
+    mpath: string = manifest_find(sd)
+    free(sd)
+    if str_len(mpath) == 0 {
+        vec_push(pkgs, new_pkg("", "", "", false, alloc(empty_manifest()), alloc(empty_lock()), "", true, false))
+        return alloc(PkgSet { pkgs: pkgs, by_alias: by_alias, has_project: false })
+    }
+    m: *Manifest = manifest_read(mpath)
+    free(mpath)
+    lpath: string = lock_path_for(m)
+    l: *Lock = lock_read(lpath)
+    free(lpath)
+    // The two paths are copied because every diagnostic built from them borrows one and
+    // the manifest and the lock are released at the end of the load.
+    mown: string = copy_string((*m).path)
+    lown: string = copy_string((*l).path)
+    push_faults(errors, mown, mown, (*m).errors)
+    push_faults(errors, lown, lown, (*l).errors)
+    check_project(m, l, mown, errors)
+    vec_push(pkgs, new_pkg("", copy_string((*m).dir), "", true, m, l, "", true, from_manifest))
+    return alloc(PkgSet { pkgs: pkgs, by_alias: by_alias, has_project: true })
+}
+
+/** Whether a package.dawn governs this load at all. */
+export func pkg_has_project(ps: *PkgSet) -> bool {
+    return (*ps).has_project
+}
+
+/** Whether seg names a dependency the package at idx declared. The alias set is the
+ *  importing package's own, so a dependency's imports read against the requirements
+ *  its own manifest wrote rather than against the project's. */
+export func pkg_is_alias(ps: *PkgSet, idx: int64, seg: string) -> bool {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    if !(*p).has_manifest {
+        return false
+    }
+    return require_index((*(*p).m).requires, seg) >= 0
+}
+
+/** The physical entry file of a package, the file a bare alias import names and the
+ *  file whose directory the rest of a dotted alias import walks under. */
+export func pkg_root_file(ps: *PkgSet, idx: int64) -> string {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    return (*p).root_file
+}
+
+/** The manifest a package carries, empty of directives when it carries none. */
+export func pkg_manifest(ps: *PkgSet, idx: int64) -> *Manifest {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    return (*p).m
+}
+
+/** Whether the package's own @link and @csource values still need folding into the
+ *  module wide tables, reporting true exactly once per package that has a manifest.
+ *  The loader asks as each file registers, so a package contributes its directives
+ *  when its first file joins the module and never again. */
+export func pkg_take_directives(ps: *PkgSet, idx: int64) -> bool {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    if !(*p).has_manifest {
+        return false
+    }
+    if (*p).folded {
+        return false
+    }
+    (*p).folded = true
+    return true
+}
+
+// The tail naming a pin that is not what the package requiring it asked for. The
+// requiring package is named because the disagreement is between two files, its
+// package.dawn and the lock the checkout answers to, and neither one alone says it.
+func unasked_tail(pkg: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "of '")
+    sb_push(b, pkg)
+    sb_push(b, "' does not match dawn.lock; run dawn get")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The lock line a checkout answers to: the project's own when it declares this
+// dependency, which is how a project overrides the reference a dependency asked for,
+// and otherwise the line written by the package that required it. The index is -1
+// when neither pins the alias.
+func lock_pin(ps: *PkgSet, from: int64, alias: string) -> (*Lock, int64) {
+    root: *Pkg = vec_get((*ps).pkgs, 0)
+    ri: int64 = lock_entry_index((*root).lock, alias)
+    if ri >= 0 {
+        return ((*root).lock, ri)
+    }
+    p: *Pkg = vec_get((*ps).pkgs, from)
+    return ((*p).lock, lock_entry_index((*p).lock, alias))
+}
+
+// Whether the checkout an alias names is the one the lock records, and the sentence
+// naming what is wrong when it is not. The three ways a tree is out of step with dawn
+// are that nothing was resolved, that nothing was fetched, and that what was fetched is
+// not what was resolved, and each names the one command that closes it.
+//
+// An empty sentence with a false answer means the project wide check already said this,
+// so the import fails without a second sentence over the first. That check covers every
+// requirement the project declared and every entry of its lock; what reaches a sentence
+// here is what it could not have seen, a dependency of a dependency pinned by the
+// package that required it rather than by the project.
+func checkout_state(ps: *PkgSet, from: int64, alias: string, depdir: string) -> (bool, string) {
+    root: *Pkg = vec_get((*ps).pkgs, 0)
+    covered: bool = lock_entry_index((*root).lock, alias) >= 0
+    l, idx := lock_pin(ps, from, alias)
+    if idx < 0 {
+        if require_index((*(*root).m).requires, alias) >= 0 {
+            return (false, "")
+        }
+        return (false, "is not locked; run dawn get")
+    }
+    e: *LockEntry = vec_get((*l).entries, idx)
+    // The pin the lock records has to be the one the package that required this
+    // dependency actually asked for. The project's own requirements are read against
+    // the lock before a single import resolves; this is that same rule one level down,
+    // and without it a lock line naming another source answers a dependency's import
+    // with a package it never asked for.
+    if from > 0 {
+        fp: *Pkg = vec_get((*ps).pkgs, from)
+        ri: int64 = require_index((*(*fp).m).requires, alias)
+        if ri >= 0 {
+            r: *Require = vec_get((*(*fp).m).requires, ri)
+            mut asked: bool = str_eq((*e).source, (*r).source)
+            if !str_eq((*e).ref, (*r).ref) {
+                asked = false
+            }
+            if !asked {
+                return (false, unasked_tail((*fp).alias))
+            }
+        }
+    }
+    st: Stamp = stamp_read(depdir)
+    if !st.ok {
+        stamp_free(st)
+        if covered {
+            return (false, "")
+        }
+        return (false, "is not fetched; run dawn get")
+    }
+    mut same: bool = str_eq(st.commit, (*e).commit)
+    if !str_eq(st.source, (*e).source) { same = false }
+    if !str_eq(st.ref, (*e).ref) { same = false }
+    stamp_free(st)
+    if !same {
+        if covered {
+            return (false, "")
+        }
+        return (false, "does not match dawn.lock; run dawn get")
+    }
+    return (true, "")
+}
+
+// The manifest a checked out dependency carries, and whether it carries one at all. A
+// dependency's own manifest faults are not the depending package's faults and are not
+// reported here, the same reading dep_root_file makes of them.
+func read_pkg_manifest(dir: string) -> (*Manifest, bool) {
+    p: string = path_join(dir, "package.dawn")
+    if source_is_file(p) {
+        m: *Manifest = manifest_read(p)
+        free(p)
+        return (m, true)
+    }
+    free(p)
+    return (alloc(empty_manifest()), false)
+}
+
+// The lock a checked out dependency carries, empty when it carries none. It is read
+// for one reason: a dependency of a dependency is pinned by the package that required
+// it unless the project overrode that requirement itself.
+func read_pkg_lock(dir: string) -> *Lock {
+    p: string = path_join(dir, "dawn.lock")
+    l: *Lock = lock_read(p)
+    free(p)
+    return l
+}
+
+// The fault an import through a dependency alias earns. The message outlives the load,
+// since the diagnostic borrows it.
+func dep_fault(importer: string, alias: string, tail: string) -> LoadDiag {
+    return load_diag_plain(importer, dep_sentence(alias, tail))
+}
+
+/** The package index an alias names, checking the lock and the checkout the first time
+ *  the alias is reached and recording the answer, so a broken dependency is reported
+ *  once however many files import it. Returns -1 when the dependency is unusable, and
+ *  then the fault has already been recorded. The checkout is always looked for under
+ *  the project's own dawn_modules, since the graph is flat: a dependency of a
+ *  dependency is a sibling of it rather than nested underneath. */
+export func pkg_dep_index(ps: *PkgSet, from: int64, alias: string, importer: string, errors: *Vector<LoadDiag>) -> int64 {
+    if map_has((*ps).by_alias, alias) {
+        i: int64 = unwrap_or(map_get((*ps).by_alias, alias), 0)
+        known: *Pkg = vec_get((*ps).pkgs, i)
+        if !(*known).ok {
+            return -1
+        }
+        return i
+    }
+    root: *Pkg = vec_get((*ps).pkgs, 0)
+    depdir: string = dep_dir((*root).m, alias)
+    usable, why := checkout_state(ps, from, alias, depdir)
+    mut ok: bool = usable
+    mut fault: string = why
+    m, has_m := read_pkg_manifest(depdir)
+    l: *Lock = read_pkg_lock(depdir)
+    // A dependency whose own package.dawn or dawn.lock does not read is not resolved
+    // through. A half read lock still holds the lines that parsed, and resolving an
+    // import through one would answer it with whatever survived the parse rather than
+    // with what the file says. The faults are the dependency's own, so they are reported
+    // under its own files, spelled manifest relative like every other path a checkout
+    // contributes.
+    if vec_len((*m).errors) > 0 {
+        push_faults(errors, (*m).path, pkg_file_display(alias, "package.dawn"), (*m).errors)
+        ok = false
+    }
+    if vec_len((*l).errors) > 0 {
+        push_faults(errors, (*l).path, pkg_file_display(alias, "dawn.lock"), (*l).errors)
+        ok = false
+    }
+    mut rootf: string = ""
+    if ok {
+        rootf = dep_root_file(depdir)
+        if str_len(rootf) == 0 {
+            ok = false
+            fault = "has no root file; add @root to its package.dawn"
+        } else {
+            // The root has to be a file inside the checkout the lock stands behind. A
+            // root climbing out with ".." names a file no lock line vouches for, and it
+            // would register under a spelling that walks back out of dawn_modules.
+            inside: string = path_under(depdir, rootf)
+            if str_len(inside) == 0 {
+                ok = false
+                fault = "names a root outside its checkout; fix @root in its package.dawn"
+            }
+            free(inside)
+        }
+    }
+    if str_len(fault) > 0 {
+        vec_push(errors, dep_fault(importer, alias, fault))
+    }
+    key: string = copy_string(alias)
+    idx: int64 = vec_len((*ps).pkgs)
+    vec_push((*ps).pkgs, new_pkg(key, depdir, path_join(dawn_modules_dir(), alias), has_m, m, l, rootf, ok, true))
+    map_put((*ps).by_alias, key, idx)
+    if !ok {
+        return -1
+    }
+    return idx
+}
+
+/** The path a file registers under: the path as the loader resolved it, which for a
+ *  file named on the command line is the spelling that was typed, or the package
+ *  relative spelling for a package whose files are rooted, dawn_modules/<alias>/<path>
+ *  for a dependency and <path> for a project compiled from its own manifest. A file
+ *  that resolved outside the package directory keeps its physical path, since a made up
+ *  relative spelling would be a second file's name rather than this one's. */
+export func pkg_display_path(ps: *PkgSet, idx: int64, phys: string) -> string {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    if !(*p).rooted {
+        return copy_string(phys)
+    }
+    rel: string = path_under((*p).dir, phys)
+    if str_len(rel) == 0 {
+        free(rel)
+        return copy_string(phys)
+    }
+    if str_len((*p).display) == 0 {
+        return rel
+    }
+    out: string = path_join((*p).display, rel)
+    free(rel)
+    return out
+}
+
+/** The alias a package is reached by, empty for the project itself. */
+export func pkg_alias(ps: *PkgSet, idx: int64) -> string {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    return (*p).alias
+}
+
+/** The physical directory a package occupies, the root every relative value in its
+ *  manifest resolves against and the directory its files have to stay inside. */
+export func pkg_dir(ps: *PkgSet, idx: int64) -> string {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    return (*p).dir
+}
+
+/** The spelling a file inside a checked out dependency is reported under, manifest
+ *  relative so it reads the same on every machine. A fresh heap string the caller owns,
+ *  and one a diagnostic borrows must outlive the load. */
+export func pkg_file_display(alias: string, name: string) -> string {
+    base: string = path_join(dawn_modules_dir(), alias)
+    out: string = path_join(base, name)
+    free(base)
+    return out
+}
+
+/** The spelling a package's own package.dawn is reported under: the path it was found
+ *  at for the project, and the manifest relative one for a dependency. */
+export func pkg_manifest_display(ps: *PkgSet, idx: int64) -> string {
+    p: *Pkg = vec_get((*ps).pkgs, idx)
+    if str_len((*p).alias) == 0 {
+        return copy_string((*(*p).m).path)
+    }
+    return pkg_file_display((*p).alias, "package.dawn")
+}
+
+/** The fault an import naming a quoted git path earns inside a project. The old cache
+ *  path still answers outside one for this release. */
+export func pkg_url_import_fault(importer: string, imp: string) -> LoadDiag {
+    return load_diag_plain(importer, quote_msg("", imp, " is a url import; declare it with @require in package.dawn"))
+}
+
+/** The fault a local directory named std earns for shadowing the standard library.
+ *  Nothing resolves through it any more, so the shadow is named rather than quietly
+ *  answered, which is what made the meaning of an @import std.io depend on the shape
+ *  of the tree around the importing file. */
+export func pkg_std_shadow_fault(importer: string) -> LoadDiag {
+    return load_diag_plain(importer, "'std' is reserved for the standard library; rename the local directory")
+}
+
+/** The fault an import reaching into dawn_modules earns. A checkout is reached through
+ *  the alias that pinned it, and a path into the directory would name a file the lock
+ *  does not stand behind. */
+export func pkg_dawn_modules_fault(importer: string, imp: string) -> LoadDiag {
+    return load_diag_plain(importer, quote_msg("", imp, " imports through dawn_modules; import a dependency through the alias its @require names"))
+}
+
+// The fault one exported name reaching the merged module from two packages earns. The
+// diagnostic carries the file that raised it and names the file that got there first,
+// so both sides of the collision are on the line.
+func collision_fault(disp: string, name: string, prior: string) -> LoadDiag {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is also exported by '")
+    sb_push(b, prior)
+    sb_push(b, "'; two packages cannot export one name")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return load_diag_plain(disp, out)
+}
+
+/** Records the exported names one file brings into the merged module and reports the
+ *  ones another package already exported. Exports are global in 1.14.0, so two
+ *  packages exporting a name is a program that cannot be built; within one package it
+ *  stays a duplicate definition, which resolve reports against the offending item. The
+ *  first file to claim a name keeps it, so a third file colliding is reported against
+ *  the same file the second one was. */
+export func pkg_check_exports(owner_file: *Map<string, string>, owner_pkg: *Map<string, int64>, ex: *Map<string, int64>, disp: string, pkg: int64, errors: *Vector<LoadDiag>) -> void {
+    keys: *Vector<string> = map_keys(ex)
+    mut i: int64 = 0
+    while i < vec_len(keys) {
+        k: string = vec_get(keys, i)
+        if map_has(owner_pkg, k) {
+            other: int64 = unwrap_or(map_get(owner_pkg, k), 0)
+            if other != pkg {
+                vec_push(errors, collision_fault(disp, k, unwrap_or(map_get(owner_file, k), "")))
+            }
+        } else {
+            map_put(owner_pkg, k, pkg)
+            map_put(owner_file, k, disp)
+        }
+        i = i + 1
+    }
+    vec_free(keys)
+    free(keys)
+}
+
+/** The first dotted segment of an import, the segment an alias and a reserved name are
+ *  matched against. An import carrying no dot is one segment. */
+export func pkg_first_segment(imp: string) -> string {
+    n: int64 = str_len(imp)
+    mut i: int64 = 0
+    while i < n {
+        if imp[i] == 46 {
+            return substring(imp, 0, i)
+        }
+        i = i + 1
+    }
+    return copy_string(imp)
+}
+
+/** Everything after the first dotted segment, empty when the import is one segment. */
+export func pkg_rest_segments(imp: string) -> string {
+    n: int64 = str_len(imp)
+    mut i: int64 = 0
+    while i < n {
+        if imp[i] == 46 {
+            return substring(imp, i + 1, n)
+        }
+        i = i + 1
+    }
+    return substring(imp, 0, 0)
+}
+
+// Every fault a manifest recorded from index from onward, rendered as one block. The
+// caller reads it after asking for a root file, so what it holds is the reason there
+// is none.
+func faults_from(m: *Manifest, from: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    errs: *Vector<string> = (*m).errors
+    mut i: int64 = from
+    while i < vec_len(errs) {
+        if i > from {
+            sb_push_char(b, 10)
+        }
+        sb_push(b, vec_get(errs, i))
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** The file a build, run, or check with no file argument compiles: the @root of the
+ *  package.dawn found by walking up from the working directory, which is the one shape
+ *  where discovery starts somewhere other than a source file's own directory. A
+ *  manifest that is there but names no root file reports its own fault; the rest of
+ *  its faults are left for the load, which discovers the same manifest and reports
+ *  them all against the compile they actually stop. */
+export func project_root() -> ProjectRoot {
+    mpath: string = manifest_find(".")
+    if str_len(mpath) == 0 {
+        return ProjectRoot { ok: false, path: "", stem: "", msg: "" }
+    }
+    m: *Manifest = manifest_read(mpath)
+    free(mpath)
+    before: int64 = vec_len((*m).errors)
+    rf: string = manifest_root_file(m)
+    stem: string = copy_string((*m).package)
+    msg: string = faults_from(m, before)
+    manifest_free(m)
+    free(m)
+    if str_len(rf) == 0 {
+        free(stem)
+        return ProjectRoot { ok: false, path: "", stem: "", msg: msg }
+    }
+    free(msg)
+    return ProjectRoot { ok: true, path: rf, stem: stem, msg: "" }
+}
+
+/** Releases everything the package set owns and nothing else, the contract manifest_free
+ *  and lock_free keep: each manifest and lock in the two step form its own contract
+ *  names, then the tables. The PkgSet allocation is the caller's, so a heap one is
+ *  released with pkgset_free(ps) followed by free(ps).
+ *
+ *  Everything that left this file, a display path, a resolved file, a link value, a
+ *  rendered fault, was copied on the way out, so nothing outside points into what is
+ *  released here. */
+export func pkgset_free(ps: *PkgSet) -> void {
+    pkgs: *Vector<*Pkg> = (*ps).pkgs
+    while vec_len(pkgs) > 0 {
+        p: *Pkg = vec_take(pkgs, vec_len(pkgs) - 1)
+        manifest_free((*p).m)
+        free((*p).m)
+        lock_free((*p).lock)
+        free((*p).lock)
+        if str_len((*p).alias) > 0 { free((*p).alias) }
+        if str_len((*p).dir) > 0 { free((*p).dir) }
+        if str_len((*p).display) > 0 { free((*p).display) }
+        if str_len((*p).root_file) > 0 { free((*p).root_file) }
+        free(p)
+    }
+    vec_free(pkgs)
+    free(pkgs)
+    map_free((*ps).by_alias)
+    free((*ps).by_alias)
+}

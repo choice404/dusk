@@ -8,14 +8,17 @@
 
 @import std.io
 @import std.string
+@import version
+@import loaderpkg
 @import driver
 @import cli
 @import clidoc
 @import genfn
 
-// The version string the version command prints.
+// The version string the version command prints. The number itself lives in
+// version.dusk, the one place a release bumps it.
 func version_string() -> string {
-    return "dusk 1.13.3"
+    return "dusk " + toolchain_version()
 }
 
 // Prints the command list to stderr, where every message that is not a built
@@ -41,15 +44,76 @@ func usage() -> void {
     printerr("  esc <file>    dump native escape summaries")
     printerr("  doc <file>     render a module's doc comments as markdown")
     printerr("  doc --json <file>  emit the module's doc model as JSON")
+    printerr("build, run, check, and ir with no file compile the @root of the package.dawn")
+    printerr("found by walking up from the working directory.")
+}
+
+// Whether a command compiles a project rather than one named file, which is what lets
+// it run with no file argument at all. ir is here with the three because it compiles a
+// whole program too, and reading a project's IR without naming its root is how the
+// emitted bytes of a build get compared.
+func takes_project(cmd: string) -> bool {
+    if str_eq(cmd, "build") { return true }
+    if str_eq(cmd, "run") { return true }
+    if str_eq(cmd, "check") { return true }
+    if str_eq(cmd, "ir") { return true }
+    return false
+}
+
+// Reports why there is nothing to compile: the manifest's own fault when one is there
+// but names no root file, and the usage error when there is no manifest at all.
+func no_project(pr: ProjectRoot) -> int32 {
+    if str_len(pr.msg) > 0 {
+        printerr(pr.msg)
+        return 1
+    }
+    printerr("dusk: this command needs a file argument, or a package.dawn to build")
+    usage()
+    return 1
+}
+
+// Runs build, run, or check over the project the working directory sits in. Every
+// other command is asked about one file, so it still says so.
+func run_project_cmd(cmd: string, argv: string[]) -> int32 {
+    if !takes_project(cmd) {
+        printerr("dusk: this command needs a file argument")
+        usage()
+        return 1
+    }
+    pr: ProjectRoot = project_root()
+    if !pr.ok {
+        return no_project(pr)
+    }
+    if str_eq(cmd, "check") {
+        return cmd_check(pr.path, argv[0], true)
+    }
+    if str_eq(cmd, "ir") {
+        return cmd_ir(pr.path, argv[0], default_target(), true)
+    }
+    if str_eq(cmd, "run") {
+        return build_module(argv[0], pr.path, true, argv, 3, true)
+    }
+    return build_module(argv[0], pr.path, false, argv, 3, true)
+}
+
+// `dusk build --lib` with no file archives the project: the manifest's @root is the
+// module and @package is the stem, so the library carries the package's own name.
+func project_lib(prog: string) -> int32 {
+    pr: ProjectRoot = project_root()
+    if !pr.ok {
+        return no_project(pr)
+    }
+    if str_len(pr.stem) > 0 {
+        return build_lib_named(prog, pr.path, pr.stem, true)
+    }
+    return build_lib_named(prog, pr.path, stem_of(pr.path), true)
 }
 
 // Dispatches a command that takes a source file argument, reporting a usage error
 // when the file is missing.
 func run_file_cmd(cmd: string, argv: string[]) -> int32 {
     if argv.len < 3 {
-        printerr("dusk: this command needs a file argument")
-        usage()
-        return 1
+        return run_project_cmd(cmd, argv)
     }
     path: string = argv[2]
     if str_eq(cmd, "lex") {
@@ -71,7 +135,7 @@ func run_file_cmd(cmd: string, argv: string[]) -> int32 {
         if argv.len >= 4 && str_eq(argv[2], "--json") {
             return cmd_check_json(argv[3], argv[0])
         }
-        return cmd_check(path, argv[0])
+        return cmd_check(path, argv[0], false)
     }
     if str_eq(cmd, "mono") {
         return cmd_mono(path, argv[0])
@@ -81,18 +145,23 @@ func run_file_cmd(cmd: string, argv: string[]) -> int32 {
         // browser playground is built with; the flag sits at argv[2] and the file
         // at argv[3], mirroring build --lib. Without it, the native triple.
         if argv.len >= 4 && str_eq(argv[2], "--target=wasm32") {
-            return cmd_ir(argv[3], argv[0], wasm_target())
+            return cmd_ir(argv[3], argv[0], wasm_target(), false)
         }
-        return cmd_ir(path, argv[0], default_target())
+        return cmd_ir(path, argv[0], default_target(), false)
     }
     if str_eq(cmd, "build") {
         if argv.len >= 4 && str_eq(argv[2], "--lib") {
             return build_lib(argv[0], argv[3])
         }
-        return build_module(argv[0], path, false, argv, 3)
+        // `build --lib` with nothing after it archives the project rather than a file
+        // that happens to be spelled like the flag.
+        if str_eq(path, "--lib") {
+            return project_lib(argv[0])
+        }
+        return build_module(argv[0], path, false, argv, 3, false)
     }
     if str_eq(cmd, "run") {
-        return build_module(argv[0], path, true, argv, 3)
+        return build_module(argv[0], path, true, argv, 3, false)
     }
     if str_eq(cmd, "esc") {
         return cmd_esc(path, argv[0])

@@ -1,0 +1,599 @@
+/** manifest: reading package.dawn, the file that declares what a package is and
+ *  what it needs. The file is a list of directives, one per line, in the grammar
+ *  manifestline defines:
+ *
+ *      @package  name          the package's own name
+ *      @version  1.2.0         the package's own version
+ *      @dusk     1.14          the oldest toolchain that can build it
+ *      @root     src/main.dusk the file a build starts from
+ *      @require  alias source ref   a dependency, bound to a local alias
+ *      @link     m             a library the linker adds
+ *      @csource  vendor/x.c    a C source the build compiles in
+ *
+ *  Nothing here fetches, clones, or builds: the reader turns a file into a value
+ *  and a list of faults, and every fault reads "path:line: message" so a caller
+ *  prints it as it stands. Reading never stops at the first bad line, so one run
+ *  reports every mistake in the file.
+ *
+ *  An alias is an identifier, because it names a dependency the way an import
+ *  names a module. 'std' is reserved for the standard library and 'dawn_modules'
+ *  for the directory the dependencies land in, so neither can be an alias. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import home
+@import source
+@import pathnorm
+@import manifestline
+
+/** One @require line: the alias the package refers to the dependency by, the source
+ *  it comes from, the ref that pins it, and the line it was written on so a later
+ *  fault can point back at it. Every string is owned by the Require. */
+export struct Require {
+    alias: string,
+    source: string,
+    ref: string,
+    line: int64,
+}
+
+/** A read package.dawn. path is the file itself and dir the directory holding it,
+ *  the base every relative path in the file resolves against. package, version,
+ *  dusk_min, and root are empty when the file did not set them. errors holds every
+ *  fault the read found, already rendered. The Manifest owns all of it. */
+export struct Manifest {
+    path: string,
+    dir: string,
+    package: string,
+    version: string,
+    dusk_min: string,
+    root: string,
+    requires: *Vector<*Require>,
+    links: *Vector<string>,
+    csources: *Vector<string>,
+    errors: *Vector<string>,
+}
+
+/** The name of the directory a package's dependencies are checked out into, under
+ *  the directory holding package.dawn. */
+export func dawn_modules_dir() -> string {
+    return "dawn_modules"
+}
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+func is_digit_byte(c: int64) -> bool {
+    if c < 48 { return false }
+    if c > 57 { return false }
+    return true
+}
+
+func is_alpha_byte(c: int64) -> bool {
+    if c >= 97 {
+        if c <= 122 { return true }
+    }
+    if c >= 65 {
+        if c <= 90 { return true }
+    }
+    return false
+}
+
+/** Whether s spells an identifier: a letter or underscore, then letters, digits,
+ *  and underscores. This is the alias rule, and it is deliberately the same rule
+ *  the language uses for a name, since an alias is written where a name is. */
+func is_ident(s: string) -> bool {
+    n: int64 = str_len(s)
+    if n == 0 { return false }
+    c0: int64 = s[0]
+    if !is_alpha_byte(c0) {
+        if c0 != 95 { return false }
+    }
+    mut i: int64 = 1
+    while i < n {
+        c: int64 = s[i]
+        if !is_alpha_byte(c) {
+            if !is_digit_byte(c) {
+                if c != 95 { return false }
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/** Whether s carries a path separator. */
+func has_slash(s: string) -> bool {
+    n: int64 = str_len(s)
+    mut i: int64 = 0
+    while i < n {
+        if s[i] == 47 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+/** Whether c may appear in a package name: a letter, a digit, an underscore, or a
+ *  hyphen. Nothing else, because the name is written into a file path, the archive
+ *  libNAME.a and the header NAME.h a library build produces, and a name carrying a
+ *  separator or a dot would write those outside the output directory. */
+func is_package_byte(c: int64) -> bool {
+    if is_alpha_byte(c) { return true }
+    if is_digit_byte(c) { return true }
+    if c == 95 { return true }
+    if c == 45 { return true }
+    return false
+}
+
+/** The fault a package name earns, or the empty string when it is usable. A non empty
+ *  result is a fresh heap string the caller owns. Exported so dawn judges a name it is
+ *  about to write the same way the reader judges one it reads. */
+export func package_name_error(name: string) -> string {
+    n: int64 = str_len(name)
+    mut ok: bool = n > 0
+    mut i: int64 = 0
+    while i < n {
+        if !is_package_byte(name[i]) {
+            ok = false
+        }
+        i = i + 1
+    }
+    if ok {
+        return ""
+    }
+    return quote_msg("@package value ", name, " is not a package name; use letters, digits, _ and -")
+}
+
+/** The fault an alias earns, or the empty string when it is usable. A non empty
+ *  result is a fresh heap string the caller owns. Exported because a dawn.lock
+ *  entry carries an alias too and must judge it the same way. */
+export func alias_error(alias: string) -> string {
+    if !is_ident(alias) {
+        return quote_msg("", alias, " is not a valid alias; an alias is an identifier like my_pkg")
+    }
+    if str_eq(alias, "std") {
+        return quote_msg("", alias, " is reserved")
+    }
+    if str_eq(alias, dawn_modules_dir()) {
+        return quote_msg("", alias, " is reserved")
+    }
+    return ""
+}
+
+/** The index of the require carrying alias, or -1 when there is none. */
+export func require_index(rs: *Vector<*Require>, alias: string) -> int64 {
+    mut i: int64 = 0
+    while i < vec_len(rs) {
+        r: *Require = vec_get(rs, i)
+        if str_eq((*r).alias, alias) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/** The directory portion of a path: everything before the last separator. A path
+ *  with no separator names a file in the working directory, and its directory is
+ *  the empty string, which path_join treats as no prefix at all. A file directly
+ *  under the root has "/" for its directory. */
+func parent_of(path: string) -> string {
+    n: int64 = str_len(path)
+    mut last: int64 = -1
+    mut i: int64 = 0
+    while i < n {
+        if path[i] == 47 { last = i }
+        i = i + 1
+    }
+    if last < 0 { return "" }
+    if last == 0 { return copy_string("/") }
+    return substring(path, 0, last)
+}
+
+/** The absolute form of a directory, falling back to the text given when the path
+ *  cannot be resolved, so a search still runs over a directory that does not
+ *  exist rather than faulting. */
+func canon_dir(dir: string) -> string {
+    mut start: string = dir
+    if str_len(dir) == 0 {
+        start = "."
+    }
+    real: string = source_realpath(start)
+    if str_len(real) > 0 {
+        return real
+    }
+    free(real)
+    return copy_string(start)
+}
+
+/** The package.dawn governing start_dir: the first one found walking from
+ *  start_dir up to the filesystem root, or the empty string when no directory on
+ *  that walk holds one. A non empty result is a fresh heap string the caller owns.
+ *  The walk starts from the absolute form of start_dir, so a relative directory
+ *  and a symlinked one both climb the real tree. */
+export func manifest_find(start_dir: string) -> string {
+    mut dir: string = canon_dir(start_dir)
+    mut searching: bool = true
+    while searching {
+        cand: string = path_join(dir, "package.dawn")
+        if source_is_file(cand) {
+            free(dir)
+            return cand
+        }
+        free(cand)
+        if str_len(dir) <= 1 {
+            searching = false
+        } else {
+            up: string = parent_of(dir)
+            free(dir)
+            dir = up
+        }
+    }
+    free(dir)
+    return ""
+}
+
+func manifest_new(path: string) -> *Manifest {
+    rv: *Vector<*Require> = alloc(vec_new())
+    lv: *Vector<string> = alloc(vec_new())
+    cv: *Vector<string> = alloc(vec_new())
+    ev: *Vector<string> = alloc(vec_new())
+    return alloc(Manifest {
+        path: copy_string(path),
+        dir: parent_of(path),
+        package: "",
+        version: "",
+        dusk_min: "",
+        root: "",
+        requires: rv,
+        links: lv,
+        csources: cv,
+        errors: ev,
+    })
+}
+
+/** The index of the first newline at or after from, or n when the rest of the text
+ *  is the last line. */
+func line_end(text: string, n: int64, from: int64) -> int64 {
+    mut i: int64 = from
+    while i < n {
+        if text[i] == 10 { return i }
+        i = i + 1
+    }
+    return n
+}
+
+func dup_error(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "duplicate ")
+    sb_push(b, name)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func empty_value_error(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " value cannot be empty")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func push_fault(m: *Manifest, path: string, lineno: int64, msg: string) -> void {
+    vec_push((*m).errors, err_at(path, lineno, msg))
+}
+
+/** Records a directive that carries exactly one value. The four single value
+ *  directives may each appear once, and a repeat is a fault rather than a silent
+ *  overwrite, so a file that says two different roots never picks one. @link and
+ *  @csource are lists and repeat freely; both reject a value opening with '-',
+ *  since such a value reaches clang as an option rather than as a library or a
+ *  path, the same guard the source directives carry. */
+func apply_value(m: *Manifest, path: string, lineno: int64, name: string, val: string) -> void {
+    if str_len(val) == 0 {
+        e: string = empty_value_error(name)
+        push_fault(m, path, lineno, e)
+        free(e)
+        return
+    }
+    if str_eq(name, "@link") {
+        if val[0] == 45 {
+            push_fault(m, path, lineno, "a link value names a library or a path; it cannot begin with '-'")
+            return
+        }
+        vec_push((*m).links, copy_string(val))
+        return
+    }
+    if str_eq(name, "@csource") {
+        if val[0] == 45 {
+            push_fault(m, path, lineno, "a csource value names a C source path; it cannot begin with '-'")
+            return
+        }
+        vec_push((*m).csources, copy_string(val))
+        return
+    }
+    mut taken: bool = false
+    if str_eq(name, "@package") { taken = str_len((*m).package) > 0 }
+    if str_eq(name, "@version") { taken = str_len((*m).version) > 0 }
+    if str_eq(name, "@dusk") { taken = str_len((*m).dusk_min) > 0 }
+    if str_eq(name, "@root") { taken = str_len((*m).root) > 0 }
+    if taken {
+        d: string = dup_error(name)
+        push_fault(m, path, lineno, d)
+        free(d)
+        return
+    }
+    if str_eq(name, "@package") {
+        pe: string = package_name_error(val)
+        if str_len(pe) > 0 {
+            push_fault(m, path, lineno, pe)
+            free(pe)
+            return
+        }
+    }
+    if str_eq(name, "@package") { (*m).package = copy_string(val) }
+    if str_eq(name, "@version") { (*m).version = copy_string(val) }
+    if str_eq(name, "@dusk") { (*m).dusk_min = copy_string(val) }
+    if str_eq(name, "@root") { (*m).root = copy_string(val) }
+}
+
+/** Records one @require line. The alias must be a usable identifier and must not
+ *  already name another dependency, since two requires under one alias would leave
+ *  the import ambiguous. */
+func apply_require(m: *Manifest, path: string, lineno: int64, args: *Vector<string>) -> void {
+    alias: string = vec_get(args, 1)
+    src: string = vec_get(args, 2)
+    rf: string = vec_get(args, 3)
+    ae: string = alias_error(alias)
+    if str_len(ae) > 0 {
+        push_fault(m, path, lineno, ae)
+        free(ae)
+        return
+    }
+    if require_index((*m).requires, alias) >= 0 {
+        d: string = quote_msg("duplicate alias ", alias, "")
+        push_fault(m, path, lineno, d)
+        free(d)
+        return
+    }
+    if str_len(src) == 0 {
+        push_fault(m, path, lineno, "@require source cannot be empty")
+        return
+    }
+    if str_len(rf) == 0 {
+        push_fault(m, path, lineno, "@require ref cannot be empty")
+        return
+    }
+    r: *Require = alloc(Require {
+        alias: copy_string(alias),
+        source: copy_string(src),
+        ref: copy_string(rf),
+        line: lineno,
+    })
+    vec_push((*m).requires, r)
+}
+
+/** Records one scanned directive line, or the fault it earns. @lock is a real
+ *  directive but belongs to dawn.lock, so it is named apart from a directive no
+ *  dawn file knows at all. */
+func apply_directive(m: *Manifest, path: string, lineno: int64, args: *Vector<string>) -> void {
+    name: string = vec_get(args, 0)
+    if directive_arity(name) < 0 {
+        u: string = unknown_directive_error(name)
+        push_fault(m, path, lineno, u)
+        free(u)
+        return
+    }
+    if str_eq(name, "@lock") {
+        push_fault(m, path, lineno, "@lock belongs in dawn.lock, not package.dawn")
+        return
+    }
+    ae: string = arity_error(name, vec_len(args) - 1)
+    if str_len(ae) > 0 {
+        push_fault(m, path, lineno, ae)
+        free(ae)
+        return
+    }
+    if str_eq(name, "@require") {
+        apply_require(m, path, lineno, args)
+        return
+    }
+    apply_value(m, path, lineno, name, vec_get(args, 1))
+}
+
+/** Reads the package.dawn at path. A file that cannot be read is one fault on the
+ *  returned Manifest rather than a fault of the process, so a caller reports it the
+ *  same way it reports a bad line. The caller owns the result and frees it with
+ *  manifest_free. */
+export func manifest_read(path: string) -> *Manifest {
+    m: *Manifest = manifest_new(path)
+    text, e := read_file(path)
+    if e.exists() {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "cannot read: ")
+        sb_push(b, e.message)
+        msg: string = substring(sb_cstr(b), 0, sb_size(b))
+        vec_push((*m).errors, err_plain(path, msg))
+        free(msg)
+        sb_free(b)
+        free(b)
+        return m
+    }
+    n: int64 = str_len(text)
+    mut pos: int64 = 0
+    mut lineno: int64 = 0
+    while pos < n {
+        stop: int64 = line_end(text, n, pos)
+        lineno = lineno + 1
+        ln: string = substring(text, pos, stop)
+        d: DirLine = scan_directive_line(ln)
+        if str_len(d.err) > 0 {
+            push_fault(m, path, lineno, d.err)
+        } else if d.ok {
+            apply_directive(m, path, lineno, d.args)
+        }
+        dirline_free(d)
+        free(ln)
+        pos = stop + 1
+    }
+    free(text)
+    return m
+}
+
+/** The first of the default root files that exists under dir, or the empty string
+ *  when neither does. A package that names no @root is expected to keep its entry
+ *  at main.dusk or at src/main.dusk. */
+func default_root(dir: string) -> string {
+    top: string = path_join(dir, "main.dusk")
+    if source_is_file(top) {
+        return top
+    }
+    free(top)
+    nested: string = path_join(dir, "src/main.dusk")
+    if source_is_file(nested) {
+        return nested
+    }
+    free(nested)
+    return ""
+}
+
+/** The file a build of this package starts from: @root resolved against the
+ *  package directory, or the first default root that exists. The empty string
+ *  means there is none, and then the reason is added to the manifest's own faults,
+ *  since a package with no entry file is a manifest mistake. A non empty result is
+ *  a fresh heap string the caller owns. */
+export func manifest_root_file(m: *Manifest) -> string {
+    if str_len((*m).root) > 0 {
+        p: string = path_join((*m).dir, (*m).root)
+        if source_is_file(p) {
+            return p
+        }
+        free(p)
+        msg: string = quote_msg("@root names ", (*m).root, ", which is not a file")
+        vec_push((*m).errors, err_plain((*m).path, msg))
+        free(msg)
+        return ""
+    }
+    d: string = default_root((*m).dir)
+    if str_len(d) > 0 {
+        return d
+    }
+    vec_push((*m).errors, err_plain((*m).path, "no root file; add @root, or put the entry at main.dusk or src/main.dusk"))
+    return ""
+}
+
+/** Where the dependency bound to alias is checked out: dawn_modules/<alias> under
+ *  the package directory. The result is a fresh heap string the caller owns. */
+export func dep_dir(m: *Manifest, alias: string) -> string {
+    base: string = path_join((*m).dir, dawn_modules_dir())
+    out: string = path_join(base, alias)
+    free(base)
+    return out
+}
+
+/** The clone URL for a @require source. A source already carrying a scheme is
+ *  handed back as it stands, and a bare host/owner/repo becomes an https URL, the
+ *  shorthand a dusk import already uses. Anything else, including an empty source,
+ *  a bare word with no slash, and a bare filesystem path, returns the empty string:
+ *  those are not sources, and the caller reports them rather than guessing a URL.
+ *  A local checkout is named with a file:// URL. A non empty result is a fresh heap
+ *  string the caller owns. */
+export func source_url(source: string) -> string {
+    if str_len(source) == 0 { return "" }
+    if starts_with(source, "https://") { return copy_string(source) }
+    if starts_with(source, "http://") { return copy_string(source) }
+    if starts_with(source, "ssh://") { return copy_string(source) }
+    if starts_with(source, "file://") { return copy_string(source) }
+    if starts_with(source, "git@") { return copy_string(source) }
+    if source[0] == 47 { return "" }
+    if source[0] == 46 { return "" }
+    if !has_slash(source) { return "" }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "https://")
+    sb_push(b, source)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** The file a build of a checked out dependency starts from. The dependency's own
+ *  package.dawn decides it when there is one, and its faults are not the depending
+ *  package's faults, so they are read and dropped here; a dependency with no
+ *  manifest falls back to the same default roots. The empty string means the
+ *  dependency has no entry file. A non empty result is a fresh heap string the
+ *  caller owns. */
+export func dep_root_file(depdir: string) -> string {
+    mpath: string = path_join(depdir, "package.dawn")
+    if !source_is_file(mpath) {
+        free(mpath)
+        return default_root(depdir)
+    }
+    m: *Manifest = manifest_read(mpath)
+    free(mpath)
+    if str_len((*m).root) == 0 {
+        manifest_free(m)
+        free(m)
+        return default_root(depdir)
+    }
+    joined: string = path_join(depdir, (*m).root)
+    manifest_free(m)
+    free(m)
+    // Cleaned before it is handed back, so a root written "./src/x.dusk" names the same
+    // file as "src/x.dusk" and one written with ".." shows plainly where it landed. A
+    // caller that requires the root to stay inside the checkout can then test the
+    // cleaned path rather than a spelling that hides the climb.
+    p: string = normalize_path(joined)
+    free(joined)
+    if source_is_file(p) {
+        return p
+    }
+    free(p)
+    return ""
+}
+
+/** Releases everything a manifest owns and nothing else, the same contract sb_free
+ *  and vec_free keep: the Manifest allocation itself is the caller's, so a heap
+ *  manifest is released with manifest_free(m) followed by free(m). After this the
+ *  manifest holds stale pointers and must not be read. */
+export func manifest_free(m: *Manifest) -> void {
+    if str_len((*m).path) > 0 { free((*m).path) }
+    if str_len((*m).dir) > 0 { free((*m).dir) }
+    if str_len((*m).package) > 0 { free((*m).package) }
+    if str_len((*m).version) > 0 { free((*m).version) }
+    if str_len((*m).dusk_min) > 0 { free((*m).dusk_min) }
+    if str_len((*m).root) > 0 { free((*m).root) }
+    while vec_len((*m).requires) > 0 {
+        r: *Require = vec_take((*m).requires, vec_len((*m).requires) - 1)
+        free((*r).alias)
+        free((*r).source)
+        free((*r).ref)
+        free(r)
+    }
+    vec_free((*m).requires)
+    free((*m).requires)
+    while vec_len((*m).links) > 0 {
+        s: string = vec_take((*m).links, vec_len((*m).links) - 1)
+        free(s)
+    }
+    vec_free((*m).links)
+    free((*m).links)
+    while vec_len((*m).csources) > 0 {
+        s: string = vec_take((*m).csources, vec_len((*m).csources) - 1)
+        free(s)
+    }
+    vec_free((*m).csources)
+    free((*m).csources)
+    while vec_len((*m).errors) > 0 {
+        s: string = vec_take((*m).errors, vec_len((*m).errors) - 1)
+        free(s)
+    }
+    vec_free((*m).errors)
+    free((*m).errors)
+}

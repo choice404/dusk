@@ -309,8 +309,8 @@ export func run_demo(prog: string) -> int32 {
  *  links the runtime. The run flag controls whether the linked binary is executed.
  *  This is the compiler's own entry; it pins the output to out_dir(), the stage0
  *  parallel target/dusk-out. */
-export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64) -> int32 {
-    return build_module_to(prog, path, run_it, argv, arg_start, out_dir())
+export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, from_manifest: bool) -> int32 {
+    return build_module_to_pkg(prog, path, run_it, argv, arg_start, out_dir(), from_manifest)
 }
 
 /** The general form: build into an explicit output directory. build_module fixes
@@ -320,7 +320,15 @@ export func build_module(prog: string, path: string, run_it: bool, argv: string[
  *  line, and the exit-code passthrough, is shared, so the two entry points differ
  *  only in where the two files land. */
 export func build_module_to(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string) -> int32 {
-    ir: CliIrResult = compile_ir_text(path, prog, default_target())
+    return build_module_to_pkg(prog, path, run_it, argv, arg_start, out, false)
+}
+
+/** The same build, told whether the path came from a package.dawn rather than from the
+ *  command line. A build from a manifest registers the project's own files under a
+ *  manifest relative spelling, so two checkouts of one project emit identical bytes;
+ *  a build of a named file keeps that file's spelling. */
+export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string, from_manifest: bool) -> int32 {
+    ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest)
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
         return 1
@@ -730,14 +738,21 @@ func archive_lib(home: string, ll: string, stem: string, out: string, csources: 
  *  monomorphization roots every export and each export survives to the archive. A
  *  build with no exports still produces an archive, empty of dusk entry points. */
 export func build_lib(prog: string, path: string) -> int32 {
+    return build_lib_named(prog, path, stem_of(path), false)
+}
+
+/** The same archive under a name of the caller's choosing. build_lib takes the source
+ *  file's own stem; a build that came from a manifest passes @package instead, so a
+ *  project's library carries the package's name rather than the name of whatever file
+ *  its @root happened to be. */
+export func build_lib_named(prog: string, path: string, stem: string, from_manifest: bool) -> int32 {
     out: string = out_dir()
-    ir: CliIrResult = compile_ir_text(path, prog, default_target())
+    ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest)
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
         return 1
     }
     if !make_out_dir(out) { return 1 }
-    stem: string = stem_of(path)
     ll_name: *StringBuilder = alloc(sb_new())
     sb_push(ll_name, stem)
     sb_push(ll_name, ".ll")

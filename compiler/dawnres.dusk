@@ -1,0 +1,204 @@
+/** dawnres: the shape of a resolved dependency and the rules that decide whether a
+ *  second claim on one may join the first. Dependencies land flat: every package in
+ *  the graph, however deep it was required from, is checked out into one
+ *  dawn_modules beside the root manifest, so an alias means the same package to
+ *  every file in the build. That flatness is what makes the rules necessary.
+ *
+ *  Three claims can collide, and each is refused by naming both manifests rather
+ *  than resolved to whichever arrived last, since either answer would compile
+ *  something nobody asked for:
+ *
+ *      one alias, two sources          there is no single package for the alias
+ *      one alias, two refs             there is no single version for the alias,
+ *                                      unless the root manifest named one, and then
+ *                                      the root's choice stands over its graph
+ *      one source and ref, two aliases one package would be checked out twice under
+ *                                      two names, and a value from one copy would
+ *                                      not be a value of the other
+ *
+ *  A claim identical to one already admitted is simply the same dependency reached
+ *  twice, which is what a diamond in the graph looks like, and it joins silently. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import manifestline
+
+/** One dependency the resolver settled: the alias it is bound to, the source and ref
+ *  that were asked for, the commit those resolved to, the manifest that asked, and
+ *  whether that manifest was the root's own. Every string is owned by the record. */
+export struct DawnDep {
+    alias: string,
+    source: string,
+    ref: string,
+    commit: string,
+    origin: string,
+    from_root: bool,
+}
+
+/** A claim on an alias, before it is resolved to a commit. */
+export struct DawnWant {
+    alias: string,
+    source: string,
+    ref: string,
+    origin: string,
+    from_root: bool,
+}
+
+/** What to do with a claim: DAWN_ADMIT to resolve and fetch it, DAWN_SAME to pass
+ *  over a dependency already settled, DAWN_CLASH to stop with the message. */
+export func dawn_admit_new() -> int64 { return 0 }
+export func dawn_admit_same() -> int64 { return 1 }
+export func dawn_admit_clash() -> int64 { return 2 }
+
+/** A verdict on one claim. msg is non empty only for a clash, and is then a fresh
+ *  heap string the caller owns. */
+export struct DawnVerdict {
+    kind: int64,
+    msg: string,
+}
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+export func dawn_want_free(w: *DawnWant) -> void {
+    free((*w).alias)
+    free((*w).source)
+    free((*w).ref)
+    free((*w).origin)
+}
+
+export func dawn_dep_free(d: *DawnDep) -> void {
+    free((*d).alias)
+    free((*d).source)
+    free((*d).ref)
+    free((*d).commit)
+    free((*d).origin)
+}
+
+/** Releases every dependency a set holds and the vector's own storage. The Vector
+ *  allocation itself is the caller's, the sb_free contract. */
+export func dawn_deps_free(deps: *Vector<*DawnDep>) -> void {
+    while vec_len(deps) > 0 {
+        d: *DawnDep = vec_take(deps, vec_len(deps) - 1)
+        dawn_dep_free(d)
+        free(d)
+    }
+    vec_free(deps)
+}
+
+/** Releases every claim a queue holds and the vector's own storage. The Vector
+ *  allocation itself is the caller's. */
+export func dawn_wants_free(wants: *Vector<*DawnWant>) -> void {
+    while vec_len(wants) > 0 {
+        w: *DawnWant = vec_take(wants, vec_len(wants) - 1)
+        dawn_want_free(w)
+        free(w)
+    }
+    vec_free(wants)
+}
+
+/** A claim on the heap, copying every string so the caller keeps its own. */
+export func dawn_want_new(alias: string, source: string, ref: string, origin: string, from_root: bool) -> *DawnWant {
+    return alloc(DawnWant {
+        alias: copy_string(alias),
+        source: copy_string(source),
+        ref: copy_string(ref),
+        origin: copy_string(origin),
+        from_root: from_root,
+    })
+}
+
+/** A settled dependency on the heap. */
+export func dawn_dep_new(w: *DawnWant, commit: string) -> *DawnDep {
+    return alloc(DawnDep {
+        alias: copy_string((*w).alias),
+        source: copy_string((*w).source),
+        ref: copy_string((*w).ref),
+        commit: copy_string(commit),
+        origin: copy_string((*w).origin),
+        from_root: (*w).from_root,
+    })
+}
+
+/** The index of the settled dependency bound to alias, or -1. */
+export func dawn_dep_index(deps: *Vector<*DawnDep>, alias: string) -> int64 {
+    mut i: int64 = 0
+    while i < vec_len(deps) {
+        d: *DawnDep = vec_get(deps, i)
+        if str_eq((*d).alias, alias) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+/** The index of the settled dependency taken from exactly this source at exactly
+ *  this ref, or -1. */
+export func dawn_dep_by_source(deps: *Vector<*DawnDep>, source: string, ref: string) -> int64 {
+    mut i: int64 = 0
+    while i < vec_len(deps) {
+        d: *DawnDep = vec_get(deps, i)
+        if str_eq((*d).source, source) {
+            if str_eq((*d).ref, ref) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+func two_sources_msg(alias: string, held: *DawnDep, w: *DawnWant) -> string {
+    mut m: string = "alias '" + alias + "' is required from '" + (*held).source + "' by " + (*held).origin
+    m += " and from '" + (*w).source + "' by " + (*w).origin
+    m += "; one alias names one package"
+    return m
+}
+
+func two_refs_msg(alias: string, held: *DawnDep, w: *DawnWant, root_path: string) -> string {
+    mut m: string = "alias '" + alias + "' is required at '" + (*held).ref + "' by " + (*held).origin
+    m += " and at '" + (*w).ref + "' by " + (*w).origin
+    m += "; add a @require for it in " + root_path + " to settle the version"
+    return m
+}
+
+func two_aliases_msg(held: *DawnDep, w: *DawnWant) -> string {
+    mut m: string = "'" + (*w).source + "' at '" + (*w).ref + "' is required under two aliases, '"
+    m += (*held).alias + "' by " + (*held).origin
+    m += " and '" + (*w).alias + "' by " + (*w).origin
+    m += "; one package has one alias"
+    return m
+}
+
+/** Judges a claim against everything already settled. The root manifest's own
+ *  requires are settled first, so a claim that disagrees with a root require is
+ *  always the deeper one and the root's choice stands; two deeper claims that
+ *  disagree have no tie breaker and are refused with the fix, which is for the root
+ *  to say which version it wants. */
+export func dawn_judge(deps: *Vector<*DawnDep>, w: *DawnWant, root_path: string) -> DawnVerdict {
+    at: int64 = dawn_dep_index(deps, (*w).alias)
+    if at >= 0 {
+        held: *DawnDep = vec_get(deps, at)
+        if !str_eq((*held).source, (*w).source) {
+            return DawnVerdict { kind: dawn_admit_clash(), msg: two_sources_msg((*w).alias, held, w) }
+        }
+        if str_eq((*held).ref, (*w).ref) {
+            return DawnVerdict { kind: dawn_admit_same(), msg: "" }
+        }
+        if (*held).from_root {
+            return DawnVerdict { kind: dawn_admit_same(), msg: "" }
+        }
+        return DawnVerdict { kind: dawn_admit_clash(), msg: two_refs_msg((*w).alias, held, w, root_path) }
+    }
+    same: int64 = dawn_dep_by_source(deps, (*w).source, (*w).ref)
+    if same >= 0 {
+        held: *DawnDep = vec_get(deps, same)
+        return DawnVerdict { kind: dawn_admit_clash(), msg: two_aliases_msg(held, w) }
+    }
+    return DawnVerdict { kind: dawn_admit_new(), msg: "" }
+}

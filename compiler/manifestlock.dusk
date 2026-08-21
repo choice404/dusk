@@ -1,0 +1,559 @@
+/** manifestlock: dawn.lock, the file that records exactly which commit each
+ *  dependency resolved to, and the agreement check between it and package.dawn.
+ *  The file is one directive:
+ *
+ *      @lock alias source ref commit
+ *
+ *  package.dawn says what the package wants, a source and a ref, and dawn.lock says
+ *  what it got, the same source and ref plus the 40 character commit the ref
+ *  named at the time it was resolved. A build reads both and refuses to guess: a
+ *  require with no lock line, or one whose lock line records a different source or
+ *  ref, is reported and the build stops until dawn get writes a fresh lock.
+ *
+ *  Alongside the lock sits the stamp, a .dawn file written into each checked out
+ *  dependency holding the one line "source ref commit". The lock is what the
+ *  package asked for and the stamp is what is actually on disk, so a checkout that
+ *  drifted from the lock is visible without running git. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import home
+@import source
+@import version
+@import manifestline
+@import manifest
+
+/** One @lock line. Every string is owned by the entry. */
+export struct LockEntry {
+    alias: string,
+    source: string,
+    ref: string,
+    commit: string,
+}
+
+/** A read dawn.lock. A missing file is an empty lock with no faults, since a
+ *  package that has never resolved simply has no lock yet. errors holds every fault
+ *  a present file earned, already rendered. */
+export struct Lock {
+    path: string,
+    entries: *Vector<*LockEntry>,
+    errors: *Vector<string>,
+}
+
+/** What a checked out dependency's .dawn stamp says is on disk. ok is false when
+ *  there is no stamp or the stamp does not hold three fields, and then the three
+ *  strings are empty. */
+export struct Stamp {
+    ok: bool,
+    source: string,
+    ref: string,
+    commit: string,
+}
+
+func copy_string(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+/** The dawn.lock beside a package.dawn. The result is a fresh heap string the
+ *  caller owns. */
+export func lock_path_for(m: *Manifest) -> string {
+    return path_join((*m).dir, "dawn.lock")
+}
+
+/** Whether c is a hexadecimal digit, either case. */
+func is_hex_byte(c: int64) -> bool {
+    if c >= 48 {
+        if c <= 57 { return true }
+    }
+    if c >= 97 {
+        if c <= 102 { return true }
+    }
+    if c >= 65 {
+        if c <= 70 { return true }
+    }
+    return false
+}
+
+/** Whether s spells a full git object name: 40 hexadecimal digits. An abbreviated
+ *  hash is refused, since a lock records exactly one object and a prefix can grow
+ *  ambiguous as a repository does. */
+func is_commit(s: string) -> bool {
+    n: int64 = str_len(s)
+    if n != 40 { return false }
+    mut i: int64 = 0
+    while i < n {
+        if !is_hex_byte(s[i]) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+/** The index of the entry carrying alias, or -1 when there is none. */
+export func lock_entry_index(l: *Lock, alias: string) -> int64 {
+    mut i: int64 = 0
+    while i < vec_len((*l).entries) {
+        e: *LockEntry = vec_get((*l).entries, i)
+        if str_eq((*e).alias, alias) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+func line_end(text: string, n: int64, from: int64) -> int64 {
+    mut i: int64 = from
+    while i < n {
+        if text[i] == 10 { return i }
+        i = i + 1
+    }
+    return n
+}
+
+func push_fault(l: *Lock, path: string, lineno: int64, msg: string) -> void {
+    vec_push((*l).errors, err_at(path, lineno, msg))
+}
+
+/** Records one scanned line of a lock file. dawn.lock is machine written and holds
+ *  one directive, so any other directive is named as being in the wrong file
+ *  rather than reported as an argument count mistake. */
+func apply_lock_line(l: *Lock, path: string, lineno: int64, args: *Vector<string>) -> void {
+    name: string = vec_get(args, 0)
+    if !str_eq(name, "@lock") {
+        push_fault(l, path, lineno, "dawn.lock holds @lock lines only")
+        return
+    }
+    ae: string = arity_error(name, vec_len(args) - 1)
+    if str_len(ae) > 0 {
+        push_fault(l, path, lineno, ae)
+        free(ae)
+        return
+    }
+    alias: string = vec_get(args, 1)
+    src: string = vec_get(args, 2)
+    rf: string = vec_get(args, 3)
+    commit: string = vec_get(args, 4)
+    aerr: string = alias_error(alias)
+    if str_len(aerr) > 0 {
+        push_fault(l, path, lineno, aerr)
+        free(aerr)
+        return
+    }
+    if lock_entry_index(l, alias) >= 0 {
+        d: string = quote_msg("duplicate alias ", alias, "")
+        push_fault(l, path, lineno, d)
+        free(d)
+        return
+    }
+    if str_len(src) == 0 {
+        push_fault(l, path, lineno, "@lock source cannot be empty")
+        return
+    }
+    if str_len(rf) == 0 {
+        push_fault(l, path, lineno, "@lock ref cannot be empty")
+        return
+    }
+    if !is_commit(commit) {
+        push_fault(l, path, lineno, "@lock commit must be a 40 character git hash")
+        return
+    }
+    e: *LockEntry = alloc(LockEntry {
+        alias: copy_string(alias),
+        source: copy_string(src),
+        ref: copy_string(rf),
+        commit: copy_string(commit),
+    })
+    vec_push((*l).entries, e)
+}
+
+/** Reads the dawn.lock at path. A file that is not there is an empty lock and no
+ *  fault: a package resolves for the first time from an unlocked state. A file
+ *  that is there but cannot be read is a fault, since something is wrong with it
+ *  rather than absent. The caller owns the result and releases it with lock_free
+ *  followed by free. */
+export func lock_read(path: string) -> *Lock {
+    ev: *Vector<*LockEntry> = alloc(vec_new())
+    errv: *Vector<string> = alloc(vec_new())
+    l: *Lock = alloc(Lock { path: copy_string(path), entries: ev, errors: errv })
+    if !source_is_file(path) {
+        return l
+    }
+    text, e := read_file(path)
+    if e.exists() {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "cannot read: ")
+        sb_push(b, e.message)
+        msg: string = substring(sb_cstr(b), 0, sb_size(b))
+        vec_push((*l).errors, err_plain(path, msg))
+        free(msg)
+        sb_free(b)
+        free(b)
+        return l
+    }
+    n: int64 = str_len(text)
+    mut pos: int64 = 0
+    mut lineno: int64 = 0
+    while pos < n {
+        stop: int64 = line_end(text, n, pos)
+        lineno = lineno + 1
+        ln: string = substring(text, pos, stop)
+        d: DirLine = scan_directive_line(ln)
+        if str_len(d.err) > 0 {
+            push_fault(l, path, lineno, d.err)
+        } else if d.ok {
+            apply_lock_line(l, path, lineno, d.args)
+        }
+        dirline_free(d)
+        free(ln)
+        pos = stop + 1
+    }
+    free(text)
+    return l
+}
+
+/** Whether v has to be written quoted to read back as itself: an empty value and
+ *  one carrying whitespace each need the quotes, since whitespace is what splits
+ *  one value from the next. A "//" inside a value does not, because a comment only
+ *  opens where a value could start, so a URL writes bare; a value that begins with
+ *  "//" is exactly that position, so it does need them or the line reads back as a
+ *  comment. A double quote is quoted here for completeness, though lock_write refuses
+ *  such a value before any file is touched. */
+func needs_quotes(v: string) -> bool {
+    n: int64 = str_len(v)
+    if n == 0 { return true }
+    if n > 1 {
+        if v[0] == 47 {
+            if v[1] == 47 { return true }
+        }
+    }
+    mut i: int64 = 0
+    while i < n {
+        c: int64 = v[i]
+        if c == 32 { return true }
+        if c == 9 { return true }
+        if c == 11 { return true }
+        if c == 12 { return true }
+        if c == 13 { return true }
+        if c == 34 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+/** Whether v cannot be written at all: the grammar has one grouping mark and no
+ *  escape, so a value carrying a double quote or a control byte has no spelling
+ *  that reads back as itself. */
+func unwritable(v: string) -> bool {
+    n: int64 = str_len(v)
+    mut i: int64 = 0
+    while i < n {
+        c: int64 = v[i]
+        if c == 34 { return true }
+        if c < 32 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+func push_field(b: *StringBuilder, v: string) -> void {
+    if needs_quotes(v) {
+        sb_push_char(b, 34)
+        sb_push(b, v)
+        sb_push_char(b, 34)
+    } else {
+        sb_push(b, v)
+    }
+}
+
+/** The full text of a lock file, one @lock line per entry in the order the entries
+ *  were recorded. A field that would not read back bare is quoted, so the text this
+ *  writes always parses back into the same entries. The result is a fresh heap
+ *  string the caller owns. */
+export func lock_text(l: *Lock) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < vec_len((*l).entries) {
+        e: *LockEntry = vec_get((*l).entries, i)
+        sb_push(b, "@lock ")
+        push_field(b, (*e).alias)
+        sb_push_char(b, 32)
+        push_field(b, (*e).source)
+        sb_push_char(b, 32)
+        push_field(b, (*e).ref)
+        sb_push_char(b, 32)
+        push_field(b, (*e).commit)
+        sb_push_char(b, 10)
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Writes the lock file, returning the empty string on success or one sentence
+ *  naming what went wrong. An entry carrying a value the grammar cannot spell is
+ *  refused before the file is touched, so a failed write never leaves a lock behind
+ *  that the reader would disagree with. */
+export func lock_write(path: string, l: *Lock) -> string {
+    mut i: int64 = 0
+    while i < vec_len((*l).entries) {
+        e: *LockEntry = vec_get((*l).entries, i)
+        mut bad: bool = unwritable((*e).alias)
+        if unwritable((*e).source) { bad = true }
+        if unwritable((*e).ref) { bad = true }
+        if unwritable((*e).commit) { bad = true }
+        if bad {
+            return quote_msg("cannot write the lock: the entry for ", (*e).alias, " holds a double quote or a control character")
+        }
+        i = i + 1
+    }
+    text: string = lock_text(l)
+    werr := write_file(path, text)
+    free(text)
+    if werr.exists() {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "cannot write ")
+        sb_push(b, path)
+        sb_push(b, ": ")
+        sb_push(b, werr.message)
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        return out
+    }
+    return ""
+}
+
+/** The stamp file inside a checked out dependency. The result is a fresh heap
+ *  string the caller owns. */
+export func stamp_path(depdir: string) -> string {
+    return path_join(depdir, ".dawn")
+}
+
+/** The one line a stamp holds, "source ref commit" with a trailing newline. The
+ *  result is a fresh heap string the caller owns. */
+export func stamp_text(source: string, ref: string, commit: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    push_field(b, source)
+    sb_push_char(b, 32)
+    push_field(b, ref)
+    sb_push_char(b, 32)
+    push_field(b, commit)
+    sb_push_char(b, 10)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+func stamp_none() -> Stamp {
+    return Stamp { ok: false, source: "", ref: "", commit: "" }
+}
+
+/** Reads the stamp a checked out dependency carries. A missing stamp, an unreadable
+ *  one, and one that does not hold exactly three fields all report ok false, since
+ *  in every one of those cases what is on disk is unknown and the caller re
+ *  resolves. The stamp's fields follow the same quoting the lock uses, so a source
+ *  carrying a space round trips. */
+export func stamp_read(depdir: string) -> Stamp {
+    p: string = stamp_path(depdir)
+    if !source_is_file(p) {
+        free(p)
+        return stamp_none()
+    }
+    text, e := read_file(p)
+    free(p)
+    if e.exists() {
+        return stamp_none()
+    }
+    n: int64 = str_len(text)
+    stop: int64 = line_end(text, n, 0)
+    ln: string = substring(text, 0, stop)
+    free(text)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "@stamp ")
+    sb_push(b, ln)
+    full: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(ln)
+    d: DirLine = scan_directive_line(full)
+    free(full)
+    if !d.ok {
+        dirline_free(d)
+        return stamp_none()
+    }
+    if vec_len(d.args) != 4 {
+        dirline_free(d)
+        return stamp_none()
+    }
+    s: Stamp = Stamp {
+        ok: true,
+        source: copy_string(vec_get(d.args, 1)),
+        ref: copy_string(vec_get(d.args, 2)),
+        commit: copy_string(vec_get(d.args, 3)),
+    }
+    dirline_free(d)
+    return s
+}
+
+/** Releases everything a stamp owns and nothing else. A stamp is a value, so there
+ *  is no allocation of its own to release. Safe on a stamp reporting ok false,
+ *  whose fields are empty. */
+export func stamp_free(s: Stamp) -> void {
+    if str_len(s.source) > 0 { free(s.source) }
+    if str_len(s.ref) > 0 { free(s.ref) }
+    if str_len(s.commit) > 0 { free(s.commit) }
+}
+
+/** Whether the lock pins exactly what a require asks for. A lock line under the same
+ *  alias but naming another source or another ref is not a pin for this require at
+ *  all, since what it records is not what the manifest now asks for. */
+func pinned_for(l: *Lock, r: *Require) -> bool {
+    idx: int64 = lock_entry_index(l, (*r).alias)
+    if idx < 0 {
+        return false
+    }
+    e: *LockEntry = vec_get((*l).entries, idx)
+    if !str_eq((*e).source, (*r).source) {
+        return false
+    }
+    return str_eq((*e).ref, (*r).ref)
+}
+
+/** What is wrong with the checkout a lock entry names, or the empty string when what
+ *  is on disk is exactly what the entry records. The answer is read from the stamp
+ *  rather than by running git, and a checkout that is not there is told apart from one
+ *  that drifted: the first has never been fetched and the second was fetched against a
+ *  lock that has moved since. The result is a static sentence and is never freed. */
+func stamp_fault(m: *Manifest, e: *LockEntry) -> string {
+    dir: string = dep_dir(m, (*e).alias)
+    st: Stamp = stamp_read(dir)
+    free(dir)
+    if !st.ok {
+        stamp_free(st)
+        return "is not fetched; run dawn get"
+    }
+    mut same: bool = str_eq(st.commit, (*e).commit)
+    if !str_eq(st.source, (*e).source) { same = false }
+    if !str_eq(st.ref, (*e).ref) { same = false }
+    stamp_free(st)
+    if !same {
+        return "does not match dawn.lock; run dawn get"
+    }
+    return ""
+}
+
+/** The floor fault a manifest earns, or the empty string. A floor that cannot be read
+ *  and a toolchain too old are reported apart, since one is a mistake in the file and
+ *  the other is a fact about the machine. A non empty result is a fresh heap string
+ *  the caller owns. */
+func floor_fault(m: *Manifest) -> string {
+    if str_len((*m).dusk_min) == 0 {
+        return ""
+    }
+    v: int64 = version_at_least((*m).dusk_min)
+    if v < 0 {
+        return quote_msg("@dusk value ", (*m).dusk_min, " is not a version like 1.14")
+    }
+    if v > 0 {
+        return ""
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "package.dawn asks for dusk ")
+    sb_push(b, (*m).dusk_min)
+    sb_push(b, ", this is ")
+    sb_push(b, toolchain_version())
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** One sentence about a dependency, "dependency '<alias>' <tail>", with the alias
+ *  quoted the way every fault that names one quotes it. The result is a fresh heap
+ *  string the caller owns. */
+func dep_sentence(alias: string, tail: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dependency '")
+    sb_push(b, alias)
+    sb_push(b, "' ")
+    sb_push(b, tail)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Every way a project is out of step with what is on disk, as a fresh vector of
+ *  sentences the caller owns: the vector, and every string in it, are the caller's to
+ *  release. An empty result means package.dawn, dawn.lock, and the checkouts agree and
+ *  a build may proceed.
+ *
+ *  Three things are read. The toolchain has to meet the floor the manifest names. Every
+ *  requirement the manifest declares has to be pinned by the lock at the same source and
+ *  ref, since a manifest edited past its lock asks for something nothing resolved. Every
+ *  entry of the lock, not only the ones the manifest declared, has to have a checkout
+ *  on disk holding exactly what the entry records, because a dependency of a dependency
+ *  is locked without the root naming it and its checkout is just as much a part of the
+ *  build.
+ *
+ *  A lock entry nothing asks for any more is deliberately not a disagreement: telling a
+ *  stale entry from a transitive one means reading every manifest in the graph, which is
+ *  the fetching tool's work, and refusing on it would refuse every project that has a
+ *  dependency of a dependency. It does still have to be on disk, so dropping a @require
+ *  and building before running dawn get again reports that dependency as not fetched:
+ *  the lock is what the checkouts answer to, and it mirrors the manifest only once dawn
+ *  has rewritten it. Both the compiler and dawn read the three files through here, so
+ *  neither can come to a verdict the other would not. */
+export func verify_project(m: *Manifest, l: *Lock) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    ff: string = floor_fault(m)
+    if str_len(ff) > 0 {
+        vec_push(out, ff)
+    }
+    mut i: int64 = 0
+    while i < vec_len((*m).requires) {
+        r: *Require = vec_get((*m).requires, i)
+        if !pinned_for(l, r) {
+            vec_push(out, quote_msg("", (*r).alias, " is not locked; run dawn get"))
+        }
+        i = i + 1
+    }
+    mut j: int64 = 0
+    while j < vec_len((*l).entries) {
+        e: *LockEntry = vec_get((*l).entries, j)
+        f: string = stamp_fault(m, e)
+        if str_len(f) > 0 {
+            vec_push(out, dep_sentence((*e).alias, f))
+        }
+        j = j + 1
+    }
+    return out
+}
+
+/** Releases everything a lock owns and nothing else, the sb_free contract: the Lock
+ *  allocation itself is the caller's, so a heap lock is released with lock_free(l)
+ *  followed by free(l). */
+export func lock_free(l: *Lock) -> void {
+    if str_len((*l).path) > 0 { free((*l).path) }
+    while vec_len((*l).entries) > 0 {
+        e: *LockEntry = vec_take((*l).entries, vec_len((*l).entries) - 1)
+        free((*e).alias)
+        free((*e).source)
+        free((*e).ref)
+        free((*e).commit)
+        free(e)
+    }
+    vec_free((*l).entries)
+    free((*l).entries)
+    while vec_len((*l).errors) > 0 {
+        s: string = vec_take((*l).errors, vec_len((*l).errors) - 1)
+        free(s)
+    }
+    vec_free((*l).errors)
+    free((*l).errors)
+}

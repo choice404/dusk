@@ -3323,7 +3323,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.13.3\n
+out dusk 1.14.0\n
 argv version
 code 0
 ---
@@ -6637,4 +6637,318 @@ test structret_divergetail_ok
 mode run
 file examples/structret_divergetail_ok.dusk
 out 1\n4\nB\nA\n7\n
+---
+# Builtin builds a git fixture package and a project requiring it by a file URL, runs dawn
+# get, and asserts the clone stamp and the lock line agree with the tag's commit and that a
+# second get rewrites nothing.
+test dawn_get_writes_a_lock_and_a_clone_stamp
+mode special
+special dawn_get_lock
+---
+# Builtin requires a fixture package, fetches it, and asserts dawn run compiles a root that
+# imports the package through its alias and prints the value the package's module returns.
+test dawn_run_builds_a_root_that_imports_through_an_alias
+mode special
+special dawn_run_alias
+---
+# Builtin asserts the words after dawn run reach the program as its own argv, in order.
+test dawn_run_forwards_trailing_arguments_to_the_program
+mode special
+special dawn_run_args
+---
+# Builtin builds a package that itself requires a second package, and asserts get fetches
+# both into one flat dawn_modules with two lock lines and that a root composed across both
+# runs.
+test dawn_get_fetches_a_required_package_of_a_required_package
+mode special
+special dawn_transitive
+---
+# Builtin moves a fixture to a second tag, edits the manifest to it, asserts building is
+# refused while the lock still pins the old commit, then asserts dawn update moves the pin
+# and the program prints the newer package's line.
+test dawn_update_moves_a_pin_a_manifest_edit_alone_cannot
+mode special
+special dawn_update_moves_pin
+---
+# Builtin asserts a manifest that requires a package with no lock beside it is refused by
+# both dawn build and dusk build, each naming the fetch that fixes it.
+test dawn_a_require_with_no_lock_is_refused_by_both_tools
+mode special
+special dawn_missing_lock_refused
+---
+# Builtin edits a fetched clone's stamp away from the lock and asserts building is refused
+# by alias rather than compiling a working tree the lock does not vouch for.
+test dawn_a_clone_stamp_that_left_the_lock_is_refused
+mode special
+special dawn_stale_stamp_refused
+---
+# Builtin asserts dawn add writes the require into the manifest and then fetches it, so the
+# manifest, the lock, and the clone all name the new package.
+test dawn_add_writes_the_require_and_then_fetches_it
+mode special
+special dawn_add_edits_manifest
+---
+# Builtin runs dawn init in an empty directory and asserts the manifest names the package,
+# the gitignore keeps dawn_modules out of the repository, and the root it wrote runs.
+test dawn_init_writes_a_manifest_a_gitignore_and_a_root_that_runs
+mode special
+special dawn_init_layout
+---
+# Builtin copies one fetched project into two directories and asserts both emit byte
+# identical IR, that the required module's fault locations are spelled under dawn_modules
+# relative to the manifest, and that a build with no file argument takes the manifest root.
+test dawn_the_same_lock_emits_the_same_ir_from_any_directory
+mode special
+special dawn_ir_parity
+---
+# Builtin has two packages claim one alias from different sources through a transitive
+# require and asserts the fetch is refused by that alias.
+test dawn_one_alias_claimed_by_two_sources_is_refused
+mode special
+special dawn_alias_collision
+---
+# A package.dawn beside the source turns a directory into a project, and these records
+# drive that from the compiler's side: static fixtures under tests/dawn/, one project per
+# record, with the checkouts and the lock already written so no record clones anything.
+# The dawn_* specials above prove the tool that writes those files; these prove what the
+# compiler reads back out of them.
+
+# A bare alias import names the required package's own root file, so the manifest decides
+# what the word greet means rather than the shape of the importing directory.
+test a_bare_alias_import_resolves_to_the_required_packages_root
+mode run
+file tests/dawn/alias/src/main.dusk
+out greetings\n
+---
+# A dotted alias import whose last segment is a symbol rather than a file binds that one
+# export unqualified, the leaf form a local import already had, reached through an alias.
+test a_leaf_import_through_an_alias_binds_one_dependency_symbol
+mode run
+file tests/dawn/leaf/src/main.dusk
+out extra\n
+---
+# A local src/greet.dusk sits beside the importer and the manifest binds greet to a
+# dependency. The alias is answered before the tree is read, so the dependency's line is
+# printed and the local file of that name is never loaded.
+test an_alias_wins_over_a_local_file_of_the_same_name
+mode run
+file tests/dawn/shadow/src/main.dusk
+out greetings\n
+---
+# The project requires maybe, maybe's own manifest requires util, and both checkouts sit
+# flat under the project's dawn_modules. A dependency's import reads against its own
+# manifest's aliases, so maybe reaches util by the name maybe wrote.
+test a_dependency_of_a_dependency_resolves_flat_under_dawn_modules
+mode run
+file tests/dawn/transitive/src/main.dusk
+out maybe over util\n
+---
+# The same graph with the project's lock pinning maybe alone: util is pinned by
+# dawn_modules/maybe/dawn.lock, the lock the package that required it wrote, and the
+# checkout is still found flat under the project.
+test a_transitive_pin_is_read_from_the_dependencys_own_lock
+mode run
+file tests/dawn/deplock/src/main.dusk
+out maybe over util\n
+---
+# @csource and @link in package.dawn reach the clang line, and the csource path resolves
+# against the manifest's directory rather than the working directory, so the vendored C
+# function links and returns its value.
+test a_manifest_csource_and_link_reach_the_clang_line
+mode run
+file tests/dawn/csource/src/main.dusk
+out 7\n
+---
+# An alias reaches a dependency's exports and nothing else. The qualified form names a
+# helper the dependency kept to itself, and the module privacy rule answers it.
+test a_qualified_call_into_a_dependencys_private_helper_is_refused
+mode check_fail
+file tests/dawn/private/src/main.dusk
+err_has tests/dawn/private/src/main.dusk
+err_has 'greet_secret' is private to module 'greet'
+---
+# The lock pins the dependency and nothing was ever checked out. The project wide check
+# names it once, under the manifest, before a single import is resolved.
+test a_locked_dependency_that_was_never_fetched_is_refused
+mode check_fail
+file tests/dawn/unfetched/src/main.dusk
+err_has tests/dawn/unfetched/package.dawn: dependency 'greet' is not fetched; run dawn get
+err_absent is not locked
+---
+# The checkout is there and its stamp records a commit the lock does not, so the working
+# tree is not the one the lock vouches for. Told apart from a checkout that never arrived.
+test a_checkout_that_drifted_from_the_lock_is_refused
+mode check_fail
+file tests/dawn/stale/src/main.dusk
+err_has tests/dawn/stale/package.dawn: dependency 'greet' does not match dawn.lock; run dawn get
+err_absent is not fetched
+---
+# A @require with no @lock line beside it is refused before anything is read off disk:
+# nothing resolved the requirement, so there is no commit to build against.
+test a_require_with_no_lock_line_is_refused
+mode check_fail
+file tests/dawn/unlocked/src/main.dusk
+err_has tests/dawn/unlocked/package.dawn: 'greet' is not locked; run dawn get
+---
+# The quoted git import is not how a project names a dependency any more. Inside a project
+# it is refused and the refusal names the directive that replaces it.
+test a_url_import_inside_a_project_is_refused
+mode check_fail
+file tests/dawn/urlimport/src/main.dusk
+err_has tests/dawn/urlimport/src/main.dusk: 'example.com/user/repo/mod' is a url import; declare it with @require in package.dawn
+---
+# std is reserved. A local directory named std that would have answered an import under it
+# is named rather than quietly winning, so what @import std.string means never turns on
+# the shape of the tree around the importing file.
+test a_local_std_directory_shadowing_the_standard_library_is_refused
+mode check_fail
+file tests/dawn/stdshadow/src/main.dusk
+err_has tests/dawn/stdshadow/src/main.dusk: 'std' is reserved for the standard library; rename the local directory
+---
+# A checkout is reached through the alias that pinned it. A path spelled into the checkout
+# directory would name a file the lock does not stand behind, so it is refused.
+test an_import_reaching_into_dawn_modules_is_refused
+mode check_fail
+file tests/dawn/dawnmods/src/main.dusk
+err_has tests/dawn/dawnmods/src/main.dusk: 'dawn_modules.greet.src.greet' imports through dawn_modules; import a dependency through the alias its @require names
+---
+# Exports are global in 1.14.0, so one name exported by two packages is a program that
+# cannot be built. The file that got there first keeps the name and the fault names both.
+test one_name_exported_by_two_packages_is_refused
+mode check_fail
+file tests/dawn/collide/src/main.dusk
+err_has dawn_modules/greet/src/greet.dusk: 'greet_line' is also exported by 'tests/dawn/collide/src/main.dusk'; two packages cannot export one name
+---
+# A @dusk floor this toolchain cannot meet stops the build rather than compiling a source
+# the package says needs a newer language. The refusal names both versions.
+test a_manifest_asking_for_a_newer_dusk_is_refused
+mode check_fail
+file tests/dawn/dusktoonew/src/main.dusk
+err_has tests/dawn/dusktoonew/package.dawn: package.dawn asks for dusk 9.9, this is 
+---
+# A dawn file holds directives only. A line that is neither blank, a comment, nor a
+# directive is named with the line it sits on.
+test a_manifest_line_that_is_not_a_directive_is_refused
+mode check_fail
+file tests/dawn/badline/src/main.dusk
+err_has tests/dawn/badline/package.dawn:3: expected a directive
+---
+# The one shape the project wide check cannot see: util is pinned by maybe's own lock and
+# its checkout is gone, so the fault is raised at the import that asked for it and names
+# the importing file by its manifest relative spelling.
+test a_transitive_checkout_that_is_gone_is_refused_at_the_import
+mode check_fail
+file tests/dawn/deplockmissing/src/main.dusk
+err_has dawn_modules/maybe/src/maybe.dusk: dependency 'util' is not fetched; run dawn get
+---
+# One alias bound twice in one manifest is refused rather than resolved to whichever line
+# came last, so an alias names one package for the whole project.
+test a_manifest_that_requires_one_alias_twice_is_refused
+mode check_fail
+file tests/dawn/dupalias/src/main.dusk
+err_has tests/dawn/dupalias/package.dawn:5: duplicate alias 'greet'
+---
+# std is reserved on the manifest side too: a require may not claim the alias the standard
+# library answers to, which would have made an import under std ambiguous.
+test a_require_claiming_the_std_alias_is_refused
+mode check_fail
+file tests/dawn/stdalias/src/main.dusk
+err_has tests/dawn/stdalias/package.dawn:4: 'std' is reserved
+---
+# A @require takes an alias, a source, and a ref. A line short one word is refused naming
+# the three it wanted and the count it got, rather than reading a ref off the wrong word.
+test a_require_with_the_wrong_argument_count_is_refused
+mode check_fail
+file tests/dawn/arity/src/main.dusk
+err_has tests/dawn/arity/package.dawn:4: @require takes 3 arguments (alias source ref), got 2
+---
+# A directive no dawn file knows is a mistake in the file, not something to skip: a
+# misspelled @requires would otherwise drop a dependency silently.
+test a_directive_no_dawn_file_knows_is_refused
+mode check_fail
+file tests/dawn/unknowndirective/src/main.dusk
+err_has tests/dawn/unknowndirective/package.dawn:3: unknown directive '@requires'
+---
+# The checkout is there and matches its pin, and its own manifest names a root file that
+# is not in it, so the alias has nothing to resolve to. Named against the importing file.
+test a_dependency_with_no_entry_file_is_refused
+mode check_fail
+file tests/dawn/depnoroot/src/main.dusk
+err_has tests/dawn/depnoroot/src/main.dusk: dependency 'greet' has no root file; add @root to its package.dawn
+---
+# The second review batch of project fixtures. Six of these are containment and
+# agreement rules a dependency's own package.dawn must answer to, since a checkout is
+# only as trustworthy as the lock that pinned it; the other three are the alias leaf
+# form and the C source dedup key.
+
+# An alias import may run one segment past the alias and name a symbol the package's
+# root file exports, with no file of that name in the package. Same leaf form a local
+# import already had, reached through an alias.
+test an_alias_import_may_end_in_a_symbol_the_root_file_exports
+mode run
+file tests/dawn/leafalias/src/main.dusk
+out hello from greet\n
+---
+# The twin: the same shape naming a symbol the package does not export is refused, and
+# the refusal names the symbol and the package rather than reporting an unresolvable
+# import, which is what the file plus leaf form looks like from the outside.
+test an_alias_import_naming_a_symbol_the_package_does_not_export_is_refused
+mode check_fail
+file tests/dawn/leafmiss/src/main.dusk
+err_has tests/dawn/leafmiss/src/main.dusk: import 'greet.no_such' names 'no_such', but 'greet' exports no such symbol
+---
+# A dependency's @root climbs out of its own checkout, and the file it names really is
+# there, so nothing but the containment rule refuses it. A checkout may only compile
+# files the lock stands behind.
+test a_dependency_whose_root_climbs_out_of_its_checkout_is_refused
+mode check_fail
+file tests/dawn/rootescape/src/main.dusk
+err_has tests/dawn/rootescape/src/main.dusk: dependency 'greet' names a root outside its checkout; fix @root in its package.dawn
+---
+# The same containment rule over @csource: a dependency may not hand clang a C file
+# from outside its checkout, which would compile code no commit pinned.
+test a_dependency_csource_outside_its_checkout_is_refused
+mode check_fail
+file tests/dawn/csrcescape/src/main.dusk
+err_has dawn_modules/greet/package.dawn: dependency 'greet' names a C source outside its checkout; fix @csource in its package.dawn
+---
+# A dependency may name a library to link, never a path to one: a path would reach an
+# object outside the checkout the same way an escaping csource does.
+test a_dependency_link_naming_a_path_instead_of_a_library_is_refused
+mode check_fail
+file tests/dawn/linkpath/src/main.dusk
+err_has dependency 'greet' names a link path; a dependency may only link a library by name
+err_absent clang
+---
+# @package is what build --lib writes libNAME.a and NAME.h from, so the value is held to
+# letters, digits, underscore and hyphen rather than passed through to a file name.
+test a_package_value_that_is_not_a_package_name_is_refused
+mode check_fail
+file tests/dawn/pkgname/src/main.dusk
+err_has tests/dawn/pkgname/package.dawn:1: @package value '../evil' is not a package name; use letters, digits, _ and -
+---
+# The project's lock pins util to a source the package that requires it never asked for,
+# with a stamp that matches the lock, so every check that reads the lock alone passes it.
+# The requirement it answers has to agree too, or a lock line can swap a dependency out.
+test a_transitive_pin_the_requiring_package_never_asked_for_is_refused
+mode check_fail
+file tests/dawn/translockmismatch/src/main.dusk
+err_has dawn_modules/mid/src/mid.dusk: dependency 'util' of 'mid' does not match dawn.lock; run dawn get
+---
+# A dependency whose own package.dawn does not read is refused with that file's own
+# fault, spelled manifest relative so it reads the same on every machine, and the import
+# that asked for it adds nothing vaguer over the top.
+test a_dependency_whose_own_manifest_does_not_read_is_refused
+mode check_fail
+file tests/dawn/depbadmanifest/src/main.dusk
+err_has dawn_modules/greet/package.dawn:3: expected a directive
+err_absent tests/dawn/depbadmanifest/dawn_modules
+---
+# One C file named by package.dawn and by a source file under two different spellings.
+# The dedup key is the file rather than the spelling, so clang compiles it once and the
+# link sees one vendor_tag instead of failing on a duplicate symbol.
+test one_c_file_named_by_a_manifest_and_a_source_compiles_once
+mode run
+file tests/dawn/csrcdouble/src/main.dusk
+out 7\n
 ---

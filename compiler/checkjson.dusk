@@ -6,7 +6,14 @@
 //
 //   {"file": <root path>, "ok": bool, "diagnostics": [<diag>, ...]}
 //   <diag> = {"file": <span's file>, "severity": "error", "message": <verbatim>,
-//             "span": {"lo","hi","line","col","end_line","end_col"} | null}
+//             "span": {"lo","hi","line","col","end_line","end_col"} | null,
+//             "line": <1 based line, only when there is one and no span>}
+//
+// The trailing "line" key appears only for a diagnostic that knows the line it sits on
+// but has no byte span to point at, which is what a fault in a directive file like
+// package.dawn is: it is read line by line and never lexed. Every diagnostic that
+// existed before carries exactly the keys it always did, and a consumer that does not
+// know the key ignores it, the rule the contract states.
 //
 // lo and hi are file-local byte offsets, line and col are 1 based and count columns
 // in Unicode scalars, and every diagnostic is severity "error" today. Emission order
@@ -50,7 +57,7 @@ func push_span_obj(b: *StringBuilder, level: int64, src: string, n: int64, t: *L
 // Appends one diagnostic object at the given element indent: file, severity, message,
 // then span, present as an object or `null`. The object is written without its own
 // leading indent; the array walker indents before the call.
-func push_diag_obj(b: *StringBuilder, level: int64, file: string, has_span: bool, src: string, n: int64, t: *LineTable, lo: int64, hi: int64, msg: string) -> void {
+func push_diag_obj(b: *StringBuilder, level: int64, file: string, has_span: bool, src: string, n: int64, t: *LineTable, lo: int64, hi: int64, msg: string, line: int64) -> void {
     sb_push(b, "{\n")
     push_key(b, level + 1, "file")
     push_str(b, file)
@@ -66,6 +73,11 @@ func push_diag_obj(b: *StringBuilder, level: int64, file: string, has_span: bool
         push_span_obj(b, level + 1, src, n, t, lo, hi)
     } else {
         sb_push(b, "null")
+    }
+    if line > 0 {
+        sb_push(b, ",\n")
+        push_key(b, level + 1, "line")
+        sb_push_int(b, line)
     }
     sb_push_char(b, 10)
     ind(b, level)
@@ -89,7 +101,7 @@ func push_load_group(b: *StringBuilder, level: int64, diags: *Vector<LoadDiag>, 
     while i < vec_len(diags) {
         d: LoadDiag = vec_get(diags, i)
         ind(b, level)
-        push_diag_obj(b, level, d.path, d.has_span, d.src, d.len, d.lines, d.lo, d.hi, d.msg)
+        push_diag_obj(b, level, d.path, d.has_span, d.src, d.len, d.lines, d.lo, d.hi, d.msg, d.line)
         idx = idx + 1
         push_elem_sep(b, idx, total)
         i = i + 1
@@ -109,10 +121,10 @@ func push_span_group(b: *StringBuilder, level: int64, root_file: string, files: 
         fi: int64 = file_for_span(files, d.lo)
         ind(b, level)
         if fi < 0 {
-            push_diag_obj(b, level, root_file, false, "", 0, line_table_new(), 0, 0, d.msg)
+            push_diag_obj(b, level, root_file, false, "", 0, line_table_new(), 0, 0, d.msg, 0)
         } else {
             f: FileSrc = vec_get(files, fi)
-            push_diag_obj(b, level, f.path, true, f.src, f.len, f.lines, d.lo - f.base, d.hi - f.base, d.msg)
+            push_diag_obj(b, level, f.path, true, f.src, f.len, f.lines, d.lo - f.base, d.hi - f.base, d.msg, 0)
         }
         idx = idx + 1
         push_elem_sep(b, idx, total)

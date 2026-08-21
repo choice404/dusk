@@ -1,0 +1,348 @@
+// testrun dawnspecial: the dawn checks that prove the package tool does what a
+// manifest says, and the dispatch every dawn special arrives through. A project is a
+// directory holding package.dawn; get clones each require into dawn_modules and
+// records what it took in dawn.lock and in a per module stamp; build and run compile
+// the manifest root. Each check here builds its own fixture repositories under
+// target/testrun and reads the result off disk, so nothing depends on a previous
+// check or on the network. The refusals and the parity check live in dawnguard.
+//
+// The package tool under test is DAWN_BIN, or the file named dawn beside the
+// compiler under test. A missing tool fails every dawn special by name.
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.vector
+@import exec
+@import compare
+@import dawnfix
+@import dawnproj
+@import dawnguard
+
+// Checks that the lock the project ends up with names exactly the one require it
+// declares, and that the clone stamp agrees with it.
+func check_single_lock(c: Ctx, dep: Repo, alias: string, ref: string) -> string {
+    lockp: string = app_dir(c) + "/dawn.lock"
+    if !exists(lockp) {
+        return "dawn get wrote no lock at '" + lockp + "'"
+    }
+    lines: *Vector<string> = lock_lines(c)
+    if vec_len(lines) != 1 {
+        return "dawn.lock holds " + int_to_string(vec_len(lines)) + " lines, want 1 for a manifest with one require"
+    }
+    line: string = vec_get(lines, 0)
+    bad: string = lock_line_bad(line, alias, dep.source, ref)
+    if str_len(bad) > 0 {
+        return bad
+    }
+    commit: string = lock_commit(line)
+    head: string = git_head(c, dep.path)
+    if str_len(head) == 0 {
+        return "could not read the fixture repository head at '" + dep.path + "'"
+    }
+    if !str_eq(commit, head) {
+        return "the lock pins commit '" + commit + "' but the fixture tag " + ref + " is at '" + head + "'"
+    }
+    return stamp_bad(c, alias, dep.source, ref, commit)
+}
+
+// dawn_get_lock: get clones the required package, stamps the clone with what it
+// took, writes a lock line naming the alias, the source, the ref, and the resolved
+// commit, and a second get changes nothing.
+func get_lock(bin: string) -> string {
+    c: Ctx = ctx_new("get_lock", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    r: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if r.code != 0 {
+        return shell_detail("dawn get", r)
+    }
+    le: string = check_single_lock(c, dep, "dep", "v0.1.0")
+    if str_len(le) > 0 {
+        return le
+    }
+    before: string = slurp(app + "/dawn.lock")
+    again: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if again.code != 0 {
+        return shell_detail("a second dawn get", again)
+    }
+    after: string = slurp(app + "/dawn.lock")
+    if !str_eq(before, after) {
+        return "a second dawn get rewrote dawn.lock, from '" + before + "' to '" + after + "'"
+    }
+    return ""
+}
+
+// dawn_run_alias: a root that imports a required package through its alias builds
+// and runs, and the value the required module returns reaches the program's output.
+func run_alias(bin: string) -> string {
+    c: Ctx = ctx_new("run_alias", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "dep", "dep v1", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, req_line("dep", dep.source, "v0.1.0"), app_main_greet())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    r: Shell = sh(c, app, dawn_cmd(c, "run"))
+    if r.code != 0 {
+        return shell_detail("dawn run", r)
+    }
+    if !str_contains(r.out, "dep v1\n") {
+        return "dawn run printed '" + escape_show(r.out) + "', want a line 'dep v1' from the required module"
+    }
+    if !exists(app + "/target/dawn-out") {
+        return "dawn run built nothing into 'target/dawn-out' inside the project"
+    }
+    return ""
+}
+
+// dawn_run_args: the words after the run command reach the program as its own argv,
+// in order, and nothing of the tool's own command line leaks into them.
+func run_args(bin: string) -> string {
+    c: Ctx = ctx_new("run_args", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    pe: string = app_project(c, "", app_main_args())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    r: Shell = sh(c, app, dawn_cmd(c, "run a b"))
+    if r.code != 0 {
+        return shell_detail("dawn run a b", r)
+    }
+    if !str_contains(r.out, "a\nb\n") {
+        return "dawn run a b printed '" + escape_show(r.out) + "', want the forwarded arguments 'a' and 'b' on their own lines"
+    }
+    return ""
+}
+
+// dawn_transitive: a required package's own requires are fetched into the same flat
+// dawn_modules and locked beside the direct one, and a root composed across both
+// packages runs.
+func transitive(bin: string) -> string {
+    c: Ctx = ctx_new("transitive", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    leaf: Repo = module_repo(c, "b", "", "leaf", leaf_module(), "v0.1.0")
+    if str_len(leaf.err) > 0 {
+        return leaf.err
+    }
+    mid: Repo = module_repo(c, "a", req_line("b", leaf.source, "v0.1.0"), "lib", lib_module(), "v0.1.0")
+    if str_len(mid.err) > 0 {
+        return mid.err
+    }
+    pe: string = app_project(c, req_line("a", mid.source, "v0.1.0"), app_main_lib())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    g: Shell = sh(c, app, dawn_cmd(c, "get"))
+    if g.code != 0 {
+        return shell_detail("dawn get", g)
+    }
+    lines: *Vector<string> = lock_lines(c)
+    if vec_len(lines) != 2 {
+        return "dawn.lock holds " + int_to_string(vec_len(lines)) + " lines, want 2: the direct require and the one it requires in turn"
+    }
+    ae: string = check_locked(c, mid, "a", "v0.1.0")
+    if str_len(ae) > 0 {
+        return ae
+    }
+    be: string = check_locked(c, leaf, "b", "v0.1.0")
+    if str_len(be) > 0 {
+        return be
+    }
+    r: Shell = sh(c, app, dawn_cmd(c, "run"))
+    if r.code != 0 {
+        return shell_detail("dawn run", r)
+    }
+    if !str_contains(r.out, "a+leaf\n") {
+        return "dawn run printed '" + escape_show(r.out) + "', want the line 'a+leaf' composed across both packages"
+    }
+    return ""
+}
+
+// Checks the lock line and the clone stamp of one alias among several.
+func check_locked(c: Ctx, dep: Repo, alias: string, ref: string) -> string {
+    line: string = lock_line_for(c, alias)
+    if str_len(line) == 0 {
+        return "dawn.lock names no alias '" + alias + "'"
+    }
+    bad: string = lock_line_bad(line, alias, dep.source, ref)
+    if str_len(bad) > 0 {
+        return bad
+    }
+    return stamp_bad(c, alias, dep.source, ref, lock_commit(line))
+}
+
+// dawn_add_edits_manifest: add writes the require into the manifest and then fetches
+// it, so the manifest, the lock, and the clone all name the new package.
+func add_edits_manifest(bin: string) -> string {
+    c: Ctx = ctx_new("add", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dep: Repo = dep_repo(c, "b", "added dep", "v0.1.0")
+    if str_len(dep.err) > 0 {
+        return dep.err
+    }
+    pe: string = app_project(c, "", trivial_main())
+    if str_len(pe) > 0 {
+        return pe
+    }
+    app: string = app_dir(c)
+    args: string = "add b " + qw(dep.source) + " v0.1.0"
+    r: Shell = sh(c, app, dawn_cmd(c, args))
+    if r.code != 0 {
+        return shell_detail("dawn add b", r)
+    }
+    de: string = manifest_requires(app + "/package.dawn", "b", dep.source, "v0.1.0")
+    if str_len(de) > 0 {
+        return de
+    }
+    return check_locked(c, dep, "b", "v0.1.0")
+}
+
+// Checks that a manifest carries a require directive for the alias with the given
+// source and ref.
+func manifest_requires(path: string, alias: string, source: string, ref: string) -> string {
+    lines: *Vector<string> = lines_of(path)
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        w: *Vector<string> = split_ws(vec_get(lines, i))
+        if vec_len(w) == 4 && str_eq(vec_get(w, 0), "@require") && str_eq(vec_get(w, 1), alias) {
+            if !str_eq(vec_get(w, 2), source) {
+                return "the manifest requires '" + alias + "' from '" + vec_get(w, 2) + "', want '" + source + "'"
+            }
+            if !str_eq(vec_get(w, 3), ref) {
+                return "the manifest requires '" + alias + "' at ref '" + vec_get(w, 3) + "', want '" + ref + "'"
+            }
+            return ""
+        }
+        i = i + 1
+    }
+    return "the manifest '" + path + "' carries no '@require " + alias + "' line after dawn add"
+}
+
+// The root a manifest declares, or the empty string when it declares none and the
+// default applies.
+func manifest_root(path: string) -> string {
+    lines: *Vector<string> = lines_of(path)
+    mut i: int64 = 0
+    while i < vec_len(lines) {
+        w: *Vector<string> = split_ws(vec_get(lines, i))
+        if vec_len(w) == 2 && str_eq(vec_get(w, 0), "@root") {
+            return vec_get(w, 1)
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// Whether the project has the root it declares, or one of the two defaults when it
+// declares none.
+func has_root(dir: string, declared: string) -> string {
+    if str_len(declared) > 0 {
+        if exists(dir + "/" + declared) {
+            return ""
+        }
+        return "the manifest declares root '" + declared + "' but no such file was written"
+    }
+    if exists(dir + "/main.dusk") || exists(dir + "/src/main.dusk") {
+        return ""
+    }
+    return "dawn init wrote neither main.dusk nor src/main.dusk, and the manifest declares no root"
+}
+
+// dawn_init_layout: init writes a manifest naming the package, a gitignore that
+// keeps fetched packages out of the repository, and a root that builds and runs.
+func init_layout(bin: string) -> string {
+    c: Ctx = ctx_new("init", bin)
+    if str_len(c.err) > 0 {
+        return c.err
+    }
+    dir: string = c.work + "/hello"
+    fe: string = fresh_dir(dir)
+    if str_len(fe) > 0 {
+        return fe
+    }
+    r: Shell = sh(c, dir, dawn_cmd(c, "init hello"))
+    if r.code != 0 {
+        return shell_detail("dawn init hello", r)
+    }
+    mpath: string = dir + "/package.dawn"
+    if !exists(mpath) {
+        return "dawn init wrote no manifest at '" + mpath + "'"
+    }
+    text: string = slurp(mpath)
+    if !str_contains(text, "@package hello") {
+        return "the manifest dawn init wrote does not declare '@package hello': '" + escape_show(text) + "'"
+    }
+    gpath: string = dir + "/.gitignore"
+    if !exists(gpath) {
+        return "dawn init wrote no .gitignore at '" + gpath + "'"
+    }
+    if !str_contains(slurp(gpath), "dawn_modules/") {
+        return "the .gitignore dawn init wrote does not ignore 'dawn_modules/'"
+    }
+    re: string = has_root(dir, manifest_root(mpath))
+    if str_len(re) > 0 {
+        return re
+    }
+    run_r: Shell = sh(c, dir, dawn_cmd(c, "run"))
+    if run_r.code != 0 {
+        return shell_detail("dawn run in the project dawn init wrote", run_r)
+    }
+    if !str_contains(run_r.out, "hello") {
+        return "the project dawn init wrote printed '" + escape_show(run_r.out) + "', want a line naming the package"
+    }
+    return ""
+}
+
+// Dispatches one dawn special to its check. An unrecognized dawn name fails rather
+// than passing as a no op, the same way the special dispatch itself does.
+export func run_dawn_special(name: string, bin: string) -> string {
+    if str_eq(name, "dawn_get_lock") {
+        return get_lock(bin)
+    }
+    if str_eq(name, "dawn_run_alias") {
+        return run_alias(bin)
+    }
+    if str_eq(name, "dawn_run_args") {
+        return run_args(bin)
+    }
+    if str_eq(name, "dawn_transitive") {
+        return transitive(bin)
+    }
+    if str_eq(name, "dawn_add_edits_manifest") {
+        return add_edits_manifest(bin)
+    }
+    if str_eq(name, "dawn_init_layout") {
+        return init_layout(bin)
+    }
+    return run_dawn_guard(name, bin)
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ratchet.sh: prove the ratchet rule at a release gate. The previous release's
-# dusk binary must build the current compiler source, and the binary it
-# produces must pass the golden suite. Run this before cutting any release;
+# dusk binary must build the current compiler source and the package tool,
+# and the binary it produces must pass the golden suite. Run this before cutting any release;
 # success means a machine holding only the previous release can reach this one
 # from source.
 #
@@ -61,8 +61,14 @@ echo "ratchet: previous release builds the test runner"
 DUSK_HOME="$repo_root" caged_build "$prev" tests/runner/testrun.dusk \
     || { echo "ratchet: FAIL: the previous release cannot build the test runner" >&2; exit 1; }
 
+echo "ratchet: previous release builds the package tool"
+DUSK_HOME="$repo_root" caged_build "$prev" "$repo_root/compiler/dawn.dusk" \
+    || { echo "ratchet: FAIL: the previous release cannot build compiler/dawn.dusk" >&2; exit 1; }
+new_dawn="$repo_root/target/dusk-out/dawn"
+[[ -x "$new_dawn" ]] || { echo "ratchet: FAIL: build produced no $new_dawn" >&2; exit 1; }
+
 echo "ratchet: golden suite against the freshly built compiler"
-DUSK_HOME="$repo_root" DUSK_BIN="$new_dusk" timeout 3000 bash -c '
+DUSK_HOME="$repo_root" DUSK_BIN="$new_dusk" DAWN_BIN="$new_dawn" timeout 3000 bash -c '
     ulimit -v 12582912
     ulimit -t 3600
     exec nice -n 19 target/dusk-out/testrun tests/goldens.manifest
