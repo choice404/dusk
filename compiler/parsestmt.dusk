@@ -37,12 +37,21 @@ export func parse_block(p: *Parser) -> int64 {
             reading = false
         } else if p_muted(p) {
             reading = false
+        } else if p_at(p, k_semi()) {
+            p_stray_semi(p, stray_semi_stmt())
         } else {
             before: int64 = (*p).pos
             sid: int64 = parse_stmt(p)
             if sid >= 0 {
                 vec_push(stmts, sid)
             }
+            // One semicolon closes the statement just read, the same break a newline
+            // makes; a second one has no statement before it and is left for the loop
+            // head above to name, which is what makes `;;` a fault rather than an
+            // empty statement. The terminator has to sit on the statement's own line:
+            // a semicolon opening the next line ends nothing, and reaching across the
+            // break to eat it would swallow the stray instead of naming it.
+            if !p_nl_here(p) { p_eat(p, k_semi()) }
             p_guard_progress(p, before, "unexpected token in block")
         }
     }
@@ -62,6 +71,11 @@ export func parse_stmt(p: *Parser) -> int64 {
     if p_eat_kw(p, "return") {
         if p_at(p, k_rbrace()) { return ast_stmt(p_ast(p), sk_return(), -1, 0, 0, 0) }
         if p_nl_here(p) { return ast_stmt(p_ast(p), sk_return(), -1, 0, 0, 0) }
+        // A semicolon ends the statement exactly as the line break above does, so a bare
+        // `return;` returns no value; the block loop eats the terminator afterwards. Left
+        // out, the value grammar ran on the terminator and named it as a missing
+        // expression, which `break;` and `continue;` never did.
+        if p_at(p, k_semi()) { return ast_stmt(p_ast(p), sk_return(), -1, 0, 0, 0) }
         return ast_stmt(p_ast(p), sk_return(), parse_await_or_expr(p), 0, 0, 0)
     }
     if p_eat_kw(p, "defer") {
@@ -103,25 +117,32 @@ export func parse_stmt(p: *Parser) -> int64 {
     if op >= 0 {
         p_bump(p)
         rhs2: int64 = parse_expr(p)
-        return ast_stmt(p_ast(p), sk_assign_op(), op, e, rhs2, 0)
+        return ast_stmt(p_ast(p), sk_assign_op(), op, e, rhs2, aos_written())
     }
-    if !p_nl_here(p) {
-        if p_at(p, k_plus_plus()) {
-            sp_lo: int64 = p_lo(p)
-            sp_hi: int64 = p_hi(p)
-            p_bump(p)
-            one: int64 = ast_expr(p_ast(p), xk_int(), sp_lo, sp_hi, 1, -1, 0, 0)
-            return ast_stmt(p_ast(p), sk_assign_op(), bop_add(), e, one, 0)
-        }
-        if p_at(p, k_minus_minus()) {
-            sp_lo2: int64 = p_lo(p)
-            sp_hi2: int64 = p_hi(p)
-            p_bump(p)
-            one2: int64 = ast_expr(p_ast(p), xk_int(), sp_lo2, sp_hi2, 1, -1, 0, 0)
-            return ast_stmt(p_ast(p), sk_assign_op(), bop_sub(), e, one2, 0)
-        }
+    return incdec_or_expr_stmt(p, e)
+}
+
+// A statement that is one increment or decrement and nothing else keeps the shape it
+// has always had: the value is discarded, so it folds back into the compound
+// assignment `x += 1` the parser has desugared it to since it was statement only, and
+// every pass past the parser sees exactly what it saw before. The prefix and postfix
+// forms collapse to the same statement, since a discarded value cannot tell them
+// apart. An increment anywhere else in the statement, including one inside parentheses
+// or under an operator, stays the expression it parsed as. The synthesized literal
+// takes the operator token's own span, recovered from the node's d field, so a
+// diagnostic against it points at the `++` that produced it, and the statement's own d
+// records which form was written so the checker judges it by the operator's rule rather
+// than by the addition.
+func incdec_or_expr_stmt(p: *Parser, e: int64) -> int64 {
+    a: *Ast = p_ast(p)
+    n: ExprNode = vec_get((*a).exprs, e)
+    if n.kind != xk_incdec() {
+        return ast_stmt(a, sk_expr(), e, 0, 0, 0)
     }
-    return ast_stmt(p_ast(p), sk_expr(), e, 0, 0, 0)
+    one: int64 = ast_expr(a, xk_int(), n.d, n.d + 2, 1, -1, 0, 0)
+    mut src: int64 = aos_postfix()
+    if n.c == incdec_pre() { src = aos_prefix() }
+    return ast_stmt(a, sk_assign_op(), n.b, n.a, one, src)
 }
 
 func is_binding_start(p: *Parser) -> bool {
@@ -234,6 +255,16 @@ func parse_for_stmt(p: *Parser) -> int64 {
     return ast_stmt(p_ast(p), sk_for(), var, iter, body, second)
 }
 
+// Whether the arm just parsed ended in a closing brace: its body was a block, or its
+// body was an expression whose last token was one, which is every value form that
+// carries a block of its own.
+func arm_ends_in_brace(p: *Parser, block_body: bool) -> bool {
+    if block_body {
+        return true
+    }
+    return p_prev_kind(p) == k_rbrace()
+}
+
 export func parse_match_parts(p: *Parser) -> (int64, int64, int64, int64) {
     p_expect_kw(p, "match")
     scrut: int64 = parse_expr_no_struct(p)
@@ -266,10 +297,18 @@ export func parse_match_parts(p: *Parser) -> (int64, int64, int64, int64) {
                 body = ast_block(p_ast(p), one2)
             }
             vec_push(arms, ast_arm(p_ast(p), pat, body))
-            if block_body {
+            // An arm that ends in a closing brace may drop its comma, whether the brace
+            // is the arm's own block or the tail of a match, an if, a lambda, or a do the
+            // arm evaluates. The separator is there to find the end of a one line arm,
+            // and a brace already ends one; demanding it after a block read as a mistake
+            // in a shape that looks complete, and the message named a token rather than
+            // the rule. Anything else still needs the comma, and now says so.
+            if arm_ends_in_brace(p, block_body) {
                 p_eat(p, k_comma())
             } else if !p_at(p, k_rbrace()) {
-                p_expect(p, k_comma())
+                if !p_eat(p, k_comma()) {
+                    p_error(p, "expected ',' after a match arm; an arm that ends in a block may omit it")
+                }
             }
             p_guard_progress(p, before, "unexpected token in match arm")
         }
@@ -367,6 +406,8 @@ func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
             reading = false
         } else if p_muted(p) {
             reading = false
+        } else if p_at(p, k_semi()) {
+            p_stray_semi(p, stray_semi_stmt())
         } else if !p_enter_chain(p, p_chain_what(steps, "do")) {
             p_leave_nesting(p)
             reading = false
@@ -389,6 +430,10 @@ func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
                     vec_push(elems, DoElemNode { kind: 1, a: sid2, b: 0 })
                 }
             }
+            // A step ends at a semicolon exactly as a block statement does, one
+            // consumed here, on the step's own line, and a second left for the loop
+            // head to name.
+            if !p_nl_here(p) { p_eat(p, k_semi()) }
             p_guard_progress(p, before, "unexpected token in do block")
         }
     }

@@ -110,6 +110,28 @@ func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, boun
         clos_collect_expr(s, e.a, used, bound)
         return
     }
+    if e.kind == xk_incdec() {
+        // An increment reads its place before it writes it, so the name is captured for
+        // the read; missing it would leave the lifted body naming a free variable that
+        // is not in the environment, and the ident lowering would die on it.
+        clos_collect_expr(s, e.a, used, bound)
+        return
+    }
+    if e.kind == xk_ifexpr() {
+        // Each branch is a block that opens its own scope, so each gets its own copy of
+        // the bound set: a binding one branch makes must not mask a use of the same name
+        // in the other branch or after the join, which would under-capture.
+        clos_collect_expr(s, e.a, used, bound)
+        then_bound: *Map<string, int64> = clos_bound_clone(bound)
+        clos_collect_block(s, e.b, used, then_bound)
+        map_free(then_bound)
+        free(then_bound)
+        else_bound: *Map<string, int64> = clos_bound_clone(bound)
+        clos_collect_block(s, e.c, used, else_bound)
+        map_free(else_bound)
+        free(else_bound)
+        return
+    }
     if e.kind == xk_collect() { clos_collect_expr(s, e.b, used, bound) }
 }
 

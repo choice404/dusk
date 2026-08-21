@@ -19,6 +19,7 @@
 @import genagg
 @import genptr
 @import genplace
+@import genenum
 
 // Copies a string literal's decoded bytes into a char array slot through
 // llvm.memcpy. The interned global carries a trailing NUL that is deliberately
@@ -47,6 +48,12 @@ func gl_is_char_array(c: *CTyArena, ty: int64) -> bool {
     if n.kind != ctyk_array() { return false }
     en: CTyNode = vec_get(cty_nodes(c), n.a)
     return en.kind == ctyk_char()
+}
+
+// Whether an expression is one of the two branching value forms, the pair that can write
+// a destination slot directly instead of minting one.
+func gl_branching(e: ExprNode) -> bool {
+    return e.kind == xk_ifexpr() || e.kind == xk_match()
 }
 
 // Lowers a scalar binding and records its stack slot for later loads and stores.
@@ -93,6 +100,19 @@ export func gen_let(s: *GenFuncState, sid: int64) -> void {
     mut v: Val = Val { ty: cty_void(c), op: gs_copy("") }
     if bind.ty >= 0 {
         ty = cty_lower_ast(c, a, bind.ty)
+        // An annotated binding knows its slot's type before the value is lowered, so a
+        // match or an if used as a value writes that slot directly. Going through a value
+        // would let the branching form size a slot of its own, and a form whose branches
+        // all diverge sizes that one i64 and then adapts an unreachable load into a
+        // binding that is not an i64.
+        if !cty_is_stub(c, ty) {
+            if gl_branching(init) {
+                bslot: string = gen_alloca(s, ty)
+                gen_into_slot(s, st.c, ty, bslot)
+                gs_bind(s, gs_copy(ast_name(a, bind.name)), LocalVal { ty: ty, op: bslot })
+                return
+            }
+        }
         tn: CTyNode = vec_get(cty_nodes(c), ty)
         mut special_alloc: bool = false
         if init.kind == xk_call() {
@@ -148,6 +168,12 @@ export func gen_assign(s: *GenFuncState, lhs: int64, rhs: int64) -> void {
         // bytes, the same lowering as the let form.
         pn: CTyNode = vec_get(cty_nodes(c), p.ty)
         gl_char_lit_copy(s, p.ptr, pn.b, r)
+        return
+    }
+    // The place's type is known before the value is lowered, so a branching value writes
+    // the place directly and each branch adapts to the place's own type.
+    if gl_branching(r) {
+        gen_into_slot(s, rhs, p.ty, p.ptr)
         return
     }
     v: Val = gen_expr(s, rhs)

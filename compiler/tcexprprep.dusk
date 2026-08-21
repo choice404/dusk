@@ -12,6 +12,7 @@
 @import tcstate
 @import tcscope
 @import tcbin
+@import tcfit
 @import tccall
 @import tciface
 @import tcmatch
@@ -96,7 +97,7 @@ func field_dup_msg(fname: string, sname: string) -> string {
     return out
 }
 
-func no_field_msg(sname: string, fname: string) -> string {
+export func no_field_msg(sname: string, fname: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push_char(b, 39)
     sb_push(b, sname)
@@ -107,6 +108,43 @@ func no_field_msg(sname: string, fname: string) -> string {
     sb_free(b)
     free(b)
     return out
+}
+
+/** The type a field read off a named struct answers, and the reject when the struct has
+ *  no field by that name.
+ *
+ *  A struct field read used to answer the surface wildcard, which agreed with everything
+ *  downstream: `vec_len(self.items)` could not pin T off a field whose declaration names
+ *  it, `(*p).nofield` passed check and died in codegen as `unsupported field expression`
+ *  naming no file and no line, and `s.f++` over a float field passed check and died in
+ *  clang adding an integer 1 to a double. The declaration is right there in the sig table,
+ *  so the read answers it.
+ *
+ *  The stored field type is the lowered one, which is what makes this safe inside a
+ *  generic: the sig was built with the struct's own parameters in scope, so a field
+ *  written `T` or `*Vector<T>` already lowered to the wildcard or to the argument-erased
+ *  named form, and this hands back exactly the same erasure every other type in the arena
+ *  carries. A name the struct does not declare is refused here rather than left to
+ *  codegen, and dusk has no field inheritance, so a struct's own list is the whole list.
+ *  @param tc the type checker holding the sig tables
+ *  @param sname the base's struct name
+ *  @param fname the field name being read
+ *  @param lo the span start of the field expression
+ *  @param hi the span end of the field expression
+ *  @return the field's declared type, or unknown when the field does not exist */
+export func field_read_ty(tc: *TypeChecker, sname: string, fname: string, lo: int64, hi: int64) -> int64 {
+    st: StructSig = sig_struct((*tc).sigtab, sname)
+    sigs: *TypeSigs = (*tc).sigtab
+    mut i: int64 = 0
+    while i < st.len {
+        f: FieldSig = vec_get((*sigs).fields, st.off + i)
+        if str_eq(f.name, fname) { return f.ty }
+        i = i + 1
+    }
+    disp: string = base_type_name(sname)
+    tc_emit(tc, no_field_msg(disp, fname), lo, hi)
+    free(disp)
+    return ty_unknown((*tc).ty)
 }
 
 func wrong_field_msg(sname: string, fname: string) -> string {

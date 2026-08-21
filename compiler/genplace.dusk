@@ -13,6 +13,7 @@
 @import genscope
 @import genexpr
 @import genptr
+@import genenum
 
 export struct Place { ok: bool, ty: int64, ptr: string }
 
@@ -93,7 +94,7 @@ func gp_mkey(t: string, m: string) -> string {
 // literals unknown (they carry no place), but a tuple or array literal needs each
 // element's type to size its aggregate the same way gen_tuple/gen_array_lit do, so
 // this backfills the scalar literal kinds exactly as ge_tail_ty's hand list does.
-func gp_lit_ty(s: *GenFuncState, id: int64) -> int64 {
+export func gp_lit_ty(s: *GenFuncState, id: int64) -> int64 {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     t: int64 = static_expr_ty(s, id)
@@ -172,7 +173,16 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
     if e.kind == xk_index() {
         bt2: int64 = static_expr_ty(s, e.a)
         bn: CTyNode = vec_get(cty_nodes(c), bt2)
-        if bn.kind == ctyk_array() || bn.kind == ctyk_slice() || bn.kind == ctyk_ptr() || bn.kind == ctyk_rawptr() { return bn.a }
+        if bn.kind == ctyk_array() || bn.kind == ctyk_slice() || bn.kind == ctyk_ptr() || bn.kind == ctyk_rawptr() {
+            // A range index is not an element read, it is the slice rvalue gen_slice
+            // builds, and gen_slice always answers a slice of the base's element for
+            // every base it accepts, a string base included. Answering the element here
+            // sized a match arm or an if branch of `arr[0..2]` as one element and stored
+            // a { ptr, i64 } through it.
+            idx: ExprNode = vec_get((*a).exprs, e.b)
+            if idx.kind == xk_range() { return cty_intern(c, ctyk_slice(), bn.a, 0, "") }
+            return bn.a
+        }
     }
     if e.kind == xk_unary() {
         if e.a == uop_deref() {
@@ -214,7 +224,14 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
                     return static_expr_ty(s, vec_get((*a).kids, e.b))
                 }
                 if str_eq(cname, "alloc") && e.c == 1 {
-                    return cty_intern(c, ctyk_ptr(), static_expr_ty(s, vec_get((*a).kids, e.b)), 0, "")
+                    // The pointee types through the literal backfill, not the bare static
+                    // walk: a scalar literal carries no place, so `alloc(1)` answered a
+                    // pointer to void, and a match arm or if branch that yielded one sized
+                    // its slot from that and left every deref of it as `load void`, which
+                    // clang refuses. gp_lit_ty answers the static type where there is one
+                    // and the literal's own type otherwise, so a suffixed literal keeps its
+                    // width and a non-literal argument is unchanged.
+                    return cty_intern(c, ctyk_ptr(), gp_lit_ty(s, vec_get((*a).kids, e.b)), 0, "")
                 }
                 // A cast builtin spelled as a call, float64(n), yields the cast's type.
                 castt: int64 = gp_cast_ret(c, cname)
@@ -261,6 +278,17 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
     // is a rawptr to char, the same as a plain string literal's runtime value.
     if e.kind == xk_fstr() {
         return cty_rawptr(c, cty_char(c))
+    }
+    // An increment yields its place's type, whichever end of the operator it sits on.
+    if e.kind == xk_incdec() {
+        return static_expr_ty(s, e.a)
+    }
+    // An `if` used as a value types to its branch tails, through the same walk that sizes
+    // its result slot when it is lowered, so a member sized here and the slot written
+    // there cannot disagree.
+    if e.kind == xk_ifexpr() {
+        it: int64 = gen_ifexpr_ty(s, e.b, e.c)
+        if it >= 0 { return it }
     }
     return cty_void(c)
 }

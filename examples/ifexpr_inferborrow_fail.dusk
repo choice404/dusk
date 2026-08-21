@@ -1,0 +1,20 @@
+@paradigm procedural
+
+// An inferred `x := if ...` carries only the surface wildcard, so is_managed_ty cannot see
+// the result is a managed pointer; without consulting the branch ownership verdict the
+// borrowed result launders into x and freeing it double frees an allocation the frame still
+// owns. Both branches yield a borrow, a ref alias each, so the if is a borrow and the free
+// is refused. This is the if twin of matchexpr_inferborrow_fail.
+func main() -> int64 {
+    p := alloc(42)
+    q := alloc(7)
+    ref rp := p
+    ref rq := q
+    c: bool = true
+    x := if c { rp } else { rq }
+    println(*x)
+    free(x)
+    free(p)
+    free(q)
+    return 0
+}

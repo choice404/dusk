@@ -102,6 +102,16 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, 
             unbind_scoped(bound, marm)
             m = m + 1
         }
+    } else if e.kind == xk_ifexpr() {
+        // A branch body is a block with its own scope, so each is walked with the block's
+        // own binders bound and unbound around it, exactly as a match arm's body is. A
+        // missed branch would drop a capture and leave a closure over a dead frame
+        // unreported.
+        collect_capture_expr(tc, e.a, bound, seen, out)
+        collect_capture_block(tc, e.b, bound, seen, out)
+        collect_capture_block(tc, e.c, bound, seen, out)
+    } else if e.kind == xk_incdec() {
+        collect_capture_expr(tc, e.a, bound, seen, out)
     } else if e.kind == xk_await() {
         collect_capture_expr(tc, e.a, bound, seen, out)
     } else if e.kind == xk_collect() {

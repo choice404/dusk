@@ -173,7 +173,13 @@ func rewrite_block(a: *Ast, id: int64) -> int64 {
 func value_ize_last_hi(a: *Ast, off: int64, len: int64, floor_hi: int64) -> int64 {
     if len == 0 { return floor_hi }
     arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + len - 1))
-    b: BlockNode = vec_get((*a).blocks, arm.body)
+    return block_tail_hi(a, arm.body, floor_hi)
+}
+
+// The high span of a block's tail expression, floored by a low bound so an empty or
+// diverging block never yields a span below it.
+func block_tail_hi(a: *Ast, block_id: int64, floor_hi: int64) -> int64 {
+    b: BlockNode = vec_get((*a).blocks, block_id)
     if b.len == 0 { return floor_hi }
     s: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, b.off + b.len - 1))
     if s.kind == sk_expr() {
@@ -181,6 +187,41 @@ func value_ize_last_hi(a: *Ast, off: int64, len: int64, floor_hi: int64) -> int6
         if te.hi > floor_hi { return te.hi }
     }
     return floor_hi
+}
+
+// The increment expression behind a statement the parser folded into a compound
+// assignment. The fold is what a discarded value earns, and a tail is not discarded, so
+// at a tail the operator is rebuilt as the expression it was written as. d says which
+// form was written, the place is the assignment's target, and the synthesized literal
+// carries the operator token's own span, so the node comes back with the span the parser
+// would have given it: the place through the operator for a postfix, the operator
+// through the place for a prefix.
+func rebuilt_incdec(a: *Ast, last: StmtNode) -> int64 {
+    place: ExprNode = vec_get((*a).exprs, last.b)
+    lit: ExprNode = vec_get((*a).exprs, last.c)
+    mut fix: int64 = incdec_post()
+    mut lo: int64 = place.lo
+    mut hi: int64 = lit.hi
+    if last.d == aos_prefix() {
+        fix = incdec_pre()
+        lo = lit.lo
+        hi = place.hi
+    }
+    return ast_expr(a, xk_incdec(), lo, hi, last.b, last.a, fix, lit.lo)
+}
+
+// A copy of a block with its last statement replaced. Every statement before the tail
+// is reused by id, so only the tail is rebuilt.
+func replace_tail(a: *Ast, block_id: int64, new_stmt: int64) -> int64 {
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    ids: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < b.len - 1 {
+        vec_push(ids, vec_get((*a).kids, b.off + i))
+        i = i + 1
+    }
+    vec_push(ids, new_stmt)
+    return ast_block(a, ids)
 }
 
 // Value-ize an already-rewritten block: if its last statement is a bare match, replace that
@@ -199,40 +240,63 @@ func value_ize_block(a: *Ast, block_id: int64) -> int64 {
     scrut_e: ExprNode = vec_get((*a).exprs, last.a)
     hi: int64 = value_ize_last_hi(a, voff, vlen, scrut_e.hi)
     mx: int64 = ast_expr(a, xk_match(), scrut_e.lo, hi, last.a, voff, vlen, 0)
-    new_stmt: int64 = ast_stmt(a, sk_expr(), mx, 0, 0, 0)
-    ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < b.len - 1 {
-        vec_push(ids, vec_get((*a).kids, b.off + i))
-        i = i + 1
+    return replace_tail(a, block_id, ast_stmt(a, sk_expr(), mx, 0, 0, 0))
+}
+
+// Value-ize a block whose tail carries a value: a match arm body, or a branch of an
+// `if` used as a value. A tail that is a bare match value-izes by the match rule above,
+// and a tail that is a complete `if` becomes the if-expression it reads as, its own
+// branches value-ized in turn, so the two block-tail forms compose to any depth. A tail
+// the parser folded from a lone `n++` comes back as the operator expression it was
+// written as, so a branch spelled `{ n++ }` yields a value exactly as `c ? 1 : n++`
+// does; without it the two spellings of the same operator disagreed. A tail
+// that is anything else, including an `if` with no else, is left as the statement it is,
+// so the checker names a branch with no value rather than the desugar inventing one. An
+// arm or branch whose tail `if` diverges on both sides is unchanged in meaning: it
+// yields no value either way, and the checker's yield-or-diverge rule reads the
+// if-expression's branches exactly as it read the statement's.
+func value_ize_branch(a: *Ast, block_id: int64) -> int64 {
+    b: BlockNode = vec_get((*a).blocks, block_id)
+    if b.len == 0 { return block_id }
+    last: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, b.off + b.len - 1))
+    if last.kind == sk_match() { return value_ize_block(a, block_id) }
+    if last.kind == sk_assign_op() && last.d != aos_written() {
+        return replace_tail(a, block_id, ast_stmt(a, sk_expr(), rebuilt_incdec(a, last), 0, 0, 0))
     }
-    vec_push(ids, new_stmt)
-    return ast_block(a, ids)
+    if last.kind != sk_if() { return block_id }
+    if last.c < 0 { return block_id }
+    then_b: int64 = value_ize_branch(a, last.b)
+    else_b: int64 = value_ize_branch(a, last.c)
+    cond_e: ExprNode = vec_get((*a).exprs, last.a)
+    hi: int64 = block_tail_hi(a, else_b, cond_e.hi)
+    ix: int64 = ast_expr(a, xk_ifexpr(), cond_e.lo, hi, last.a, then_b, else_b, 0)
+    return replace_tail(a, block_id, ast_stmt(a, sk_expr(), ix, 0, 0, 0))
 }
 
 // Value-ize each arm body of an already-rewritten arm list. The patterns are already
-// cloned, so they are reused; only the bodies are rethreaded through value_ize_block.
+// cloned, so they are reused; only the bodies are rethreaded through value_ize_branch.
 func value_ize_arms(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
-        vec_push(ids, ast_arm(a, arm.pat, value_ize_block(a, arm.body)))
+        vec_push(ids, ast_arm(a, arm.pat, value_ize_branch(a, arm.body)))
         i = i + 1
     }
     return ast_kids(a, ids)
 }
 
 // The value-position variant of rewrite_match: a match used as an expression may have an arm
-// body that ends in a bare match, which value-izes into the enclosing match. Each arm body is
-// rewritten as usual and then value-ized; a body with no trailing match is left byte-identical
-// to the plain rewrite, so an ordinary match expression's desugar is unchanged.
+// body that ends in a bare match or a complete `if`, either of which value-izes into the
+// enclosing match. Each arm body is rewritten as usual and then value-ized; a body with
+// neither tail form is left byte-identical to the plain rewrite, so an ordinary match
+// expression's desugar is unchanged.
 func rewrite_match_value(a: *Ast, scrut: int64, off: int64, len: int64) -> (int64, int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
-        vec_push(ids, ast_arm(a, clone_pattern(a, arm.pat), value_ize_block(a, rewrite_block(a, arm.body))))
+        vec_push(ids, ast_arm(a, clone_pattern(a, arm.pat), value_ize_branch(a, rewrite_block(a, arm.body))))
         i = i + 1
     }
     aoff, alen := ast_kids(a, ids)
@@ -253,7 +317,7 @@ func rewrite_stmt(a: *Ast, id: int64) -> int64 {
         return ast_stmt(a, sk_assign(), rewrite_expr(a, s.a), rewrite_expr(a, s.b), 0, 0)
     }
     if s.kind == sk_assign_op() {
-        return ast_stmt(a, sk_assign_op(), s.a, rewrite_expr(a, s.b), rewrite_expr(a, s.c), 0)
+        return ast_stmt(a, sk_assign_op(), s.a, rewrite_expr(a, s.b), rewrite_expr(a, s.c), s.d)
     }
     if s.kind == sk_return() {
         mut e: int64 = -1
@@ -329,6 +393,14 @@ func rewrite_expr(a: *Ast, id: int64) -> int64 {
     if e.kind == xk_match() {
         scrut, off5, len5 := rewrite_match_value(a, e.a, e.b, e.c)
         return ast_expr(a, xk_match(), e.lo, e.hi, scrut, off5, len5, 0)
+    }
+    if e.kind == xk_incdec() {
+        return ast_expr(a, xk_incdec(), e.lo, e.hi, rewrite_expr(a, e.a), e.b, e.c, e.d)
+    }
+    if e.kind == xk_ifexpr() {
+        then_b: int64 = value_ize_branch(a, rewrite_block(a, e.b))
+        else_b: int64 = value_ize_branch(a, rewrite_block(a, e.c))
+        return ast_expr(a, xk_ifexpr(), e.lo, e.hi, rewrite_expr(a, e.a), then_b, else_b, 0)
     }
     if e.kind == xk_do() {
         return do_to_calls(a, e.a, e.b, e.c, e.lo, e.hi)

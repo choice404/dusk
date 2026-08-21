@@ -1,0 +1,210 @@
+// tcif: the judgment of an `if` used as a value. The node hands one result out of two
+// branches, which is the shape a match expression already has, so this file answers the
+// same four questions walk_match_expr answers, in the same order and with the same
+// machinery: every branch yields a value or diverges, the branches agree on type once
+// mono has made them ground, the branches agree on the ownership of the result, and the
+// result's escape is the join of the branches. What is missing next to a match is the
+// pattern: an if binds nothing, so no branch projects a subject and the copy and borrow
+// judgments read the tail alone.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tcstate
+@import tcscope
+@import tcown
+@import tcexpr
+@import tcexprprep
+
+// The ownership one branch tail contributes to a managed-pointer if expression. Parallel
+// to arm_own_value with the pattern cases dropped, since an if binds no payload: a name
+// that owns hands an owner and every other name a borrow, a call hands what it declares,
+// a nested branching expression hands the verdict its own walk recorded, and every other
+// tail is this frame's own fresh value.
+func branch_own_value(tc: *TypeChecker, tail_id: int64, tail_ty: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    tail: ExprNode = vec_get((*a).exprs, tail_id)
+    if tail.kind == xk_ident() {
+        if own_of(tc, ast_name(a, tail.a)) == own_owner() { return own_owner() }
+        return own_borrow()
+    }
+    if tail.kind == xk_call() {
+        if is_owning_call(tc, tail) { return own_owner() }
+        if is_managed_ty(tc, tail_ty) { return own_owner() }
+        return own_borrow()
+    }
+    if tail.kind == xk_match() || tail.kind == xk_ifexpr() {
+        v: int64 = match_own_of(tc, tail_id)
+        if v >= 0 { return v }
+        return own_owner()
+    }
+    return own_owner()
+}
+
+// The tail expr id of a branch whose bare extraction copies an owner, or -1. An owner
+// named from an outer scope outlives the branch, so handing it out of the if copies a
+// value someone else still releases; a branch-local owner is a move out and does not.
+// No diagnostic here: the emit waits until the if is confirmed managed.
+func branch_copy_fault(tc: *TypeChecker, tail_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    tail: ExprNode = vec_get((*a).exprs, tail_id)
+    if tail.kind == xk_ident() {
+        src: string = ast_name(a, tail.a)
+        if own_of(tc, src) == own_owner() && !owns_top_scope(tc, src) { return tail_id }
+    }
+    return -1
+}
+
+// Whether a branch tail yields a managed pointer, the evidence that keeps the ownership
+// verdict to managed-pointer if expressions so a scalar one never fabricates a
+// disagreement. A nested branching tail reads the verdict its own walk stored, since its
+// inferred type is the surface wildcard.
+func branch_tail_managed(tc: *TypeChecker, tail_id: int64, tail_ty: int64) -> bool {
+    a: *Ast = (*tc).ast
+    tail: ExprNode = vec_get((*a).exprs, tail_id)
+    if tail.kind == xk_match() || tail.kind == xk_ifexpr() {
+        return match_own_of(tc, tail_id) >= 0
+    }
+    return is_managed_ty(tc, tail_ty)
+}
+
+// A branch tail that is a lambda literal has no result slot to store into, the same hole
+// a match arm has, so it is refused where it is written rather than reaching codegen.
+func check_branch_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
+    if (*tc).types_only { return }
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < branch_count(a, e) {
+        tail_id: int64 = branch_tail_at(a, e, i)
+        if tail_id >= 0 {
+            tail: ExprNode = vec_get((*a).exprs, tail_id)
+            if tail.kind == xk_lambda() {
+                tc_emit(tc, "a branch of an if expression cannot yield a lambda; bind the function to a name outside the if", tail.lo, tail.hi)
+            }
+        }
+        i = i + 1
+    }
+}
+
+/** Judges an `if` used as a value and answers the type it yields.
+ *
+ *  The walk mirrors walk_match_expr branch for branch. Each branch runs in its own scope
+ *  so a branch-local binding cannot leak, and the branch_depth bump is what makes a defer
+ *  inside a branch the misplacement it already is under a statement if. A branch with no
+ *  tail expression must diverge, or the result slot is read uninitialized; the caret goes
+ *  on the branch's own last statement when it has one, and on the condition otherwise.
+ *
+ *  The type agreement runs on the ground pass only, the same trade the match arms make: a
+ *  surface branch over a generic hole cannot be width-checked, and once mono grounds it
+ *  the tails are compared pairwise so codegen's take-first result slot rests on a checker
+ *  guarantee rather than on whichever branch resolved first.
+ *
+ *  The ownership verdict runs on the surface pass only, where the scopes and the ownership
+ *  records are live. It is collected per branch with the branch scope open, then finalized
+ *  once the if is confirmed to carry a managed pointer, so a scalar if never fabricates an
+ *  ownership fault. The aggregate lands in the shared branch verdict table under this
+ *  expression's id, which is what lets a binding, a destructure, a free, a move, and a
+ *  return read an if's result exactly as they read a match's.
+ *  @param tc the type checker holding the scope, ownership, and diagnostic state
+ *  @param id the if expression's own id, the key its verdict is stored under
+ *  @param e the if expression node
+ *  @return the agreed branch type on the ground pass, else the surface wildcard */
+export func walk_ifexpr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
+    ctx: int64 = (*tc).match_ctx
+    (*tc).match_ctx = 0
+    a: *Ast = (*tc).ast
+    ct: int64 = infer_expr(tc, e.a)
+    cn: TyNode = ty_get((*tc).ty, ct)
+    cond: ExprNode = vec_get((*a).exprs, e.a)
+    if cn.kind != tyk_bool() && cn.kind != tyk_unknown() {
+        tc_emit(tc, "if condition must be a bool", cond.lo, cond.hi)
+    }
+    (*tc).branch_depth = (*tc).branch_depth + 1
+    own_vals: *Vector<int64> = alloc(vec_new())
+    copy_faults: *Vector<int64> = alloc(vec_new())
+    own_tails: *Vector<int64> = alloc(vec_new())
+    mut any_managed: bool = false
+    mut ref_ty: int64 = -1
+    mut disagreed: bool = false
+    mut i: int64 = 0
+    while i < branch_count(a, e) {
+        blk: int64 = branch_block_at(a, e, i)
+        push_scope(tc)
+        // A branch whose tail is itself a branching expression must run its own ownership
+        // judgment inside a managed context, or it records nothing and a borrow laundered
+        // through it reads as this frame's owner. The hint rides into the inner walk the
+        // same way walk_match_expr passes it into a nested arm tail, around the diagnostic
+        // walk and around the suppressed re-infer both, since the first hint is consumed by
+        // whichever walk reaches it first.
+        mut nest_hint: bool = false
+        if !(*tc).types_only && ctx == 1 {
+            pk: int64 = branch_tail_at(a, e, i)
+            if pk >= 0 {
+                pkx: ExprNode = vec_get((*a).exprs, pk)
+                if pkx.kind == xk_match() || pkx.kind == xk_ifexpr() { nest_hint = true }
+            }
+        }
+        if nest_hint { (*tc).match_ctx = 1 }
+        check_block_no_scope(tc, blk)
+        if nest_hint { (*tc).match_ctx = 0 }
+        tail_id: int64 = branch_tail_at(a, e, i)
+        if tail_id < 0 && !(*tc).types_only && !block_diverges(a, blk) {
+            mut slo: int64 = cond.lo
+            mut shi: int64 = cond.hi
+            sp: int64 = block_tail_span_expr(a, blk)
+            if sp >= 0 {
+                spx: ExprNode = vec_get((*a).exprs, sp)
+                slo = spx.lo
+                shi = spx.hi
+            }
+            // The two ways a branch is excused are the two a match arm has: yield a tail
+            // expression, or never reach the end of the branch at all.
+            tc_emit(tc, "an if used as a value needs every branch to yield a value or diverge", slo, shi)
+        }
+        if tail_id >= 0 {
+            if nest_hint { (*tc).match_ctx = 1 }
+            (*tc).suppress = (*tc).suppress + 1
+            at: int64 = infer_expr(tc, tail_id)
+            (*tc).suppress = (*tc).suppress - 1
+            if nest_hint { (*tc).match_ctx = 0 }
+            if (*tc).types_only {
+                atn: TyNode = ty_get((*tc).ty, at)
+                if atn.kind != tyk_unknown() && !disagreed {
+                    if ref_ty < 0 {
+                        ref_ty = at
+                    } else if !compat((*tc).ty, ref_ty, at) {
+                        tailx: ExprNode = vec_get((*a).exprs, tail_id)
+                        tc_emit(tc, "the branches of an if expression must agree on type", tailx.lo, tailx.hi)
+                        disagreed = true
+                    }
+                }
+            } else {
+                if branch_tail_managed(tc, tail_id, at) { any_managed = true }
+                vec_push(own_vals, branch_own_value(tc, tail_id, at))
+                vec_push(copy_faults, branch_copy_fault(tc, tail_id))
+                vec_push(own_tails, tail_id)
+            }
+        }
+        pop_scope(tc)
+        i = i + 1
+    }
+    (*tc).branch_depth = (*tc).branch_depth - 1
+    check_branch_lambdas(tc, e)
+    if !(*tc).types_only && (ctx == 1 || any_managed) {
+        finalize_result_own(tc, id, own_vals, copy_faults, own_tails, "the branches of an if expression must agree on ownership of its result")
+    }
+    if (*tc).types_only && !disagreed && ref_ty >= 0 {
+        // A literal branch adapts to whatever width the branches agreed on, so the
+        // agreement alone would let `y := if c { a } else { 300 }` over an int8 a store a
+        // truncated 44 through the slot the first branch sized. Ranging the literal tails
+        // against the agreement is what refuses it where no annotation hands a target.
+        check_branch_lit_fits(tc, e, ref_ty)
+        return ref_ty
+    }
+    return ty_unknown((*tc).ty)
+}

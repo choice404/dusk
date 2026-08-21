@@ -1,0 +1,45 @@
+// A body that returns from every arm still writes the trailing return every function
+// body ends with, and a struct or an enum return type is a named LLVM type whose zero is
+// zeroinitializer, not an integer. std.unwrap_or is exactly this shape, so every generic
+// instantiation of it over a struct payload writes one of these returns.
+@paradigm procedural
+@import std.functional.maybe
+
+struct P { x: int64, y: int64 }
+
+enum K { A, B }
+
+func pick(k: K) -> P {
+    match k {
+        A => { return P { x: 1, y: 2 } },
+        B => { return P { x: 3, y: 4 } },
+    }
+}
+
+func tag(k: K) -> K {
+    match k {
+        A => { return K.B },
+        B => { return K.A },
+    }
+}
+
+func name(k: K) -> string {
+    match k {
+        A => { return "A" },
+        B => { return "B" },
+    }
+}
+
+func main() -> int32 {
+    p: P = pick(K.A)
+    println(p.x)
+    q: P = pick(K.B)
+    println(q.y)
+    println(name(tag(K.A)))
+    println(name(tag(K.B)))
+    fallback: P = P { x: 7, y: 8 }
+    m: Maybe<P> = Maybe.None
+    got: P = unwrap_or(m, fallback)
+    println(got.x)
+    return 0
+}

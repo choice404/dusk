@@ -215,6 +215,32 @@ export func gen_emit_defers(s: *GenFuncState) -> void {
     (*s).cur_lo = saved
 }
 
+/** The zero of a type, spelled for the LLVM type rather than guessed from the ctype
+ *  kind. Keyed on the spelling because the spelling is what clang parses: an error and a
+ *  C function pointer are both `ptr` without being the raw pointer kind, and a struct or
+ *  an enum is a named type, `%Name`, which is as much an aggregate as a literal `{ ... }`
+ *  even though nothing in the text says so. The kind list handed all of those the integer
+ *  0, so a body that fell through emitted `ret ptr 0` or `ret %Name 0` and clang refused
+ *  the module. Three prefixes cover every aggregate this backend writes: a named type, a
+ *  literal struct, and an array. The caller handles void before asking, since a void
+ *  return carries no constant at all.
+ *  @param ll the LLVM type spelling
+ *  @return the constant to write after it */
+export func gen_zero_text(ll: string) -> string {
+    if str_eq(ll, "ptr") { return "null" }
+    if str_eq(ll, "double") { return "0.0" }
+    if str_eq(ll, "float") { return "0.0" }
+    if str_len(ll) > 0 {
+        // %Name for a struct or an enum, { ... } for a literal struct, tuple, slice, or
+        // fat value, [ ... ] for an array. cty_ll writes a named type for those two kinds
+        // and no other, so no scalar can reach the aggregate answer.
+        if ll[0] == 37 { return "zeroinitializer" }
+        if ll[0] == 123 { return "zeroinitializer" }
+        if ll[0] == 91 { return "zeroinitializer" }
+    }
+    return "0"
+}
+
 export func gen_default_ret(s: *GenFuncState) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), (*s).ret)
@@ -228,11 +254,7 @@ export func gen_default_ret(s: *GenFuncState) -> void {
     sb_push(b, "ret ")
     sb_push(b, ll)
     sb_push_char(b, 32)
-    if n.kind == ctyk_f64() { sb_push(b, "0.0") }
-    else if n.kind == ctyk_f32() { sb_push(b, "0.0") }
-    else if n.kind == ctyk_rawptr() { sb_push(b, "null") }
-    else if cty_is_aggregate(c, (*s).ret) { sb_push(b, "zeroinitializer") }
-    else { sb_push_char(b, 48) }
+    sb_push(b, gen_zero_text(ll))
     text: string = gs_built(b)
     sb_free(b)
     free(b)
@@ -242,6 +264,26 @@ export func gen_default_ret(s: *GenFuncState) -> void {
     (*s).terminated = true
 }
 
+// The value a return hands back. A match or an if used as a value sizes its own result
+// slot from a branch-tail walk that is allowed to answer nothing, and a form whose every
+// branch diverges answers exactly that, so the fallback i64 would be adapted into a
+// return type that is not one. Lowering into a slot of the return type instead lets each
+// branch adapt to the real type, and a diverging branch stores nothing. Every other
+// expression lowers as it always has.
+func gen_ret_val(s: *GenFuncState, expr: int64) -> Val {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, expr)
+    if e.kind == xk_ifexpr() || e.kind == xk_match() {
+        if vec_get(cty_nodes(c), (*s).ret).kind != ctyk_void() {
+            slot: string = gen_alloca(s, (*s).ret)
+            gen_into_slot(s, expr, (*s).ret, slot)
+            return Val { ty: (*s).ret, op: gen_load_slot(s, (*s).ret, slot) }
+        }
+    }
+    return gen_expr(s, expr)
+}
+
 func gen_return(s: *GenFuncState, expr: int64) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
     if expr < 0 {
@@ -249,7 +291,7 @@ func gen_return(s: *GenFuncState, expr: int64) -> void {
         gen_default_ret(s)
         return
     }
-    v: Val = gen_expr(s, expr)
+    v: Val = gen_ret_val(s, expr)
     av: Val = adapt(s, v, (*s).ret)
     gen_emit_defers(s)
     n: CTyNode = vec_get(cty_nodes(c), (*s).ret)
@@ -386,7 +428,7 @@ export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
                     } else {
                         gen_async_return_val(s, Val { ty: take.elem_ty, op: gen_load_slot(s, take.elem_ty, take.elem_slot) })
                     }
-                } else { gen_async_return(s, st.a) }
+                } else { gen_async_return_val(s, gen_ret_val(s, st.a)) }
             } else { gen_async_return(s, -1) }
         } else { gen_return(s, st.a) }
         return }
@@ -419,6 +461,11 @@ export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
     if st.kind == sk_expr() {
         ex: ExprNode = vec_get((*a).exprs, st.a)
         if ex.kind == xk_await() { gen_await_take(s, st.a) }
+        // An if-expression whose value is thrown away lowers with no result slot at all,
+        // the way a statement match does. Going through the value path instead would
+        // size a slot for a value nobody reads, and a branch tail that is a void call
+        // has no value to size it by.
+        else if ex.kind == xk_ifexpr() { gen_ifexpr_into(s, ex.a, ex.b, ex.c, -1, "") }
         else { gen_expr(s, st.a) }
         return }
     if st.kind == sk_for() { gen_for(s, st) }

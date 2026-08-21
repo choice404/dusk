@@ -376,7 +376,32 @@ export func static_ty(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: 
     if e.kind == xk_collect() {
         return mt_collector(a, subst_apply(m, e.a, subst))
     }
+    if e.kind == xk_incdec() {
+        // An increment reads and writes one place and yields a value of that place's
+        // type, whichever end of the operator it sits on.
+        return static_ty(m, e.a, subst, env)
+    }
+    if e.kind == xk_ifexpr() {
+        t: int64 = if_branch_ty(m, e.b, subst, env)
+        if t >= 0 { return t }
+        return if_branch_ty(m, e.c, subst, env)
+    }
     return -1
+}
+
+// The type of one branch of an `if` used as a value, or -1 when this walk cannot say.
+// Only a branch that is a single expression answers: a branch holding statements can
+// bind a name of its own, and this walk reads names from the enclosing environment, so
+// it would read a shadowed outer binding's type and hand mono the wrong instantiation.
+// -1 is the answer a match expression gives for every shape, so a caller that cannot
+// type the branch degrades exactly as it always has.
+func if_branch_ty(m: *Mono, bid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
+    a: *Ast = (*m).ast
+    b: BlockNode = vec_get((*a).blocks, bid)
+    if b.len != 1 { return -1 }
+    st: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, b.off))
+    if st.kind != sk_expr() { return -1 }
+    return static_ty(m, st.a, subst, env)
 }
 
 func static_ty_call(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
@@ -426,6 +451,36 @@ func static_ty_call(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *M
     return -1
 }
 
+// The declared AST type of one field of a non generic struct, or -1 when no declared
+// struct carries the name or the struct declares no such field. The generic arm below
+// answers through m_gstructs and substitutes the instantiation's arguments; a non generic
+// struct has none to substitute, so its field type is read straight off the declaration.
+// Without this a generic call whose argument is a field read, `vec_len(self.items)` over
+// a declared `items: *Vector<*Flag>`, had no argument type to unify the parameter against
+// and reported an unpinnable type parameter, which is why such a field had to be rebound
+// to an annotated local before every call. The scan mirrors the type pass's own
+// struct_field_ast: a struct name is unique in the merged module, the arena is small, and
+// this walk only reaches here where it used to give up outright.
+func nongeneric_field_ty(m: *Mono, sname: string, fname: string) -> int64 {
+    a: *Ast = (*m).ast
+    structs: *Vector<StructNode> = (*a).structs
+    mut i: int64 = 0
+    while i < vec_len(structs) {
+        st: StructNode = vec_get(structs, i)
+        if str_eq(ast_name(a, st.name), sname) {
+            mut j: int64 = 0
+            while j < st.fields_len {
+                fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + j))
+                if str_eq(ast_name(a, fld.name), fname) { return fld.ty }
+                j = j + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
 func static_ty_field(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *Map<string, int64>) -> int64 {
     a: *Ast = (*m).ast
     e: ExprNode = vec_get((*a).exprs, exprid)
@@ -461,6 +516,8 @@ func static_ty_field(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *
                 fi = fi + 1
             }
         }
+        ft: int64 = nongeneric_field_ty(m, s, name)
+        if ft >= 0 { return subst_apply(m, ft, subst) }
     }
     return -1
 }

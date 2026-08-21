@@ -45,12 +45,41 @@ func nfunc_param_ty(m: *Mono, fname: string, i: int64) -> int64 {
     return p.ty
 }
 
+/** Rewrites a free function, the spelling with no receiver to bind.
+ *  @param m the mono state
+ *  @param fid the function node to rewrite
+ *  @param subst the type-argument substitution this instantiation applies
+ *  @param mangled the instantiated name id, or -1 to keep the declared name
+ *  @return the rewritten function node id */
 export func rw_func(m: *Mono, fid: int64, subst: *Map<string, int64>, mangled: int64) -> int64 {
+    return rw_method(m, fid, subst, mangled, -1)
+}
+
+/** Rewrites one function, binding its parameters and, for a method, its receiver into the
+ *  environment the static type walk reads.
+ *
+ *  The receiver is what this exists for. A method's body names `self`, and the walk env
+ *  used to hold declared parameters only, so `self` missed and static_ty answered -1 for
+ *  it and for everything read off it. A generic call whose argument came off the receiver,
+ *  `vec_len(self.items)` over a declared `items: *Vector<*Flag>`, therefore had no argument
+ *  type to unify its parameter against and reported an unpinnable type parameter, while
+ *  the free-function twin `vec_len(s.items)` over the same struct passed. The container
+ *  `for` form lands in the same place, since its pre-mono rewrite splices exactly those
+ *  accessor calls. The receiver type is the impl's own named type, which is what the type
+ *  pass declares `self` as, so the two passes read the same receiver.
+ *  @param m the mono state
+ *  @param fid the function node to rewrite
+ *  @param subst the type-argument substitution this instantiation applies
+ *  @param mangled the instantiated name id, or -1 to keep the declared name
+ *  @param self_ty the receiver's AST type node, or -1 for a free function
+ *  @return the rewritten function node id */
+export func rw_method(m: *Mono, fid: int64, subst: *Map<string, int64>, mangled: int64, self_ty: int64) -> int64 {
     a: *Ast = (*m).ast
     f: FuncNode = vec_get((*a).funcs, fid)
     mut name_id: int64 = f.name
     if mangled >= 0 { name_id = mangled }
     env: *Map<string, int64> = alloc(map_new())
+    if self_ty >= 0 { map_put(env, "self", self_ty) }
     params_out: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
     while i < f.params_len {
@@ -98,6 +127,29 @@ export func rw_block(m: *Mono, bid: int64, subst: *Map<string, int64>, env: *Map
     return ast_block(a, stmts_out)
 }
 
+// A branch block of an `if` used as a value. Every statement but the last rewrites as an
+// ordinary statement; the last, when it is an expression statement, is the branch's value,
+// so it rewrites against the expected type the whole if-expression was asked for. A branch
+// that ends in anything else (a return, a while, a bare match the desugar left alone)
+// carries no value and rewrites as a plain block.
+func rw_branch(m: *Mono, bid: int64, subst: *Map<string, int64>, env: *Map<string, int64>, ret: int64, expected: int64) -> int64 {
+    a: *Ast = (*m).ast
+    b: BlockNode = vec_get((*a).blocks, bid)
+    stmts_out: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < b.len {
+        sid: int64 = vec_get((*a).kids, b.off + i)
+        st: StmtNode = vec_get((*a).stmts, sid)
+        if i + 1 == b.len && st.kind == sk_expr() {
+            vec_push(stmts_out, ast_stmt(a, sk_expr(), rw_expr(m, st.a, subst, env, expected), 0, 0, 0))
+        } else {
+            vec_push(stmts_out, rw_stmt(m, sid, subst, env, ret))
+        }
+        i = i + 1
+    }
+    return ast_block(a, stmts_out)
+}
+
 func rw_stmt(m: *Mono, sid: int64, subst: *Map<string, int64>, env: *Map<string, int64>, ret: int64) -> int64 {
     s0: StmtNode = vec_get((*(*m).ast).stmts, sid)
     if s0.kind == sk_break() || s0.kind == sk_continue() {
@@ -117,7 +169,7 @@ func rw_stmt(m: *Mono, sid: int64, subst: *Map<string, int64>, env: *Map<string,
     if s.kind == sk_assign_op() {
         rl2: int64 = rw_expr(m, s.b, subst, env, -1)
         rr2: int64 = rw_expr(m, s.c, subst, env, -1)
-        return ast_stmt(a, sk_assign_op(), s.a, rl2, rr2, 0)
+        return ast_stmt(a, sk_assign_op(), s.a, rl2, rr2, s.d)
     }
     if s.kind == sk_return() {
         if s.a < 0 { return ast_stmt(a, sk_return(), -1, 0, 0, 0) }
@@ -358,6 +410,25 @@ export func rw_expr(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<
     if e.kind == xk_match() {
         scrut, moff, mlen := rw_match(m, e.a, e.b, e.c, subst, env, mt_unit(a))
         return ast_expr(a, xk_match(), e.lo, e.hi, scrut, moff, mlen, 0)
+    }
+    if e.kind == xk_incdec() {
+        // Only the place recurses. b is the operator, c the prefix or postfix flag, and
+        // d the operator token's low byte, all plain values that carry through unread:
+        // mono never retypes an increment, since its type is the place's type.
+        return ast_expr(a, xk_incdec(), e.lo, e.hi, rw_expr(m, e.a, subst, env, -1), e.b, e.c, e.d)
+    }
+    if e.kind == xk_ifexpr() {
+        // Each branch gets its own copy of the environment, the way a match arm and a
+        // statement `if` both do, so a binding one branch makes cannot type a name in
+        // the other. The expected type rides through to each branch's tail expression,
+        // which is where the value comes from: a branch spelled as a bare enum
+        // constructor then picks the instantiation the binding asked for instead of
+        // stalling on an argument list that says nothing.
+        unit: int64 = mt_unit(a)
+        cond: int64 = rw_expr(m, e.a, subst, env, -1)
+        then_b: int64 = rw_branch(m, e.b, subst, map_clone_i64(env), unit, expected)
+        else_b: int64 = rw_branch(m, e.c, subst, map_clone_i64(env), unit, expected)
+        return ast_expr(a, xk_ifexpr(), e.lo, e.hi, cond, then_b, else_b, 0)
     }
     if e.kind == xk_await() {
         rop: int64 = rw_expr(m, e.a, subst, env, -1)

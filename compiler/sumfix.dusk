@@ -34,6 +34,11 @@ func build_gens(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
 // shared outputs the caller keeps the lambda tables and frame stores; the fixpoint
 // passes throwaway ones.
 func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string, lret: *Map<string, int64>, lsink: *Map<string, int64>, lcoll: *Map<string, int64>, lcap: *Map<string, string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> SummaryHandle {
+    // One transfer is one lambda-summary generation. The walk below never writes the
+    // summary table and every nested lambda state inherits it, so a lambda summary
+    // cached during this transfer is reusable throughout it; a summary that grew since
+    // the last transfer must not be, so the generation is opened here and nowhere else.
+    sum_lambda_cache_reset(t)
     a: *Ast = (*t).ast
     gens: *Map<string, int64> = build_gens(a, f.generics_off, f.generics_len)
     fnb: *Map<string, string> = sum_resolvable_fn_binds(t, f.body)
@@ -277,6 +282,12 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
         collect_callees_block(t, mfns, e.d, out)
     } else if e.kind == xk_match() {
         collect_callees_match(t, mfns, e.a, e.b, e.c, out)
+    } else if e.kind == xk_ifexpr() {
+        collect_callees_expr(t, mfns, e.a, out)
+        collect_callees_block(t, mfns, e.b, out)
+        collect_callees_block(t, mfns, e.c, out)
+    } else if e.kind == xk_incdec() {
+        collect_callees_expr(t, mfns, e.a, out)
     } else if e.kind == xk_collect() {
         collect_callees_expr(t, mfns, e.b, out)
     } else if e.kind == xk_do() {

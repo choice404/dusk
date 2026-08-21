@@ -1,0 +1,30 @@
+@paradigm procedural
+
+@import std.map
+
+// A type parameter's name is a type spelling, not a value, so it is not another enum's
+// variant however the two are spelled. std.map's own body writes sizeof(K) and sizeof(V),
+// and any module that also declared an enum with a variant named K or V used to refuse the
+// stdlib it imported: the identifier arm read the variant table before it read the generic
+// scope. The enum here declares both names, and the map still works.
+enum E {
+    K(n: int64),
+    V(n: int64),
+    Nil,
+}
+
+func main() -> int32 {
+    m: *Map<string, int64> = alloc(map_new())
+    map_put(m, "a", 1)
+    map_put(m, "b", 2)
+    println(map_len(m))
+    e := E.V(7)
+    match e {
+        K(n) => println(n),
+        V(n) => println(n),
+        Nil => println(0),
+    }
+    map_free(m)
+    free(m)
+    return 0
+}

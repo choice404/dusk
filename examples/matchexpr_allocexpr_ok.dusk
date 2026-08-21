@@ -1,0 +1,33 @@
+// alloc of an expression that reads a match arm's payload: a field of it, an arithmetic
+// over it, and a dereference of it. The pointee decides the result slot, and a payload
+// binding is not an ordinary local yet when that slot is sized, so the size comes from
+// the arm's own pattern.
+@paradigm procedural
+
+struct D { n: int64, m: int64 }
+
+enum M {
+    A(d: D),
+    B(n: int64),
+    C(p: *int64),
+}
+
+func f(m: M) -> int64 {
+    p := match m {
+        A(d) => { alloc(d.n) },
+        B(n) => { alloc(n + 1) },
+        C(q) => { alloc(*q * 2) },
+    }
+    v: int64 = *p
+    free(p)
+    return v
+}
+
+func main() -> int32 {
+    println(f(M.A(D { n: 7, m: 9 })))
+    println(f(M.B(41)))
+    r: *int64 = alloc(4)
+    println(f(M.C(r)))
+    free(r)
+    return 0
+}

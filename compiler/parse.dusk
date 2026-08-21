@@ -118,6 +118,16 @@ export func p_nl_here(p: *Parser) -> bool { return p_tok(p).nl_before }
 export func p_at(p: *Parser, k: int64) -> bool { return p_kind(p) == k }
 export func p_at_eof(p: *Parser) -> bool { return p_kind(p) == k_eof() }
 
+// The kind of the token just consumed, or Eof at the start of input. The arm grammar
+// reads it to see whether an arm ended in a closing brace.
+export func p_prev_kind(p: *Parser) -> int64 {
+    if (*p).pos > 0 {
+        toks: *Vector<Token> = (*p).toks
+        return vec_get(toks, (*p).pos - 1).kind
+    }
+    return k_eof()
+}
+
 export func p_prev_hi(p: *Parser) -> int64 {
     if (*p).pos > 0 {
         toks: *Vector<Token> = (*p).toks
@@ -251,6 +261,28 @@ export func p_ident(p: *Parser) -> int64 {
         p_error_owned(p, expected_found("identifier", p))
     }
     return intern_id((*(*p).ast).interner, "")
+}
+
+// Names a semicolon that ends nothing and steps over it. A semicolon ends a statement
+// exactly as a newline does, so the grammar consumes one after the statement it
+// terminates; one that arrives where a statement or an item is supposed to begin, a
+// doubled `;`, a line holding only `;`, one right after `{`, or one trailing a top
+// level declaration, has nothing before it to end. The token is always consumed, so
+// the loop reporting it still makes progress and each stray is named once.
+export func p_stray_semi(p: *Parser, msg: string) -> void {
+    p_error(p, msg)
+    p_bump(p)
+}
+
+// The message for a stray semicolon inside a body, where statements live.
+export func stray_semi_stmt() -> string {
+    return "stray ';'; a semicolon ends a statement, and there is no statement before it"
+}
+
+// The message for a stray semicolon between top level declarations, where the
+// terminator has no meaning at all.
+export func stray_semi_item() -> string {
+    return "stray ';'; a top level declaration does not end in a semicolon"
 }
 
 export func p_guard_progress(p: *Parser, before: int64, ctx: string) -> bool {

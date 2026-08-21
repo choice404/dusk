@@ -1,0 +1,31 @@
+// A function whose body ends in a match that returns from every arm. Nothing falls
+// through, but the emitter still writes the trailing return every function body ends
+// with, and the constant it writes has to be the zero of the return type: an error is a
+// pointer, so the zero is null and not the integer 0, which is not a pointer at all.
+@paradigm procedural
+
+enum K { A, B }
+
+func fail(k: K) -> error {
+    match k {
+        A => { return error { message: "boom" } },
+        B => { return error {} },
+    }
+}
+
+func name(k: K) -> string {
+    match k {
+        A => { return "alpha" },
+        B => { return "beta" },
+    }
+}
+
+func main() -> int32 {
+    a := fail(K.A)
+    if a.exists() { println(a.message) }
+    b := fail(K.B)
+    if !b.exists() { println("clean") }
+    println(name(K.A))
+    println(name(K.B))
+    return 0
+}

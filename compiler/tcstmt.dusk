@@ -11,6 +11,7 @@
 @import tcstate
 @import tcscope
 @import tcbin
+@import tcfit
 @import tcexpr
 @import tclet
 @import tciface
@@ -18,24 +19,7 @@
 @import tcown
 @import tcesc
 @import tcesccap
-
-// Whether an expression names storage an assignment can write: a binding, a
-// field chain, a scalar index (a range mints an rvalue slice), or a
-// dereference. Everything else has no address, and codegen would silently
-// drop the store.
-func is_place_expr(a: *Ast, id: int64) -> bool {
-    e: ExprNode = vec_get((*a).exprs, id)
-    if e.kind == xk_ident() { return true }
-    if e.kind == xk_field() { return is_place_expr(a, e.a) }
-    if e.kind == xk_index() {
-        idx: ExprNode = vec_get((*a).exprs, e.b)
-        return idx.kind != xk_range()
-    }
-    if e.kind == xk_unary() {
-        if e.a == uop_deref() { return true }
-    }
-    return false
-}
+@import tcincdec
 
 func cannot_iterate_msg(rendered: string) -> string {
     b: *StringBuilder = alloc(sb_new())
@@ -247,27 +231,34 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
     mut t: int64 = ty_unknown((*tc).ty)
+    // A match and an if used as a value both hand one result out of several branches, so
+    // both answer the branch verdict the managed return position consults.
+    branching: bool = e.kind == xk_match() || e.kind == xk_ifexpr()
     if e.kind == xk_await() {
         t = infer_await_operand(tc, e)
     } else {
-        // A managed return type hints the match verdict the same way a managed binding does,
-        // so a returned match extraction over a locally allocated subject still classifies.
-        // A bare type-parameter return (a generic func returning T) hints the same way: the
-        // returned match may launder a borrow the subject owns, and the surface pass is the
-        // only place the borrow is visible before mono grounds T. T lowers to a hole, so the
-        // written return node is consulted through cur_ret_ast.
-        if !(*tc).types_only && e.kind == xk_match() && (is_managed_ty(tc, (*tc).cur_ret) || is_typaram_ast(tc, (*tc).cur_ret_ast)) { (*tc).match_ctx = 1 }
+        // A managed return type hints the branch verdict the same way a managed binding
+        // does, so a returned match or if extraction over a locally allocated subject still
+        // classifies. A bare type-parameter return (a generic func returning T) hints the
+        // same way: the returned value may launder a borrow the subject owns, and the
+        // surface pass is the only place the borrow is visible before mono grounds T. T
+        // lowers to a hole, so the written return node is consulted through cur_ret_ast.
+        if !(*tc).types_only && branching && (is_managed_ty(tc, (*tc).cur_ret) || is_typaram_ast(tc, (*tc).cur_ret_ast)) { (*tc).match_ctx = 1 }
         t = infer_expr(tc, expr_id)
         (*tc).match_ctx = 0
     }
-    // Returning a match expression whose arms agreed on a borrow hands the caller a
-    // pointer the subject still owns: the return position would launder the borrow into
-    // the caller's owner exactly as the copy spelling does in binding position. The
-    // verdict walk_match_expr stored gates on a managed return type, so a scalar match
-    // return is untouched.
-    if !(*tc).types_only && e.kind == xk_match() && (is_managed_ty(tc, (*tc).cur_ret) || is_typaram_ast(tc, (*tc).cur_ret_ast)) {
+    // Returning a match or if expression whose branches agreed on a borrow hands the caller
+    // a pointer the subject still owns: the return position would launder the borrow into
+    // the caller's owner exactly as the copy spelling does in binding position. The verdict
+    // the branch walk stored gates on a managed return type, so a scalar result is
+    // untouched.
+    if !(*tc).types_only && branching && (is_managed_ty(tc, (*tc).cur_ret) || is_typaram_ast(tc, (*tc).cur_ret_ast)) {
         if match_own_of(tc, expr_id) == own_borrow() {
-            tc_emit(tc, "cannot return a borrowed match result; move the payload or return an owning call", e.lo, e.hi)
+            if e.kind == xk_match() {
+                tc_emit(tc, "cannot return a borrowed match result; move the payload or return an owning call", e.lo, e.hi)
+            } else {
+                tc_emit(tc, "cannot return a borrowed if result; move the payload or return an owning call", e.lo, e.hi)
+            }
         }
     }
     if !compat((*tc).ty, (*tc).cur_ret, t) {
@@ -404,6 +395,19 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
                 if esc2.slice || esc2.closure { raise_esc(tc, root, esc2.slice, esc2.closure) }
             }
         }
+    } else if s.kind == sk_assign_op() && s.d != aos_written() {
+        // A statement that was one `++` or `--` folds to a compound assignment, since the
+        // value it yields is discarded and every pass past the parser has always seen the
+        // fold. d records that it was written as the operator, so the judgment is the
+        // operator's own rule: the same place check, the same integer rule, and the same
+        // messages the expression form earns, rather than the arithmetic complaint the
+        // synthesized `+ 1` would have produced. The mutability check below is the one
+        // both forms share.
+        lt1: int64 = infer_expr(tc, s.b)
+        infer_expr(tc, s.c)
+        lhs1: ExprNode = vec_get((*a).exprs, s.b)
+        check_incdec(tc, s.b, s.a, lt1, lhs1.lo, lhs1.hi)
+        check_assign_target(tc, s.b)
     } else if s.kind == sk_assign_op() {
         lt2: int64 = infer_expr(tc, s.b)
         rt2: int64 = infer_expr(tc, s.c)

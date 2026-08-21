@@ -1,0 +1,39 @@
+@paradigm procedural
+
+@import std.vector
+
+// The accept twin for a typed field read: a field carries its declared type through an
+// annotation of that type, through arithmetic at its own width, through a chain of struct
+// fields, through an index, and through a generic call, and a pointer field is still freed
+// by whoever owns it. A field whose declaration names the struct's own type parameter
+// stays the wildcard, since the arena erases a named type's arguments.
+struct Inner { n: int32 }
+
+struct Outer { inner: Inner, tag: uint8, xs: int64[3], items: *Vector<int64> }
+
+struct Held<T> { v: T, count: int64 }
+
+func take32(n: int32) -> int32 {
+    return n
+}
+
+func main() -> int32 {
+    v: *Vector<int64> = alloc(vec_new())
+    vec_push(v, 7)
+    o: Outer = Outer { inner: Inner { n: 5i32 }, tag: 3u8, xs: [1, 2, 3], items: v }
+    a: int32 = o.inner.n
+    println(a)
+    println(take32(o.inner.n + 1i32))
+    b: uint8 = o.tag
+    println(b)
+    println(o.xs[1])
+    println(vec_len(o.items))
+    h: Held<int64> = Held { v: 9, count: 1 }
+    println(h.count)
+    // A field declared as the struct's own type parameter is the wildcard on the surface
+    // and its ground instantiation's concrete type after mono.
+    println(h.v)
+    vec_free(v)
+    free(v)
+    return 0
+}

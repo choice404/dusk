@@ -27,6 +27,12 @@ export func parse_module(p: *Parser) -> *Ast {
             reading = false
         } else if p_muted(p) {
             reading = false
+        } else if p_at(p, k_semi()) {
+            // A semicolon terminates a statement, and the module body holds
+            // declarations rather than statements, so one between items ends nothing.
+            // The signature forms inside an interface or a foreign block keep their
+            // own optional `;`, which is item grammar and stays as it is.
+            p_stray_semi(p, stray_semi_item())
         } else {
             before: int64 = (*p).pos
             dlo, dhi := p_take_doc(p)
@@ -202,11 +208,25 @@ func parse_item(p: *Parser) -> void {
         return
     }
     if p_kw(p, "impl") {
+        // An impl block has no visibility of its own: a method is reachable exactly where
+        // its receiver type is, so the export on the type is the one that counts. The
+        // keyword parsed and its flag was dropped on the floor, which read as an export
+        // that did nothing.
+        if exported {
+            p_error(p, "an impl takes no export; its methods follow the receiver type")
+        }
         imid: int64 = parse_impl_item(p)
         ast_item(p_ast(p), ik_impl(), imid)
         return
     }
     if p_kw(p, "foreign") {
+        // A foreign block has no visibility of its own either: its functions are the C
+        // symbols they name, never privatized and never renamed, so every importer reaches
+        // them by those names whatever is written here. The keyword parsed and its flag was
+        // dropped on the floor, which read as an export that did nothing.
+        if exported {
+            p_error(p, "a foreign block takes no export; its functions are reached by their own names")
+        }
         fid3: int64 = parse_foreign_item(p)
         ast_item(p_ast(p), ik_foreign(), fid3)
         return

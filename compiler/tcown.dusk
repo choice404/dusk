@@ -13,6 +13,28 @@
 @import tcscope
 @import tcmatch
 
+/** Whether an expression names storage a write can reach: a binding, a field chain, a
+ *  scalar index (a range mints an rvalue slice), or a dereference. Everything else has
+ *  no address, and codegen would silently drop the store. Both writers ask it, the
+ *  assignment statements and the increment and decrement expression, so the two agree
+ *  on what a place is.
+ *  @param a the AST holding the expression
+ *  @param id the expression to test
+ *  @return true when the expression names storage */
+export func is_place_expr(a: *Ast, id: int64) -> bool {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() { return true }
+    if e.kind == xk_field() { return is_place_expr(a, e.a) }
+    if e.kind == xk_index() {
+        idx: ExprNode = vec_get((*a).exprs, e.b)
+        return idx.kind != xk_range()
+    }
+    if e.kind == xk_unary() {
+        if e.a == uop_deref() { return true }
+    }
+    return false
+}
+
 /** Whether a lowered type is a managed pointer, a non raw pointer to a non unit type,
  *  the base test the ownership discipline uses to decide a value must be tracked and
  *  released.
@@ -121,6 +143,12 @@ func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
         }
     } else if e.kind == xk_match() {
         mark_errs_in_rec(tc, e.a)
+    } else if e.kind == xk_ifexpr() {
+        // Only the condition, matching the match arm above: a branch body is a block,
+        // and a block's own statements discharge their obligations as they are checked.
+        mark_errs_in_rec(tc, e.a)
+    } else if e.kind == xk_incdec() {
+        mark_errs_in_rec(tc, e.a)
     } else if e.kind == xk_do() {
         mut m: int64 = 0
         while m < e.c {
@@ -203,6 +231,43 @@ export func match_arm_tail(a: *Ast, block_id: int64) -> int64 {
     return st.a
 }
 
+/** How many branches a branching expression has: two for an if used as a value, whose
+ *  else block the grammar always supplies, and one per arm for a match. The two node
+ *  kinds answer the same questions to the checks that judge a result out of several
+ *  branches, so those checks walk both through this accessor rather than special casing
+ *  the layout each time.
+ *  @param a the AST holding the expression
+ *  @param e the match or if expression node
+ *  @return the branch count */
+export func branch_count(a: *Ast, e: ExprNode) -> int64 {
+    if e.kind == xk_ifexpr() { return 2 }
+    return e.c
+}
+
+/** The block one branch of a branching expression runs: the then block at 0 and the else
+ *  block at 1 for an if, the arm's body for a match.
+ *  @param a the AST holding the expression
+ *  @param e the match or if expression node
+ *  @param i the branch index, below branch_count
+ *  @return the block id the branch runs */
+export func branch_block_at(a: *Ast, e: ExprNode, i: int64) -> int64 {
+    if e.kind == xk_ifexpr() {
+        if i == 0 { return e.b }
+        return e.c
+    }
+    arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
+    return arm.body
+}
+
+/** The tail value expression of one branch, or -1 when the branch yields no value.
+ *  @param a the AST holding the expression
+ *  @param e the match or if expression node
+ *  @param i the branch index, below branch_count
+ *  @return the tail expression id, or -1 */
+export func branch_tail_at(a: *Ast, e: ExprNode, i: int64) -> int64 {
+    return match_arm_tail(a, branch_block_at(a, e, i))
+}
+
 // Whether a name is one of a variant pattern's payload binders.
 func pat_binds_name(a: *Ast, pat_id: int64, name: string) -> bool {
     p: PatternNode = vec_get((*a).patterns, pat_id)
@@ -259,7 +324,7 @@ export func arm_own_value(tc: *TypeChecker, pat_id: int64, tail_id: int64, subj_
     // verdict consults it rather than assuming an owner. A borrow that flows out of
     // the inner match therefore propagates outward and the free/move/return consumers
     // see it; a missing entry means the inner match was not a managed-pointer match.
-    if tail.kind == xk_match() {
+    if tail.kind == xk_match() || tail.kind == xk_ifexpr() {
         v: int64 = match_own_of(tc, tail_id)
         if v >= 0 { return v }
         return own_owner()
@@ -286,20 +351,22 @@ export func arm_copy_fault(tc: *TypeChecker, pat_id: int64, tail_id: int64, subj
     return -1
 }
 
-/** The match-expression ownership verdict, keyed by the match expr id. Populated by
- *  walk_match_expr on the surface pass while each arm scope is live; read by the binding,
+/** The result ownership verdict of a branching expression, keyed by its expr id. A match
+ *  and an if used as a value both write here, since both hand one result out of several
+ *  branches and the consumers ask the same question of either. Populated by walk_match_expr
+ *  and walk_ifexpr on the surface pass while each branch scope is live; read by the binding,
  *  destructure, free/move, and return-position checks. own_owner()/own_borrow() carry the
- *  verdict; a missing entry means the match was not a managed-pointer match (or the ground
- *  pass, which never writes). */
+ *  verdict; a missing entry means the expression was not a managed-pointer one (or the
+ *  ground pass, which never writes). */
 export func set_match_own(tc: *TypeChecker, id: int64, v: int64) -> void {
     map_put((*tc).match_own, id, v)
 }
 
-/** The ownership verdict recorded for a managed-pointer match expression, or -1 when
+/** The ownership verdict recorded for a managed-pointer match or if expression, or -1 when
  *  none was recorded, the read paired with set_match_own.
- *  @param tc the type checker holding the match verdicts
- *  @param id the match expression id
- *  @return the recorded ownership tag, or -1 when the match has no verdict */
+ *  @param tc the type checker holding the branch verdicts
+ *  @param id the match or if expression id
+ *  @return the recorded ownership tag, or -1 when the expression has no verdict */
 export func match_own_of(tc: *TypeChecker, id: int64) -> int64 {
     return unwrap_or(map_get((*tc).match_own, id), -1)
 }
@@ -358,7 +425,7 @@ export func arm_tail_managed(tc: *TypeChecker, subj_id: int64, pat_id: int64, ta
     // A nested match tail's inferred type is a surface hole, so its managed status reads
     // from the verdict the inner walk stored: a present match_own entry is the evidence
     // that the inner match was itself a managed-pointer match and this arm carries one.
-    if tail.kind == xk_match() {
+    if tail.kind == xk_match() || tail.kind == xk_ifexpr() {
         return match_own_of(tc, tail_id) >= 0
     }
     return is_managed_ty(tc, tail_ty)
@@ -435,11 +502,11 @@ export func arm_tail_unprovable(tc: *TypeChecker, subj_id: int64, pat_id: int64,
  *  @return the ownership tag the binding is declared with */
 export func binding_own(tc: *TypeChecker, stmt: StmtNode, value: ExprNode, vt: int64, decl_ty: int64) -> int64 {
     if (stmt.d & 2) != 0 { return own_borrow() }
-    // A match expression bound to a managed pointer takes the verdict its arms agreed on,
-    // computed by walk_match_expr with the arm scopes live and stored under the value expr
-    // id. The judgment is surface-only, so the ground pass keeps the owner default and
-    // stays byte-identical.
-    if value.kind == xk_match() {
+    // A match or if expression bound to a managed pointer takes the verdict its branches
+    // agreed on, computed by walk_match_expr or walk_ifexpr with the branch scopes live and
+    // stored under the value expr id. The judgment is surface-only, so the ground pass keeps
+    // the owner default and stays byte-identical.
+    if value.kind == xk_match() || value.kind == xk_ifexpr() {
         if (*tc).types_only { return own_owner() }
         v: int64 = match_own_of(tc, stmt.c)
         if v >= 0 { return v }

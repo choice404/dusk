@@ -40,7 +40,16 @@ export struct CapFlow { idx: int64, name: string }
  *  fn_bind_cache memoizes the resolvable function binds of one body id, a purely
  *  lexical read of the AST that the fixpoint would otherwise recompute on every
  *  reanalysis of the same function; fn_bind_empty is the shared read-only fallback
- *  a cache read names, never handed out and never written. */
+ *  a cache read names, never handed out and never written.
+ *  lam_used_cache memoizes one lambda's free identifiers on its expression id, the
+ *  same purely lexical read, with lam_used_empty as its read-only fallback.
+ *  lam_sum_cache and lam_caps_cache memoize one lambda's standalone summary and its
+ *  serialized capture edges on that same id. Those two are not lexical: they read the
+ *  callee summary table, so each entry carries the generation it was computed under in
+ *  lam_sum_gen and only counts as a hit at the current lam_cache_gen. One transfer of a
+ *  function is one generation, and the summary table is never written during a transfer,
+ *  so a hit inside a transfer is the value that transfer would have recomputed, and a
+ *  summary that grew between transfers can never be read back stale. */
 export struct SumTables {
     ast: *Ast,
     ifaces: *Map<string, int64>,
@@ -51,7 +60,23 @@ export struct SumTables {
     module_fns: *Map<string, int64>,
     fn_bind_cache: *Map<int64, *Map<string, string>>,
     fn_bind_empty: *Map<string, string>,
+    lam_used_cache: *Map<int64, *Vector<string>>,
+    lam_used_empty: *Vector<string>,
+    lam_cache_gen: int64,
+    lam_sum_gen: *Map<int64, int64>,
+    lam_sum_cache: *Map<int64, SummaryHandle>,
+    lam_caps_cache: *Map<int64, string>,
     infer_ty: int64,
+}
+
+/** Opens a new lambda-summary generation, retiring every cached standalone summary.
+ *  The walk of one function reads a fixed callee summary table, so a cached summary is
+ *  reusable for exactly as long as that table holds still; the fixpoint calls this
+ *  before each function's transfer, so a summary that grew since the last transfer is
+ *  never read back out of the cache. The lexical caches are untouched: the AST they
+ *  read does not move. */
+export func sum_lambda_cache_reset(t: *SumTables) -> void {
+    (*t).lam_cache_gen = (*t).lam_cache_gen + 1
 }
 
 /** The escape info the enforcement step reads. summaries and method_summaries are
@@ -238,7 +263,12 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
     infer_ty: int64 = ast_type(a, tk_infer(), 0, 0, 0)
     fn_bind_cache: *Map<int64, *Map<string, string>> = alloc(map_new())
     fn_bind_empty: *Map<string, string> = alloc(map_new())
-    return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, enum_idx: enum_idx, variant_idx: variant_idx, variant_by_enum: variant_by_enum, module_fns: module_fns, fn_bind_cache: fn_bind_cache, fn_bind_empty: fn_bind_empty, infer_ty: infer_ty })
+    lam_used_cache: *Map<int64, *Vector<string>> = alloc(map_new())
+    lam_used_empty: *Vector<string> = alloc(vec_new())
+    lam_sum_gen: *Map<int64, int64> = alloc(map_new())
+    lam_sum_cache: *Map<int64, SummaryHandle> = alloc(map_new())
+    lam_caps_cache: *Map<int64, string> = alloc(map_new())
+    return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, enum_idx: enum_idx, variant_idx: variant_idx, variant_by_enum: variant_by_enum, module_fns: module_fns, fn_bind_cache: fn_bind_cache, fn_bind_empty: fn_bind_empty, lam_used_cache: lam_used_cache, lam_used_empty: lam_used_empty, lam_cache_gen: 0, lam_sum_gen: lam_sum_gen, lam_sum_cache: lam_sum_cache, lam_caps_cache: lam_caps_cache, infer_ty: infer_ty })
 }
 
 func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {

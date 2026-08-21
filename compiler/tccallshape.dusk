@@ -12,6 +12,7 @@
 @import tcstate
 @import tcscope
 @import tcbin
+@import tcfit
 @import tciface
 @import tcown
 @import tcesc
@@ -202,6 +203,45 @@ func enum_contains_variant(tc: *TypeChecker, en: string, v: string) -> bool {
     // One keyed lookup against the per enum variant table, the same answer the
     // old slot scan gave without the walk over every variant per constructor call.
     return sig_has_variant_in((*tc).sigtab, en, v)
+}
+
+// Whether the declaration this enum name resolves to carries type parameters, read
+// off the item list the same way a generic function name is read for a callback
+// argument. The signature tables record an enum's variants and payloads but not its
+// generics, and the payload walk needs no such question, so the declaration answers
+// it here rather than growing a table every enum pays for.
+func enum_is_generic(tc: *TypeChecker, name: string) -> bool {
+    a: *Ast = (*tc).ast
+    items: *Vector<ItemNode> = (*a).items
+    mut i: int64 = 0
+    while i < vec_len(items) {
+        it: ItemNode = vec_get(items, i)
+        if it.kind == ik_enum() {
+            e: EnumNode = vec_get((*a).enums, it.id)
+            if str_eq(ast_name(a, e.name), name) { return e.generics_len > 0 }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// The type a qualified constructor call hands back. A non generic enum answers with
+// its own named type, which is what every consumer of the value needed all along: an
+// annotation, an assignment, a return, an argument, and a payload field all compare
+// against it, and a match reads its variants straight off it. Before this the call
+// inferred the surface wildcard and each of those comparisons silently agreed, so
+// `x: int64 = Opt.Some(1)`, `o = Tag.Hi(1)` over an `Opt` binding, and a constructor
+// handed to a parameter of another enum all passed check and died in clang.
+//
+// A generic enum keeps the wildcard. The arena erases a named type's arguments, so
+// `Maybe<int64>` and `Maybe<string>` are one type here and a name alone would claim
+// an agreement the surface cannot prove; mono grounds the constructor into an
+// instantiated, non generic enum, and the ground pass types that copy by this same
+// rule. The enum-by-expression fallbacks (scrut_enum_name, the recorded enum of a
+// binding) still answer for the generic form, exactly as they did before.
+export func ctor_result_ty(tc: *TypeChecker, en: string) -> int64 {
+    if enum_is_generic(tc, en) { return ty_unknown((*tc).ty) }
+    return ty_named((*tc).ty, en)
 }
 
 func ctor_arity_msg(en: string, v: string, want: int64, got: int64) -> string {

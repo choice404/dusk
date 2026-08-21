@@ -205,7 +205,8 @@ func lx_is_doc_open(lx: *Lexer) -> bool {
     return true
 }
 
-// Skips a Rust-style nested block comment starting at "/*". Inside a block comment
+// Skips a block comment starting at "/*". A plain block comment nests, the Rust rule; a
+// doc block ("/**") does not, and ends at its first "*/". Inside a block comment
 // only "/*" and "*/" are significant: quotes and "//" are inert, so a commented-out
 // string literal or line comment cannot reopen or extend the block. A newline inside
 // the comment sets the pending newline flag, so a multi-line comment terminates a
@@ -213,10 +214,12 @@ func lx_is_doc_open(lx: *Lexer) -> bool {
 // unterminated comment records a fault at its opening "/*". The byte scan is UTF-8
 // safe: 0x2A, 0x2F, and 0x0A never appear as a continuation byte.
 //
-// A doc block ("/**") is skipped identically, producing no token, but on clean
+// A doc block ("/**") is skipped the same way, producing no token, but on clean
 // termination its full byte span [open, pos), delimiters included, is recorded in
 // the docs side table for the parser to bind to the item it precedes. An
-// unterminated doc block records the same fault and captures nothing.
+// unterminated doc block records the same fault, against its own opening "/**", and
+// captures nothing. The one difference is nesting: a "/*" inside a doc block is prose,
+// not a nested comment, so a doc that mentions cmd/*.dusk still ends at its own "*/".
 func lx_skip_block_comment(lx: *Lexer) -> void {
     open: int64 = lx_pos(lx)
     is_doc: bool = lx_is_doc_open(lx)
@@ -244,7 +247,16 @@ func lx_skip_block_comment(lx: *Lexer) -> void {
         } else if b == 47 {
             if lx_peek2(lx) == 42 {
                 (*lx).pos = (*lx).pos + 2
-                depth = depth + 1
+                // A plain block comment nests, so a commented-out block of code that
+                // holds its own comment closes where it should. A doc block does not: it
+                // is prose about the item below it, and prose holds glob patterns like
+                // cmd/*.dusk and shell snippets that open a comment nobody ever closes.
+                // Nesting them swallowed the rest of the file, and the fault landed at
+                // end of input rather than on the sentence that caused it. A doc block
+                // ends at its first "*/".
+                if !is_doc {
+                    depth = depth + 1
+                }
             } else {
                 (*lx).pos = (*lx).pos + 1
             }

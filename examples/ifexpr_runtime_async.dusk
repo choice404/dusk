@@ -1,0 +1,29 @@
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+// A selected branch may await, and the if result survives the suspension.
+async func value(n: int64) -> int64 {
+    return n
+}
+
+async func amain() -> int32 {
+    c: bool = true
+    chosen: int64 = if c {
+        result, err := await value(14)
+        err.ignore()
+        result
+    } else {
+        9
+    }
+    println(chosen)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

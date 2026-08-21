@@ -232,6 +232,27 @@ export func reject_iface_targ_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi
     }
 }
 
+// An enum handed where an interface is expected. An interface is erased to the checker's
+// wildcard in the lowered arena, so the ordinary argument, binding, and return comparisons
+// all agree with it and this is the one place the pairing is judged; before this rule the
+// enum arm fell through and the value reached codegen, where the method call had no vtable
+// to read and the program died with no dusk error to its name. An enum can never carry the
+// impl either: a method on an enum is refused where it is written.
+func iface_enum_msg(concrete: string, iface: string) -> string {
+    disp: string = base_type_name(concrete)
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "cannot use the enum '")
+    sb_push(s, disp)
+    sb_push(s, "' as interface '")
+    sb_push(s, iface)
+    sb_push(s, "'; only a struct can implement an interface, so wrap the enum in one")
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    free(disp)
+    return out
+}
+
 export func check_conformance(tc: *TypeChecker, expected: int64, actual: int64, lo: int64, hi: int64) -> void {
     reject_collector_iface_box(tc, expected, actual, lo, hi)
     en: TyNode = ty_get((*tc).ty, expected)
@@ -240,9 +261,13 @@ export func check_conformance(tc: *TypeChecker, expected: int64, actual: int64, 
     if en.kind == tyk_named() && an.kind == tyk_named() {
         iface: string = ty_name((*tc).ty, expected)
         concrete: string = ty_name((*tc).ty, actual)
-        if tc_has_iface(tc, iface) && !tc_has_iface(tc, concrete) && tc_has_struct(tc, concrete) {
-            if !tc_has_impl(tc, sig_pair_key(iface, concrete)) {
-                tc_emit(tc, iface_impl_msg(concrete, iface), lo, hi)
+        if tc_has_iface(tc, iface) && !tc_has_iface(tc, concrete) {
+            if tc_has_struct(tc, concrete) {
+                if !tc_has_impl(tc, sig_pair_key(iface, concrete)) {
+                    tc_emit(tc, iface_impl_msg(concrete, iface), lo, hi)
+                }
+            } else if tc_has_enum(tc, concrete) {
+                tc_emit(tc, iface_enum_msg(concrete, iface), lo, hi)
             }
         }
     }

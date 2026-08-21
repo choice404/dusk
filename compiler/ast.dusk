@@ -109,10 +109,32 @@ export func xk_collect() -> int64 { return 21 }
 // expressions. Every generic expr walker recurses the kids uniformly, like an
 // array's; only codegen reads the alternation to weave chunks and holes.
 export func xk_fstr() -> int64 { return 22 }
+// An increment or decrement, `x++`, `x--`, `++x`, `--x`. a is the place it reads and
+// writes, b is bop_add or bop_sub, c is incdec_pre or incdec_post, and d is the
+// operator token's low byte, a span that shifts with lo and hi when a module is
+// merged. A postfix form yields the place's old value and a prefix form its new one;
+// a whole statement that is one of these discards the value, so the parser folds that
+// case back into the compound assignment it has always been.
+export func xk_incdec() -> int64 { return 23 }
+// An `if` used as a value. a is the condition, b is the then block, and c is the else
+// block, which the value form always has: the grammar refuses a valueless branch, and
+// the recovery path fills an empty block, so no walker meets a missing branch. An
+// `else if` chain nests one of these inside the else block as its single expression
+// statement, the shape the statement `if` already uses, and a ternary builds the same
+// node with a single expression block per branch.
+export func xk_ifexpr() -> int64 { return 24 }
 
 export func sk_let() -> int64 { return 0 }
 export func sk_assign() -> int64 { return 1 }
 export func sk_assign_op() -> int64 { return 2 }
+// Where a compound assignment came from, the d field of an sk_assign_op. A `+=` and
+// its siblings record aos_written, the zero every other producer already passes; a
+// statement that was one `++` or `--` records which form it was spelled as, so the
+// checker judges it by the operator's own rule and names the operator the source
+// holds rather than the addition the fold produced.
+export func aos_written() -> int64 { return 0 }
+export func aos_postfix() -> int64 { return 1 }
+export func aos_prefix() -> int64 { return 2 }
 export func sk_return() -> int64 { return 3 }
 export func sk_defer() -> int64 { return 4 }
 export func sk_if() -> int64 { return 5 }
@@ -153,6 +175,11 @@ export func dk_method_sig() -> int64 { return 4 }
 export func dk_module() -> int64 { return 5 }
 export func dk_impl() -> int64 { return 6 }
 export func dk_foreign_func() -> int64 { return 7 }
+
+// Where the operator of an xk_incdec sits, the c field. Postfix yields the value the
+// place held before the write, prefix the value it holds after.
+export func incdec_post() -> int64 { return 0 }
+export func incdec_pre() -> int64 { return 1 }
 
 export func uop_deref() -> int64 { return 0 }
 export func uop_neg() -> int64 { return 1 }

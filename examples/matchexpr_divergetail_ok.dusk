@@ -1,0 +1,49 @@
+// A match expression arm whose tail is an `if` used as a value that returns on both
+// sides. The arm yields nothing at all, so the result slot is written only by the arms
+// that do yield, and the branching tail writes that slot directly instead of building a
+// value of its own. The binding takes its type from its annotation in g and from the
+// other arm in gi, and a pointer result and a string result are both here because a
+// tail that invents its own result is only visible when the real one is not an int.
+@paradigm procedural
+
+enum E { A, B }
+
+func g(e: E, c: bool) -> int64 {
+    p: *int64 = match e {
+        A => { if c { return 10 } else { return 11 } },
+        B => { alloc(5) },
+    }
+    n: int64 = *p
+    free(p)
+    return n
+}
+
+func gi(e: E, c: bool) -> int64 {
+    p := match e {
+        A => { if c { return 20 } else { return 21 } },
+        B => { alloc(6) },
+    }
+    n: int64 = *p
+    free(p)
+    return n
+}
+
+func h(e: E, c: bool) -> string {
+    s: string = match e {
+        A => { if c { return "ten" } else { return "eleven" } },
+        B => { "five" },
+    }
+    return s
+}
+
+func main() -> int32 {
+    println(g(E.A, true))
+    println(g(E.A, false))
+    println(g(E.B, true))
+    println(gi(E.A, true))
+    println(gi(E.B, true))
+    println(h(E.A, true))
+    println(h(E.A, false))
+    println(h(E.B, true))
+    return 0
+}

@@ -12,6 +12,7 @@
 @import tcstate
 @import tcscope
 @import tcbin
+@import tcfit
 @import tciface
 @import tcown
 @import tcesc
@@ -45,7 +46,10 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                     check_slice_covariance(tc, sig_ty_at((*tc).sigtab, TyList { off: payloads.off, len: payloads.len }, ci), vec_get(arg_tys, ci), arg_id, arg.lo, arg.hi)
                     ci = ci + 1
                 }
-                return ty_unknown((*tc).ty)
+                // The constructor call is the enum's value, so it carries the enum's
+                // type; ctor_result_ty holds back only the generic form, whose arguments
+                // this arena does not keep.
+                return ctor_result_ty(tc, en)
             }
         }
         bn_base: TyNode = ty_get((*tc).ty, base_ty)
@@ -256,10 +260,11 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                 if arg_len > 0 {
                     arg0_id: int64 = vec_get((*a).kids, arg_off)
                     arg0: ExprNode = vec_get((*a).exprs, arg0_id)
-                    // A move argument is a managed context, so a match argument earns the
-                    // verdict even when its arms are unresolved generic payload binders that
-                    // resolve managed only at ground. walk_match_expr captures and clears it.
-                    if !(*tc).types_only && arg0.kind == xk_match() { (*tc).match_ctx = 1 }
+                    // A move argument is a managed context, so a branching argument earns
+                    // the verdict even when its branches are unresolved generic payload
+                    // binders that resolve managed only at ground. The branch walk captures
+                    // and clears it.
+                    if !(*tc).types_only && (arg0.kind == xk_match() || arg0.kind == xk_ifexpr()) { (*tc).match_ctx = 1 }
                     mt: int64 = infer_expr(tc, arg0_id)
                     mn: TyNode = ty_get((*tc).ty, mt)
                     if mn.kind == tyk_collector() {
@@ -276,10 +281,10 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                         if !(*tc).types_only && free_call_arg_aliases(tc, arg0) {
                             tc_emit(tc, alias_result_msg("move"), arg0.lo, arg0.hi)
                         }
-                    } else if arg0.kind == xk_match() {
-                        // Moving a match expression whose arms borrow moves a pointer the
-                        // subject still owns; the verdict walk_match_expr stored rejects it
-                        // with the same voice a borrowed identifier earns.
+                    } else if arg0.kind == xk_match() || arg0.kind == xk_ifexpr() {
+                        // Moving a branching expression whose branches borrow moves a pointer
+                        // the subject still owns; the verdict the branch walk stored rejects
+                        // it with the same voice a borrowed identifier earns.
                         if !(*tc).types_only && match_own_of(tc, arg0_id) == own_borrow() {
                             tc_emit(tc, "cannot move a borrowed pointer; only its owner can be moved", arg0.lo, arg0.hi)
                         }
@@ -292,9 +297,10 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                 if arg_len > 0 {
                     farg_id: int64 = vec_get((*a).kids, arg_off)
                     farg: ExprNode = vec_get((*a).exprs, farg_id)
-                    // A free argument is a managed context, so a match argument earns the
-                    // verdict even when its arms are unresolved generic payload binders.
-                    if !(*tc).types_only && farg.kind == xk_match() { (*tc).match_ctx = 1 }
+                    // A free argument is a managed context, so a branching argument earns
+                    // the verdict even when its branches are unresolved generic payload
+                    // binders.
+                    if !(*tc).types_only && (farg.kind == xk_match() || farg.kind == xk_ifexpr()) { (*tc).match_ctx = 1 }
                     ft: int64 = infer_expr(tc, farg_id)
                     fnode: TyNode = ty_get((*tc).ty, ft)
                     // The heap-type validation compares an effective type: a field access
@@ -327,9 +333,10 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                         if !(*tc).types_only && free_call_arg_aliases(tc, farg) {
                             tc_emit(tc, alias_result_msg("free"), farg.lo, farg.hi)
                         }
-                    } else if farg.kind == xk_match() {
-                        // Freeing a match expression whose arms borrow frees a pointer the
-                        // subject still owns; the stored verdict rejects the double free.
+                    } else if farg.kind == xk_match() || farg.kind == xk_ifexpr() {
+                        // Freeing a branching expression whose branches borrow frees a
+                        // pointer the subject still owns; the stored verdict rejects the
+                        // double free.
                         if !(*tc).types_only && match_own_of(tc, farg_id) == own_borrow() {
                             tc_emit(tc, "cannot free a borrowed pointer; only its owner frees it", farg.lo, farg.hi)
                         }

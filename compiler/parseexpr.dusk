@@ -11,14 +11,70 @@
 @import parsestmt
 
 export func parse_expr(p: *Parser) -> int64 {
-    return parse_range(p)
+    return parse_ternary(p)
 }
 export func parse_expr_no_struct(p: *Parser) -> int64 {
     saved: bool = (*p).no_struct
     (*p).no_struct = true
-    e: int64 = parse_range(p)
+    e: int64 = parse_ternary(p)
     (*p).no_struct = saved
     return e
+}
+
+// A single expression as a block: one expression statement whose value is the
+// block's tail. A ternary branch and an `else if` link both take this shape, so the
+// conditional operator, the `if` value form, and the chained form all build the one
+// node kind and every later pass reads a branch's value the same way.
+func expr_block(p: *Parser, e: int64) -> int64 {
+    one: *Vector<int64> = alloc(vec_new())
+    vec_push(one, ast_stmt(p_ast(p), sk_expr(), e, 0, 0, 0))
+    return ast_block(p_ast(p), one)
+}
+
+// Whether a conditional operator continues here. Like every other chain the grammar
+// folds, it never continues across a line break, so a `?` opening the next line is
+// left to the statement grammar rather than pulled onto the line above.
+func at_ternary(p: *Parser) -> bool {
+    if !p_at(p, k_question()) { return false }
+    return !p_nl_here(p)
+}
+
+// c ? a : b, the loosest expression operator: it sits below the range and the pipe,
+// so both branches may be a full expression, and above the statement's assignment,
+// which is not an expression at all. It is right associative, the else branch taking
+// one more conditional, so a ? b : c ? d : e reads as a ? b : (c ? d : e). The branch
+// between `?` and `:` is a full expression, which is unambiguous because the `:`
+// closing a nested conditional is consumed by that nested parse first.
+func parse_ternary(p: *Parser) -> int64 {
+    cond: int64 = parse_range(p)
+    if !at_ternary(p) {
+        return cond
+    }
+    mut e: int64 = cond
+    if p_enter_nesting(p, "expression", "expression") {
+        e = parse_ternary_rest(p, cond)
+    }
+    p_leave_nesting(p)
+    return e
+}
+
+func parse_ternary_rest(p: *Parser, cond: int64) -> int64 {
+    q_lo: int64 = p_lo(p)
+    q_hi: int64 = p_hi(p)
+    p_bump(p)
+    then_e: int64 = parse_expr(p)
+    if !p_eat(p, k_colon()) {
+        // The caret points at the `?`, the operator whose second half is missing.
+        // Recovery keeps the branch already parsed and drops the conditional, so the
+        // statement ends where it stands rather than swallowing the next line as an
+        // else branch and burying this diagnostic under the faults that would cause.
+        p_error_span(p, q_lo, q_hi, "a conditional needs a ':' and a second branch, as in c ? a : b")
+        return then_e
+    }
+    else_e: int64 = parse_expr(p)
+    c: ExprNode = vec_get((*p_ast(p)).exprs, cond)
+    r: ExprNode = vec_get((*p_ast(p)).exprs, else_e)
+    return ast_expr(p_ast(p), xk_ifexpr(), c.lo, r.hi, cond, expr_block(p, then_e), expr_block(p, else_e), 0)
 }
 
 func parse_range(p: *Parser) -> int64 {
@@ -155,6 +211,17 @@ func parse_unary_inner(p: *Parser) -> int64 {
         n: ExprNode = vec_get((*p_ast(p)).exprs, e)
         return ast_expr(p_ast(p), xk_unary(), lo, n.hi, uop_deref(), e, 0, 0)
     }
+    // ++x and --x bind exactly as tightly as unary minus, so ++x.f increments the
+    // field and ++x + 1 adds to the incremented value. The operand is parsed by the
+    // same unary level, which is what lets the prefix form stack on a postfix chain.
+    pre: int64 = incdec_op(p)
+    if pre >= 0 {
+        op_lo: int64 = p_lo(p)
+        p_bump(p)
+        e1: int64 = parse_unary(p)
+        n1: ExprNode = vec_get((*p_ast(p)).exprs, e1)
+        return ast_expr(p_ast(p), xk_incdec(), lo, n1.hi, e1, pre, incdec_pre(), op_lo)
+    }
     mut op: int64 = -1
     if p_at(p, k_star()) { op = uop_deref() }
     if p_at(p, k_minus()) { op = uop_neg() }
@@ -196,18 +263,35 @@ func recook_format_arg(p: *Parser, callee: int64, args: *Vector<int64>) -> void 
     vec_set(args, 0, ns)
 }
 
+// The arithmetic of an increment or decrement token, bop_add for `++` and bop_sub
+// for `--`, or -1 where the current token is neither. Both forms read and write the
+// same place, so they differ only in the operator this returns.
+func incdec_op(p: *Parser) -> int64 {
+    if p_at(p, k_plus_plus()) { return bop_add() }
+    if p_at(p, k_minus_minus()) { return bop_sub() }
+    return -1
+}
+
 // Whether the current token opens one more postfix link on the value already parsed:
-// a call, an index, or a field.
+// a call, an index, a field, or a postfix increment or decrement.
 func at_postfix_link(p: *Parser) -> bool {
     if p_at(p, k_lparen()) { return true }
     if p_at(p, k_lbracket()) { return true }
     if p_at(p, k_dot()) { return true }
+    if incdec_op(p) >= 0 { return true }
     return false
 }
 
 // One postfix link over e. The caller has established that the current token opens
-// one of the three, so the field case is the remaining alternative.
+// one of the four, so the field case is the remaining alternative.
 func parse_postfix_link(p: *Parser, e: int64) -> int64 {
+    post: int64 = incdec_op(p)
+    if post >= 0 {
+        op_lo: int64 = p_lo(p)
+        p_bump(p)
+        n0: ExprNode = vec_get((*p_ast(p)).exprs, e)
+        return ast_expr(p_ast(p), xk_incdec(), n0.lo, p_prev_hi(p), e, post, incdec_post(), op_lo)
+    }
     if p_at(p, k_lparen()) {
         p_bump(p)
         saved: bool = (*p).no_struct
@@ -236,8 +320,8 @@ func parse_postfix_link(p: *Parser, e: int64) -> int64 {
     return ast_expr(p_ast(p), xk_field(), n3.lo, p_prev_hi(p), e, name, 0, 0)
 }
 
-// x.f.g, f()(), and a[0][0] all fold left in this loop, one AST level per link, so a
-// postfix chain deepens the tree without recursing in the parser. A call link is the
+// x.f.g, f()(), a[0][0], and i++ all fold left in this loop, one AST level per link,
+// so a postfix chain deepens the tree without recursing in the parser. A call link is the
 // most expensive level any later pass walks, so each link takes a unit of the nesting
 // budget; without the charge a 924 link chain overflowed the stack in typeck.
 func parse_postfix(p: *Parser) -> int64 {
@@ -337,6 +421,9 @@ func parse_primary(p: *Parser) -> int64 {
         lo: int64 = p_lo(p)
         scrut, off, len, hi := parse_match_parts(p)
         return ast_expr(p_ast(p), xk_match(), lo, hi, scrut, off, len, 0)
+    }
+    if p_kw(p, "if") {
+        return parse_if_expr(p)
     }
     if p_kw(p, "do") {
         return parse_do_expr(p)
@@ -500,6 +587,61 @@ func parse_struct_lit(p: *Parser, name: int64, lo: int64) -> int64 {
     p_expect(p, k_rbrace())
     off, len := ast_kids(p_ast(p), fields)
     return ast_expr(p_ast(p), xk_struct_lit(), lo, p_prev_hi(p), name, off, len, 0)
+}
+
+// A branch block of an `if` used as a value. A block is a fresh statement context, so
+// the struct-literal suppression a condition or an iterand turns on is lifted inside it
+// and restored after; without that, the literal brace in `for x in if c { P { n: 1 } }
+// else { q }` would read as the loop body's opening brace.
+func parse_branch_block(p: *Parser) -> int64 {
+    saved: bool = (*p).no_struct
+    (*p).no_struct = false
+    b: int64 = parse_block(p)
+    (*p).no_struct = saved
+    return b
+}
+
+// `if` in expression position. parse_stmt takes the statement form first, so this is
+// reached only where a value is wanted, and there the else branch is not optional: a
+// missing branch has no value to give. The recovery path fills an empty block rather
+// than leaving none, so every pass past the parser reads two real branches. The caret
+// points at the `if` itself, the keyword the fix follows, rather than at whatever token
+// happens to sit past the then block.
+func parse_if_expr(p: *Parser) -> int64 {
+    lo: int64 = p_lo(p)
+    kw_hi: int64 = p_hi(p)
+    p_expect_kw(p, "if")
+    cond: int64 = parse_expr_no_struct(p)
+    then_b: int64 = parse_branch_block(p)
+    mut els: int64 = -1
+    if p_eat_kw(p, "else") {
+        els = parse_else_branch(p)
+    } else {
+        p_error_span(p, lo, kw_hi, "an if used as a value needs an else branch")
+        empty: *Vector<int64> = alloc(vec_new())
+        els = ast_block(p_ast(p), empty)
+    }
+    return ast_expr(p_ast(p), xk_ifexpr(), lo, p_prev_hi(p), cond, then_b, els, 0)
+}
+
+// The else half of an if used as a value. A plain `else` takes a block; an `else if`
+// nests one more if-expression inside the else block as its single expression
+// statement, the same shape the statement form builds, so the block tail rule reads
+// the chain's value the same way at every level. The recursion is charged to the
+// nesting budget exactly as the statement form charges it, so a chain that outruns the
+// budget is named rather than left to overflow a later pass's stack.
+func parse_else_branch(p: *Parser) -> int64 {
+    if !p_kw(p, "if") {
+        return parse_branch_block(p)
+    }
+    if !p_enter_nesting(p, "block", "function") {
+        p_leave_nesting(p)
+        empty: *Vector<int64> = alloc(vec_new())
+        return ast_block(p_ast(p), empty)
+    }
+    b: int64 = expr_block(p, parse_if_expr(p))
+    p_leave_nesting(p)
+    return b
 }
 
 func parse_lambda_expr(p: *Parser) -> int64 {

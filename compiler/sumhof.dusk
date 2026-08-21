@@ -25,10 +25,8 @@ struct SavedParam { name: string, had_env: bool, env_val: SumVal, had_ty: bool, 
 // and walked inline (walk_lambda_inline) so stores through captured places and the
 // lambda's own relation are recorded.
 export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
-    id.ignore()
-    record_lambda_summary(c, e)
+    record_lambda_summary(c, e, id)
     a: *Ast = (*(*c).t).ast
-    used: *Vector<string> = alloc(vec_new())
     bound: *Map<string, int64> = alloc(map_new())
     mut p: int64 = 0
     while p < e.b {
@@ -36,7 +34,7 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
         map_put(bound, ast_name(a, pn.name), 1)
         p = p + 1
     }
-    collect_block_used((*c).t, e.d, used, bound)
+    used: *Vector<string> = lambda_used_names((*c).t, e, id, bound)
     env: *Map<string, SumVal> = (*c).env
     locals: *Map<string, int64> = (*c).locals
     pidx: *Map<string, int64> = (*c).param_index
@@ -67,7 +65,7 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
 // channel, the collect subset, and the capture-flow edges. First-wins per span:
 // desugar stamps a do's generated lambdas with the whole do span, so one span
 // records once, in walk order.
-func record_lambda_summary(c: *SumCtx, e: ExprNode) -> void {
+func record_lambda_summary(c: *SumCtx, e: ExprNode, id: int64) -> void {
     lret: *Map<string, int64> = (*c).lambda_returns
     lsink: *Map<string, int64> = (*c).lambda_sinks
     lcoll: *Map<string, int64> = (*c).lambda_collect_sinks
@@ -75,12 +73,64 @@ func record_lambda_summary(c: *SumCtx, e: ExprNode) -> void {
     lspans: *Vector<SpanKey> = (*c).lambda_spans
     key: string = sum_span_key(e.lo, e.hi)
     if map_has(lret, key) { return }
-    sm, caps := sum_transfer_lambda(c, e)
+    sm, caps := lambda_transfer(c, e, id)
     map_put(lret, key, sm.returns_alias | sm.reads_through)
     map_put(lsink, key, sm.sinks)
     map_put(lcoll, key, sm.collect_sinks)
-    if vec_len(caps) > 0 { map_put(lcap, key, serialize_caps(caps)) }
+    if str_len(caps) > 0 { map_put(lcap, key, caps) }
     vec_push(lspans, SpanKey { lo: e.lo, hi: e.hi })
+}
+
+// The standalone summary and serialized capture edges of one lambda, memoized on the
+// lambda's expression id for the current generation. The span key above cannot serve
+// as the memo key and the per-state table cannot serve as the memo: a do's generated
+// lambdas all carry the whole do span, and each level's summary is computed in a fresh
+// state whose span table starts empty, so a do of N steps re-derived every deeper level
+// once per level and paid cubic time in N. The expression id is unique per literal, so
+// keying on it collapses that to one derivation per lambda per transfer.
+//
+// Soundness rests on the transfer being a function of the callee summary table, the
+// enclosing generics, and the body: the walk of one function never writes the summary
+// table, every nested state inherits that same table and the same generics, and the AST
+// is fixed, so within one generation a hit is exactly what a recomputation would yield.
+// A summary that grows between transfers opens a new generation, so a stale, smaller
+// value can never be read back and no view is lost from the summary it feeds.
+func lambda_transfer(c: *SumCtx, e: ExprNode, id: int64) -> (SummaryHandle, string) {
+    t: *SumTables = (*c).t
+    stamps: *Map<int64, int64> = (*t).lam_sum_gen
+    gen: int64 = (*t).lam_cache_gen
+    if map_has(stamps, id) && unwrap_or(map_get(stamps, id), -1) == gen {
+        hit: SummaryHandle = unwrap_or(map_get((*t).lam_sum_cache, id), empty_summary())
+        return (hit, unwrap_or(map_get((*t).lam_caps_cache, id), ""))
+    }
+    sm, caps := sum_transfer_lambda(c, e)
+    ser: string = caps_string(caps)
+    map_put((*t).lam_sum_cache, id, sm)
+    map_put((*t).lam_caps_cache, id, ser)
+    map_put(stamps, id, gen)
+    return (sm, ser)
+}
+
+// The serialized capture edges of a lambda, or the empty string when it captures
+// nothing, so a capture-free lambda costs no allocation and records no capture line.
+func caps_string(caps: *Vector<CapFlow>) -> string {
+    if vec_len(caps) == 0 { return "" }
+    return serialize_caps(caps)
+}
+
+// The free identifiers of one lambda body, memoized on the lambda's expression id.
+// The walk reads only the AST and the lambda's own parameters, never a summary or any
+// walk state, so one lambda always yields the same list however many times an enclosing
+// function is reanalyzed. The bound map the caller hands in holds exactly those
+// parameters and the walk leaves it that way, so a hit and a miss agree on it. The
+// returned vector is the cache's own: callers read it and never write it.
+func lambda_used_names(t: *SumTables, e: ExprNode, id: int64, bound: *Map<string, int64>) -> *Vector<string> {
+    cache: *Map<int64, *Vector<string>> = (*t).lam_used_cache
+    if map_has(cache, id) { return unwrap_or(map_get(cache, id), (*t).lam_used_empty) }
+    used: *Vector<string> = alloc(vec_new())
+    collect_block_used(t, e.d, used, bound)
+    map_put(cache, id, used)
+    return used
 }
 
 // The standalone summary of a lambda body, plus its sorted capture-flow edges,
@@ -463,6 +513,12 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
         fnb_block(t, e.d, cand, pois)
     } else if e.kind == xk_match() {
         fnb_match(t, e.a, e.b, e.c, cand, pois)
+    } else if e.kind == xk_ifexpr() {
+        fnb_expr(t, e.a, cand, pois)
+        fnb_block(t, e.b, cand, pois)
+        fnb_block(t, e.c, cand, pois)
+    } else if e.kind == xk_incdec() {
+        fnb_expr(t, e.a, cand, pois)
     } else if e.kind == xk_collect() {
         fnb_expr(t, e.b, cand, pois)
     } else if e.kind == xk_do() {
@@ -631,6 +687,15 @@ func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *
         used_unbind(bound, lam)
     } else if e.kind == xk_match() {
         collect_match_used(t, e.a, e.b, e.c, used, bound)
+    } else if e.kind == xk_ifexpr() {
+        // An if used as a value binds nothing of its own, so each branch block scopes only
+        // its own lets, which collect_block_used binds and unbinds. A missed branch would
+        // lose a free name and read a closure over a dead frame as frame free.
+        collect_expr_used(t, e.a, used, bound)
+        collect_block_used(t, e.b, used, bound)
+        collect_block_used(t, e.c, used, bound)
+    } else if e.kind == xk_incdec() {
+        collect_expr_used(t, e.a, used, bound)
     } else if e.kind == xk_await() {
         collect_expr_used(t, e.a, used, bound)
     } else if e.kind == xk_collect() {

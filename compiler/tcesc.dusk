@@ -430,6 +430,22 @@ func value_escape_match(tc: *TypeChecker, e: ExprNode) -> EscPair {
     return out
 }
 
+// The escape of an if used as a value: the join of its two branch tails, since the value
+// that reaches the binding is one of them and the checker cannot say which. A branch with
+// no tail yields nothing to join. There is no subject to project, unlike a match arm, so
+// each tail answers for itself.
+func value_escape_ifexpr(tc: *TypeChecker, e: ExprNode) -> EscPair {
+    a: *Ast = (*tc).ast
+    mut out: EscPair = esc_none()
+    mut i: int64 = 0
+    while i < branch_count(a, e) {
+        tail: int64 = branch_tail_at(a, e, i)
+        if tail >= 0 { out = esc_or(out, value_escape(tc, tail)) }
+        i = i + 1
+    }
+    return out
+}
+
 export func value_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
     if (*tc).types_only { return esc_none() }
     a: *Ast = (*tc).ast
@@ -480,6 +496,7 @@ export func value_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
     }
     if e.kind == xk_call() { return value_escape_call(tc, e) }
     if e.kind == xk_match() { return value_escape_match(tc, e) }
+    if e.kind == xk_ifexpr() { return value_escape_ifexpr(tc, e) }
     return esc_none()
 }
 

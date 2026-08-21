@@ -1,0 +1,43 @@
+@paradigm oop
+@paradigm procedural
+
+@import std.vector
+
+// A generic call whose argument is a struct field read. The field declares its element
+// type, but a field read answered the checker's wildcard and mono had no argument type to
+// unify the callee's parameter against, so `vec_len(self.items)` reported an unpinnable
+// type parameter and the field had to be rebound to an annotated local before every such
+// call. Both the type pass and mono read the declaration now, so the call stands as
+// written and the method is one line again.
+struct Flag { on: bool }
+
+struct Flags { items: *Vector<*Flag> }
+
+impl Flags {
+    func count() -> int64 {
+        return vec_len(self.items)
+    }
+
+    // The container `for` lands in the same place: its pre-mono rewrite splices the very
+    // accessor calls above, over the same receiver field.
+    func lit() -> int64 {
+        mut n: int64 = 0
+        for f in self.items {
+            if (*f).on { n = n + 1 }
+        }
+        return n
+    }
+}
+
+func main() -> int32 {
+    v: *Vector<*Flag> = alloc(vec_new())
+    a: *Flag = alloc(Flag { on: true })
+    vec_push(v, a)
+    f: Flags = Flags { items: v }
+    println(f.count())
+    println(f.lit())
+    free(a)
+    vec_free(v)
+    free(v)
+    return 0
+}

@@ -410,6 +410,32 @@ func gx_binary_vals(s: *GenFuncState, op: int64, av0: Val, rhs: int64) -> Val {
     return av
 }
 
+// An increment or decrement in expression position. The place is addressed once, so an
+// index expression inside it is evaluated once and `arr[i++]` bumps i a single time; the
+// read, the arithmetic, and the write back are the compound assignment's own shape, and a
+// managed pointer deref in the chain takes its generation check there, once, like every
+// other place. Add and subtract are sign agnostic in two's complement, so one opcode pair
+// serves every integer width and an unsigned place wraps at its own width by the same
+// instruction the checked type promises. A postfix form yields the value the place held
+// before the write, a prefix form the value it holds after; both are already in hand, so
+// neither costs a second load. A float, a bool, a pointer, an immutable binding, and a
+// non-place are the checker's to refuse, and it refuses them before this runs.
+func gen_incdec(s: *GenFuncState, e: ExprNode) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    p: Place = gen_place(s, e.a)
+    if !p.ok {
+        emit_error((*s).module, "unsupported increment target")
+        return Val { ty: cty_int(c, 64), op: gs_copy("0") }
+    }
+    old: string = gen_load_slot(s, p.ty, p.ptr)
+    mut op: string = "add"
+    if e.b == bop_sub() { op = "sub" }
+    fresh: string = gx_op_line(s, op, p.ty, old, "1")
+    gen_store_slot(s, p.ty, fresh, p.ptr)
+    if e.c == incdec_pre() { return Val { ty: p.ty, op: fresh } }
+    return Val { ty: p.ty, op: old }
+}
+
 export func gen_expr(s: *GenFuncState, id: int64) -> Val {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -493,6 +519,7 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
         av: Val = gen_expr(s, e.b)
         return gx_binary_vals(s, e.a, av, e.c)
     }
+    if e.kind == xk_incdec() { return gen_incdec(s, e) }
     if e.kind == xk_call() {
         if is_enum_ref(s, e.a) {
             callee: ExprNode = vec_get((*a).exprs, e.a)
@@ -579,6 +606,7 @@ export func gen_expr(s: *GenFuncState, id: int64) -> Val {
     else if e.kind == xk_struct_lit() { return gen_struct_lit(s, e) }
     else if e.kind == xk_lambda() { return gen_lambda(s, e) }
     else if e.kind == xk_match() { return gen_match_expr(s, e) }
+    else if e.kind == xk_ifexpr() { return gen_ifexpr(s, e) }
     else if e.kind == xk_await() {
         take: AwaitTake = gen_await_take(s, id)
         return Val { ty: take.elem_ty, op: gen_load_slot(s, take.elem_ty, take.elem_slot) }

@@ -212,7 +212,7 @@ func fi_stmt(a: *Ast, fc: ForCtx, sid: int64) -> int64 {
         nb: int64 = fi_expr(a, fc, s.b)
         nc: int64 = fi_expr(a, fc, s.c)
         if nb == s.b && nc == s.c { return sid }
-        return ast_stmt(a, sk_assign_op(), s.a, nb, nc, 0)
+        return ast_stmt(a, sk_assign_op(), s.a, nb, nc, s.d)
     }
     if s.kind == sk_return() {
         if s.a < 0 { return sid }
@@ -368,6 +368,18 @@ func fi_expr(a: *Ast, fc: ForCtx, eid: int64) -> int64 {
         noff, nlen, chg := fi_arms(a, fc, e.b, e.c)
         if nscrut == e.a && !chg { return eid }
         return ast_expr(a, xk_match(), e.lo, e.hi, nscrut, noff, nlen, 0)
+    }
+    if e.kind == xk_incdec() {
+        na: int64 = fi_expr(a, fc, e.a)
+        if na == e.a { return eid }
+        return ast_expr(a, xk_incdec(), e.lo, e.hi, na, e.b, e.c, e.d)
+    }
+    if e.kind == xk_ifexpr() {
+        na: int64 = fi_expr(a, fc, e.a)
+        nthen: int64 = fi_block(a, fc, e.b)
+        nelse: int64 = fi_block(a, fc, e.c)
+        if na == e.a && nthen == e.b && nelse == e.c { return eid }
+        return ast_expr(a, xk_ifexpr(), e.lo, e.hi, na, nthen, nelse, 0)
     }
     if e.kind == xk_await() {
         na: int64 = fi_expr(a, fc, e.a)

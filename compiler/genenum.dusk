@@ -248,7 +248,7 @@ func ge_pat_binder_ty(s: *GenFuncState, ename: string, pat: PatternNode, binder:
 // same identifier. A repeated let of one name in a scope is a checker error, so the first
 // matching let is the only one. Returns cty_void when the name is not a single let local of
 // the block.
-func ge_block_local_ty(s: *GenFuncState, block_id: int64, ename: string, pat: PatternNode, name: string) -> int64 {
+func ge_block_local_ty(s: *GenFuncState, block_id: int64, ename: string, pat_id: int64, name: string) -> int64 {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     blk: BlockNode = vec_get((*a).blocks, block_id)
@@ -262,8 +262,8 @@ func ge_block_local_ty(s: *GenFuncState, block_id: int64, ename: string, pat: Pa
             if str_eq(ast_name(a, b.name), name) {
                 if b.ty >= 0 { return cty_lower_ast(c, a, b.ty) }
                 rhs: ExprNode = vec_get((*a).exprs, st.c)
-                if rhs.kind == xk_ident() && !str_eq(ename, "") {
-                    bt: int64 = ge_pat_binder_ty(s, ename, pat, ast_name(a, rhs.a))
+                if rhs.kind == xk_ident() && !str_eq(ename, "") && pat_id >= 0 {
+                    bt: int64 = ge_pat_binder_ty(s, ename, vec_get((*a).patterns, pat_id), ast_name(a, rhs.a))
                     if bt >= 0 { return bt }
                 }
                 return static_expr_ty(s, st.c)
@@ -297,9 +297,12 @@ func ge_chain_push(chain: *Vector<GeArmFrame>, ename: string, pat: int64, body: 
     return nc
 }
 
-// A payload binder of one frame's pattern, or -1. Gated on a real enum name.
+// A payload binder of one frame's pattern, or -1. Gated on a real enum name, and on the
+// frame having a pattern at all: a branch of an `if` used as a value is a frame with a
+// block and no pattern, so it carries pat -1 and binds nothing.
 func ge_frame_binder(s: *GenFuncState, name: string, ename: string, pat_id: int64) -> int64 {
     if str_eq(ename, "") { return -1 }
+    if pat_id < 0 { return -1 }
     a: *Ast = (*(*s).ctx).ast
     return ge_pat_binder_ty(s, ename, vec_get((*a).patterns, pat_id), name)
 }
@@ -309,9 +312,8 @@ func ge_frame_binder(s: *GenFuncState, name: string, ename: string, pat_id: int6
 func ge_frame_local(s: *GenFuncState, name: string, ename: string, pat_id: int64, body_id: int64) -> int64 {
     bt: int64 = ge_frame_binder(s, name, ename, pat_id)
     if bt >= 0 { return bt }
-    a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
-    bl: int64 = ge_block_local_ty(s, body_id, ename, vec_get((*a).patterns, pat_id), name)
+    bl: int64 = ge_block_local_ty(s, body_id, ename, pat_id, name)
     if vec_get(cty_nodes(c), bl).kind != ctyk_void() { return bl }
     return -1
 }
@@ -369,9 +371,30 @@ func ge_tail_ty(s: *GenFuncState, tail_id: int64, ename: string, pat_id: int64, 
         bl: int64 = ge_chain_local(s, ast_name(a, ex.a), ename, pat_id, body_id, chain)
         if bl >= 0 { return bl }
     }
+    // `alloc(expr)`: the pointee decides the slot, and the expression may read a payload
+    // binder or an arm local, neither of which is in the local table yet when the result
+    // slot is sized. The static walk answered a pointer to void for all of them and every
+    // deref of the result came out `load void`, which clang refuses. ge_expr_ty types the
+    // argument through the frame chain first and the ordinary static walk after, so a
+    // binder, a field of a binder, an arithmetic over one, and a plain live local all
+    // answer.
+    if ex.kind == xk_call() {
+        ae: ExprNode = vec_get((*a).exprs, ex.a)
+        if ae.kind == xk_ident() && str_eq(ast_name(a, ae.a), "alloc") && ex.c == 1 {
+            pt: int64 = ge_expr_ty(s, vec_get((*a).kids, ex.b), ename, pat_id, body_id, chain)
+            if pt >= 0 { return cty_intern(c, ctyk_ptr(), pt, 0, "") }
+        }
+    }
     if ex.kind == xk_match() {
         nc: *Vector<GeArmFrame> = ge_chain_push(chain, ename, pat_id, body_id)
         return ge_match_ty(s, ex.a, ex.b, ex.c, nc)
+    }
+    // A tail that is an `if` used as a value is sized by its own branches, and this arm
+    // joins the chain first so a branch tail naming this arm's payload binder or local
+    // still resolves through it, exactly as a nested match tail does.
+    if ex.kind == xk_ifexpr() {
+        ic: *Vector<GeArmFrame> = ge_chain_push(chain, ename, pat_id, body_id)
+        return ge_if_ty(s, ex.b, ex.c, ic)
     }
     ty: int64 = static_expr_ty(s, tail_id)
     if vec_get(cty_nodes(c), ty).kind != ctyk_void() { return ty }
@@ -397,6 +420,63 @@ func ge_tail_ty(s: *GenFuncState, tail_id: int64, ename: string, pat_id: int64, 
             }
         }
     }
+    return -1
+}
+
+// The cty of an expression a result-slot walk must type before the arm's own bindings
+// exist. A name resolves through the frame chain, so a payload binder and an arm or branch
+// local both answer; a field, an index, a deref, a negation, and an arithmetic binary
+// resolve through their own operands, so a chain-bound name buried under them still
+// answers. Anything else falls to the literal aware static walk, which reads a live local
+// or a literal. -1 when nothing answers, so a caller can fall back rather than pin a wrong
+// type. It types values, never places, and emits nothing.
+func ge_expr_ty(s: *GenFuncState, id: int64, ename: string, pat_id: int64, body_id: int64, chain: *Vector<GeArmFrame>) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        r: int64 = ge_chain_local(s, ast_name(a, e.a), ename, pat_id, body_id, chain)
+        if r >= 0 { return r }
+    }
+    if e.kind == xk_field() {
+        bt: int64 = ge_expr_ty(s, e.a, ename, pat_id, body_id, chain)
+        if bt >= 0 {
+            fi: int64 = cty_struct_field(c, bt, ast_name(a, e.b))
+            if fi >= 0 { return cty_struct_field_ty(c, bt, fi) }
+        }
+    }
+    if e.kind == xk_index() {
+        bt2: int64 = ge_expr_ty(s, e.a, ename, pat_id, body_id, chain)
+        if bt2 >= 0 {
+            bn: CTyNode = vec_get(cty_nodes(c), bt2)
+            if bn.kind == ctyk_array() || bn.kind == ctyk_slice() || bn.kind == ctyk_ptr() || bn.kind == ctyk_rawptr() {
+                idx: ExprNode = vec_get((*a).exprs, e.b)
+                if idx.kind == xk_range() { return cty_intern(c, ctyk_slice(), bn.a, 0, "") }
+                return bn.a
+            }
+        }
+    }
+    if e.kind == xk_unary() {
+        if e.a == uop_deref() {
+            bt3: int64 = ge_expr_ty(s, e.b, ename, pat_id, body_id, chain)
+            if bt3 >= 0 {
+                pn: CTyNode = vec_get(cty_nodes(c), bt3)
+                if pn.kind == ctyk_ptr() || pn.kind == ctyk_rawptr() { return pn.a }
+            }
+        }
+        if e.a == uop_neg() || e.a == uop_bitnot() {
+            return ge_expr_ty(s, e.b, ename, pat_id, body_id, chain)
+        }
+    }
+    // An arithmetic binary keeps its operands' type; a comparison or a logical operator
+    // yields a bool, which the static walk below already answers.
+    if e.kind == xk_binary() && e.a <= bop_mod() {
+        lt: int64 = ge_expr_ty(s, e.b, ename, pat_id, body_id, chain)
+        if lt >= 0 { return lt }
+        return ge_expr_ty(s, e.c, ename, pat_id, body_id, chain)
+    }
+    t: int64 = gp_lit_ty(s, id)
+    if vec_get(cty_nodes(c), t).kind != ctyk_void() { return t }
     return -1
 }
 
@@ -436,6 +516,42 @@ func ge_result_ty(s: *GenFuncState, scrut: int64, off: int64, len: int64) -> int
     return cty_int(c, 64)
 }
 
+// The cty of one branch of an `if` used as a value, or -1 when the branch carries no
+// value (it ends in a return, a break, or any statement that is not an expression) or
+// ends in a tail this walk cannot type. The branch's own block joins the chain, so a
+// tail naming a binding the branch made is sized by that binding's let rather than by
+// an outer name it shadows.
+func ge_branch_ty(s: *GenFuncState, block_id: int64, chain: *Vector<GeArmFrame>) -> int64 {
+    a: *Ast = (*(*s).ctx).ast
+    blk: BlockNode = vec_get((*a).blocks, block_id)
+    if blk.len == 0 { return -1 }
+    st: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, blk.off + blk.len - 1))
+    if st.kind != sk_expr() { return -1 }
+    return ge_tail_ty(s, st.a, "", -1, block_id, chain)
+}
+
+// The cty of an `if` used as a value, from the first branch whose tail resolves. Fallible
+// for the reason ge_match_ty is fallible: a then branch that diverges, or whose tail this
+// walk cannot type, must not pin the result slot before the else branch has answered, or a
+// wider value stores through a slot too narrow to hold it.
+func ge_if_ty(s: *GenFuncState, then_b: int64, else_b: int64, chain: *Vector<GeArmFrame>) -> int64 {
+    t: int64 = ge_branch_ty(s, then_b, chain)
+    if t >= 0 { return t }
+    return ge_branch_ty(s, else_b, chain)
+}
+
+/** The cty an `if` used as a value yields, or -1 when neither branch resolves. The static
+ *  type walk asks this so an if-expression buried in an aggregate member or a match arm
+ *  tail sizes the same way it does when it is lowered.
+ *  @param s the function state holding the AST and the ctype arena
+ *  @param then_b the then branch block
+ *  @param else_b the else branch block, which the value form always has
+ *  @return the branch tail cty, or -1 when neither branch answers */
+export func gen_ifexpr_ty(s: *GenFuncState, then_b: int64, else_b: int64) -> int64 {
+    chain: *Vector<GeArmFrame> = alloc(vec_new())
+    return ge_if_ty(s, then_b, else_b, chain)
+}
+
 func ge_arm_body(s: *GenFuncState, block_id: int64, result_ty: int64, result_slot: string) -> void {
     if result_ty < 0 { gen_block(s, block_id)
         return }
@@ -447,9 +563,15 @@ func ge_arm_body(s: *GenFuncState, block_id: int64, result_ty: int64, result_slo
             sid: int64 = vec_get((*a).kids, b.off + i)
             st: StmtNode = vec_get((*a).stmts, sid)
             if i + 1 == b.len && st.kind == sk_expr() {
-                v: Val = gen_expr(s, st.a)
-                av: Val = adapt(s, v, result_ty)
-                gen_store_slot(s, result_ty, av.op, result_slot)
+                // A tail that is itself a match or an if used as a value writes this slot
+                // directly rather than minting one of its own, so a nested form whose
+                // branches all diverge never invents an i64 result to adapt into a slot
+                // that is not one.
+                if !gen_into_slot(s, st.a, result_ty, result_slot) {
+                    v: Val = gen_expr(s, st.a)
+                    av: Val = adapt(s, v, result_ty)
+                    gen_store_slot(s, result_ty, av.op, result_slot)
+                }
             } else { gen_stmt(s, sid) }
         }
         i = i + 1
@@ -571,5 +693,86 @@ export func gen_match_expr(s: *GenFuncState, e: ExprNode) -> Val {
     ty: int64 = ge_result_ty(s, e.a, e.b, e.c)
     slot: string = gen_alloca(s, ty)
     gen_match(s, e.a, e.b, e.c, ty, slot)
+    return Val { ty: ty, op: gen_load_slot(s, ty, slot) }
+}
+
+/** Lowers an `if` used as a value into one result slot: the two way branch the statement
+ *  form already emits, with each branch's tail expression stored into the slot the way a
+ *  match arm's tail is. There are no phi nodes anywhere in this backend, so the slot is
+ *  the join; under async frame lowering gen_alloca puts it in the task frame, which is
+ *  what lets a branch suspend on an await and still find its half written value after the
+ *  resume. A branch that diverges stores nothing and never reaches the join, exactly like
+ *  a match arm that returns. A result_ty of -1 means the value is discarded, and then both
+ *  branches lower as plain blocks, the shape a statement match takes.
+ *  @param s the function state to emit into
+ *  @param cond_id the condition expression
+ *  @param then_b the then branch block
+ *  @param else_b the else branch block
+ *  @param result_ty the cty of the result slot, or -1 to discard the value
+ *  @param result_slot the slot each branch's tail stores into, "" when discarding */
+export func gen_ifexpr_into(s: *GenFuncState, cond_id: int64, then_b: int64, else_b: int64, result_ty: int64, result_slot: string) -> void {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    cv: Val = gen_expr(s, cond_id)
+    cond: string = coerce(s, cv.ty, cv.op, cty_bool(c))
+    then_l: int64 = fresh_label((*s).fb)
+    else_l: int64 = fresh_label((*s).fb)
+    end_l: int64 = fresh_label((*s).fb)
+    endl: string = branch_label(end_l)
+    br_cond((*s).fb, cond, branch_label(then_l), branch_label(else_l))
+    place_label((*s).fb, then_l)
+    (*s).terminated = false
+    gs_scope_push(s)
+    ge_arm_body(s, then_b, result_ty, result_slot)
+    gs_scope_pop(s)
+    if !(*s).terminated { br((*s).fb, endl) }
+    place_label((*s).fb, else_l)
+    (*s).terminated = false
+    gs_scope_push(s)
+    ge_arm_body(s, else_b, result_ty, result_slot)
+    gs_scope_pop(s)
+    if !(*s).terminated { br((*s).fb, endl) }
+    place_label((*s).fb, end_l)
+    (*s).terminated = false
+}
+
+/** Lowers an `if` used as a value in value position, sizing the result slot from the
+ *  branch tails and loading the joined value back out.
+ *  @param s the function state to emit into
+ *  @param e the if-expression node
+ *  @return the joined value and its cty */
+/** Lowers one of the two branching value forms straight into a destination slot the
+ *  caller already has, instead of letting it mint its own. Both forms size their own slot
+ *  from a branch-tail walk that is allowed to answer nothing, and a form whose every
+ *  branch diverges answers exactly that, so the self minted slot lands on the i64 fallback
+ *  and the load out of the unreachable join is then adapted into the caller's wider slot,
+ *  which clang refuses. Writing into the destination removes the middle slot outright:
+ *  each branch adapts to the destination's own type, and a branch that diverges stores
+ *  nothing at all. Answers false for every other expression, which the caller lowers as an
+ *  ordinary value.
+ *  @param s the function state to emit into
+ *  @param id the expression to lower
+ *  @param ty the cty of the destination slot
+ *  @param slot the destination slot
+ *  @return true when the expression was lowered into the slot */
+export func gen_into_slot(s: *GenFuncState, id: int64, ty: int64, slot: string) -> bool {
+    a: *Ast = (*(*s).ctx).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ifexpr() {
+        gen_ifexpr_into(s, e.a, e.b, e.c, ty, slot)
+        return true
+    }
+    if e.kind == xk_match() {
+        gen_match(s, e.a, e.b, e.c, ty, slot)
+        return true
+    }
+    return false
+}
+
+export func gen_ifexpr(s: *GenFuncState, e: ExprNode) -> Val {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    mut ty: int64 = gen_ifexpr_ty(s, e.b, e.c)
+    if ty < 0 { ty = cty_int(c, 64) }
+    slot: string = gen_alloca(s, ty)
+    gen_ifexpr_into(s, e.a, e.b, e.c, ty, slot)
     return Val { ty: ty, op: gen_load_slot(s, ty, slot) }
 }

@@ -1,0 +1,39 @@
+@paradigm procedural
+
+// The accept twin: a payload free constructor now carries its enum's type, so it still fits
+// every position that consumes that enum. An annotation of its own enum, a return, an
+// argument, a boxed alloc, a reassignment with a sibling variant, and a match all take it,
+// and a generic enum keeps the wildcard it has to keep, since this arena erases a named
+// type's arguments.
+enum Opt { Some(n: int64), None }
+enum Maybe<T> { Just(v: T), Nothing }
+
+func take(o: Opt) -> int64 {
+    match o {
+        Some(n) => return n,
+        None => return 0,
+    }
+}
+
+func none() -> Opt {
+    return Opt.None
+}
+
+func main() -> int32 {
+    x: Opt = Opt.None
+    println(take(x))
+    println(take(Opt.None))
+    println(take(none()))
+    p: *Opt = alloc(Opt.None)
+    println(take(*p))
+    free(p)
+    mut o := Opt.Some(3)
+    o = Opt.None
+    println(take(o))
+    m: Maybe<int64> = Maybe.Nothing
+    match m {
+        Just(v) => println(v),
+        Nothing => println(9),
+    }
+    return 0
+}

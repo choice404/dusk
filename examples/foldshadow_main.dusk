@@ -1,0 +1,46 @@
+@paradigm procedural
+@paradigm oop
+
+// A local binding shadows an imported module's name. A call through a name the function
+// itself bound is a method call on that value, not a call into the module, and the
+// qualified call fold has to see the binding to tell them apart: before it did,
+// `foldshadow_mod.parse()` inside a function whose parameter is named foldshadow_mod
+// became a call to the module's free parse, with a clean check and the wrong value at run
+// time. A name nothing in the function binds still folds, so an ordinary qualified call
+// is untouched.
+@import foldshadow_mod
+
+interface Reader {
+    parse() -> int64
+}
+
+struct Doc {
+    n: int64,
+}
+
+impl Reader for Doc {
+    func parse() -> int64 {
+        return self.n * 100
+    }
+}
+
+func through_param(foldshadow_mod: Doc) -> int64 {
+    return foldshadow_mod.parse()
+}
+
+func through_let() -> int64 {
+    foldshadow_mod: Doc = Doc { n: 5 }
+    return foldshadow_mod.parse()
+}
+
+func through_module() -> int64 {
+    return foldshadow_mod.parse()
+}
+
+func main() -> int32 {
+    d: Doc = Doc { n: 4 }
+    println(through_param(d))
+    println(through_let())
+    println(through_module())
+    return 0
+}

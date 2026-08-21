@@ -190,6 +190,29 @@ func use_name(r: *Resolver, name: string, lo: int64, hi: int64) -> void {
     emit(r, quoted_msg("undefined name ", name, ""), lo, hi)
 }
 
+// Marks a local binding read, without judging a name it does not find. An increment
+// both reads its place and writes it back, so the read has to count or `arr[i++]`
+// would leave i looking unused; the write is judged by assign_target, which owns the
+// one diagnostic an undefined or immutable target gets. Reporting here too would name
+// the same mistake twice.
+func mark_read(r: *Resolver, name: string) -> void {
+    if str_len(name) == 0 {
+        return
+    }
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
+    mut i: int64 = vec_len(scopes) - 1
+    while i >= 0 {
+        scope: *Map<string, Var> = vec_get(scopes, i)
+        if map_has(scope, name) {
+            mut v: Var = unwrap_or(map_get(scope, name), zero_var())
+            v.used = true
+            map_put(scope, name, v)
+            return
+        }
+        i = i - 1
+    }
+}
+
 func assign_target(r: *Resolver, lhs: int64) -> void {
     a: *Ast = (*r).ast
     e: ExprNode = vec_get((*a).exprs, lhs)
@@ -397,6 +420,16 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
         resolve_lambda(r, e)
     } else if e.kind == xk_match() {
         resolve_match(r, e.a, e.b, e.c)
+    } else if e.kind == xk_incdec() {
+        place: ExprNode = vec_get((*a).exprs, e.a)
+        if place.kind == xk_ident() {
+            mark_read(r, ast_name(a, place.a))
+        }
+        assign_target(r, e.a)
+    } else if e.kind == xk_ifexpr() {
+        resolve_expr(r, e.a)
+        resolve_block(r, e.b)
+        resolve_block(r, e.c)
     } else if e.kind == xk_await() {
         resolve_expr(r, e.a)
     } else if e.kind == xk_collect() {

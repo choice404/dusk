@@ -158,6 +158,34 @@ func gp_display_string(s: *GenFuncState, v: Val) -> string {
     return out
 }
 
+// A bool prints as one of its two spellings, never as 1 and 0, and the choice is a
+// select between two interned constants. Every sink the print family has already takes a
+// C string, so the same operand serves print, println, the error twins, a {} placeholder,
+// and the f-string builder, and none of them needs a new runtime entry point: a program
+// that prints a bool grows a select and two constants and declares nothing it did not
+// declare before.
+func gp_bool_text(s: *GenFuncState, v: Val) -> string {
+    c: *CTyArena = genctx_ctys((*s).ctx)
+    yes: string = emit_cstring((*s).module, "true")
+    no: string = emit_cstring((*s).module, "false")
+    one: string = coerce(s, v.ty, v.op, cty_bool(c))
+    dest: string = next_tmp((*s).fb)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, dest)
+    sb_push(b, " = select i1 ")
+    sb_push(b, one)
+    sb_push(b, ", ptr ")
+    sb_push(b, yes)
+    sb_push(b, ", ptr ")
+    sb_push(b, no)
+    text: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, text)
+    free(text)
+    return dest
+}
+
 // Whether a printed value takes the unsigned decimal path. Only an integer width
 // carries the flag; a char, a bool, or a rune keeps its own arm. The narrower
 // unsigned widths widen to i64 through coerce, which zero extends them, so the u64
@@ -182,6 +210,16 @@ func gp_print_value(s: *GenFuncState, v: Val, newline: bool, errout: bool) -> vo
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), v.ty)
     if gp_print_char_text(s, v, newline, errout) { return }
+    if n.kind == ctyk_bool() {
+        txt: string = gp_bool_text(s, v)
+        if errout {
+            gp_call_cstr(s, "cool_eprint_cstr", txt)
+            if newline { gp_newline(s, true) }
+            return
+        }
+        if newline { gp_call_cstr(s, "cool_println_cstr", txt) } else { gp_call_cstr(s, "cool_print_cstr", txt) }
+        return
+    }
     if errout {
         if n.kind == ctyk_rawptr() || n.kind == ctyk_error() { gp_call_cstr(s, "cool_eprint_cstr", v.op) }
         else if cty_is_float(c, v.ty) {
@@ -431,6 +469,12 @@ func gp_fstr_value(s: *GenFuncState, bh: string, v: Val) -> void {
     c: *CTyArena = genctx_ctys((*s).ctx)
     n: CTyNode = vec_get(cty_nodes(c), v.ty)
     if gp_fsb_char_text(s, bh, v) { return }
+    // The bool twin of the print dispatch: the same select over the same two constants,
+    // so f"{b}" and println("{}", b) write the same bytes.
+    if n.kind == ctyk_bool() {
+        gp_fsb_cstr(s, bh, gp_bool_text(s, v))
+        return
+    }
     if n.kind == ctyk_rawptr() || n.kind == ctyk_error() {
         gp_fsb_cstr(s, bh, v.op)
     } else if cty_is_float(c, v.ty) {

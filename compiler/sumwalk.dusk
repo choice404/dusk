@@ -351,6 +351,16 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
     if e.kind == xk_match() {
         return sum_eval_match(c, e)
     }
+    if e.kind == xk_ifexpr() {
+        return sum_eval_ifexpr(c, e)
+    }
+    if e.kind == xk_incdec() {
+        // The place is read and written back with an integer, which carries no view of any
+        // frame, so the store records nothing and the expression's value is none. The place
+        // is still evaluated, so an index inside it registers its own reads.
+        sum_eval(c, e.a)
+        return val_none()
+    }
     if e.kind == xk_await() {
         sum_eval(c, e.a)
         return val_none()
@@ -434,6 +444,28 @@ export func struct_gens(t: *SumTables, st: StructNode) -> *Map<string, int64> {
         i = i + 1
     }
     return g
+}
+
+// An if used as a value contributes the join of its branch tails, the same way a match
+// contributes the join of its arm tails. Both branch bodies are walked whole, so a store
+// or a call inside one registers even when the branch yields nothing.
+func sum_eval_ifexpr(c: *SumCtx, e: ExprNode) -> SumVal {
+    a: *Ast = (*(*c).t).ast
+    sum_eval(c, e.a)
+    mut r: SumVal = val_none()
+    mut i: int64 = 0
+    while i < 2 {
+        mut blk: int64 = e.b
+        if i == 1 { blk = e.c }
+        sum_block(c, blk)
+        b: BlockNode = vec_get((*a).blocks, blk)
+        if b.len > 0 {
+            last: StmtNode = vec_get((*a).stmts, kid(a, b.off, b.len - 1))
+            if last.kind == sk_expr() { r = val_join(r, sum_eval(c, last.a)) }
+        }
+        i = i + 1
+    }
+    return r
 }
 
 func sum_eval_match(c: *SumCtx, e: ExprNode) -> SumVal {

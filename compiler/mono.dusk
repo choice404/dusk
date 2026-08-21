@@ -351,9 +351,15 @@ func rewrite_item(m: *Mono, it: ItemNode) -> void {
         im: ImplNode = vec_get((*a).impls, it.id)
         if !mono_is_generic(m, ast_name(a, im.ty)) {
             methods: *Vector<int64> = alloc(vec_new())
+            // The receiver's type, built once per impl and handed to every method so the
+            // static type walk can read `self`. It is the impl's own named type, the same
+            // thing the type pass declares `self` as, and it carries no arguments: the
+            // generic branch below refuses methods on a generic type outright, so a
+            // receiver reaching here never mentions a type parameter.
+            self_ty: int64 = mt_named0(a, ast_name(a, im.ty))
             mut i: int64 = 0
             while i < im.methods_len {
-                vec_push(methods, rw_func(m, vec_get((*a).kids, im.methods_off + i), empty_subst, -1))
+                vec_push(methods, rw_method(m, vec_get((*a).kids, im.methods_off + i), empty_subst, -1, self_ty))
                 i = i + 1
             }
             iid: int64 = ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)

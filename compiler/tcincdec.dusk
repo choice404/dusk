@@ -1,0 +1,86 @@
+// tcincdec: the increment and decrement expression's operand rules. The operator both
+// reads and writes one place, so its judgment sits between the arithmetic rules and the
+// place rules: the operand has to be storage, and the storage has to be an integer.
+
+@paradigm procedural
+
+@import std.string
+@import ast
+@import ty
+@import tcstate
+@import tcown
+
+// The spelling of an increment or decrement, read off the arithmetic the parser
+// recorded: bop_add for `++`, bop_sub for `--`.
+func incdec_spelling(op: int64) -> string {
+    if op == bop_add() { return "++" }
+    return "--"
+}
+
+// The verb a diagnostic uses for the write the operator performs, so `++` is told it
+// increments and `--` that it decrements.
+func incdec_verb(op: int64) -> string {
+    if op == bop_add() { return "incremented" }
+    return "decremented"
+}
+
+// The operand of an increment or decrement is written as well as read, so it must be
+// something with an address. The wording names the four spellings that have one,
+// exactly as the assignment form names them.
+func incdec_place_msg(op: int64) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, incdec_spelling(op))
+    sb_push(b, "' needs a place to write back to: a name, a field, an index, or a dereference")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// A place the operator cannot step. Every integer width steps, signed or unsigned, and
+// nothing else does: a float has no unit step the width agrees on, a char and a rune are
+// text, a bool has no arithmetic, and a pointer does not do arithmetic in dusk at all.
+func incdec_type_msg(op: int64, rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, incdec_spelling(op))
+    sb_push(b, "' takes an integer place; ")
+    sb_push(b, rendered)
+    sb_push(b, " cannot be ")
+    sb_push(b, incdec_verb(op))
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Judges an increment or decrement expression and answers the type it yields. The
+ *  operand must be a place, since the operator writes it back, and its type must be an
+ *  integer of any width and either signedness: an unsigned place wraps at its ends, which
+ *  is the arithmetic the operator has, while a float, char, rune, bool, pointer, string,
+ *  or aggregate has no step to take. The result is the place's own type, whichever form
+ *  the operator took: postfix hands back the value the place held and prefix the value it
+ *  now holds, and both are values of the place's type. An unresolved operand is the hole a
+ *  generic body leaves and is passed through, so the ground pass judges it once mono makes
+ *  it concrete. The mutability of the place is judged by check_assign_target, the same
+ *  check the assignment forms run, so an immutable target earns the one message it
+ *  always has.
+ *  @param tc the type checker to record a diagnostic against
+ *  @param place_id the operand expression, the place read and written
+ *  @param op bop_add for `++` or bop_sub for `--`
+ *  @param t the operand's inferred type
+ *  @param lo the span start of the whole expression
+ *  @param hi the span end of the whole expression
+ *  @return the type the expression yields, or unknown when it was refused */
+export func check_incdec(tc: *TypeChecker, place_id: int64, op: int64, t: int64, lo: int64, hi: int64) -> int64 {
+    if !is_place_expr((*tc).ast, place_id) {
+        tc_emit(tc, incdec_place_msg(op), lo, hi)
+        return ty_unknown((*tc).ty)
+    }
+    n: TyNode = ty_get((*tc).ty, t)
+    if n.kind == tyk_unknown() { return t }
+    if n.kind == tyk_int() { return t }
+    tc_emit(tc, incdec_type_msg(op, ty_render((*tc).ty, t)), lo, hi)
+    return ty_unknown((*tc).ty)
+}

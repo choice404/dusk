@@ -1,0 +1,23 @@
+// A match expression whose arms yield freshly allocated pointers. A bare literal has no
+// type of its own to read, so the pointee takes the literal's type, a width suffix
+// included, and a pointee named by a payload binding takes it from the arm's pattern.
+@paradigm procedural
+
+enum P { A(v: int64), B }
+enum K { X, Y }
+
+func main() -> int32 {
+    k: K = K.X
+    x := match k { X => { alloc(1) }, Y => { alloc(2) } }
+    println(*x)
+    free(x)
+    e: P = P.A(7)
+    y := match e { A(v) => { alloc(v) }, B => { alloc(0) } }
+    println(*y)
+    free(y)
+    ky: K = K.Y
+    z := match ky { X => { alloc(1u32) }, Y => { alloc(9u32) } }
+    println(*z)
+    free(z)
+    return 0
+}

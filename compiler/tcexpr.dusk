@@ -12,6 +12,7 @@
 @import tcstate
 @import tcscope
 @import tcbin
+@import tcfit
 @import tccall
 @import tciface
 @import tcmatch
@@ -21,15 +22,20 @@
 @import tcesccap
 @import tcexprprep
 @import tcesc3
+@import tcif
+@import tcincdec
 
 func arm_diverges(a: *Ast, block_id: int64) -> bool {
     return block_diverges(a, block_id)
 }
 
-// A representative expr id inside an arm's last statement, to carry the every-arm-yields
-// caret; -1 when the last statement holds no expression (an empty block), in which case
-// the caller falls back to the scrutinee.
-func arm_tail_span_expr(a: *Ast, block_id: int64) -> int64 {
+/** A representative expr id inside a branch's last statement, to carry the caret of the
+ *  every-branch-yields diagnostic; -1 when the last statement holds no expression (an
+ *  empty block), in which case the caller falls back to the subject it is judging.
+ *  @param a the AST holding the block
+ *  @param block_id the branch block whose last statement is read
+ *  @return an expression id inside that statement, or -1 */
+export func block_tail_span_expr(a: *Ast, block_id: int64) -> int64 {
     b: BlockNode = vec_get((*a).blocks, block_id)
     if b.len == 0 { return -1 }
     s: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, b.off + b.len - 1))
@@ -102,19 +108,20 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
         push_scope(tc)
         bind_match_arm(tc, arm.pat, st, e.a)
         bind_match_arm_escape(tc, arm.pat, st, e.a, scrut_esc)
-        // A nested match tail in a managed context (a managed annotation, ctx == 1, or an
-        // owned subject) must run its own ownership judgment so a verdict is recorded even
-        // when its tails name an outer payload binder or its payload type is a generic hole on
-        // the surface pass; without the hint the inner match records nothing and a borrow or an
-        // owner copy launders outward. The hint is set around the diagnostic walk so the inner
-        // copy fault emits, and around the suppressed re-infer so the verdict is recorded even
-        // if a leading match statement consumed the first hint.
+        // A nested branching tail, a match or an if used as a value, in a managed context (a
+        // managed annotation, ctx == 1, or an owned subject) must run its own ownership
+        // judgment so a verdict is recorded even when its tails name an outer payload binder
+        // or its payload type is a generic hole on the surface pass; without the hint the
+        // inner walk records nothing and a borrow or an owner copy launders outward. The
+        // hint is set around the diagnostic walk so the inner copy fault emits, and around
+        // the suppressed re-infer so the verdict is recorded even if a leading match
+        // statement consumed the first hint.
         mut nest_hint: bool = false
         if !(*tc).types_only && (ctx == 1 || subj_own == own_owner()) {
             pk: int64 = match_arm_tail(a, arm.body)
             if pk >= 0 {
                 pkx: ExprNode = vec_get((*a).exprs, pk)
-                if pkx.kind == xk_match() { nest_hint = true }
+                if pkx.kind == xk_match() || pkx.kind == xk_ifexpr() { nest_hint = true }
             }
         }
         if nest_hint { (*tc).match_ctx = 1 }
@@ -122,7 +129,7 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
         if nest_hint { (*tc).match_ctx = 0 }
         tail_id: int64 = match_arm_tail(a, arm.body)
         if tail_id < 0 && !(*tc).types_only && !arm_diverges(a, arm.body) {
-            mut sp: int64 = arm_tail_span_expr(a, arm.body)
+            mut sp: int64 = block_tail_span_expr(a, arm.body)
             if sp < 0 { sp = e.a }
             spx: ExprNode = vec_get((*a).exprs, sp)
             tc_emit(tc, "every arm of a match expression must yield a value or return", spx.lo, spx.hi)
@@ -159,7 +166,7 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
     check_match_arm_lambdas(tc, e)
     check_match_scrutinee(tc, st, e.a, e.b, e.c)
     if !(*tc).types_only && (ctx == 1 || any_managed || any_unprovable) {
-        finalize_match_own(tc, id, own_vals, copy_faults, own_tails)
+        finalize_result_own(tc, id, own_vals, copy_faults, own_tails, "the arms of a match expression must agree on ownership of its result")
     }
     // On the ground pass the arms have concrete types, so a match yields the type they
     // agreed on rather than the surface wildcard. This lets a match used as another match's
@@ -167,16 +174,28 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
     // annotation get the same width and type comparison any other value does. A surface
     // match, or a ground match whose arms disagreed, stays unknown so the disagreement is
     // reported once and nothing downstream cascades on it.
-    if (*tc).types_only && !disagreed && ref_ty >= 0 { return ref_ty }
+    if (*tc).types_only && !disagreed && ref_ty >= 0 {
+        check_branch_lit_fits(tc, e, ref_ty)
+        return ref_ty
+    }
     return ty_unknown((*tc).ty)
 }
 
-// Emit the deferred ownership faults of a confirmed-managed match and store its verdict.
-// Each recorded copy fault becomes the standard owner-copy diagnostic; the arms must agree
-// on ownership, faulting the first arm that disagrees with the running verdict; the
-// aggregate (owner if every arm owns, borrow if every arm borrows, else the first) lands in
-// match_own for the binding, destructure, free/move, and return checks to read.
-func finalize_match_own(tc: *TypeChecker, id: int64, own_vals: *Vector<int64>, copy_faults: *Vector<int64>, own_tails: *Vector<int64>) -> void {
+/** Emits the deferred ownership faults of a confirmed-managed branching expression and
+ *  stores its verdict. Each recorded copy fault becomes the standard owner-copy
+ *  diagnostic; the branches must agree on ownership, faulting the first one that disagrees
+ *  with the running verdict; the aggregate (owner if every branch owns, borrow if every
+ *  branch borrows, else the first) lands in the branch verdict table for the binding,
+ *  destructure, free/move, and return checks to read. A match and an if used as a value
+ *  share the whole shape and differ only in the noun the disagreement names, which is why
+ *  the message is a parameter.
+ *  @param tc the type checker to record the diagnostics against
+ *  @param id the branching expression's id, the key the verdict is stored under
+ *  @param own_vals the per-branch ownership contributions, in branch order
+ *  @param copy_faults the per-branch copy fault expr ids, -1 where the branch has none
+ *  @param own_tails the per-branch tail expr ids, for the disagreement caret
+ *  @param disagree_msg the diagnostic a branch that disagrees on ownership earns */
+export func finalize_result_own(tc: *TypeChecker, id: int64, own_vals: *Vector<int64>, copy_faults: *Vector<int64>, own_tails: *Vector<int64>, disagree_msg: string) -> void {
     a: *Ast = (*tc).ast
     mut i: int64 = 0
     while i < vec_len(copy_faults) {
@@ -197,13 +216,47 @@ func finalize_match_own(tc: *TypeChecker, id: int64, own_vals: *Vector<int64>, c
         } else if v != verdict && !mixed {
             mixed = true
             me: ExprNode = vec_get((*a).exprs, vec_get(own_tails, j))
-            tc_emit(tc, "the arms of a match expression must agree on ownership of its result", me.lo, me.hi)
+            tc_emit(tc, disagree_msg, me.lo, me.hi)
         }
         j = j + 1
     }
     mut vv: int64 = own_owner()
     if verdict >= 0 { vv = verdict }
     set_match_own(tc, id, vv)
+}
+
+/** Ranges every literal branch tail of a branching expression against the type the
+ *  branches agreed on, the ground-pass rule that keeps an untargeted match or if from
+ *  truncating a literal into a narrower slot.
+ *
+ *  The agreement itself cannot catch this: an unsuffixed literal is width 0 and compat
+ *  lets it adapt to any width, so `y := if c { a } else { 300 }` over an int8 a agreed
+ *  cleanly, codegen sized the result slot from the first branch, and 300 came back 44.
+ *  Every annotated position already ranges its literals through the target it was handed,
+ *  which is why the annotated twin `z: int8 = if c { 300 } else { a }` always refused it;
+ *  an inferred binding, a print argument, and a discarded expression hand no target at
+ *  all, so the ranging belongs here, at the one place the agreed type is known.
+ *
+ *  Ground pass only, where the agreement is over concrete types. A width 0 agreement,
+ *  every branch a bare literal, is the int64 default and holds anything a literal can
+ *  spell, so it is skipped. check_lit_fits_target recurses through a nested branching
+ *  tail, so a literal buried one level down is ranged against this agreement too; the
+ *  inner walk may range it a second time against its own agreement, and the ground
+ *  collector drops the duplicate (lo, hi, msg) triple.
+ *  @param tc the type checker to record a diagnostic against
+ *  @param e the match or if expression node
+ *  @param ref_ty the type the branches agreed on */
+export func check_branch_lit_fits(tc: *TypeChecker, e: ExprNode, ref_ty: int64) -> void {
+    n: TyNode = ty_get((*tc).ty, ref_ty)
+    if n.kind != tyk_int() { return }
+    if n.w == 0 { return }
+    a: *Ast = (*tc).ast
+    mut i: int64 = 0
+    while i < branch_count(a, e) {
+        tail: int64 = branch_tail_at(a, e, i)
+        if tail >= 0 { check_lit_fits_target(tc, tail, ref_ty) }
+        i = i + 1
+    }
 }
 
 export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
@@ -243,7 +296,15 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
             free(bmsg)
             tc_emit(tc, outmsg, e.lo, e.hi)
         }
-        if !is_local(tc, name) && !sig_has_fn((*tc).sigtab, name) {
+        // A bare name that is one of the enclosing function's type parameters is a type
+        // spelling, not a value, so it is not another enum's variant no matter how the
+        // two are spelled. `sizeof(K)` inside a generic reaches here as a plain
+        // identifier argument, and without this guard any enum in the merged module that
+        // happened to declare a variant named K refused std.map's own body. Resolve
+        // already skips a type spelling in this position, so the two passes agree; a
+        // generic name used as a real value is still an undefined name there.
+        gens: *Map<string, int64> = (*tc).cur_generics
+        if !is_local(tc, name) && !sig_has_fn((*tc).sigtab, name) && !map_has(gens, name) {
             en: string = variant_owner((*tc).sigtab, name)
             if str_len(en) > 0 {
                 tc_emit(tc, ident_variant_value_msg(en, name), e.lo, e.hi)
@@ -337,6 +398,13 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
                     tc_emit(tc, bare_variant_msg(vename, fname, vsig.len), e.lo, e.hi)
                     return ty_unknown((*tc).ty)
                 }
+                // The payload free form is the enum's value written whole, so it carries
+                // the enum's type the same way the call form does. Before this it answered
+                // the surface wildcard and every comparison downstream silently agreed, so
+                // `x: int64 = Opt.None` and a `mut o: Opt` reassigned with another enum's
+                // payload free variant both passed check and died in clang. A generic enum
+                // keeps the wildcard, since this arena erases a named type's arguments.
+                return ctor_result_ty(tc, vename)
             }
         }
         if bn.kind == tyk_array() {
@@ -348,6 +416,16 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
             if str_eq(fname, "message") { return ty_str((*tc).ty) }
             tc_emit(tc, error_field_msg(fname), e.lo, e.hi)
             return ty_str((*tc).ty)
+        }
+        // A field read through a pointer has no lowering at all: codegen refuses every one
+        // of them as `unsupported field expression`, naming no file and no line, so `p.n`
+        // passed check and failed the build whether or not the field existed, exactly as
+        // `p.n = 1` did before the store form was named. The dereference is the spelling
+        // that lowers, and the message is the store form's own. A method call through a
+        // pointer is a call, not a field read, and never reaches here.
+        if bn.kind == tyk_ptr() || bn.kind == tyk_rawptr() {
+            tc_emit(tc, "a field read through a pointer needs an explicit dereference; write (*p).field", e.lo, e.hi)
+            return ty_unknown((*tc).ty)
         }
         // A scalar carries no member at all, so a field access on one, read or assigned,
         // has no lowering. Before this rule it left check clean and died in codegen as
@@ -363,6 +441,17 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
                 tc_emit(tc, no_fields_msg(ty_render((*tc).ty, base_ty)), e.lo, e.hi)
             }
             return ty_unknown((*tc).ty)
+        }
+        // A named base whose struct is declared answers the field's own declared type,
+        // and a field the struct does not declare is refused. Everything else, an enum
+        // value, a tuple, a future, a collector, stays the permissive wildcard it has
+        // always been.
+        if bn.kind == tyk_named() {
+            sname: string = ty_name((*tc).ty, base_ty)
+            structs3: *Map<string, StructSig> = (*tc).structs
+            if map_has(structs3, sname) {
+                return field_read_ty(tc, sname, fname, e.lo, e.hi)
+            }
         }
         return ty_unknown((*tc).ty)
     }
@@ -433,6 +522,18 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
     if e.kind == xk_lambda() { return infer_lambda_sig(tc, e) }
     if e.kind == xk_match() {
         return walk_match_expr(tc, id, e)
+    }
+    if e.kind == xk_ifexpr() {
+        return walk_ifexpr(tc, id, e)
+    }
+    if e.kind == xk_incdec() {
+        // The place is inferred once, here, so the operand's own reads and diagnostics
+        // happen exactly once no matter which side the operator sits on. The mutability
+        // and place-shape rules are the assignment forms' own, so a field store through a
+        // pointer and an immutable target earn the messages they always have.
+        pt: int64 = infer_expr(tc, e.a)
+        check_assign_target(tc, e.a)
+        return check_incdec(tc, e.a, e.b, pt, e.lo, e.hi)
     }
     if e.kind == xk_do() {
         mut i: int64 = 0

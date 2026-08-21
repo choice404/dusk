@@ -11,6 +11,7 @@
 @import tcstate
 @import tcscope
 @import tcbin
+@import tcfit
 @import tcexpr
 @import tciface
 @import tcown
@@ -289,7 +290,8 @@ func member_ident_own(tc: *TypeChecker, name: string) -> int64 {
 // nesting depth is remembered under its path key (name#i, name#i#j, ...). A nested tuple
 // member recurses so a launder through ((p, 1), 2) survives the inner destructure; an
 // identifier that owns or borrows, and a borrowed match member, each record a borrowed leaf;
-// a fresh member records nothing and keeps the destructure default. Surface-only.
+// a fresh member records nothing and keeps the destructure default. A branching member,
+// a match or an if used as a value, reads the verdict its own walk stored. Surface-only.
 func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) -> void {
     if value.kind != xk_tuple() { return }
     a: *Ast = (*tc).ast
@@ -304,7 +306,7 @@ func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) ->
             if member_ident_own(tc, ast_name(a, me.a)) == own_borrow() {
                 map_put((*tc).tuple_member_own, key, own_borrow())
             }
-        } else if me.kind == xk_match() {
+        } else if me.kind == xk_match() || me.kind == xk_ifexpr() {
             mv: int64 = match_own_of(tc, mid)
             if mv == own_borrow() { map_put((*tc).tuple_member_own, key, own_borrow()) }
         }
@@ -403,13 +405,15 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         tyid = harden((*tc).ty, vt)
     }
     declare_one(tc, b, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
-    // A match value bound with an inferred type carries only the surface wildcard here, so
-    // is_managed_ty cannot see it is managed; consult the ownership verdict the match walk
-    // stored so a borrowed result recorded under the binding rejects a later free, exactly as
-    // an annotated managed binding already does. Without this an inferred `x := match` whose
-    // arms borrow launders the borrow and frees a pointer the subject still owns.
+    // A match or if value bound with an inferred type carries only the surface wildcard
+    // here, so is_managed_ty cannot see it is managed; consult the ownership verdict the
+    // branch walk stored so a borrowed result recorded under the binding rejects a later
+    // free, exactly as an annotated managed binding already does. Without this an inferred
+    // `x := match` or `x := if c { p } else { q }` whose branches borrow launders the borrow
+    // and frees a pointer the subject still owns.
     mut want_own: bool = is_managed_ty(tc, tyid)
-    if !want_own && value.kind == xk_match() && !(*tc).types_only && match_own_of(tc, stmt.c) >= 0 {
+    branching_value: bool = value.kind == xk_match() || value.kind == xk_ifexpr()
+    if !want_own && branching_value && !(*tc).types_only && match_own_of(tc, stmt.c) >= 0 {
         want_own = true
     }
     // A generic binding whose value is a name that already carries an ownership record
@@ -492,17 +496,18 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             tyid = harden((*tc).ty, tyid)
         }
         declare_one(tc, b, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
-        // A tuple member that is a match expression takes the ownership verdict its arms
-        // agreed on, not an unconditional owner: a borrowed extraction laundered through a
-        // destructure keeps its borrow so the freed member rejects. The member type may be a
-        // match's surface wildcard, so a recorded verdict enters the ownership record even when
-        // is_managed_ty cannot see the part is managed, mirroring the single-binding path.
+        // A tuple member that is a branching expression, a match or an if used as a value,
+        // takes the ownership verdict its branches agreed on, not an unconditional owner: a
+        // borrowed extraction laundered through a destructure keeps its borrow so the freed
+        // member rejects. The member type may be the surface wildcard, so a recorded verdict
+        // enters the ownership record even when is_managed_ty cannot see the part is managed,
+        // mirroring the single-binding path.
         mut own_member: int64 = -1
         binder_name: string = ast_name(a, b.name)
         if value.kind == xk_tuple() && value.b == stmt.b && !(*tc).types_only {
             member_id: int64 = vec_get((*a).kids, value.a + m)
             mem: ExprNode = vec_get((*a).exprs, member_id)
-            if mem.kind == xk_match() {
+            if mem.kind == xk_match() || mem.kind == xk_ifexpr() {
                 mv: int64 = match_own_of(tc, member_id)
                 if mv >= 0 { own_member = mv }
             } else if mem.kind == xk_ident() {
@@ -588,11 +593,11 @@ export func check_let(tc: *TypeChecker, stmt: StmtNode) -> void {
         }
         return
     }
-    // A managed-typed single binding hints the match verdict: a match value bound to a
-    // managed annotation is ownership-relevant even when no arm resolves managed on its own
-    // (a single unresolved payload binder over a locally allocated subject), so the copy
-    // spelling of an extraction still rejects. walk_match_expr captures and clears the hint.
-    if stmt.b == 1 && !(*tc).types_only && value.kind == xk_match() {
+    // A managed-typed single binding hints the branch verdict: a match or if value bound to
+    // a managed annotation is ownership-relevant even when no branch resolves managed on its
+    // own (a single unresolved payload binder over a locally allocated subject), so the copy
+    // spelling of an extraction still rejects. The branch walk captures and clears the hint.
+    if stmt.b == 1 && !(*tc).types_only && (value.kind == xk_match() || value.kind == xk_ifexpr()) {
         b_hint: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a))
         if b_hint.ty >= 0 && is_managed_ty(tc, tc_type(tc, b_hint.ty)) { (*tc).match_ctx = 1 }
     }

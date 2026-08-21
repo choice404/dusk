@@ -1,0 +1,41 @@
+// The same diverge-only nested tail under each consumer that knows the destination
+// before the value is lowered: an annotated binding, a return, and an assignment. Every
+// one of them hands its own type to the branching form, so a branch that returns stores
+// nothing and the join is never asked to produce a value nobody can use.
+@paradigm procedural
+
+func g(k: bool, c: bool) -> int64 {
+    p: *int64 = if k { if c { return 10 } else { return 11 } } else { alloc(5) }
+    n: int64 = *p
+    free(p)
+    return n
+}
+
+func h(k: bool, c: bool) -> string {
+    s: string = if k { if c { return "ten" } else { return "eleven" } } else { "five" }
+    return s
+}
+
+func r(k: bool, c: bool) -> string {
+    return if k { if c { return "ra" } else { return "rb" } } else { "rc" }
+}
+
+func w(k: bool, c: bool) -> string {
+    mut s: string = "init"
+    s = if k { if c { return "wa" } else { return "wb" } } else { "wc" }
+    return s
+}
+
+func main() -> int32 {
+    println(g(true, true))
+    println(g(true, false))
+    println(g(false, true))
+    println(h(true, true))
+    println(h(false, true))
+    println(r(true, true))
+    println(r(true, false))
+    println(r(false, true))
+    println(w(true, true))
+    println(w(false, true))
+    return 0
+}

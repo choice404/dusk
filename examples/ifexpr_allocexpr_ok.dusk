@@ -1,0 +1,35 @@
+// alloc of a field, once through a binding the branch itself makes and once through a
+// binding the enclosing body makes. Both name the pointee that sizes the branch result,
+// and the branch local is not an ordinary local yet when that size is taken, so it comes
+// from the branch's own block.
+@paradigm procedural
+
+struct D { n: int64, m: int64 }
+
+func f(c: bool) -> int64 {
+    p := if c {
+        d: D = D { n: 7, m: 9 }
+        alloc(d.m)
+    } else {
+        alloc(0)
+    }
+    v: int64 = *p
+    free(p)
+    return v
+}
+
+func g(c: bool) -> int64 {
+    d: D = D { n: 3, m: 4 }
+    p := c ? alloc(d.n) : alloc(d.m)
+    v: int64 = *p
+    free(p)
+    return v
+}
+
+func main() -> int32 {
+    println(f(true))
+    println(f(false))
+    println(g(true))
+    println(g(false))
+    return 0
+}

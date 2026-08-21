@@ -442,6 +442,14 @@ func ren_expr(r: *Renamer, id: int64, skip: *Map<string, int64>, bound: *Vector<
         ren_lambda(r, e, skip, bound)
     } else if e.kind == xk_match() {
         ren_match_value(r, e.a, e.b, e.c, skip, bound)
+    } else if e.kind == xk_incdec() {
+        ren_expr(r, e.a, skip, bound)
+    } else if e.kind == xk_ifexpr() {
+        // Each branch is a block, and ren_block opens its own scope, so a binding made
+        // inside one branch cannot leak into the other or into the enclosing body.
+        ren_expr(r, e.a, skip, bound)
+        ren_block(r, e.b, skip, bound)
+        ren_block(r, e.c, skip, bound)
     } else if e.kind == xk_do() {
         ren_do(r, e, skip, bound)
     } else if e.kind == xk_await() {

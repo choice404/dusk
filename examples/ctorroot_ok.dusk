@@ -1,0 +1,73 @@
+// The accept twin of the ctorroot_*_fail set: every position that consumes a
+// constructor call directly, now that the call carries its enum's own type. The
+// constructor is matched where it is written, passed to a parameter, returned,
+// written into a struct field and an array element, destructured out of a tuple,
+// boxed with alloc, and nested inside another enum's payload. Each of these used to
+// ride the surface wildcard, so this pins that naming the type accepts them still.
+@paradigm procedural
+
+enum Opt {
+    Some(v: int64),
+    None,
+}
+
+enum Outer {
+    Wrap(o: Opt),
+    Nil,
+}
+
+struct Holder {
+    o: Opt,
+}
+
+func take(o: Opt) -> int64 {
+    match o {
+        Some(v) => return v,
+        None => return 0,
+    }
+}
+
+func make(n: int64) -> Opt {
+    return Opt.Some(n)
+}
+
+func unwrap_outer(w: Outer) -> int64 {
+    match w {
+        Wrap(o) => return take(o),
+        Nil => return -1,
+    }
+}
+
+func main() -> int32 {
+    // matched where it is written
+    match Opt.Some(1) {
+        Some(v) => println(v),
+        None => println(0),
+    }
+    // passed to a parameter, and returned from a function
+    println(take(Opt.Some(2)))
+    println(take(make(3)))
+    // written into a struct field
+    h: Holder = Holder { o: Opt.Some(4) }
+    println(take(h.o))
+    // written into an array element
+    xs: Opt[2] = [Opt.Some(5), Opt.None]
+    println(take(xs[0]))
+    // destructured out of a tuple
+    o, n := (Opt.Some(6), 1)
+    println(take(o) + n - 1)
+    // boxed with alloc
+    p: *Opt = alloc(Opt.Some(7))
+    println(take(*p))
+    free(p)
+    // nested inside another enum's payload
+    println(unwrap_outer(Outer.Wrap(Opt.Some(8))))
+    // reassigned with another constructor of the same enum
+    mut m := Opt.Some(9)
+    m = Opt.None
+    match m {
+        Some(v) => println(v),
+        None => println(10),
+    }
+    return 0
+}
