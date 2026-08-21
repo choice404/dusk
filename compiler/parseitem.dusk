@@ -13,11 +13,19 @@
 @import parsety
 @import parsestmt
 
+// The module body stops at end of input or at the mute, the same two exits the block
+// and item loops take. Past the nesting guard the token stream is desynchronized, so
+// every later item start is an artifact of that one rejection; without the stop the
+// progress guard walked the rest of the file one token at a time, silently, since a
+// muted parser records nothing. The guard's diagnostic is already recorded, so the
+// parse still fails on it.
 export func parse_module(p: *Parser) -> *Ast {
     parse_module_head(p)
     mut reading: bool = true
     while reading {
         if p_at_eof(p) {
+            reading = false
+        } else if p_muted(p) {
             reading = false
         } else {
             before: int64 = (*p).pos

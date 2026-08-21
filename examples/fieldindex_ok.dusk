@@ -1,0 +1,44 @@
+// The legal field and index shapes, pinned so the scalar rejects beside them can
+// never widen onto one. A struct field, a nested field chain, a field through an
+// explicit deref, '.len' on an array and on a slice, an index into an array, a
+// slice, and a string, a range slice of an array and of a string, an index through
+// a raw pointer, and an index inside a generic body where the element type is still
+// a hole on the surface pass.
+@paradigm procedural
+
+struct Inner { n: int64 }
+struct Outer { inner: Inner, tag: int64 }
+
+func first<T>(xs: T[]) -> T {
+    return xs[0]
+}
+
+func main() -> int32 {
+    o: Outer = Outer { inner: Inner { n: 7 }, tag: 2 }
+    println("{}", o.tag)
+    println("{}", o.inner.n)
+
+    bp: *Outer = alloc(Outer { inner: Inner { n: 9 }, tag: 3 })
+    println("{}", (*bp).tag)
+    println("{}", (*bp).inner.n)
+    free(bp)
+
+    arr: int64[4] = [10, 20, 30, 40]
+    println("{}", arr.len)
+    println("{}", arr[2])
+    sl: int64[] = arr[1..3]
+    println("{}", sl.len)
+    println("{}", sl[1])
+    println("{}", first(sl))
+
+    s: string = "dusk"
+    println("{}", s[1])
+    println("{}", s[0..2])
+
+    rp: *raw int64 = alloc_bytes(16)
+    rp[0] = 5
+    rp[1] = 6
+    println("{}", rp[0] + rp[1])
+    free(rp)
+    return 0
+}

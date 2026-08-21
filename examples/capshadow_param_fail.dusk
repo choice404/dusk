@@ -1,0 +1,31 @@
+@paradigm procedural
+
+// A closure that views the frame is stored through a parameter, and the store is
+// only caught when the closure is known to capture the frame slice v. The capture
+// scan gathers the names a lambda body uses and the names it binds, and an inner
+// lambda parameter named v used to bind into the same flat set as the enclosing
+// body, so the outer v the closure genuinely captures read as bound and the capture
+// vanished. The store then looked frame free and this program built, leaving
+// (*dst).f holding a closure over a dead frame. Each construct now binds into its
+// own scope. The nested block twin is capshadow_block_fail, the legal shadow twin
+// is capshadow_ok.
+struct Holder { f: () -> int64 }
+
+func fill(dst: *Holder) -> void {
+    arr: int64[4] = [1, 2, 3, 4]
+    v: int64[] = arr[0..4]
+    g := lambda () -> int64 {
+        total: int64 = v.len
+        k := lambda (v: int64) -> int64 { return v + 1 }
+        return total + k(1)
+    }
+    (*dst).f = g
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { f: lambda () -> int64 { return 0 } })
+    fill(h)
+    println(((*h).f)())
+    free(h)
+    return 0
+}

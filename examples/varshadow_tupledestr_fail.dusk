@@ -1,0 +1,33 @@
+@paradigm procedural
+@paradigm functional
+
+// The same conservative answer for a scrutinee bound by a tuple destructure, where the
+// binding records no enum because its initializer is the whole tuple.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    o, n := (Opt.Some(c), 1)
+    local: int64[4] = [111, 222, 333, 444]
+    match o {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    println(n)
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

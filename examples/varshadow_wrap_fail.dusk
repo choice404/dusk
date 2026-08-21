@@ -1,0 +1,29 @@
+@paradigm procedural
+
+// The interprocedural side of the same shared name. wrap's summary records whether
+// an argument's view can reach its return, and the constructor's payload decides
+// that: read by bare variant name the payload is Tally's scalar, wrap looks like it
+// returns nothing derived from s, and the caller's dead frame slice escapes through
+// the call. The summary walk reads the payload off the constructor's own enum, so
+// wrap is credited with returning a view of argument 1 and the call is refused. The
+// declaration order twin is varshadow_wraprev_fail.
+enum Rows { Some(s: int64[]), None }
+enum Tally { Some(n: int64), None }
+
+func wrap(s: int64[]) -> Rows {
+    return Rows.Some(s)
+}
+
+func mk() -> Rows {
+    local: int64[4] = [1, 2, 3, 4]
+    return wrap(local[0..4])
+}
+
+func main() -> int32 {
+    r := mk()
+    match r {
+        Some(s) => { println(s[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

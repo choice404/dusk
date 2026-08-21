@@ -1,0 +1,44 @@
+@paradigm procedural
+
+// Two enums declare a variant named Some, and their payloads differ in kind: Opt
+// carries a scalar, Held carries a managed pointer. The collected element type is
+// Opt, so the mint's buried view guard asks whether Opt reaches a managed pointer,
+// and the honest answer is no: the collected array holds int64 payloads and nothing
+// that points at the frame. Answering that question out of a table keyed by variant
+// name alone hands back whichever enum registered Some last, which here is Held, and
+// the guard then rejects this legal program. The payload comes off the enum's own
+// variant slot instead, so the mint is allowed, the deep copy survives a forced
+// collection, and the payload reads back as 7. The declaration order twin is
+// collectorvshadowrev_ok, the reject twin is collectorvshadow_fail.
+foreign "C" {
+    func cool_gc_collect() -> void
+}
+
+struct Inner {
+    s: int64[],
+}
+
+enum Opt { Some(n: int64), None }
+enum Held { Some(c: *Inner), None }
+
+struct Wrap {
+    items: Opt[1],
+    p: *Inner,
+}
+
+func mk() -> collector<Opt[]> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    w := Wrap { items: [Opt.Some(7)], p: p }
+    return collector<Opt[]>(w.items)
+}
+
+func main() -> int32 {
+    c := mk()
+    cool_gc_collect()
+    match c[0] {
+        Some(n) => { println(n) }
+        None => { println(0) }
+    }
+    return 0
+}

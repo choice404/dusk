@@ -14,6 +14,7 @@
 @import ast
 @import tcstate
 @import summary
+@import sumflow
 
 export struct SumCtx {
     t: *SumTables,
@@ -29,7 +30,7 @@ export struct SumCtx {
     reads_through: int64,
     sinks: int64,
     collect_sinks: int64,
-    flows: string,
+    flows: int64[64],
     lambda_rets: *Vector<SumVal>,
     lambda_depth: int64,
     lambda_returns: *Map<string, int64>,
@@ -54,7 +55,7 @@ export func ctx_new(t: *SumTables, summaries: *Map<string, SummaryHandle>, gens:
     return alloc(SumCtx {
         t: t, summaries: summaries, gens: gens, param_index: param_index, dest_mask: 0,
         fn_binds: fn_binds, locals: locals, local_types: local_types, env: env,
-        returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "",
+        returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero(),
         lambda_rets: lambda_rets, lambda_depth: 0, lambda_returns: lret, lambda_sinks: lsink,
         lambda_collect_sinks: lcoll, lambda_capture_flows: lcap, lambda_spans: lspans,
         frame_stores: fs, capture_flows: capture_flows,
@@ -88,16 +89,29 @@ export func ctx_bind_self(c: *SumCtx, recv: string, idx: int64) -> void {
 }
 
 // The summary this state has computed, with the sink set closed backward over the
-// store edges and the flow set canonicalized for stable equality and rendering.
+// store edges. The bit matrix is already sorted and deduplicated by construction, so
+// equality and rendering are stable with no canonicalization pass.
 export func ctx_summary(c: *SumCtx) -> SummaryHandle {
-    canon: string = flows_canon((*c).flows)
+    fl: int64[64] = (*c).flows
     return SummaryHandle {
         empty: false,
         returns_alias: (*c).returns_alias,
         reads_through: (*c).reads_through,
-        sinks: close_sinks((*c).sinks, canon),
-        collect_sinks: close_sinks((*c).collect_sinks, canon),
-        flows: canon,
+        sinks: close_sinks((*c).sinks, fl),
+        collect_sinks: close_sinks((*c).collect_sinks, fl),
+        flows: fl,
+    }
+}
+
+// Records the store edges of one store: every source parameter in srcps may have its
+// view stored into every destination in dests. One row write per source, since a row
+// is the destination set itself.
+export func ctx_flow_edges(c: *SumCtx, srcps: int64, dests: int64) -> void {
+    if srcps == 0 || dests == 0 { return }
+    mut k: int64 = 0
+    while k < 64 {
+        if ps_has(srcps, k) { (*c).flows = flow_add_row((*c).flows, k, dests) }
+        k = k + 1
     }
 }
 
@@ -161,6 +175,14 @@ export func sum_stmt(c: *SumCtx, sid: int64) -> void {
         vname: string = ast_name(a, s.a)
         map_put((*c).locals, vname, 1)
         map_put((*c).env, vname, it)
+        // `for k, v in m` binds a second name, the interned name plus one in d. Left
+        // unbound it read as a free use of whatever the enclosing frame calls v, so a
+        // closure that only walks the map was charged with capturing that frame value.
+        if s.d != 0 {
+            vname2: string = ast_name(a, s.d - 1)
+            map_put((*c).locals, vname2, 1)
+            map_put((*c).env, vname2, it)
+        }
         loop_fixpoint(c, s.c)
     } else if s.kind == sk_match() {
         sum_stmt_match(c, s)
@@ -454,11 +476,20 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
             record_chan_sink(c, vec_get(argvals, 1))
         }
         sums: *Map<string, SummaryHandle> = (*c).summaries
+        fb: *Map<string, string> = (*c).fn_binds
         if map_has(sums, name) {
             return apply_summary(c, unwrap_or(map_get(sums, name), empty_summary()), arg_off, arg_len, argvals)
         }
-        if map_has(vidx, name) {
-            return ctor_val(c, name, argvals)
+        // A bare constructor call is refused by the call check, which says to write it
+        // as 'A.Some', so the bare name is only ever seen on a program that is rejected
+        // either way; it keeps the name keyed slot. A local binding, a parameter, or a
+        // resolvable function bind of that name is the callee instead, and answering it
+        // with a variant's payload model dropped the view an argument carries, so those
+        // are checked first and this arm only takes a name nothing else owns.
+        lcl: *Map<string, int64> = (*c).locals
+        pidx: *Map<string, int64> = (*c).param_index
+        if map_has(vidx, name) && !map_has(lcl, name) && !map_has(pidx, name) && !map_has(fb, name) {
+            return ctor_val(c, unwrap_or(map_get(vidx, name), -1), argvals)
         }
         bs: SummaryHandle = builtin_summary(name)
         if !bs.empty {
@@ -467,7 +498,6 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
             }
             return apply_summary(c, bs, arg_off, arg_len, argvals)
         }
-        fb: *Map<string, string> = (*c).fn_binds
         if map_has(fb, name) {
             g: string = unwrap_or(map_get(fb, name), "")
             if map_has(sums, g) {
@@ -483,8 +513,13 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
             if map_has(eidx, ast_name(a, base.a)) { is_enum_ctor = true }
         }
         if is_enum_ctor {
-            vname: string = ast_name(a, callee.b)
-            if map_has(vidx, vname) { return ctor_val(c, vname, argvals) }
+            // Asked with the enum, not the bare variant name: two enums may declare
+            // the same variant, the name keyed slot answers with whichever was
+            // declared last, and reading one enum's scalar payload for another's
+            // slice drops the view this constructor really carries.
+            vkey: string = sum_variant_key(ast_name(a, base.a), ast_name(a, callee.b))
+            vbe: *Map<string, int64> = (*t).variant_by_enum
+            if map_has(vbe, vkey) { return ctor_val(c, unwrap_or(map_get(vbe, vkey), -1), argvals) }
             return join_all(argvals)
         }
         sum_eval(c, callee.a)
@@ -500,13 +535,15 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
 export func apply_summary(c: *SumCtx, sum: SummaryHandle, arg_off: int64, arg_len: int64, argvals: *Vector<SumVal>) -> SumVal {
     a: *Ast = (*(*c).t).ast
     mut i: int64 = 0
-    while i < 64 {
-        mut j: int64 = 0
-        while j < 64 {
-            if flow_has(sum.flows, i, j) && i < arg_len && j < arg_len {
-                flow_into_place(c, kid(a, arg_off, j), vec_get(argvals, i))
+    while i < arg_len && i < 64 {
+        row: int64 = flow_row(sum.flows, i)
+        if row != 0 {
+            vi: SumVal = vec_get(argvals, i)
+            mut j: int64 = 0
+            while j < arg_len && j < 64 {
+                if (row & (1 << j)) != 0 { flow_into_place(c, kid(a, arg_off, j), vi) }
+                j = j + 1
             }
-            j = j + 1
         }
         i = i + 1
     }
@@ -549,10 +586,17 @@ export func apply_top(c: *SumCtx, arg_off: int64, arg_len: int64, argvals: *Vect
     return join_all(argvals)
 }
 
-func ctor_val(c: *SumCtx, vname: string, argvals: *Vector<SumVal>) -> SumVal {
+// The abstract value of a constructor call, taken as the join of each payload
+// argument's contribution under that payload's declared field type. The variant is
+// named by node index rather than by name, so the caller decides which enum's slot
+// is read; an index outside the arena joins every argument, the conservative answer
+// an unresolvable callee already gets.
+func ctor_val(c: *SumCtx, vid: int64, argvals: *Vector<SumVal>) -> SumVal {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
-    vr: VariantNode = vec_get((*a).variants, unwrap_or(map_get((*t).variant_idx, vname), 0))
+    variants: *Vector<VariantNode> = (*a).variants
+    if vid < 0 || vid >= vec_len(variants) { return join_all(argvals) }
+    vr: VariantNode = vec_get(variants, vid)
     gens: *Map<string, int64> = (*c).gens
     mut v: SumVal = val_none()
     mut i: int64 = 0
@@ -618,7 +662,7 @@ func loop_state(c: *SumCtx) -> string {
     sb_push_char(b, 124)
     sb_push_int(b, (*c).collect_sinks)
     sb_push_char(b, 124)
-    sb_push(b, flows_canon((*c).flows))
+    sb_push(b, flows_state((*c).flows))
     sb_push_char(b, 124)
     fs: *Vector<FlowProv> = (*c).frame_stores
     sb_push_int(b, vec_len(fs))
@@ -636,7 +680,9 @@ func loop_state(c: *SumCtx) -> string {
 }
 
 func loop_fixpoint(c: *SumCtx, bid: int64) -> void {
-    cap: int64 = map_count((*c).param_index) + map_count((*c).locals) + 4
+    pidx: *Map<string, int64> = (*c).param_index
+    lcls: *Map<string, int64> = (*c).locals
+    cap: int64 = map_len(pidx) + map_len(lcls) + 4
     mut prev: string = loop_state(c)
     mut n: int64 = 0
     while n < cap {
@@ -676,11 +722,6 @@ export func str_less(x: string, y: string) -> bool {
         i = i + 1
     }
     return x[i] == 0 && y[i] != 0
-}
-
-func map_count(m: *Map<string, int64>) -> int64 {
-    keys: *Vector<string> = map_keys(m)
-    return vec_len(keys)
 }
 
 // The inline-lambda return sink stack, backed by lambda_rets and a logical depth

@@ -1,0 +1,41 @@
+@paradigm procedural
+@paradigm functional
+
+// The scrutinee is an outer match's payload binder, whose type is unknown because its
+// own scrutinee was a constructor. Nothing here can name the inner enum, and two enums
+// declare Some, so no payload signature is trustworthy: every binder is treated as
+// carrying the scrutinee's view rather than trusting whichever enum was declared last.
+// The accept twin, where one enum alone declares the name, is varshadow_soleenum_ok.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+enum Outer { Wrap(o: Opt), Nil }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    w := Outer.Wrap(Opt.Some(c))
+    local: int64[4] = [111, 222, 333, 444]
+    match w {
+        Wrap(o) => {
+            match o {
+                Some(p) => { (*p).rows = local[0..4] }
+                None => {}
+            }
+        }
+        Nil => {}
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

@@ -1,0 +1,24 @@
+// Reject: the catch all binder inside a generic body, the shape the surface pass cannot
+// judge. `A` names a variant of the ground scrutinee and binds nothing, but `Z` names no
+// variant of Tri, so it is the catch all binder and it takes an enum's name: inside that
+// arm `Z.P` would read as the enum's constructor rather than through the binding. The
+// surface pass leaves the arm alone because a generic body does not name its scrutinee's
+// enum, and the ground pass refuses it once mono makes the scrutinee Tri. The accept twin
+// is enumnamearm_generic_ok.
+@paradigm procedural
+
+enum Tri { A, B2, C }
+enum Z { P, Q }
+
+func g<T>(x: T) -> int64 {
+    match x {
+        A => { return 10 }
+        Z => { return 99 }
+    }
+}
+
+func main() -> int32 {
+    t: Tri = Tri.B2
+    println(g(t))
+    return 0
+}

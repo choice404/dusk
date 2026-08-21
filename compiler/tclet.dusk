@@ -147,6 +147,7 @@ func declare_one(tc: *TypeChecker, b: BindNode, tyid: int64, mutable: bool, valu
     name: string = ast_name(a, b.name)
     reject_alloc_shadow(tc, name, value_lo, value_hi)
     reject_builtin_binding(tc, name, tyid, false, value_lo, value_hi)
+    reject_enum_name_binding(tc, name, value_lo, value_hi)
     declare(tc, name, tyid)
     set_esc(tc, name, false, false)
     if mutable { declare_mut(tc, name) }
@@ -154,18 +155,58 @@ func declare_one(tc: *TypeChecker, b: BindNode, tyid: int64, mutable: bool, valu
     if n.kind == tyk_error() { declare_err(tc, name, value_lo, value_hi) }
 }
 
-func record_enum_bind(tc: *TypeChecker, name: string, value: int64) -> void {
+// Which enum a binding holds, recorded because the value's own type does not say: a
+// constructor and a field read of an enum both infer unknown on the surface. Both
+// constructor forms count, the call form for a variant with a payload and the bare
+// qualified name for one without; a copy of a name inherits what that name recorded;
+// and a read out of a place carries the place's declared type. A mut binding records
+// nothing at all, because an assignment may replace its value with another enum's
+// (that assignment is a separate hole, and a stale record here would answer for the
+// value that was overwritten).
+func record_enum_bind(tc: *TypeChecker, name: string, value: int64, mutable: bool) -> void {
+    if mutable { return }
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, value)
-    if e.kind != xk_call() { return }
-    callee: ExprNode = vec_get((*a).exprs, e.a)
-    if callee.kind != xk_field() { return }
-    base: ExprNode = vec_get((*a).exprs, callee.a)
-    if base.kind != xk_ident() { return }
-    en: string = ast_name(a, base.a)
     enums: *Map<string, EnumSig> = (*tc).enums
-    if map_has(enums, en) {
-        declare_enum_bind(tc, name, en)
+    mut base_id: int64 = -1
+    if e.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_field() { base_id = callee.a }
+    } else if e.kind == xk_field() {
+        base_id = e.a
+    }
+    if base_id >= 0 {
+        base: ExprNode = vec_get((*a).exprs, base_id)
+        if base.kind == xk_ident() {
+            en: string = ast_name(a, base.a)
+            if map_has(enums, en) {
+                declare_enum_bind(tc, name, en)
+                return
+            }
+        }
+    }
+    if e.kind == xk_call() { return }
+    if e.kind == xk_ident() {
+        sname: string = ast_name(a, e.a)
+        // The binder is already declared by the time the value is read, so a binding
+        // that names itself must ask the scope outside its own or it would find the
+        // name it is defining and answer with nothing.
+        mut src: string = ""
+        if str_eq(sname, name) {
+            src = enum_bind_name_outer(tc, sname)
+        } else {
+            src = enum_bind_name(tc, sname)
+        }
+        if str_len(src) > 0 { declare_enum_bind(tc, name, src) }
+        return
+    }
+    if e.kind == xk_field() || e.kind == xk_index() || (e.kind == xk_unary() && e.a == uop_deref()) {
+        ct: int64 = chain_ty(tc, value)
+        cn: TyNode = ty_get((*tc).ty, ct)
+        if cn.kind == tyk_named() {
+            cname: string = ty_name((*tc).ty, ct)
+            if map_has(enums, cname) { declare_enum_bind(tc, name, cname) }
+        }
     }
 }
 
@@ -230,11 +271,25 @@ func copy_member_subtree(tc: *TypeChecker, src_prefix: string, dst_prefix: strin
     }
 }
 
+// The ownership a tuple literal member that names a value hands to whatever takes it back
+// out, the one place both member walks below ask. A name that owns hands a borrow, not its
+// ownership: the source name still owns the allocation and still frees it, so a binder that
+// took the member as an owner would free a pointer with a live owner, the double free the
+// single binding refuses as the copy of an owner. `move(p)` in the member position is the
+// transfer spelling, a call rather than a name, so it never reaches here and the binder it
+// feeds owns what was handed over. A name that borrows hands the borrow along, a moved name
+// hands its moved tag, and a name with no ownership record hands nothing.
+func member_ident_own(tc: *TypeChecker, name: string) -> int64 {
+    o: int64 = own_of(tc, name)
+    if o == own_owner() { return own_borrow() }
+    return o
+}
+
 // Records the per-member ownership of a tuple literal recursively, so a borrowed leaf at any
 // nesting depth is remembered under its path key (name#i, name#i#j, ...). A nested tuple
-// member recurses so a launder through ((p, 1), 2) survives the inner destructure; a
-// borrowed identifier or borrowed match member records a leaf; an owner or fresh member
-// records nothing and keeps the destructure default. Surface-only.
+// member recurses so a launder through ((p, 1), 2) survives the inner destructure; an
+// identifier that owns or borrows, and a borrowed match member, each record a borrowed leaf;
+// a fresh member records nothing and keeps the destructure default. Surface-only.
 func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) -> void {
     if value.kind != xk_tuple() { return }
     a: *Ast = (*tc).ast
@@ -245,8 +300,10 @@ func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) ->
         key: string = tuple_member_key(prefix, i)
         if me.kind == xk_tuple() {
             record_member_own_rec(tc, key, me)
-        } else if me.kind == xk_ident() && own_of(tc, ast_name(a, me.a)) == own_borrow() {
-            map_put((*tc).tuple_member_own, key, own_borrow())
+        } else if me.kind == xk_ident() {
+            if member_ident_own(tc, ast_name(a, me.a)) == own_borrow() {
+                map_put((*tc).tuple_member_own, key, own_borrow())
+            }
         } else if me.kind == xk_match() {
             mv: int64 = match_own_of(tc, mid)
             if mv == own_borrow() { map_put((*tc).tuple_member_own, key, own_borrow()) }
@@ -264,6 +321,27 @@ func record_tuple_member_own(tc: *TypeChecker, name: string, value: ExprNode) ->
         record_member_own_rec(tc, name, value)
     } else if value.kind == xk_ident() {
         copy_member_subtree(tc, ast_name((*tc).ast, value.a), name)
+    }
+}
+
+// Marks every member a `ref` binding could later be destructured into as a borrow.
+// The word declares the whole value a view of what the source still owns, so a binder
+// that holds a tuple carries the borrow down its member paths and a later `x, y := a`
+// inherits it through the same `name#i` keys a laundered tuple literal writes. The walk
+// is type driven rather than value driven, so the tuple literal spelling and the bound
+// name spelling both reach it, and a member with no ownership to track records nothing.
+// Surface only, like every other ownership record here.
+func record_ref_member_borrows(tc: *TypeChecker, prefix: string, tyid: int64) -> void {
+    if (*tc).types_only { return }
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind != tyk_tuple() { return }
+    mut i: int64 = 0
+    while i < n.len {
+        mt: int64 = vec_get((*(*tc).ty).kids, n.off + i)
+        key: string = tuple_member_key(prefix, i)
+        if is_managed_ty(tc, mt) { map_put((*tc).tuple_member_own, key, own_borrow()) }
+        record_ref_member_borrows(tc, key, mt)
+        i = i + 1
     }
 }
 
@@ -349,9 +427,12 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     if want_own {
         declare_own(tc, ast_name(a, b.name), binding_own(tc, stmt, value, vt, tyid))
     }
-    record_enum_bind(tc, ast_name(a, b.name), stmt.c)
+    record_enum_bind(tc, ast_name(a, b.name), stmt.c, (stmt.d & 1) != 0)
     record_mut_tuple(tc, stmt, b, tyid)
     record_tuple_member_own(tc, ast_name(a, b.name), value)
+    // `ref t := pair` borrows the whole value, members included, so a later destructure
+    // of t reads a borrow rather than the owner default.
+    if (stmt.d & 2) != 0 { record_ref_member_borrows(tc, ast_name(a, b.name), tyid) }
     link_binding_aliases(tc, ast_name(a, b.name), stmt.c, false)
     esc: EscPair = value_escape(tc, stmt.c)
     set_esc(tc, ast_name(a, b.name), esc.slice, esc.closure)
@@ -427,8 +508,10 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             } else if mem.kind == xk_ident() {
                 // A member that names a borrowed value hands the destructure binder that
                 // borrow, not the owner default, so `y, n := (x, 1)` over a borrowed x
-                // keeps y a borrow and a later free(y) rejects the launder.
-                mo: int64 = own_of(tc, ast_name(a, mem.a))
+                // keeps y a borrow and a later free(y) rejects the launder. A member that
+                // names an owner hands a borrow too, since the source keeps the ownership
+                // it had; `y, n := (move(x), 1)` is how the ownership comes along.
+                mo: int64 = member_ident_own(tc, ast_name(a, mem.a))
                 if mo != 0 { own_member = mo }
             } else if mem.kind == xk_tuple() {
                 // A nested tuple member records its own subtree under the binder, so a
@@ -444,13 +527,25 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             tmo: *Map<string, int64> = (*tc).tuple_member_own
             if map_has(tmo, binder_name) { own_member = unwrap_or(map_get(tmo, binder_name), -1) }
         }
+        // `ref a, b := pair` declares every binder a borrow of what the value already
+        // owns, the destructuring reading of the word the single binding honors through
+        // binding_own. Without this the marker parsed into the statement flags and
+        // vanished here, so a binder that inherited a member's owner record freed a
+        // pointer the source still owns. A binder with no ownership to track, a scalar
+        // among them, stays inert exactly as `ref n := 7` does: the borrow is written
+        // only where this walk would have written a record anyway.
+        mut own_tag: int64 = own_member
+        if (stmt.d & 2) != 0 {
+            if is_managed_ty(tc, tyid) || own_member >= 0 { own_tag = own_borrow() }
+        }
         if is_managed_ty(tc, tyid) {
             mut own_v: int64 = own_owner()
-            if own_member >= 0 { own_v = own_member }
+            if own_tag >= 0 { own_v = own_tag }
             declare_own(tc, ast_name(a, b.name), own_v)
-        } else if own_member >= 0 {
-            declare_own(tc, ast_name(a, b.name), own_member)
+        } else if own_tag >= 0 {
+            declare_own(tc, ast_name(a, b.name), own_tag)
         }
+        if (stmt.d & 2) != 0 { record_ref_member_borrows(tc, binder_name, tyid) }
         m = m + 1
     }
     if value.kind == xk_tuple() && value.b == stmt.b {

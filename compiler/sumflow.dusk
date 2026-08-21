@@ -1,0 +1,138 @@
+/** sumflow: the flow-edge relation an escape summary carries, one bit per ordered
+ *  parameter pair. A store edge means "argument i's view may be stored into a place
+ *  argument j reaches", over the same 64-parameter bound the parameter-set bitmasks
+ *  in summary use, so the whole relation is 64 rows of 64 bits and row i holds one
+ *  bit per destination j. The representation is inherently sorted and deduplicated,
+ *  so two summaries holding the same edges compare and render identically with no
+ *  separate canonicalization step, and every query is a word test rather than a
+ *  scan. An index past the bound has no bit and drops, the same over-approximation
+ *  boundary the parameter-set primitives take. Nothing here reads the AST or the
+ *  checker state: this file is the relation and nothing else, which is also why the
+ *  bit for an index is written as a plain shift rather than called through summary's
+ *  ps_single: every shift below is already bounded to [0, 64), exactly the range
+ *  where ps_single agrees with it, and the file stays a leaf. */
+
+@paradigm procedural
+
+@import std.string
+
+/** The empty flow relation: 64 rows of zero, no edge present.
+ *  @return a flow matrix holding no edge */
+export func flows_zero() -> int64[64] {
+    return [
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0
+    ]
+}
+
+/** Row i of a flow matrix, the bitmask of destinations argument i's view may be
+ *  stored into. An index past the 64-parameter bound has no row and reads empty.
+ *  @param flows the flow matrix
+ *  @param i the source parameter index
+ *  @return the destination bitmask of row i */
+export func flow_row(flows: int64[64], i: int64) -> int64 {
+    if i < 0 || i >= 64 { return 0 }
+    return flows[i]
+}
+
+/** Whether the flow edge from parameter i to parameter j is present.
+ *  @param flows the flow matrix
+ *  @param i the source parameter index
+ *  @param j the destination parameter index
+ *  @return true when the edge i to j is present */
+export func flow_has(flows: int64[64], i: int64, j: int64) -> bool {
+    return j >= 0 && j < 64 && (flow_row(flows, i) & (1 << j)) != 0
+}
+
+/** Whether row i holds any edge at all, the question "does argument i's view reach
+ *  some argument's place" without naming which.
+ *  @param flows the flow matrix
+ *  @param i the source parameter index
+ *  @return true when row i is not empty */
+export func flow_row_any(flows: int64[64], i: int64) -> bool {
+    return flow_row(flows, i) != 0
+}
+
+/** Unions a whole destination bitmask into row i, the one way an edge is ever added:
+ *  a store records that one source reaches every destination its place roots to. An
+ *  index past the 64-parameter bound has no row, so its edges drop, the same
+ *  over-approximation boundary ps_single takes when it saturates.
+ *  @param flows the flow matrix to extend
+ *  @param i the source parameter index
+ *  @param dests the destination bitmask to union into row i
+ *  @return a matrix holding every edge of flows plus i to each named destination */
+export func flow_add_row(flows: int64[64], i: int64, dests: int64) -> int64[64] {
+    if i < 0 || i >= 64 { return flows }
+    mut out: int64[64] = flows
+    out[i] = out[i] | dests
+    return out
+}
+
+/** Whether two flow matrices hold the same edge set, the equality the summary
+ *  fixpoint tests for convergence.
+ *  @param a the first matrix
+ *  @param b the second matrix
+ *  @return true when every row matches */
+export func flows_eq(a: int64[64], b: int64[64]) -> bool {
+    mut i: int64 = 0
+    while i < 64 {
+        if a[i] != b[i] { return false }
+        i = i + 1
+    }
+    return true
+}
+
+/** Closes a parameter set backward over the store edges: if argument i's view flows
+ *  into argument j's place and j is in the set, then i reaches the same boundary and
+ *  joins it. Iterated to a fixed point. Row i's whole destination mask meets the
+ *  current set in one word operation, which is the same test as asking for each j in
+ *  the set whether the edge i to j is present.
+ *  @param sinks the parameter bitmask to close
+ *  @param flows the store edges to close over
+ *  @return the closed bitmask */
+export func close_sinks(sinks: int64, flows: int64[64]) -> int64 {
+    mut cur: int64 = sinks
+    mut changed: bool = true
+    while changed {
+        changed = false
+        mut i: int64 = 0
+        while i < 64 {
+            if (flows[i] & cur) != 0 && (cur & (1 << i)) == 0 {
+                cur = cur | (1 << i)
+                changed = true
+            }
+            i = i + 1
+        }
+    }
+    return cur
+}
+
+/** A canonical text form of a flow matrix, folded into a loop's convergence state so
+ *  an iteration that adds a store edge is seen as a change. Two matrices render alike
+ *  exactly when they hold the same edges, which is the whole contract here; the esc
+ *  dump has its own renderer. Only a non-empty row is written, as "i:row;".
+ *  @param flows the flow matrix to render
+ *  @return the canonical state text of its edge set */
+export func flows_state(flows: int64[64]) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < 64 {
+        if flows[i] != 0 {
+            sb_push_int(b, i)
+            sb_push_char(b, 58)
+            sb_push_int(b, flows[i])
+            sb_push_char(b, 59)
+        }
+        i = i + 1
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

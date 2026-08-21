@@ -1,0 +1,41 @@
+// Accept and run: the legal half of the enum name reservation. A struct field may be
+// spelled like a variant, `struct S { Some: B }`, and read through a binding of any
+// name that is not an enum's, so `s.Some` is the field read it looks like and matches
+// as the B it holds. A payload free match arm that names a variant of the scrutinee's
+// own enum also stays legal even when another enum in the program carries that same
+// spelling, `enum A` beside `enum Tri { A, B, C }`: that arm names the variant and
+// binds nothing, so the reservation never reaches it. The reject twins are
+// enumnamebind_fail and enumnamebindparam_fail.
+@paradigm procedural
+
+enum Opt { Some(n: int64), None }
+enum B { X, Y }
+enum Tri { A, B2, C }
+enum A { P, Q }
+
+struct S { Some: B }
+
+func main() -> int32 {
+    s := S { Some: B.X }
+    x := s.Some
+    match x {
+        X => { println(1) }
+        Y => { println(2) }
+    }
+    match s.Some {
+        X => { println(1) }
+        Y => { println(2) }
+    }
+    o := Opt.Some(7)
+    match o {
+        Some(n) => { println(n) }
+        None => { println(0) }
+    }
+    t := Tri.A
+    match t {
+        A => { println(10) }
+        B2 => { println(20) }
+        C => { println(30) }
+    }
+    return 0
+}

@@ -51,6 +51,25 @@ func arm_tail_span_expr(a: *Ast, block_id: int64) -> int64 {
 // the move out it is; the aggregate lands in match_own keyed by the match expr id for the
 // binding, destructure, free/move, and return-position checks to read. The tail type is
 // re-inferred under suppress so the second walk adds no diagnostic and no fresh fault.
+// A payload carrying variant named with no payload at all, in the voice of the
+// constructor arity report: it names the count the variant wants and the fix.
+func bare_variant_msg(en: string, v: string, want: int64) -> string {
+    disp: string = base_type_name(en)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, disp)
+    sb_push_char(b, 46)
+    sb_push(b, v)
+    sb_push(b, "' takes ")
+    sb_push_int(b, want)
+    sb_push(b, " argument(s), so naming it alone is not a value; call it with its payload")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(disp)
+    return out
+}
+
 func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
     ctx: int64 = (*tc).match_ctx
     (*tc).match_ctx = 0
@@ -82,7 +101,7 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
         push_scope(tc)
         bind_match_arm(tc, arm.pat, st, e.a)
-        bind_match_arm_escape(tc, arm.pat, e.a, scrut_esc)
+        bind_match_arm_escape(tc, arm.pat, st, e.a, scrut_esc)
         // A nested match tail in a managed context (a managed annotation, ctx == 1, or an
         // owned subject) must run its own ownership judgment so a verdict is recorded even
         // when its tails name an outer payload binder or its payload type is a generic hole on
@@ -298,6 +317,28 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         base_ty: int64 = infer_expr(tc, e.a)
         fname: string = ast_name(a, e.b)
         bn: TyNode = ty_get((*tc).ty, base_ty)
+        // A payload carrying variant named without its payload is a constructor, not a
+        // value. It typed as the surface unknown and reached codegen, where it lowered
+        // to a zeroed enum that still matched its own arm, so `match Opt.Some` bound a
+        // payload nobody supplied and printed it. The payload free form, `Opt.None`, is
+        // the legal one and falls through untouched.
+        // The base is asked by name and not by scope: an enum's name is reserved at
+        // every binding position, so an identifier that names a declared enum is that
+        // enum here and nowhere a local binding. Codegen reads the same form the same
+        // way, off the spelling alone, and a scope test here would have disagreed with
+        // it in exactly the case the reservation now refuses.
+        vbase: ExprNode = vec_get((*a).exprs, e.a)
+        if vbase.kind == xk_ident() {
+            venums: *Map<string, EnumSig> = (*tc).enums
+            vename: string = ast_name(a, vbase.a)
+            if map_has(venums, vename) && sig_has_variant_in((*tc).sigtab, vename, fname) {
+                vsig: VariantSig = sig_variant_for_enum((*tc).sigtab, vename, fname)
+                if vsig.len > 0 {
+                    tc_emit(tc, bare_variant_msg(vename, fname, vsig.len), e.lo, e.hi)
+                    return ty_unknown((*tc).ty)
+                }
+            }
+        }
         if bn.kind == tyk_array() {
             if str_eq(fname, "len") { return ty_int((*tc).ty, 64) }
             tc_emit(tc, array_field_msg(fname), e.lo, e.hi)
@@ -307,6 +348,21 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
             if str_eq(fname, "message") { return ty_str((*tc).ty) }
             tc_emit(tc, error_field_msg(fname), e.lo, e.hi)
             return ty_str((*tc).ty)
+        }
+        // A scalar carries no member at all, so a field access on one, read or assigned,
+        // has no lowering. Before this rule it left check clean and died in codegen as
+        // an `unsupported field expression` naming no file and no line, so `a.f.f.f`
+        // over an int64 passed `dusk check` and failed the build. The unknown base a
+        // generic body leaves is not judged here; the ground pass sees it once mono
+        // makes it concrete, and a struct field's own type is answered below as
+        // unknown, so a chain through one still reads as far as the checker follows it.
+        if !ty_has_fields((*tc).ty, base_ty) {
+            if bn.kind == tyk_str() {
+                tc_emit(tc, "cannot access a field of string; a string has no fields, its byte count is str_len(s)", e.lo, e.hi)
+            } else {
+                tc_emit(tc, no_fields_msg(ty_render((*tc).ty, base_ty)), e.lo, e.hi)
+            }
+            return ty_unknown((*tc).ty)
         }
         return ty_unknown((*tc).ty)
     }
@@ -320,6 +376,16 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         // index position never states. A range answers unknown here; its two ends
         // are checked in the range arm, where they are inferred.
         check_index_signedness(tc, it0, idx.lo, idx.hi)
+        // A scalar has no elements, so neither an index nor a range slice of one has a
+        // lowering. Before this rule both left check clean and died in codegen as an
+        // `unsupported index expression` naming no file and no line, so `a[0][0]` over
+        // an int64 passed `dusk check` and failed the build. A string is indexable, its
+        // bytes are the elements, and an unknown base is the surface hole a generic body
+        // leaves, which the ground pass judges once mono makes it concrete.
+        if !ty_is_indexable((*tc).ty, base_ty2) {
+            tc_emit(tc, cannot_index_msg(ty_render((*tc).ty, base_ty2)), e.lo, e.hi)
+            return ty_unknown((*tc).ty)
+        }
         if idx.kind == xk_range() {
             // A range slice validates against its base's length, and a raw
             // pointer has none: the fat slice it would mint claims a length no
@@ -338,8 +404,10 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         if bn2.kind == tyk_slice() || bn2.kind == tyk_array() || bn2.kind == tyk_str() || bn2.kind == tyk_collector() || bn2.kind == tyk_unknown() {
             return elem_of((*tc).ty, base_ty2)
         }
-        // Stage0 currently leaves non-indexable scalar indexing permissive here;
-        // this stays aligned rather than inventing a new diagnostic in S3a.
+        // What is left is a pointer, which indexes as pointer arithmetic over its
+        // pointee, or a named type, a tuple, a future, or a handle, each of which reads
+        // through its own accessors instead. None of them has an element type to name
+        // here, so the index answers unknown rather than fabricating one.
         return ty_unknown((*tc).ty)
     }
     if e.kind == xk_range() {

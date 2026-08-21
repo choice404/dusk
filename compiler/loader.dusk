@@ -284,8 +284,8 @@ func resolve(imp: string, base: string, stdlib: string) -> Resolved {
     return resolve_in_one(rel, stdlib)
 }
 
-func located_diag(path: string, src: string, n: int64, e: Located) -> LoadDiag {
-    return load_diag_span(path, src, n, e.lo, e.hi, e.msg)
+func located_diag(path: string, src: string, n: int64, t: *LineTable, e: Located) -> LoadDiag {
+    return load_diag_span(path, src, n, t, e.lo, e.hi, e.msg)
 }
 
 func read_error(path: string, e: error) -> LoadDiag {
@@ -312,17 +312,21 @@ func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
     p_set_docs(p, lx_docs(lx))
     a: *Ast = parse_module(p)
     mut ok: bool = true
+    // One line table for this file, shared by every diagnostic raised against it,
+    // so a file that raises thousands of them locates them all against one pass
+    // over the source. It stays unbuilt unless something renders.
+    t: *LineTable = line_table_new()
     lex_errs: *Vector<Located> = lx_errors(lx)
     mut i: int64 = 0
     while i < vec_len(lex_errs) {
-        vec_push(errors, located_diag(path, s.text, s.len, vec_get(lex_errs, i)))
+        vec_push(errors, located_diag(path, s.text, s.len, t, vec_get(lex_errs, i)))
         ok = false
         i = i + 1
     }
     parse_errs: *Vector<Located> = p_errors(p)
     mut j: int64 = 0
     while j < vec_len(parse_errs) {
-        vec_push(errors, located_diag(path, s.text, s.len, vec_get(parse_errs, j)))
+        vec_push(errors, located_diag(path, s.text, s.len, t, vec_get(parse_errs, j)))
         ok = false
         j = j + 1
     }
@@ -332,7 +336,7 @@ func parse_file(path: string, errors: *Vector<LoadDiag>) -> ParsedFile {
         mut k: int64 = 0
         while k < vec_len(paradigm_errs) {
             sd: SpanDiagnostic = vec_get(paradigm_errs, k)
-            vec_push(errors, load_diag_span(path, s.text, s.len, sd.lo, sd.hi, sd.msg))
+            vec_push(errors, load_diag_span(path, s.text, s.len, t, sd.lo, sd.hi, sd.msg))
             ok = false
             k = k + 1
         }
@@ -353,7 +357,7 @@ func ast_import_strings(a: *Ast) -> *Vector<string> {
 
 func register_file(files: *Vector<FileSrc>, base: int64, path: string, src: Source, a: *Ast) -> int64 {
     load_shift_module(a, base)
-    vec_push(files, FileSrc { path: path, base: base, src: src.text, len: src.len })
+    vec_push(files, FileSrc { path: path, base: base, src: src.text, len: src.len, lines: line_table_new() })
     return base + src.len + 1
 }
 
@@ -507,10 +511,15 @@ func collect_directives(src: string, len: int64, file: string, errors: *Vector<L
     // value among them; those faults reach the build here, not only the scan
     // dump, so an illegal directive fails a check the same as a parse error.
     pe: *Vector<Located> = p.errors
-    mut d: int64 = 0
-    while d < vec_len(pe) {
-        vec_push(errors, located_diag(file, src, len, vec_get(pe, d)))
-        d = d + 1
+    if vec_len(pe) > 0 {
+        // One line table for this file's directive faults, built only when it has
+        // some, so a clean file never allocates one.
+        t: *LineTable = line_table_new()
+        mut d: int64 = 0
+        while d < vec_len(pe) {
+            vec_push(errors, located_diag(file, src, len, t, vec_get(pe, d)))
+            d = d + 1
+        }
     }
     lv: *Vector<string> = p.links
     mut i: int64 = 0

@@ -1,0 +1,33 @@
+// The parameter twin of iface_generic_ret. A generic instance declared as an
+// interface method parameter is passed by value through the vtable thunk, so the
+// thunk's parameter type has to be the monomorphized Box$int64 the caller builds.
+// While the interface declaration kept the un-mangled spelling the call was emitted
+// as an i64 argument against a Box$int64 operand and clang rejected the module.
+@paradigm oop
+@paradigm procedural
+
+struct Box<T> { v: T }
+
+interface Speaker {
+    take(b: Box<int64>) -> int64
+}
+
+struct Dog { s: int64 }
+impl Speaker for Dog {
+    func take(b: Box<int64>) -> int64 { return b.v + self.s }
+}
+
+struct Cat { s: int64 }
+impl Speaker for Cat {
+    func take(b: Box<int64>) -> int64 { return b.v * self.s }
+}
+
+func main() -> int32 {
+    d := Dog { s: 6 }
+    c := Cat { s: 5 }
+    a: Speaker = d
+    b: Speaker = c
+    println(a.take(Box { v: 4 }))
+    println(b.take(Box { v: 4 }))
+    return 0
+}

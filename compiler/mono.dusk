@@ -1,10 +1,12 @@
 /** mono: the monomorphization driver. rewrite_item copies every non-generic item
- *  in source order, emit_ty and instantiate feed the worklist, force_future_instances
- *  mints one Future per async func, then the worklist drains LIFO under the 10000
- *  instantiation budget. requested gates each distinct mangled name once, so the
- *  interface backstop and the budget diagnostic fire at most once per site. The
- *  ground items land in a fresh item table dumped through the parser's ast_dump; the
- *  arena nodes they reference are appended in place, orphan leakage by design. */
+ *  in source order and grounds each interface declaration in place, so a vtable
+ *  signature reads the same mangled type its impls do. emit_ty and instantiate feed
+ *  the worklist, force_future_instances mints one Future per async func, then the
+ *  worklist drains LIFO under the 10000 instantiation budget. requested gates each
+ *  distinct mangled name once, so the interface backstop and the budget diagnostic
+ *  fire at most once per site. The ground items land in a fresh item table dumped
+ *  through the parser's ast_dump; the arena nodes they reference are appended in
+ *  place, orphan leakage by design. */
 
 @paradigm procedural
 
@@ -241,6 +243,60 @@ func expand_instance(m: *Mono, name: string, args: *Vector<int64>, lo: int64, hi
     }
 }
 
+// Grounds one interface declaration: every method signature's parameter and return
+// type goes through emit_ty, the same path the impl's rewritten methods take, so a
+// signature naming a generic instance such as Box<int64> reads Box$int64 and the
+// vtable thunk, the dispatch result slot, and the impl body all agree on one type.
+// The grounded node replaces the original at its own arena id instead of being
+// appended, because codegen finds an interface by scanning the interface arena for a
+// name match and one of those scans stops at the first hit: a second node under the
+// same name would leave it reading the un-grounded spelling. A generic interface is
+// rejected instead: an interface value erases the type it carries, so nothing at a
+// dispatch site can pin its parameters, and leaving them unbound would hand codegen a
+// signature whose types have no width.
+func ground_interface(m: *Mono, id: int64) -> void {
+    a: *Ast = (*m).ast
+    ifaces: *Vector<InterfaceNode> = (*a).interfaces
+    iface: InterfaceNode = vec_get(ifaces, id)
+    if iface.generics_len > 0 {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "the generic interface '")
+        sb_push(b, ast_name(a, iface.name))
+        sb_push(b, "' is not supported yet; spell its methods over concrete types, since an interface value erases the type it holds and cannot be monomorphized")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        mono_diag(m, out, iface.lo, iface.hi)
+        return
+    }
+    methods: *Vector<int64> = alloc(vec_new())
+    mut i: int64 = 0
+    while i < iface.methods_len {
+        ms: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + i))
+        params: *Vector<int64> = alloc(vec_new())
+        mut j: int64 = 0
+        while j < ms.params_len {
+            p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ms.params_off + j))
+            vec_push(params, ast_param(a, p.is_using, p.name, emit_ty(m, p.ty, ms.lo, ms.hi)))
+            j = j + 1
+        }
+        ret: int64 = emit_ty(m, ms.ret, ms.lo, ms.hi)
+        vec_push(methods, ast_method_sig(a, ms.name, ms.lo, ms.hi, params, ret))
+        i = i + 1
+    }
+    moff, mlen := ast_kids(a, methods)
+    vec_set(ifaces, id, InterfaceNode {
+        exported: iface.exported,
+        name: iface.name,
+        lo: iface.lo,
+        hi: iface.hi,
+        generics_off: iface.generics_off,
+        generics_len: iface.generics_len,
+        methods_off: moff,
+        methods_len: mlen,
+    })
+}
+
 func rewrite_item(m: *Mono, it: ItemNode) -> void {
     a: *Ast = (*m).ast
     empty_subst: *Map<string, int64> = alloc(map_new())
@@ -315,6 +371,7 @@ func rewrite_item(m: *Mono, it: ItemNode) -> void {
         return
     }
     if it.kind == ik_interface() {
+        ground_interface(m, it.id)
         vec_push((*m).out, it)
         return
     }

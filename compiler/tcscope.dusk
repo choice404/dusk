@@ -167,6 +167,47 @@ export func reject_builtin_binding(tc: *TypeChecker, name: string, tyid: int64, 
     }
 }
 
+func enum_name_binding_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push_char(b, 39)
+    sb_push(b, name)
+    sb_push(b, "' is an enum name; a binding cannot take it, because a field read through it names that enum's constructor, so rename this binding")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// An enum's name is reserved at every binding position: a parameter, a let or
+// destructure binder, an await binder, a for binder, a match arm binder, and a lambda
+// parameter. Codegen reads `A.Some` as a constructor off the spelling of the base
+// identifier alone, with no scope to ask, and the checker's own constructor and
+// scrutinee readers agree with it; a binding that takes the enum's name is the one
+// case where that agreement is wrong, and the two answers then disagree. `Opt := S {
+// Some: B.X }` followed by `Opt.Some` lowered to a zeroed constructor of the declared
+// enum instead of the field read, so the program printed a value nobody wrote, and
+// the same shape through a generic parameter passed check with a payload of the wrong
+// type. Reserving the name leaves one answer for both. Only the enum's own name is
+// taken; a variant name binds freely, since no lowering keys on a variant alone.
+// Surface-only, like the builtin reservation beside it: the ground pass runs on a
+// module the surface pass already accepted.
+export func reject_enum_name_binding(tc: *TypeChecker, name: string, lo: int64, hi: int64) -> void {
+    if (*tc).types_only { return }
+    reject_enum_name_binding_any_pass(tc, name, lo, hi)
+}
+
+// The same reservation without the pass gate, for the one binding position whose own
+// question, is this arm a variant or a binder, a generic body cannot answer on the
+// surface: there the arm is judged on whichever pass names the scrutinee's enum. The
+// ground pass only ever runs on a module the surface pass accepted, so this cannot
+// double report, and the driver dedups a ground diagnostic by span and message, so one
+// generic instantiated twice still reports once.
+export func reject_enum_name_binding_any_pass(tc: *TypeChecker, name: string, lo: int64, hi: int64) -> void {
+    enums: *Map<string, EnumSig> = (*tc).enums
+    if !map_has(enums, name) { return }
+    tc_emit(tc, enum_name_binding_msg(name), lo, hi)
+}
+
 export func lookup(tc: *TypeChecker, name: string) -> int64 {
     scopes: *Vector<*Map<string, int64>> = (*tc).scopes
     mut i: int64 = vec_len(scopes) - 1
@@ -283,12 +324,37 @@ export func declare_enum_bind(tc: *TypeChecker, name: string, en: string) -> voi
     map_put(m, name, en)
 }
 
+// The enum a binding's value constructed, answered by the scope that declares the
+// name and by no scope outside it. The walk stops at the declaring scope even when
+// that scope recorded nothing: a binding whose value is not a constructor records no
+// enum, and walking past it answered with an outer binding of the same name, a
+// different value of a different enum. That stale answer both refused a legal match
+// over the shadowing binding and read the wrong payload for one it still accepted.
 export func enum_bind_name(tc: *TypeChecker, name: string) -> string {
     enum_binds: *Vector<*Map<string, string>> = (*tc).enum_binds
-    mut i: int64 = vec_len(enum_binds) - 1
+    return enum_bind_from(tc, name, vec_len(enum_binds) - 1)
+}
+
+// The same answer from the scope outside the innermost one. A binding whose value
+// names itself, `o := o`, declares the inner name before its value is read, so asking
+// from the innermost scope answers for the binding being defined and stops there; the
+// value it copies lives one scope out.
+export func enum_bind_name_outer(tc: *TypeChecker, name: string) -> string {
+    enum_binds: *Vector<*Map<string, string>> = (*tc).enum_binds
+    return enum_bind_from(tc, name, vec_len(enum_binds) - 2)
+}
+
+func enum_bind_from(tc: *TypeChecker, name: string, start: int64) -> string {
+    enum_binds: *Vector<*Map<string, string>> = (*tc).enum_binds
+    scopes: *Vector<*Map<string, int64>> = (*tc).scopes
+    mut i: int64 = start
     while i >= 0 {
         m: *Map<string, string> = vec_get(enum_binds, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), "") }
+        if i < vec_len(scopes) {
+            s: *Map<string, int64> = vec_get(scopes, i)
+            if map_has(s, name) { return "" }
+        }
         i = i - 1
     }
     return ""

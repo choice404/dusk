@@ -1,0 +1,45 @@
+@paradigm procedural
+@paradigm functional
+
+// The unsound half of the same stale answer. The inner o holds Opt, whose Some carries
+// a pointer, while the outer o holds Tag, whose Some carries a scalar. Answering the
+// inner match with the outer binding's enum typed the payload binder as a scalar, so
+// no alias link was made and the frame slice stored through the binder never reached
+// the returned pointer. The accept twin is enumshadow_valid_ok.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+struct Box { o: Opt }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    b := Box { o: Opt.Some(c) }
+    o := Tag.Some(1)
+    local: int64[4] = [111, 222, 333, 444]
+    if true {
+        o := b.o
+        match o {
+            Some(p) => { (*p).rows = local[0..4] }
+            None => {}
+        }
+    }
+    match o {
+        Some(n) => { println(n) }
+        None => {}
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

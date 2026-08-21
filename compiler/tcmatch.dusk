@@ -11,15 +11,14 @@
 @import tysigs
 @import tcstate
 @import tcscope
+@import tcesc
 
-func variant_in_enum(tc: *TypeChecker, es: EnumSig, name: string) -> bool {
-    sigs: *TypeSigs = (*tc).sigtab
-    mut i: int64 = 0
-    while i < es.len {
-        if str_eq(vec_get((*sigs).names, es.off + i), name) { return true }
-        i = i + 1
-    }
-    return false
+// Whether the resolved enum declares this variant. One lookup against the
+// enum-keyed payload table, not a walk of the enum's variant names: a match asks
+// this once per arm, so the walk cost arms times variants on an enum that carries
+// many of them.
+func variant_in_enum(tc: *TypeChecker, ename: string, name: string) -> bool {
+    return sig_has_variant_in((*tc).sigtab, ename, name)
 }
 
 func already_covered_msg(name: string) -> string {
@@ -72,10 +71,8 @@ func match_not_enum_msg(rendered: string) -> string {
 // unresolved and every binder falls back to ty_unknown). An arity mismatch
 // keeps the untyped shape too, so today's ctor/coverage diagnostics still own
 // the report; here we never index past the recorded payload list.
-func match_binder_sig(tc: *TypeChecker, st: int64, vname: string, arity: int64) -> VariantSig {
-    n: TyNode = ty_get((*tc).ty, st)
-    if n.kind != tyk_named() { return empty_variant_sig() }
-    ename: string = ty_name((*tc).ty, st)
+func match_binder_sig(tc: *TypeChecker, ename: string, vname: string, arity: int64) -> VariantSig {
+    if str_len(ename) == 0 { return empty_variant_sig() }
     enums: *Map<string, EnumSig> = (*tc).enums
     if !map_has(enums, ename) { return empty_variant_sig() }
     vs: VariantSig = sig_variant_for_enum((*tc).sigtab, ename, vname)
@@ -123,17 +120,14 @@ func pattern_arity_msg(v: string, got: int64, want: int64) -> string {
 // diagnostic. A resolved enum whose named variant does not exist is refused here
 // too (a pattern naming a variant the scrutinee enum lacks used to bind silently
 // then die at codegen); an unknown scrutinee or a non-enum keeps its own report.
-func check_pattern_arity(tc: *TypeChecker, p: PatternNode, st: int64, lo: int64, hi: int64) -> void {
+func check_pattern_arity(tc: *TypeChecker, p: PatternNode, ename: string, lo: int64, hi: int64) -> void {
     if p.kind != pk_variant() { return }
-    n: TyNode = ty_get((*tc).ty, st)
-    if n.kind != tyk_named() { return }
-    ename: string = ty_name((*tc).ty, st)
+    if str_len(ename) == 0 { return }
     enums: *Map<string, EnumSig> = (*tc).enums
     if !map_has(enums, ename) { return }
     a: *Ast = (*tc).ast
     vname: string = ast_name(a, p.a)
-    es: EnumSig = unwrap_or(map_get(enums, ename), EnumSig { off: 0, len: 0 })
-    if !variant_in_enum(tc, es, vname) {
+    if !variant_in_enum(tc, ename, vname) {
         tc_emit(tc, no_variant_msg(ename, vname), lo, hi)
         return
     }
@@ -182,8 +176,14 @@ export func bind_match_arm(tc: *TypeChecker, pat_id: int64, st: int64, subject_i
     p: PatternNode = vec_get((*a).patterns, pat_id)
     if p.kind == pk_variant() {
         subj: ExprNode = vec_get((*a).exprs, subject_id)
-        check_pattern_arity(tc, p, st, subj.lo, subj.hi)
-        vs: VariantSig = match_binder_sig(tc, st, ast_name(a, p.a), p.c)
+        // The scrutinee's type names its enum when it has one, and the expression names
+        // it when the type is the surface unknown a constructor or a field read infers.
+        // Judging only off the type left every such match unjudged: a pattern could bind
+        // two names into a one field payload and the second binder reached codegen
+        // undefined, and an arm could name a variant of an entirely different enum.
+        ename: string = scrut_enum_name(tc, st, subject_id)
+        check_pattern_arity(tc, p, ename, subj.lo, subj.hi)
+        vs: VariantSig = match_binder_sig(tc, ename, ast_name(a, p.a), p.c)
         mut subj_own: int64 = own_borrow()
         if !(*tc).types_only { subj_own = match_subject_own(tc, subject_id) }
         mut i: int64 = 0
@@ -191,6 +191,7 @@ export func bind_match_arm(tc: *TypeChecker, pat_id: int64, st: int64, subject_i
             bname: string = ast_name(a, vec_get((*a).kids, p.b + i))
             bty: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
             reject_alloc_shadow(tc, bname, subj.lo, subj.hi)
+            reject_enum_name_binding(tc, bname, subj.lo, subj.hi)
             declare(tc, bname, bty)
             if !(*tc).types_only {
                 if subj_own == own_owner() {
@@ -203,12 +204,27 @@ export func bind_match_arm(tc: *TypeChecker, pat_id: int64, st: int64, subject_i
         }
     } else if p.kind == pk_ident() {
         subj2: ExprNode = vec_get((*a).exprs, subject_id)
-        reject_alloc_shadow(tc, ast_name(a, p.a), subj2.lo, subj2.hi)
-        declare(tc, ast_name(a, p.a), st)
+        iname: string = ast_name(a, p.a)
+        reject_alloc_shadow(tc, iname, subj2.lo, subj2.hi)
+        // A payload free arm parses as an identifier pattern, so this one form is read
+        // two ways: a variant of the scrutinee's enum names that variant and binds
+        // nothing, anything else is the catch all binder. Coverage splits them on the
+        // same question, and only the binder reading takes a name, so only it answers
+        // to the enum name reservation. Judging both would refuse `match t { A => ... }`
+        // whenever some other enum in the program is also spelled A. The split needs the
+        // scrutinee's enum, which a generic body and a generic call result do not name on
+        // the surface, so an unnamed enum is left unjudged here and the ground pass, which
+        // sees the same arm once mono makes the scrutinee concrete, answers instead. That
+        // is why this is the one site that judges on either pass.
+        iename: string = scrut_enum_name(tc, st, subject_id)
+        if str_len(iename) > 0 && !variant_in_enum(tc, iename, iname) {
+            reject_enum_name_binding_any_pass(tc, iname, subj2.lo, subj2.hi)
+        }
+        declare(tc, iname, st)
     }
 }
 
-export func check_match_coverage(tc: *TypeChecker, es: EnumSig, arm_off: int64, arm_len: int64, lo: int64, hi: int64) -> void {
+export func check_match_coverage(tc: *TypeChecker, ename: string, es: EnumSig, arm_off: int64, arm_len: int64, lo: int64, hi: int64) -> void {
     a: *Ast = (*tc).ast
     covered: *Map<string, int64> = alloc(map_new())
     mut catch_all: bool = false
@@ -222,7 +238,7 @@ export func check_match_coverage(tc: *TypeChecker, es: EnumSig, arm_off: int64, 
             catch_all = true
         } else if p.kind == pk_ident() {
             name: string = ast_name(a, p.a)
-            if !variant_in_enum(tc, es, name) {
+            if !variant_in_enum(tc, ename, name) {
                 catch_all = true
             } else if map_has(covered, name) {
                 tc_emit(tc, already_covered_msg(name), lo, hi)
@@ -260,7 +276,7 @@ export func check_match_scrutinee(tc: *TypeChecker, st: int64, scrut_id: int64, 
         ename: string = ty_name((*tc).ty, st)
         enums: *Map<string, EnumSig> = (*tc).enums
         if map_has(enums, ename) {
-            check_match_coverage(tc, unwrap_or(map_get(enums, ename), EnumSig { off: 0, len: 0 }), arm_off, arm_len, scrut.lo, scrut.hi)
+            check_match_coverage(tc, ename, unwrap_or(map_get(enums, ename), EnumSig { off: 0, len: 0 }), arm_off, arm_len, scrut.lo, scrut.hi)
         } else {
             structs: *Map<string, StructSig> = (*tc).structs
             ifaces: *Map<string, int64> = (*tc).ifaces
@@ -269,6 +285,17 @@ export func check_match_scrutinee(tc: *TypeChecker, st: int64, scrut_id: int64, 
             }
         }
     } else if n.kind == tyk_unknown() {
+        // A constructor call, a binding a constructor initialized, and a struct field
+        // read all infer unknown on the surface, and returning here skipped coverage
+        // for every one of them: `match o { Some(p) => ... }` over an `o := Opt.None`
+        // fell through each arm at run time and kept going with nothing bound. The
+        // enum is recovered from the expression, and coverage is judged whenever it
+        // resolves; an unresolvable scrutinee still returns, as before.
+        ename2: string = scrut_enum_name(tc, st, scrut_id)
+        if str_len(ename2) > 0 {
+            enums2: *Map<string, EnumSig> = (*tc).enums
+            check_match_coverage(tc, ename2, unwrap_or(map_get(enums2, ename2), EnumSig { off: 0, len: 0 }), arm_off, arm_len, scrut.lo, scrut.hi)
+        }
         return
     } else {
         tc_emit(tc, match_type_msg("match needs an enum value, not ", ty_render((*tc).ty, st)), scrut.lo, scrut.hi)

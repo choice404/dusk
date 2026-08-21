@@ -1,0 +1,36 @@
+@paradigm procedural
+@paradigm functional
+
+// The same reject through a dereference: the scrutinee is a field of a heap box, so
+// the chain is a field read of a dereference and its type is what names the enum. The
+// field twin is varshadow_fieldmatch_fail.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+struct Box { o: Opt }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    bp: *Box = alloc(Box { o: Opt.Some(c) })
+    local: int64[4] = [111, 222, 333, 444]
+    match (*bp).o {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    free(bp)
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

@@ -1,0 +1,33 @@
+@paradigm procedural
+@paradigm functional
+
+// The accept twin of the variantshadow rejects. A function and a local closure both
+// repeat a variant name, and both are called with heap backed data, so nothing they
+// return views a frame and the program runs. Refusing to model a shadowed name as a
+// constructor must not make a legal call look like an escape.
+enum Tag { Some(n: int64), None }
+
+func Some(xs: int64[]) -> int64[] {
+    return xs
+}
+
+func heap3() -> int64[] {
+    seed: int64[3] = [4, 5, 6]
+    return map(seed[0..3], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> int64[] {
+    None := lambda (xs: int64[]) -> int64[] { return xs }
+    return None(Some(heap3()))
+}
+
+func main() -> int32 {
+    v := mk()
+    println(v[0])
+    t := Tag.Some(3)
+    match t {
+        Some(n) => { println(n) }
+        None => { println(0) }
+    }
+    return 0
+}

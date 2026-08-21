@@ -1,0 +1,35 @@
+// An interface method whose return type names a generic instance. Codegen sizes the
+// vtable thunk and the slot that receives a dispatched call from the interface
+// declaration, not from the impl, so the declared Box<int64> has to reach codegen as
+// the monomorphized Box$int64 the impl actually returns. Both dispatch shapes are
+// pinned: the field read straight off the call, and the binding that stores the
+// returned struct first. Two impls prove the vtable still picks the right thunk.
+@paradigm oop
+@paradigm procedural
+
+struct Box<T> { v: T }
+
+interface Speaker {
+    boxed() -> Box<int64>
+}
+
+struct Dog { s: int64 }
+impl Speaker for Dog {
+    func boxed() -> Box<int64> { return Box { v: self.s * 7 } }
+}
+
+struct Cat { s: int64 }
+impl Speaker for Cat {
+    func boxed() -> Box<int64> { return Box { v: self.s + 100 } }
+}
+
+func main() -> int32 {
+    d := Dog { s: 6 }
+    c := Cat { s: 5 }
+    a: Speaker = d
+    b: Speaker = c
+    println(a.boxed().v)
+    r := b.boxed()
+    println(r.v)
+    return 0
+}

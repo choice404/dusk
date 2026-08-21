@@ -348,7 +348,7 @@ func check_match_stmt(tc: *TypeChecker, scrut: int64, off: int64, len: int64) ->
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         push_scope(tc)
         bind_match_arm(tc, arm.pat, st, scrut)
-        bind_match_arm_escape(tc, arm.pat, scrut, scrut_esc)
+        bind_match_arm_escape(tc, arm.pat, st, scrut, scrut_esc)
         check_block_no_scope(tc, arm.body)
         pop_scope(tc)
         i = i + 1
@@ -511,6 +511,8 @@ export func check_stmt(tc: *TypeChecker, id: int64) -> void {
         }
         push_scope(tc)
         reject_alloc_shadow(tc, ast_name(a, s.a), for_iter.lo, for_iter.hi)
+        reject_enum_name_binding(tc, ast_name(a, s.a), for_iter.lo, for_iter.hi)
+        if s.d != 0 { reject_enum_name_binding(tc, ast_name(a, s.d - 1), for_iter.lo, for_iter.hi) }
         // The binder carries its element type, not the permissive wildcard the for
         // loop used to declare. For an array, slice, or string that is elem_of; for a
         // container it is the classifier's type argument, T for a vector and K for a
@@ -642,6 +644,7 @@ func check_let_await(tc: *TypeChecker, s: StmtNode, value: ExprNode) -> void {
         }
         while i < nbinds {
             b2: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
+            reject_enum_name_binding(tc, ast_name(a, b2.name), value.lo, value.hi)
             declare(tc, ast_name(a, b2.name), ty_unknown((*tc).ty))
             i = i + 1
         }
@@ -660,6 +663,7 @@ func check_let_await(tc: *TypeChecker, s: StmtNode, value: ExprNode) -> void {
         mut j: int64 = 0
         while j < nbinds {
             bx: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + j))
+            reject_enum_name_binding(tc, ast_name(a, bx.name), value.lo, value.hi)
             declare(tc, ast_name(a, bx.name), ty_unknown((*tc).ty))
             j = j + 1
         }

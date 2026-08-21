@@ -90,8 +90,7 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -
             es: EnumSig = unwrap_or(map_get(enums, name), EnumSig { off: 0, len: 0 })
             mut k: int64 = 0
             while k < es.len {
-                v: string = vec_get((*(*tc).sigtab).names, es.off + k)
-                vs: VariantSig = unwrap_or(map_get((*tc).variant_payloads, v), empty_variant_sig())
+                vs: VariantSig = sig_variant_at((*tc).sigtab, es.off + k)
                 mut q: int64 = 0
                 while q < vs.len {
                     if managed_reaches(tc, sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, q), seen) { return true }
@@ -104,9 +103,23 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -
     return false
 }
 
+// Whether a type reaches a managed value, memoized per type id. The walk reads
+// only the arena node and the signature tables, neither of which changes after
+// signatures are collected, so one answer per type is the answer for the whole
+// pass. The memo lives on the signature table rather than in this walk because
+// the enclosing question is asked once per match arm, once per binding, and once
+// per alias link, and an enum with many variants is otherwise re-walked at every
+// one of them. Only this entry point memoizes: an inner call carries a seen set
+// that cuts recursive types short, and that cut answer is true for the walk it
+// belongs to, not for the type on its own.
 export func ty_reaches_managed(tc: *TypeChecker, tyid: int64) -> bool {
+    sigtab: *TypeSigs = (*tc).sigtab
+    memo: int64 = sig_reach_memo(sigtab, tyid)
+    if memo != 0 { return memo == 2 }
     seen: *Map<string, int64> = alloc(map_new())
-    return managed_reaches(tc, tyid, seen)
+    reaches: bool = managed_reaches(tc, tyid, seen)
+    sig_reach_memo_put(sigtab, tyid, reaches)
+    return reaches
 }
 
 export func links_as_alias(tc: *TypeChecker, tyid: int64) -> bool {
@@ -223,6 +236,14 @@ export func variant_name(tc: *TypeChecker, callee_id: int64) -> string {
     f: ExprNode = vec_get((*a).exprs, callee_id)
     if f.kind == xk_ident() {
         name: string = ast_name(a, f.a)
+        // A name a local binding, a parameter, or a top level function owns is that
+        // callee, not a constructor; the call check reads these same two guards before
+        // it names an unqualified constructor. Without them a function, a closure, or a
+        // parameter that happens to repeat a variant name was modeled as that variant's
+        // constructor, and the variant's payload types then decided which arguments
+        // carry a view: a scalar payload dropped a slice argument's frame view and the
+        // call handed a dead frame back accepted.
+        if is_local(tc, name) || sig_has_fn((*tc).sigtab, name) { return "" }
         payloads: *Map<string, VariantSig> = (*tc).variant_payloads
         if map_has(payloads, name) { return name }
     } else if f.kind == xk_field() {
@@ -237,11 +258,126 @@ export func variant_name(tc: *TypeChecker, callee_id: int64) -> string {
     return ""
 }
 
+// The enum a constructor call names. A qualified call (A.Some) answers with the
+// enum its base names, the only form that reaches codegen; a bare call is already
+// refused by the call check, which says to write it as 'A.Some', so it answers with
+// the recorded owner and the payload read stays coherent on a program that is
+// rejected either way.
+export func ctor_enum_name(tc: *TypeChecker, callee_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    f: ExprNode = vec_get((*a).exprs, callee_id)
+    if f.kind == xk_field() {
+        base: ExprNode = vec_get((*a).exprs, f.a)
+        if base.kind == xk_ident() {
+            bname: string = ast_name(a, base.a)
+            enums: *Map<string, EnumSig> = (*tc).enums
+            if map_has(enums, bname) { return bname }
+        }
+        return ""
+    }
+    if f.kind == xk_ident() {
+        nm: string = ast_name(a, f.a)
+        if is_local(tc, nm) || sig_has_fn((*tc).sigtab, nm) { return "" }
+        return variant_owner((*tc).sigtab, nm)
+    }
+    return ""
+}
+
+// The enum a match scrutinee names. Its type answers when that type is a named enum,
+// and when it is not the expression does: a qualified constructor call infers unknown
+// on the surface, and so does a struct field read, so `match o` over `o := Opt.Some(c)`,
+// `match Opt.Some(c)`, and `match b.o` all arrive with no named type to ask. The let
+// records which enum a constructor bound, a constructor names its own enum, and a
+// field, index, or dereference chain carries its declared type. Empty when nothing
+// resolves, which leaves every caller on the answer it had.
+export func scrut_enum_name(tc: *TypeChecker, st: int64, scrut_id: int64) -> string {
+    enums: *Map<string, EnumSig> = (*tc).enums
+    n: TyNode = ty_get((*tc).ty, st)
+    if n.kind == tyk_named() {
+        nm: string = ty_name((*tc).ty, st)
+        if map_has(enums, nm) { return nm }
+        return ""
+    }
+    if n.kind != tyk_unknown() { return "" }
+    a: *Ast = (*tc).ast
+    exprs: *Vector<ExprNode> = (*a).exprs
+    if scrut_id < 0 || scrut_id >= vec_len(exprs) { return "" }
+    e: ExprNode = vec_get(exprs, scrut_id)
+    if e.kind == xk_ident() {
+        bn: string = enum_bind_name(tc, ast_name(a, e.a))
+        if str_len(bn) > 0 && map_has(enums, bn) { return bn }
+        return ""
+    }
+    if e.kind == xk_call() {
+        callee: ExprNode = vec_get((*a).exprs, e.a)
+        if callee.kind == xk_field() {
+            cn: string = ctor_enum_name(tc, e.a)
+            if str_len(cn) > 0 && map_has(enums, cn) { return cn }
+        }
+        return ""
+    }
+    if e.kind == xk_field() || e.kind == xk_index() || (e.kind == xk_unary() && e.a == uop_deref()) {
+        // `Opt.None` is a field expression, not a call: a payload free constructor
+        // names its enum in its own base, which no chain type can answer for.
+        if e.kind == xk_field() {
+            fbase: ExprNode = vec_get(exprs, e.a)
+            if fbase.kind == xk_ident() {
+                fname: string = ast_name(a, fbase.a)
+                if map_has(enums, fname) { return fname }
+            }
+        }
+        ct: int64 = chain_ty(tc, scrut_id)
+        cty: TyNode = ty_get((*tc).ty, ct)
+        if cty.kind == tyk_named() {
+            cname: string = ty_name((*tc).ty, ct)
+            if map_has(enums, cname) { return cname }
+        }
+    }
+    return ""
+}
+
+// The payload signature of the constructor a callee names, read out of the enum's
+// own variant slot. Two enums may declare the same variant name, and the table keyed
+// by the bare name answers with whichever enum was declared last, so a payload read
+// through it can hand one enum's field types back for another enum's payload values:
+// an int64[] payload read as an int64 carries no view, and a slice into a dead frame
+// escapes accepted. The name keyed table stays the fallback for a callee whose enum
+// does not resolve, which is exactly the answer given before.
+export func ctor_variant_sig(tc: *TypeChecker, callee_id: int64, vname: string) -> VariantSig {
+    en: string = ctor_enum_name(tc, callee_id)
+    if str_len(en) > 0 && sig_has_variant_in((*tc).sigtab, en, vname) {
+        return sig_variant_for_enum((*tc).sigtab, en, vname)
+    }
+    return unwrap_or(map_get((*tc).variant_payloads, vname), empty_variant_sig())
+}
+
+// Whether a variant's payload types cannot be known here: the enum did not resolve
+// and more than one enum in the module declares this variant name, so the name keyed
+// table would answer with whichever was declared last and could type a slice payload
+// as a scalar. The escape model then reads no payload signature at all and treats
+// every payload as view carrying, which over approximates and never under approximates.
+// A variant name only one enum declares still answers correctly by name, and the
+// ground pass, which runs no escape judgment, keeps the name keyed answer.
+export func variant_payload_opaque(tc: *TypeChecker, ename: string, vname: string) -> bool {
+    if (*tc).types_only { return false }
+    if str_len(ename) > 0 && sig_has_variant_in((*tc).sigtab, ename, vname) { return false }
+    return sig_variant_shared((*tc).sigtab, vname)
+}
+
 func value_escape_call(tc: *TypeChecker, e: ExprNode) -> EscPair {
     a: *Ast = (*tc).ast
     vname: string = variant_name(tc, e.a)
     if str_len(vname) > 0 {
-        vs: VariantSig = unwrap_or(map_get((*tc).variant_payloads, vname), empty_variant_sig())
+        if variant_payload_opaque(tc, ctor_enum_name(tc, e.a), vname) {
+            mut opaque: EscPair = esc_none()
+            mut oi: int64 = 0
+            while oi < e.c {
+                opaque = esc_or(opaque, value_escape(tc, vec_get((*a).kids, e.b + oi)))
+                oi = oi + 1
+            }
+            return opaque
+        }
+        vs: VariantSig = ctor_variant_sig(tc, e.a, vname)
         mut out: EscPair = esc_none()
         mut i: int64 = 0
         while i < e.c && i < vs.len {

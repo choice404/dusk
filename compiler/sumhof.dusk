@@ -13,6 +13,7 @@
 @import ast
 @import tcstate
 @import summary
+@import sumflow
 @import sumwalk
 @import sumplace
 
@@ -223,11 +224,10 @@ func mapper_result(c: *SumCtx, fexpr_id: int64, seeds: *Vector<SumVal>) -> SumVa
                 }
                 mut x: int64 = 0
                 while x < vec_len(seeds) && x < 64 {
-                    mut y: int64 = 0
-                    while y < 64 {
-                        if flow_has(sum.flows, x, y) { r = val_join(r, vec_get(seeds, x)) }
-                        y = y + 1
-                    }
+                    // A seed whose row holds any edge reaches some argument's place,
+                    // and the join is idempotent, so one test per row says the same
+                    // thing the scan of that row's 64 destinations said.
+                    if flow_row_any(sum.flows, x) { r = val_join(r, vec_get(seeds, x)) }
                     x = x + 1
                 }
                 return r
@@ -314,9 +314,15 @@ export func serialize_caps(caps: *Vector<CapFlow>) -> string {
 // module function and never reassigns or rebinds. At a call these resolve to the
 // target's real summary instead of the opaque TOP.
 export func sum_resolvable_fn_binds(t: *SumTables, body: int64) -> *Map<string, string> {
+    // Memoized on the body id. The walk reads only the AST, never a summary or any
+    // walk state, so one body always yields the same table and the fixpoint's repeated
+    // reanalysis of a function need not rebuild it. Callers only read the result.
+    cache: *Map<int64, *Map<string, string>> = (*t).fn_bind_cache
+    if map_has(cache, body) { return unwrap_or(map_get(cache, body), (*t).fn_bind_empty) }
     candidate: *Map<string, string> = alloc(map_new())
     poisoned: *Map<string, int64> = alloc(map_new())
     fnb_block(t, body, candidate, poisoned)
+    map_put(cache, body, candidate)
     return candidate
 }
 
@@ -391,6 +397,7 @@ func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string, string>, pois: *Map<
     } else if s.kind == sk_for() {
         fnb_expr(t, s.b, cand, pois)
         fnb_poison(ast_name(a, s.a), cand, pois)
+        if s.d != 0 { fnb_poison(ast_name(a, s.d - 1), cand, pois) }
         fnb_block(t, s.c, cand, pois)
     } else if s.kind == sk_match() {
         fnb_match(t, s.a, s.b, s.c, cand, pois)
@@ -468,22 +475,51 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
     }
 }
 
-// collect_block equivalent: gathers every used identifier and the names bound in a
-// lambda body, so the capture value can pull each free binding's provenance.
+// collect_block equivalent: gathers the identifiers a lambda body uses free, so the
+// capture value can pull each free binding's provenance. A name is recorded as used
+// only while nothing in scope binds it, and each construct binds into its own scope,
+// so a use that precedes a shadowing binder still counts and a use of the shadow
+// never does. The flat alternative, gathering every used name and every bound name
+// and subtracting at the end, loses a capture whenever an inner lambda parameter, a
+// nested block let, or an arm binder repeats an enclosing name: the enclosing binding
+// the closure really captures reads as bound, the closure looks frame free, and a
+// closure over a dead frame stores through a parameter unreported.
 export func collect_block_used(t: *SumTables, bid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     if bid < 0 { return }
     a: *Ast = (*t).ast
     blocks: *Vector<BlockNode> = (*a).blocks
     if bid >= vec_len(blocks) { return }
     b: BlockNode = vec_get(blocks, bid)
+    added: *Vector<string> = alloc(vec_new())
     mut i: int64 = 0
     while i < b.len {
-        collect_stmt_used(t, vec_get((*a).kids, b.off + i), used, bound)
+        collect_stmt_used(t, vec_get((*a).kids, b.off + i), used, bound, added)
+        i = i + 1
+    }
+    used_unbind(bound, added)
+}
+
+// Binds a name into the current scope only when nothing already binds it, recording
+// every name the scope introduced so the exit removes exactly those. A name an
+// enclosing scope already bound is left alone, so unbinding never drops a binding
+// this scope does not own.
+func used_bind(bound: *Map<string, int64>, name: string, added: *Vector<string>) -> void {
+    if !map_has(bound, name) {
+        map_put(bound, name, 1)
+        vec_push(added, name)
+    }
+}
+
+// Removes exactly the names used_bind added for a scope.
+func used_unbind(bound: *Map<string, int64>, added: *Vector<string>) -> void {
+    mut i: int64 = 0
+    while i < vec_len(added) {
+        map_remove(bound, vec_get(added, i))
         i = i + 1
     }
 }
 
-func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
+func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: *Map<string, int64>, added: *Vector<string>) -> void {
     a: *Ast = (*t).ast
     s: StmtNode = vec_get((*a).stmts, sid)
     if s.kind == sk_let() {
@@ -491,7 +527,7 @@ func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: 
         mut i: int64 = 0
         while i < s.b {
             bind: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
-            map_put(bound, ast_name(a, bind.name), 1)
+            used_bind(bound, ast_name(a, bind.name), added)
             i = i + 1
         }
     } else if s.kind == sk_assign() {
@@ -511,8 +547,14 @@ func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: 
         collect_block_used(t, s.b, used, bound)
     } else if s.kind == sk_for() {
         collect_expr_used(t, s.b, used, bound)
-        map_put(bound, ast_name(a, s.a), 1)
+        floop: *Vector<string> = alloc(vec_new())
+        used_bind(bound, ast_name(a, s.a), floop)
+        // `for k, v in m` binds a second name, the interned name plus one in d. Left
+        // unbound the loop's own value name read as a free use of an enclosing binding
+        // of the same name, and the closure was charged with a capture it never makes.
+        if s.d != 0 { used_bind(bound, ast_name(a, s.d - 1), floop) }
         collect_block_used(t, s.c, used, bound)
+        used_unbind(bound, floop)
     } else if s.kind == sk_match() {
         collect_match_used(t, s.a, s.b, s.c, used, bound)
     }
@@ -525,16 +567,18 @@ func collect_match_used(t: *SumTables, scrut: int64, arms_off: int64, arms_len: 
     while i < arms_len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + i))
         p: PatternNode = vec_get((*a).patterns, arm.pat)
+        marm: *Vector<string> = alloc(vec_new())
         if p.kind == pk_variant() {
             mut k: int64 = 0
             while k < p.c {
-                map_put(bound, ast_name(a, vec_get((*a).kids, p.b + k)), 1)
+                used_bind(bound, ast_name(a, vec_get((*a).kids, p.b + k)), marm)
                 k = k + 1
             }
         } else if p.kind == pk_ident() {
-            map_put(bound, ast_name(a, p.a), 1)
+            used_bind(bound, ast_name(a, p.a), marm)
         }
         collect_block_used(t, arm.body, used, bound)
+        used_unbind(bound, marm)
         i = i + 1
     }
 }
@@ -544,7 +588,8 @@ func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *
     a: *Ast = (*t).ast
     e: ExprNode = vec_get((*a).exprs, id)
     if e.kind == xk_ident() {
-        vec_push(used, ast_name(a, e.a))
+        name: string = ast_name(a, e.a)
+        if !map_has(bound, name) { vec_push(used, name) }
     } else if e.kind == xk_unary() {
         collect_expr_used(t, e.b, used, bound)
     } else if e.kind == xk_binary() {
@@ -575,13 +620,15 @@ func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *
             k = k + 2
         }
     } else if e.kind == xk_lambda() {
+        lam: *Vector<string> = alloc(vec_new())
         mut p: int64 = 0
         while p < e.b {
             pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
-            map_put(bound, ast_name(a, pn.name), 1)
+            used_bind(bound, ast_name(a, pn.name), lam)
             p = p + 1
         }
         collect_block_used(t, e.d, used, bound)
+        used_unbind(bound, lam)
     } else if e.kind == xk_match() {
         collect_match_used(t, e.a, e.b, e.c, used, bound)
     } else if e.kind == xk_await() {

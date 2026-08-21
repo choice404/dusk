@@ -3323,7 +3323,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.13.1\n
+out dusk 1.13.2\n
 argv version
 code 0
 ---
@@ -5361,4 +5361,603 @@ test an_unsigned_literal_exponent_with_the_top_bit_set_is_legal
 mode run
 file examples/uintpowexp_ok.dusk
 out 1\n0\n27\n1\n
+---
+test a_ref_destructuring_binding_reads_through_every_binder
+mode run
+file examples/refdestr_ok.dusk
+out 42\n41\n
+---
+test a_ref_destructuring_binding_borrows_every_name_it_binds
+mode check_fail
+file examples/refdestr_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+err_has cannot move a borrowed pointer; only its owner can be moved
+---
+test a_ref_destructuring_binding_carries_the_borrow_into_a_nested_binder
+mode check_fail
+file examples/refdestr_nested_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test a_tuple_literal_member_that_names_an_owner_hands_the_binder_a_borrow
+mode check_fail
+file examples/tupleowner_launder_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test a_moved_or_freshly_allocated_tuple_member_hands_the_binder_its_ownership
+mode run
+file examples/tupleowner_move_ok.dusk
+out 18\n17\n14\n
+---
+test a_folded_constant_the_width_holds_is_accepted_and_a_suffixed_wrap_stays_legal
+mode run
+file examples/constfit_ok.dusk
+out 100\n100\n255\n0\n18446744073709551615\n255\n6\n
+---
+test a_folded_constant_the_target_width_cannot_hold_is_refused
+mode check_fail
+file examples/constfit_fail.dusk
+err_has constant 256 does not fit in uint8
+err_has constant 200 does not fit in 8 bits
+err_has constant -1 does not fit in uint64; an unsigned type holds no negative value, cast if the wrap is meant
+err_has constant 400 does not fit in uint8
+---
+test an_interface_method_returning_a_generic_instance_dispatches
+mode run
+file examples/iface_generic_ret.dusk
+out 42\n105\n
+---
+test an_interface_method_taking_a_generic_instance_dispatches
+mode run
+file examples/iface_generic_param.dusk
+out 10\n20\n
+---
+test an_interface_inside_a_generic_type_argument_carrier_runs
+mode run
+file examples/iface_in_generic_ok.dusk
+out 42\n2\n11\n55\n77\n
+---
+test a_slice_of_structs_through_a_generic_type_argument_of_interface_is_rejected
+mode check_fail
+file examples/iface_in_generic_cov_fail.dusk
+err_has cannot pass a slice of 'Dog' as a slice of interface 'Speaker'
+---
+test a_generic_interface_declaration_is_rejected
+mode check_fail
+file examples/iface_generic_decl_fail.dusk
+err_has the generic interface 'Speaker' is not supported yet
+---
+test a_long_but_legal_chain_folds_checks_and_runs
+mode run
+file examples/chainbin_ok.dusk
+out 400\n800\n90\n
+---
+test a_binary_chain_past_the_nesting_budget_is_rejected
+mode check_fail
+file examples/chainbin_fail.dusk
+err_has expression chain is too long; split it across bindings
+---
+test a_field_and_call_chain_past_the_nesting_budget_is_rejected
+mode check_fail
+file examples/chainpost_fail.dusk
+err_has field and call chain is too long; bind an intermediate value
+---
+test a_do_block_past_the_nesting_budget_is_rejected
+mode check_fail
+file examples/chaindo_fail.dusk
+err_has do block has too many steps; move some of them into a helper function
+---
+test the_nesting_guard_reports_once_and_stops_the_parse
+mode check_fail
+file examples/chainnest_once.dusk
+err_has expression nesting is too deep; simplify the expression
+err_absent expected RParen
+---
+# A field read off a scalar has no member to read and no lowering. It passed check
+# clean and died in codegen as an unsupported field expression naming no file and no
+# line before; it is a named check error with a span now, reported once at the first
+# link of the chain.
+test a_field_read_off_a_scalar_is_rejected
+mode check_fail
+file examples/scalarfield_fail.dusk
+err_has cannot access a field of int64; a field access takes a struct, an array or a slice '.len', or an error '.message'
+---
+# A string carries no fields either, and its reject names the builtin that answers
+# the read a program reaches for.
+test a_field_read_off_a_string_names_str_len
+mode check_fail
+file examples/stringfield_fail.dusk
+err_has cannot access a field of string; a string has no fields, its byte count is str_len(s)
+---
+# An index into a scalar has no element to read and no lowering, the same divergence
+# on the index side: check clean, codegen dead with no file and no line.
+test an_index_into_a_scalar_is_rejected
+mode check_fail
+file examples/scalarindex_fail.dusk
+err_has cannot index int64; an index or a range slice takes an array, a slice, a string, or a pointer
+---
+# The legal field and index shapes beside those rejects, pinned so neither widens
+# onto one: a struct field, a nested chain, a field through a deref, '.len' on an
+# array and a slice, an index into an array, a slice, and a string, a range slice of
+# an array and of a string, an index through a raw pointer, and an index inside a
+# generic body where the element is still a hole on the surface pass.
+test the_legal_field_and_index_shapes_run
+mode run
+file examples/fieldindex_ok.dusk
+out 2\n7\n3\n9\n4\n30\n2\n30\n20\nu\ndu\n11\n
+---
+# A fixed array holds exactly the count its type declares, and an array literal
+# builds at its own length with no padding and no truncation, so a literal of any
+# other count used to hand clang a differently sized aggregate with no dusk error to
+# its name: `mut r: int64[64] = [0]` emitted a `[1 x i64]` store into a `[64 x i64]`
+# slot. The count is checked in the one literal fit walk, so the reject lands at
+# every position that walk reaches, short and long alike.
+test an_array_literal_of_the_wrong_length_is_rejected
+mode check_fail
+file examples/arrlitlen_fail.dusk
+err_has the array literal has 1 element(s) but int64[8] holds 8; a short literal is not padded, write every element
+err_has the array literal has 3 element(s) but int64[2] holds 2; drop the extra elements or widen the type
+err_has the array literal has 1 element(s) but int64[2] holds 2; a short literal is not padded, write every element
+err_has the array literal has 3 element(s) but int64[4] holds 4; a short literal is not padded, write every element
+err_has the array literal has 1 element(s) but int64[3] holds 3; a short literal is not padded, write every element
+err_has the array literal has 2 element(s) but int64[4] holds 4; a short literal is not padded, write every element
+err_has the array literal has 2 element(s) but int64[3] holds 3; a short literal is not padded, write every element
+---
+# The accept twin: an exact length literal at each of those same positions, beside
+# the four shapes the length rule leaves alone, a literal coerced to a slice which
+# takes its own length, a char array filled by a string literal which counts bytes
+# by its own rule, an array of slices which counts its slices and not their
+# elements, and a fixed array bound from another fixed array value, which is not a
+# literal at all.
+test an_exact_length_array_literal_runs_at_every_position
+mode run
+file examples/arrlitlen_ok.dusk
+out 8\n30\n8\n9\n4\n300\nHello\n200\n24\n
+---
+# Two enums may declare a variant of the same name whose payloads differ in kind, and
+# the escape verdict for one of them must not read the other's payload. The collected
+# element here is Opt, whose Some carries a scalar, while Held's Some carries a
+# managed pointer. The mint's buried view guard asks whether the element reaches a
+# managed pointer, and answering out of a table keyed by variant name alone hands back
+# whichever enum registered Some last, which rejects this legal program. The answer
+# comes off the enum's own variant slot, so the mint stands, the deep copy survives a
+# forced collection, and the scalar payload reads back.
+test a_variant_name_shared_with_a_managed_enum_leaves_a_scalar_collect_legal
+mode run
+file examples/collectorvshadow_ok.dusk
+out 7\n
+---
+# The same program with the two enums declared in the other order. A name keyed read
+# is order sensitive, wrong in one order and right in the other by accident, so both
+# orders are pinned.
+test a_shared_variant_name_leaves_a_scalar_collect_legal_in_either_order
+mode run
+file examples/collectorvshadowrev_ok.dusk
+out 7\n
+---
+# The reject twin, proving the slot read is precise and not permissive. The collected
+# element is the enum whose Some really does carry a pointer to an object holding a
+# frame view, and the scalar Some is declared after it, the order in which a name
+# keyed read would answer with the scalar and let the mint through.
+test a_managed_enum_payload_is_caught_when_a_later_enum_shares_the_variant_name
+mode check_fail
+file examples/collectorvshadow_fail.dusk
+err_has a collected slice element holds a pointer to an object that stores a view of the current frame
+---
+# The same reject with the two enums declared in the other order, the direction a name
+# keyed read answers correctly by accident.
+test a_managed_enum_payload_reject_holds_in_either_declaration_order
+mode check_fail
+file examples/collectorvshadowrev_fail.dusk
+err_has a collected slice element holds a pointer to an object that stores a view of the current frame
+---
+# The folded constant rule computes an expression of bare literals at int64, exactly as
+# codegen does, and ranges the result against the target. A fold whose value passes
+# int64's top lands on a negative pattern there, and reading that pattern as the value
+# refused `9223372036854775807 + 1` into a uint64 that holds it exactly. uint64 is the
+# one target whose values are all of int64's patterns, so an overflowing fold is no
+# longer a reject there and the stored bits are the value that prints. The last binding
+# is the other half of the rule: a fold that wanders out of int64 and back is ranged on
+# the value it ends with, which is the value codegen computes.
+test a_folded_constant_past_int64s_top_is_the_value_a_uint64_target_holds
+mode run
+file examples/constover_ok.dusk
+out 9223372036854775808\n9223372036854775810\n18446744073709551615\n1\n
+---
+# The compile fail twin. Every target narrower than uint64 still refuses a fold that
+# left int64, and the reject names the overflow instead of the wrapped pattern, since
+# that pattern is not the value that was written. The `err_absent` lines pin that: the
+# old text named a negative the program never wrote. The uint64 binding proves the
+# waiver did not swallow the negative that the fold really does name.
+test a_folded_constant_that_overflows_int64_is_refused_by_every_narrower_target
+mode check_fail
+file examples/constover_fail.dusk
+err_has constant expression overflows int64 and does not fit in uint8; cast if the wrap is meant
+err_has constant expression overflows int64 and does not fit in int32; cast if the wrap is meant
+err_has constant expression overflows int64 and does not fit in uint32; cast if the wrap is meant
+err_has constant -9223372036854775808 does not fit in uint64; an unsigned type holds no negative value, cast if the wrap is meant
+err_absent constant -9223372036854775808 does not fit in uint8
+err_absent constant -9223372036854775808 does not fit in 32 bits
+err_absent constant -4 does not fit in uint32
+---
+# Two enums declare a variant of the same name, one payload a slice and the other a
+# scalar. The escape check reads the constructor's payload types to decide whether an
+# argument's frame view rides into the value, and a read keyed by the bare variant
+# name answers with whichever enum was declared last, which types this slice from the
+# scalar enum and lets a view of a dead frame out through the return.
+test a_constructor_payload_view_is_caught_when_another_enum_shares_the_variant_name
+mode check_fail
+file examples/varshadow_ctor_fail.dusk
+err_has a slice into a local array escapes its frame
+---
+# The same reject with the two enums declared in the other order, the order in which a
+# name keyed read answers correctly by accident.
+test a_constructor_payload_view_reject_holds_in_either_declaration_order
+mode check_fail
+file examples/varshadow_ctorrev_fail.dusk
+err_has a slice into a local array escapes its frame
+---
+# The match arm side of the same shared name: the arm binder takes its type from the
+# payload the pattern names, and a name keyed read types a slice binder from another
+# enum's scalar, so the binder loses the frame view it holds and returns it.
+test a_match_binder_payload_view_is_caught_when_another_enum_shares_the_variant_name
+mode check_fail
+file examples/varshadow_armbind_fail.dusk
+err_has a slice into a local array escapes its frame
+---
+# The same reject in the other declaration order.
+test a_match_binder_payload_view_reject_holds_in_either_declaration_order
+mode check_fail
+file examples/varshadow_armbindrev_fail.dusk
+err_has a slice into a local array escapes its frame
+---
+# escalias_matchbind with a second enum declaring the same variant name. The payload
+# binder only aliases the scrutinee's group when its payload type is known to be a
+# pointer, and a name keyed read answers with the other enum's scalar, so the frame
+# slice stored through the binder never reaches the returned pointer.
+test a_payload_binder_alias_link_survives_a_shared_variant_name
+mode check_fail
+file examples/varshadow_matchstore_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The same reject in the other declaration order.
+test a_payload_binder_alias_link_holds_in_either_declaration_order
+mode check_fail
+file examples/varshadow_matchstorerev_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The interprocedural side of the same shared name. Whether a callee's summary says an
+# argument's view can reach its return is decided by the constructor's payload, and a
+# name keyed read makes the wrapper look like it returns nothing derived from its
+# argument, so the caller's dead frame slice escapes through the call.
+test a_summary_returns_view_judgment_survives_a_shared_variant_name
+mode check_fail
+file examples/varshadow_wrap_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+# The same reject in the other declaration order.
+test a_summary_returns_view_judgment_holds_in_either_declaration_order
+mode check_fail
+file examples/varshadow_wraprev_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+# The accept twin of the varshadow rejects. Both enums that share the variant name are
+# used, one carrying a heap backed slice through a constructor and out of an arm
+# binder, the other a scalar. Neither payload views a frame, so reading each payload
+# off its own enum must leave both legal, and the program prints the slice head and
+# the scalar.
+test a_shared_variant_name_leaves_both_enums_legal_to_construct_and_match
+mode run
+file examples/varshadow_ok.dusk
+out 4\n7\n
+---
+# A closure that views the frame is stored through a parameter, and the store is only
+# caught when the closure is known to capture the frame slice. An inner lambda
+# parameter that repeats the captured name used to bind into the same flat set as the
+# enclosing body, so the capture read as bound and the store looked frame free.
+test an_inner_lambda_parameter_does_not_mask_the_capture_it_shadows
+mode check_fail
+file examples/capshadow_param_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1
+---
+# The same masking through a let inside a nested block rather than an inner lambda
+# parameter, which used to leak out of its block into the whole body's bound set.
+test a_nested_block_binder_does_not_mask_the_capture_it_shadows
+mode check_fail
+file examples/capshadow_block_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1
+---
+# The accept twin, proving the per construct scoping did not turn every shadowing
+# binder into a capture. The stored closure names the frame slice nowhere: the only
+# occurrence of the name is its inner lambda's own parameter, so it captures nothing
+# and the store through the parameter is legal.
+test a_shadowing_inner_binder_alone_is_not_a_capture
+mode run
+file examples/capshadow_ok.dusk
+out 1\n42\n
+---
+# A collected array whose element is a constructor holding a pointer to an object that
+# stores a frame view. The embed walk descended into array, tuple, and struct literals
+# but not into a constructor call, so the pointer's frame view never reached the mint's
+# guard and the collected block outlived the frame it points into.
+test a_collected_constructor_payload_pointer_carries_its_frame_view
+mode check_fail
+file examples/collectorctorarg_fail.dusk
+err_has a collected slice element holds a pointer to an object that stores a view of the current frame
+---
+# The accept twin, proving the descent into constructor payloads did not turn every
+# wrapped pointer into a reject: the same collected array of constructors is legal when
+# the pointee holds a heap backed slice rather than a view of the frame.
+test a_collected_constructor_payload_pointer_with_no_frame_view_is_legal
+mode run
+file examples/collectorctorarg_ok.dusk
+out 8\n
+---
+# The scrutinee of a match is a struct field, which infers unknown on the surface, so
+# the payload binder's type came out of the table keyed by the bare variant name and a
+# second enum sharing that name answered with its scalar. The binder was then not known
+# to carry a pointer, the alias link back to the scrutinee was never made, and a frame
+# slice stored through it reached a returned pointer unreported.
+test a_field_scrutinee_resolves_its_enum_under_a_shared_variant_name
+mode check_fail
+file examples/varshadow_fieldmatch_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The same reject where the scrutinee is a field of a heap box, so the enum is named by
+# a field read of a dereference.
+test a_dereferenced_field_scrutinee_resolves_its_enum_under_a_shared_variant_name
+mode check_fail
+file examples/varshadow_ptrmatch_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The same reject with the constructor matched where it is written, the shape that has
+# no binding and no field to carry a type, only the constructor's own enum.
+test a_constructor_scrutinee_resolves_its_enum_under_a_shared_variant_name
+mode check_fail
+file examples/varshadow_ctormatch_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The accept twin of the three, matching the same shared variant name through a
+# binding, a field, and a constructor with every payload heap backed. Resolving the
+# scrutinee's enum must not turn a legal match into a reject.
+test resolving_a_scrutinee_enum_leaves_the_legal_matches_legal
+mode run
+file examples/varshadow_matchok.dusk
+out 2\n9\n1\n
+---
+# A match that leaves a variant uncovered over a binding a constructor initialized. A
+# constructor infers unknown on the surface and the coverage check returned on an
+# unknown scrutinee, so the match was never judged and the value could take no arm at
+# run time.
+test a_constructor_bound_scrutinee_is_still_checked_for_coverage
+mode check_fail
+file examples/matchcover_ctor_fail.dusk
+err_has non exhaustive match, missing variant 'None'
+---
+# The same uncovered match over a payload free constructor, the shape that really walks
+# off the end: the value is None, the only arm names Some, and the program used to
+# build and print past the match.
+test a_payload_free_constructor_binding_is_still_checked_for_coverage
+mode check_fail
+file examples/matchcover_none_fail.dusk
+err_has non exhaustive match, missing variant 'None'
+---
+# The accept twin: the same constructor bound scrutinees with every variant covered,
+# plus a wildcard arm, so judging coverage on an unknown scrutinee leaves them legal.
+test coverage_on_an_unknown_scrutinee_leaves_the_covered_matches_legal
+mode run
+file examples/matchcover_ok.dusk
+out 7\n1\n2\n
+---
+# A top level function whose name repeats a variant name. The escape model asked only
+# whether the callee's name appears in the variant payload table, so the call was
+# modeled as that variant's constructor and its scalar payload embedded no view, and a
+# slice into a dead frame came back unreported.
+test a_function_named_like_a_variant_is_not_its_constructor
+mode check_fail
+file examples/variantshadow_fn_fail.dusk
+err_has a slice into a local array escapes its frame
+---
+# The same masking through a local closure that owns the name.
+test a_local_closure_named_like_a_variant_is_not_its_constructor
+mode check_fail
+file examples/variantshadow_local_fail.dusk
+err_has a slice into a local array escapes its frame
+---
+# The same masking through a parameter that owns the name.
+test a_parameter_named_like_a_variant_is_not_its_constructor
+mode check_fail
+file examples/variantshadow_param_fail.dusk
+err_has a slice into a local array escapes its frame
+---
+# The interprocedural twin, where the shadowed name sits in the callee whose transfer
+# function the summary walk builds: the walk resolved the bare name against the variant
+# table before its own locals, so the callee was credited with returning nothing
+# derived from its argument.
+test a_shadowed_variant_name_in_a_callee_does_not_erase_its_summary
+mode check_fail
+file examples/variantshadow_sum_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+# The accept twin: a function and a closure that repeat variant names, both called with
+# heap backed data, must stay legal.
+test a_name_that_shadows_a_variant_still_calls_and_runs
+mode run
+file examples/variantshadow_ok.dusk
+out 4\n3\n
+---
+# A closure that walks a map with the two binder form and captures nothing. The capture
+# walk bound only the first binder, so the loop's own value name read as a free use of
+# an enclosing binding of the same name and the closure was charged with a capture it
+# never makes.
+test a_map_for_binds_both_of_its_names_in_the_capture_walk
+mode run
+file examples/forpair_capture_ok.dusk
+out 4\n4\n
+---
+# A binding shadows an outer one holding a different enum. The enum a binding holds is
+# recorded per scope, and the lookup walked straight past the shadowing scope, which
+# records nothing for a value that is not a constructor, to answer with the outer
+# binding's enum. The inner match was then judged against an enum whose variants it
+# never names and every arm read as a catch all, refusing this legal program.
+test a_shadowing_binding_does_not_inherit_the_outer_bindings_enum
+mode run
+file examples/enumshadow_valid_ok.dusk
+out 3\n0\n
+---
+# The unsound half of the same stale answer: the inner binding holds the enum whose
+# payload is a pointer and the outer one holds the enum whose payload is a scalar, so
+# the binder was typed from the wrong enum and the frame slice stored through it never
+# reached the returned pointer.
+test a_stale_outer_enum_does_not_type_a_shadowing_bindings_payload
+mode check_fail
+file examples/enumshadow_stale_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The scrutinee is a binding whose value came out of a struct field, one step past a
+# binding a constructor initialized: the field read infers unknown, so the binding
+# carried neither a type nor a record and the payload came off the shared variant name.
+test a_binding_read_out_of_a_field_records_that_fields_enum
+mode check_fail
+file examples/varshadow_bindchain_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The scrutinee is an outer match's payload binder, which nothing here can name. Two
+# enums declare the variant, so no payload signature is trustworthy and every binder is
+# treated as carrying the scrutinee's view instead.
+test an_unnameable_scrutinee_with_a_shared_variant_treats_its_binders_as_views
+mode check_fail
+file examples/varshadow_outerbinder_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The same conservative answer for a scrutinee bound by a tuple destructure.
+test a_tuple_destructured_scrutinee_with_a_shared_variant_is_treated_conservatively
+mode check_fail
+file examples/varshadow_tupledestr_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The same conservative answer for a field of a generic struct, whose declared type is
+# the type parameter rather than the enum the instance substitutes for it.
+test a_generic_field_scrutinee_with_a_shared_variant_is_treated_conservatively
+mode check_fail
+file examples/varshadow_genfield_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+# The accept twin of the conservative rejects: the same unnameable scrutinee shapes,
+# but one enum alone declares each variant name, so the name keyed payload answer is
+# the right one and the matches stay legal. The conservative rule must fire only where
+# the name is genuinely ambiguous.
+test a_variant_name_only_one_enum_declares_still_answers_by_name
+mode run
+file examples/varshadow_soleenum_ok.dusk
+out 5\n6\n7\n
+---
+# A payload free constructor matched where it is written. It is a field expression, not
+# a call, so coverage had no callee to read an enum from and the match went unjudged.
+test a_payload_free_constructor_scrutinee_is_still_checked_for_coverage
+mode check_fail
+file examples/matchcover_direct_fail.dusk
+err_has non exhaustive match, missing variant 'None'
+---
+# A returned closure that walks a map with the two binder form and captures nothing.
+# The type checker's capture walk bound only the first binder, so the loop's value name
+# read as a capture of the enclosing scalar of the same name and the return was refused.
+test a_map_for_binds_both_of_its_names_in_the_escape_capture_walk
+mode run
+file examples/forpair_closure_ok.dusk
+out 3\n1\n
+---
+# A module iterates a map of closures with the pair form and calls the loop's value
+# binder, and holds a private top level of that same name. The privatizer walks the body
+# before the for rewrite and bound only the first binder, so the call read as a free name
+# and was renamed to the module's private helper: the importer called the wrong function,
+# silently, and the program printed that helper's number instead of the closure's.
+test a_map_for_value_binder_is_not_renamed_to_a_private_top_level
+mode run
+file examples/forpairpriv_main.dusk
+out 5\n
+---
+# A variant pattern that binds two names into a one field payload, over a scrutinee whose
+# type is the surface unknown a constructor infers. The arity check judged only a named
+# type, so the second binder reached codegen with nothing behind it.
+test a_pattern_arity_mismatch_is_caught_on_a_constructor_bound_scrutinee
+mode check_fail
+file examples/matchbinder_arity_fail.dusk
+err_has variant pattern 'Some' binds 2 of 1 payload field(s)
+---
+# An arm naming a variant of an entirely different enum, over the same kind of scrutinee.
+# The check that refuses a variant the scrutinee's enum does not declare judged only a
+# named type, so the arm bound silently and died later in codegen.
+test a_foreign_variant_arm_is_caught_on_a_constructor_bound_scrutinee
+mode check_fail
+file examples/matchbinder_novariant_fail.dusk
+err_has 'Opt' has no variant 'Foo'
+---
+# A payload carrying variant named without its payload is a constructor, not a value. It
+# typed as the surface unknown, reached codegen, and lowered to a zeroed enum that still
+# matched its own arm, so the match bound and printed a payload nobody supplied.
+test a_payload_carrying_variant_named_alone_is_not_a_value
+mode check_fail
+file examples/matchbinder_bareval_fail.dusk
+err_has takes 1 argument(s), so naming it alone is not a value
+---
+# A binding that names itself while shadowing the outer one it copies. The binder is
+# declared before its value is read, so the question of which enum the value holds found
+# the name being defined and answered with nothing, leaving the match unjudged.
+test a_self_naming_binding_inherits_the_enum_of_the_binding_it_copies
+mode check_fail
+file examples/enumshadow_self_fail.dusk
+err_has non exhaustive match, missing variant 'None'
+---
+# An enum's name taken by a value binding: a let, a destructure binder, and a for binder.
+# Codegen reads `A.Some` as a constructor off the base identifier's spelling alone, with no
+# scope to ask, so a binding of the enum's name made a field read through it lower to a
+# zeroed constructor of that enum, and the checker's own constructor and scrutinee readers
+# agreed with codegen while its field arm asked the scope: the two answers disagreed.
+test an_enum_name_is_refused_at_a_let_a_destructure_and_a_for_binder
+mode check_fail
+file examples/enumnamebind_fail.dusk
+err_has 'Opt' is an enum name; a binding cannot take it
+err_has 'Pick' is an enum name; a binding cannot take it
+err_has 'Tag' is an enum name; a binding cannot take it
+---
+# The same reservation at the parameter and binder positions: a parameter, a lambda
+# parameter, a match arm payload binder, and a catch all binder. Through a parameter the
+# shape passed check with a payload of the wrong type, because the body's `Opt.Some` read
+# as the declared enum's constructor whatever the caller passed.
+test an_enum_name_is_refused_at_a_parameter_and_at_a_match_binder
+mode check_fail
+file examples/enumnamebindparam_fail.dusk
+err_has 'Held' is an enum name; a binding cannot take it
+err_has 'Tally' is an enum name; a binding cannot take it
+err_has 'Opt' is an enum name; a binding cannot take it
+err_has 'Sel' is an enum name; a binding cannot take it
+---
+# The legal half: only the enum's own name is taken. A struct field spelled like a variant
+# reads as the field it is, and a payload free arm that names a variant of the scrutinee's
+# own enum binds nothing, so it stays legal even when another enum in the program carries
+# that same spelling.
+test a_variant_spelled_field_and_a_variant_arm_survive_the_enum_name_reservation
+mode run
+file examples/enumnamebind_ok.dusk
+out 1\n1\n7\n10\n
+---
+# A payload free match arm is an identifier pattern, a variant of the scrutinee's enum when
+# it names one and the catch all binder otherwise, and only the binder reading takes a name
+# the enum name reservation can refuse. A generic body and a generic call result do not name
+# their enum on the surface pass, so judging the split there refused three legal shapes the
+# moment another enum was also spelled like a variant. The arm is judged on whichever pass
+# names the enum instead.
+test a_variant_arm_spelled_like_an_enum_survives_a_generic_scrutinee
+mode run
+file examples/enumnamearm_generic_ok.dusk
+out 20\n10\n10\n
+---
+# The reject twin of the same rule: inside the generic body the arm binds a name that is no
+# variant of the ground scrutinee, so it is the catch all binder and it takes an enum's name.
+# The surface pass leaves it alone and the ground pass refuses it once mono makes the
+# scrutinee concrete.
+test a_catch_all_binder_named_for_an_enum_is_refused_on_the_ground_pass
+mode check_fail
+file examples/enumnamearm_generic_fail.dusk
+err_has 'Z' is an enum name; a binding cannot take it
 ---

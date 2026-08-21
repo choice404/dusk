@@ -1,0 +1,31 @@
+@paradigm procedural
+
+// A collected array whose element is an enum constructor holding a pointer to an
+// object that stores a frame view. The mint's guard asks which bindings are embedded
+// in the collected source, and the embed walk descended into array, tuple, and
+// struct literals but not into a constructor call, so [Held.Some(p)] linked nothing
+// and p's frame view never reached the guard. The deep copy immortalizes the array
+// but not the pointee, so (*c[0]).s would read a dead frame once mk returns. The
+// constructor's payload arguments are embedded like a literal's members now, so the
+// mint is refused. The legal twin is collectorctorarg_ok.
+struct Inner {
+    s: int64[],
+}
+
+enum Held { Some(c: *Inner), None }
+
+func mk() -> collector<Held[]> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    cells: Held[1] = [Held.Some(p)]
+    return collector<Held[]>(cells)
+}
+
+func main() -> int32 {
+    c := mk()
+    match c[0] {
+        Some(q) => { println((*q).s[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

@@ -153,6 +153,10 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, 
         collect_capture_expr(tc, s.b, bound, seen, out)
         forv: *Vector<string> = alloc(vec_new())
         bind_scoped(bound, ast_name(a, s.a), forv)
+        // `for k, v in m` binds a second name, the interned name plus one in d. Left
+        // unbound, the loop's own value name read as a capture of whatever the
+        // enclosing frame calls v, and a closure that only walks the map was refused.
+        if s.d != 0 { bind_scoped(bound, ast_name(a, s.d - 1), forv) }
         collect_capture_block(tc, s.c, bound, seen, out)
         unbind_scoped(bound, forv)
     } else if s.kind == sk_match() {
@@ -224,6 +228,20 @@ export func collect_embedded(tc: *TypeChecker, expr_id: int64, out: *Vector<stri
         while j < e.c {
             collect_embedded(tc, vec_get((*a).kids, e.b + j), out)
             j = j + 2
+        }
+    } else if e.kind == xk_call() {
+        // An enum constructor is a carrier like a literal: its payload arguments are
+        // embedded in the value it yields, so an aliasing payload keeps its link
+        // through the wrapper. Without this arm a constructor nested in a literal,
+        // [Held.Some(p)], linked nothing, and a collect of that array never saw the
+        // pointee that stores a frame view. Only a constructor descends here; every
+        // other call answers through its summary at the sites that model calls.
+        if str_len(variant_name(tc, e.a)) > 0 {
+            mut k: int64 = 0
+            while k < e.c {
+                collect_embedded(tc, vec_get((*a).kids, e.b + k), out)
+                k = k + 1
+            }
         }
     }
 }
@@ -378,13 +396,45 @@ export func check_collect_mint(tc: *TypeChecker, e: ExprNode, inner: int64) -> v
     }
 }
 
-export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_id: int64, scrut: EscPair) -> void {
+// The payload signature a variant pattern binds, read out of the scrutinee enum's
+// own variant slot rather than the table keyed by the bare variant name. Two enums
+// may declare the same variant name, and that table answers with whichever was
+// declared last, so a binder over a slice payload could be typed from another enum's
+// scalar, lose the frame view it really holds, and let the view out of the arm. A
+// scrutinee whose enum does not resolve at all keeps the name keyed answer, which is
+// exactly the answer given before. The scrutinee's type alone is not enough: a
+// constructor call and a struct field read both infer unknown on the surface, so the
+// enum is resolved from the expression as well.
+func arm_variant_sig(tc: *TypeChecker, ename: string, vname: string) -> VariantSig {
+    if str_len(ename) > 0 && sig_has_variant_in((*tc).sigtab, ename, vname) {
+        return sig_variant_for_enum((*tc).sigtab, ename, vname)
+    }
+    return unwrap_or(map_get((*tc).variant_payloads, vname), empty_variant_sig())
+}
+
+export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_ty: int64, scrut_id: int64, scrut: EscPair) -> void {
     if (*tc).types_only { return }
     a: *Ast = (*tc).ast
     p: PatternNode = vec_get((*a).patterns, pat_id)
     if p.kind == pk_variant() {
         vname: string = ast_name(a, p.a)
-        vs: VariantSig = unwrap_or(map_get((*tc).variant_payloads, vname), empty_variant_sig())
+        ename: string = scrut_enum_name(tc, scrut_ty, scrut_id)
+        // The scrutinee's enum is unresolvable and its variant name belongs to more
+        // than one enum, so no payload signature here is trustworthy: every binder is
+        // treated as carrying the scrutinee's view and as aliasing it. A binder that
+        // really holds a scalar loses nothing by the extra link, and one that holds a
+        // slice or a pointer keeps the frame view it was silently dropping.
+        if variant_payload_opaque(tc, ename, vname) {
+            mut oi: int64 = 0
+            while oi < p.c {
+                oname: string = ast_name(a, vec_get((*a).kids, p.b + oi))
+                set_esc(tc, oname, scrut.slice, scrut.closure)
+                link_binding_aliases(tc, oname, scrut_id, false)
+                oi = oi + 1
+            }
+            return
+        }
+        vs: VariantSig = arm_variant_sig(tc, ename, vname)
         mut i: int64 = 0
         while i < p.c {
             bname: string = ast_name(a, vec_get((*a).kids, p.b + i))

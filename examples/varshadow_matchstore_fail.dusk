@@ -1,0 +1,37 @@
+@paradigm procedural
+@paradigm functional
+
+// escalias_matchbind with a second enum that declares the same variant name. The
+// payload binder p must alias the scrutinee's group so the frame slice stored into
+// (*p).rows reaches c, and that link is only made when the binder's payload type is
+// known to be a pointer. Reading the payload by bare variant name answers with
+// Tag's int64, no link is made, and the polluted c is returned. The binder's type
+// comes off the scrutinee enum's own variant slot. The declaration order twin is
+// varshadow_matchstorerev_fail.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    o := Opt.Some(c)
+    local: int64[4] = [111, 222, 333, 444]
+    match o {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

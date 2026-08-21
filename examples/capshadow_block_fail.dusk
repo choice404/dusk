@@ -1,0 +1,30 @@
+@paradigm procedural
+
+// The nested block twin of capshadow_param_fail. Here the shadowing binder is a let
+// inside an if block rather than an inner lambda parameter, and it used to leak out
+// of that block into the whole body's bound set, masking the outer v the closure
+// captures before the if. The block binds into its own scope, so the capture before
+// the shadow still counts and the store through the parameter is refused.
+struct Holder { f: () -> int64 }
+
+func fill(dst: *Holder) -> void {
+    arr: int64[4] = [1, 2, 3, 4]
+    v: int64[] = arr[0..4]
+    g := lambda () -> int64 {
+        mut total: int64 = v.len
+        if total > 2 {
+            v := 9
+            total = total + v
+        }
+        return total
+    }
+    (*dst).f = g
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { f: lambda () -> int64 { return 0 } })
+    fill(h)
+    println(((*h).f)())
+    free(h)
+    return 0
+}

@@ -1,0 +1,38 @@
+@paradigm procedural
+@paradigm functional
+
+// The accept twin of the varshadow rejects. Two enums declare a variant named Some
+// and both are used: Rows carries a heap backed slice through a constructor and out
+// of a match arm binder, Tally carries a scalar. Neither payload views a frame, so
+// reading each payload off its own enum's variant slot must leave both legal. A
+// payload read that resolved Rows.Some out of Tally, or the reverse, would either
+// lose the slice or invent one, so this pins the precise answer in the accept
+// direction. The reject twins are varshadow_ctor_fail and varshadow_armbind_fail.
+enum Rows { Some(s: int64[]), None }
+enum Tally { Some(n: int64), None }
+
+func heap3() -> int64[] {
+    seed: int64[3] = [4, 5, 6]
+    return map(seed[0..3], lambda (x: int64) -> int64 { return x })
+}
+
+func take(r: Rows, fb: int64[]) -> int64[] {
+    match r {
+        Some(s) => { return s }
+        None => {}
+    }
+    return fb
+}
+
+func main() -> int32 {
+    h := heap3()
+    r := Rows.Some(h)
+    t := Tally.Some(7)
+    v := take(r, h)
+    println(v[0])
+    match t {
+        Some(n) => { println(n) }
+        None => { println(0) }
+    }
+    return 0
+}

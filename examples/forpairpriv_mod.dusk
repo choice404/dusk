@@ -1,0 +1,22 @@
+@paradigm procedural
+@import std.map
+
+// A module that iterates a map of closures with the pair form and calls the loop's
+// value binder, while also holding a private top level function of that same name. The
+// privatizer renames a file's non exported top levels so a bare call cannot reach
+// another file's private helper, and it walks the body before the for rewrite, so it
+// sees the two binder form: with only the first binder bound, the call `v()` read as a
+// free name and was renamed to this file's private v, which the importer then called
+// instead of the closure the map holds. Nothing reported it, the program built, and it
+// printed the wrong number.
+func v() -> int64 {
+    return 99
+}
+
+export func sum_vals(m: *Map<string, () -> int64>) -> int64 {
+    mut t: int64 = 0
+    for k, v in m {
+        t = t + v()
+    }
+    return t
+}

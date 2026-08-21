@@ -25,6 +25,12 @@ export struct TypeSigs {
     tys: *Vector<int64>,
     fields: *Vector<FieldSig>,
     names: *Vector<string>,
+    // The payload signature of each variant, parallel to names: entry i belongs to
+    // the variant named at names[i], so an enum's variants are read straight off
+    // its EnumSig range with no lookup by name. A name-keyed lookup would answer
+    // with whichever enum registered that variant name last, which is also why
+    // this table, not variant_payloads, is what a walk over one enum reads.
+    variant_sigs: *Vector<VariantSig>,
     methods: *Vector<MethodReq>,
     fns: *Map<string, FnSig>,
     raw_sigs: *Map<string, TyList>,
@@ -39,15 +45,23 @@ export struct TypeSigs {
     variant_payloads: *Map<string, VariantSig>,
     variant_payloads_by_enum: *Map<string, VariantSig>,
     variant_owner: *Map<string, string>,
+    variant_shared: *Map<string, int64>,
     embed_fields: *Map<string, TyList>,
     method_params: *Map<string, TyList>,
     iface_method_params: *Map<string, TyList>,
+    // Memo for the managed-reach question, indexed by type id: 0 not yet asked,
+    // 1 no, 2 yes. The answer depends only on the arena node and the signature
+    // tables, both of which are fixed once collect_sigs returns, so one answer
+    // per type serves every asker for the life of this table.
+    reach_memo: *Vector<int64>,
 }
 
 export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<string, int64>) -> *TypeSigs {
     tys: *Vector<int64> = alloc(vec_new())
     fields: *Vector<FieldSig> = alloc(vec_new())
     names: *Vector<string> = alloc(vec_new())
+    variant_sigs: *Vector<VariantSig> = alloc(vec_new())
+    reach_memo: *Vector<int64> = alloc(vec_new())
     methods: *Vector<MethodReq> = alloc(vec_new())
     fns: *Map<string, FnSig> = alloc(map_new())
     raw_sigs: *Map<string, TyList> = alloc(map_new())
@@ -62,6 +76,7 @@ export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<string, int64>) 
     variant_payloads: *Map<string, VariantSig> = alloc(map_new())
     variant_payloads_by_enum: *Map<string, VariantSig> = alloc(map_new())
     variant_owner: *Map<string, string> = alloc(map_new())
+    variant_shared: *Map<string, int64> = alloc(map_new())
     embed_fields: *Map<string, TyList> = alloc(map_new())
     method_params: *Map<string, TyList> = alloc(map_new())
     iface_method_params: *Map<string, TyList> = alloc(map_new())
@@ -72,6 +87,7 @@ export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<string, int64>) 
         tys: tys,
         fields: fields,
         names: names,
+        variant_sigs: variant_sigs,
         methods: methods,
         fns: fns,
         raw_sigs: raw_sigs,
@@ -86,9 +102,11 @@ export func tysigs_new(a: *Ast, t: *TyArena, future_elems: *Map<string, int64>) 
         variant_payloads: variant_payloads,
         variant_payloads_by_enum: variant_payloads_by_enum,
         variant_owner: variant_owner,
+        variant_shared: variant_shared,
         embed_fields: embed_fields,
         method_params: method_params,
         iface_method_params: iface_method_params,
+        reach_memo: reach_memo,
     })
 }
 
@@ -249,6 +267,7 @@ func collect_enum(s: *TypeSigs, id: int64) -> void {
     ename: string = ast_name(a, e.name)
     gens: *Map<string, int64> = generics_set(s, e.generics_off, e.generics_len)
     names_vec: *Vector<string> = (*s).names
+    sigs_vec: *Vector<VariantSig> = (*s).variant_sigs
     noff: int64 = vec_len(names_vec)
     embed: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
@@ -256,6 +275,14 @@ func collect_enum(s: *TypeSigs, id: int64) -> void {
         v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + i))
         vname: string = ast_name(a, v.name)
         vec_push(names_vec, vname)
+        // Two enums may declare the same variant name. Record that so a reader with no
+        // enum in hand can tell a name that answers for exactly one enum from a name
+        // whose payload types are a coin flip.
+        owners: *Map<string, string> = (*s).variant_owner
+        if map_has(owners, vname) {
+            prev: string = unwrap_or(map_get(owners, vname), "")
+            if !str_eq(prev, ename) { map_put((*s).variant_shared, vname, 1) }
+        }
         map_put((*s).variant_owner, vname, ename)
         payload: *Vector<int64> = alloc(vec_new())
         mut j: int64 = 0
@@ -268,6 +295,7 @@ func collect_enum(s: *TypeSigs, id: int64) -> void {
         }
         list: TyList = push_tys((*s).tys, payload)
         vs: VariantSig = VariantSig { owner: ename, off: list.off, len: list.len }
+        vec_push(sigs_vec, vs)
         map_put((*s).variant_payloads, vname, vs)
         map_put((*s).variant_payloads_by_enum, key2(ename, vname), vs)
         i = i + 1
@@ -404,6 +432,51 @@ export func sig_variant(s: *TypeSigs, name: string) -> VariantSig {
 
 export func sig_variant_for_enum(s: *TypeSigs, en: string, name: string) -> VariantSig {
     return unwrap_or(map_get((*s).variant_payloads_by_enum, key2(en, name)), empty_variant_sig())
+}
+
+// The payload signature at a slot of the shared variant table, the slot an
+// EnumSig's off plus an index names. An index outside the table answers with the
+// empty signature rather than faulting, the same shape sig_ty_at holds.
+export func sig_variant_at(s: *TypeSigs, i: int64) -> VariantSig {
+    vs: *Vector<VariantSig> = (*s).variant_sigs
+    if i < 0 || i >= vec_len(vs) { return empty_variant_sig() }
+    return vec_get(vs, i)
+}
+
+// Whether the named enum declares the named variant. Answered by the enum-keyed
+// payload table, so it costs one lookup rather than a walk of the enum's variants,
+// and so an enum is never credited with a variant name another enum declared.
+export func sig_has_variant_in(s: *TypeSigs, en: string, name: string) -> bool {
+    by_enum: *Map<string, VariantSig> = (*s).variant_payloads_by_enum
+    return map_has(by_enum, sig_pair_key(en, name))
+}
+
+// The memoized managed-reach answer for a type id: 0 when it has not been asked,
+// 1 for no, 2 for yes.
+export func sig_reach_memo(s: *TypeSigs, tyid: int64) -> int64 {
+    m: *Vector<int64> = (*s).reach_memo
+    if tyid < 0 || tyid >= vec_len(m) { return 0 }
+    return vec_get(m, tyid)
+}
+
+// Records the managed-reach answer for a type id, growing the memo to cover it.
+// Type ids are dense arena indices, so the table stays as small as the arena.
+export func sig_reach_memo_put(s: *TypeSigs, tyid: int64, reaches: bool) -> void {
+    if tyid < 0 { return }
+    m: *Vector<int64> = (*s).reach_memo
+    while vec_len(m) <= tyid {
+        vec_push(m, 0)
+    }
+    mut v: int64 = 1
+    if reaches { v = 2 }
+    vec_set(m, tyid, v)
+}
+
+// Whether more than one enum in this module declares a variant of this name, so a
+// payload read keyed by the name alone answers with whichever was declared last.
+export func sig_variant_shared(s: *TypeSigs, name: string) -> bool {
+    shared: *Map<string, int64> = (*s).variant_shared
+    return map_has(shared, name)
 }
 
 export func variant_owner(s: *TypeSigs, name: string) -> string {

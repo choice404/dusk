@@ -13,6 +13,14 @@
 @import parseexpr
 
 struct DoElemNode { kind: int64, a: int64, b: int64 }
+
+// The statement loops here, the block body, the do block, and the match arm table, all
+// stop once the parser is muted. The nesting guard refuses a subtree without consuming
+// its tokens, so a loop that kept reading would parse the rest of that construct again
+// as fresh statements, one restart per budget's worth of tokens, and a 4000 deep nest
+// reported eight thousand follow-on faults that way. Stopping ends the parse at the one
+// diagnostic that named the real problem; the guard already recorded it, so the file
+// still fails.
 export func parse_block(p: *Parser) -> int64 {
     if !p_enter_nesting(p, "block", "function") {
         p_leave_nesting(p)
@@ -26,6 +34,8 @@ export func parse_block(p: *Parser) -> int64 {
         if p_at(p, k_rbrace()) {
             reading = false
         } else if p_at_eof(p) {
+            reading = false
+        } else if p_muted(p) {
             reading = false
         } else {
             before: int64 = (*p).pos
@@ -235,6 +245,8 @@ export func parse_match_parts(p: *Parser) -> (int64, int64, int64, int64) {
             reading = false
         } else if p_at_eof(p) {
             reading = false
+        } else if p_muted(p) {
+            reading = false
         } else {
             before: int64 = (*p).pos
             pat: int64 = parse_pattern(p)
@@ -327,6 +339,11 @@ export func parse_do_expr(p: *Parser) -> int64 {
     return do_to_expr(p, monad_id, elems, lo)
 }
 
+// The steps of a do block read as a flat list here, but desugar folds them into one
+// nested bind per step, so a block of n steps becomes a tree n deep. That is the same
+// flat-source deep-tree shape a chain has, so a step costs the same unit of the
+// nesting budget; without the charge a two thousand step block overflowed the stack in
+// sema. The steps are released together once the block closes.
 func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
     elems: *Vector<DoElemNode> = alloc(vec_new())
     if !p_enter_nesting(p, "block", "function") {
@@ -341,13 +358,20 @@ func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
         }
     }
     p_expect(p, k_lbrace())
+    mut steps: int64 = 0
     mut reading: bool = true
     while reading {
         if p_at(p, k_rbrace()) {
             reading = false
         } else if p_at_eof(p) {
             reading = false
+        } else if p_muted(p) {
+            reading = false
+        } else if !p_enter_chain(p, p_chain_what(steps, "do")) {
+            p_leave_nesting(p)
+            reading = false
         } else {
+            steps = steps + 1
             before: int64 = (*p).pos
             if p_kind(p) == k_ident() {
                 if p_kind2(p) == k_larrow() {
@@ -369,6 +393,7 @@ func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
         }
     }
     p_expect(p, k_rbrace())
+    p_leave_chain(p, steps)
     p_leave_nesting(p)
     return (monad_id, elems)
 }

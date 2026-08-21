@@ -1,0 +1,31 @@
+@paradigm procedural
+
+// A binding shadows an outer one of the same name with a value of a different enum.
+// The enum a binding holds is recorded per scope so a match can name it, and the
+// lookup used to walk straight past the shadowing scope, which records nothing for a
+// value that is not a constructor, and answer with the outer binding's enum. The inner
+// match over a Tri was then judged against Opt, whose variants it never names, and
+// every arm read as a catch all: this legal program was refused. The lookup stops at
+// the scope that declares the name. The reject twin is enumshadow_stale_fail.
+enum Opt { Some(n: int64), None }
+enum Tri { A, B, C }
+
+struct Box { t: Tri }
+
+func main() -> int32 {
+    o := Opt.None
+    b := Box { t: Tri.C }
+    if true {
+        o := b.t
+        match o {
+            A => { println(1) }
+            B => { println(2) }
+            C => { println(3) }
+        }
+    }
+    match o {
+        Some(n) => { println(n) }
+        None => { println(0) }
+    }
+    return 0
+}

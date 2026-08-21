@@ -1,0 +1,26 @@
+@paradigm procedural
+
+// Two enums declare a variant named Some, and their payloads differ in kind: Rows
+// carries a slice, Tally carries a scalar. The escape check reads the constructor's
+// payload types to decide whether an argument's frame view is embedded in the value,
+// and a read keyed by the bare variant name hands back whichever enum declared Some
+// last. Read that way the slice below is typed from Tally's int64, carries no view,
+// and this dead frame slice escapes into the returned value. The payload comes off
+// Rows' own variant slot instead, so the reject stands. The declaration order twin
+// is varshadow_ctorrev_fail, and the legal twin is varshadow_ok.
+enum Rows { Some(s: int64[]), None }
+enum Tally { Some(n: int64), None }
+
+func mk() -> Rows {
+    local: int64[4] = [1, 2, 3, 4]
+    return Rows.Some(local[0..4])
+}
+
+func main() -> int32 {
+    r := mk()
+    match r {
+        Some(s) => { println(s[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

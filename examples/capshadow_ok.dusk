@@ -1,0 +1,27 @@
+@paradigm procedural
+
+// The accept twin of capshadow_param_fail, proving the per construct scoping did
+// not turn every shadowing binder into a capture. The frame slice v is live in the
+// enclosing frame, and the stored closure names v nowhere: the only v it mentions is
+// its inner lambda's own parameter. That closure captures nothing, so storing it
+// through the parameter is legal and the program runs.
+struct Holder { f: () -> int64 }
+
+func fill(dst: *Holder) -> void {
+    arr: int64[4] = [1, 2, 3, 4]
+    v: int64[] = arr[0..4]
+    println(v[0])
+    g := lambda () -> int64 {
+        k := lambda (v: int64) -> int64 { return v + 1 }
+        return k(41)
+    }
+    (*dst).f = g
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { f: lambda () -> int64 { return 0 } })
+    fill(h)
+    println(((*h).f)())
+    free(h)
+    return 0
+}

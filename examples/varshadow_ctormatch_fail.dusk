@@ -1,0 +1,34 @@
+@paradigm procedural
+@paradigm functional
+
+// The same reject with the constructor matched where it is written. A constructor call
+// infers unknown on the surface, so the match had no named type to name its enum and
+// the payload binder fell back to the bare variant name, which Tag owns here. The
+// constructor names its own enum, so the binder is known to carry the pointer and the
+// store through it reaches c.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    local: int64[4] = [111, 222, 333, 444]
+    match Opt.Some(c) {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

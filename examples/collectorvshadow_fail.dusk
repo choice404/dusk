@@ -1,0 +1,37 @@
+@paradigm procedural
+
+// The reject twin of collectorvshadow_ok, proving the slot read did not loosen the
+// guard. Here the collected element is Held, whose Some carries a pointer to an
+// object that stores a frame view, and the second enum's Some carries a scalar. The
+// deep copy immortalizes the outer array but not the pointee, so (*c[0]).s would
+// dangle once mk returns, and the mint is rejected. Reading the payload by variant
+// name would answer Held's Some with whichever enum registered Some last, the scalar
+// Opt, and the guard would let this through. The declaration order twin is
+// collectorvshadowrev_fail.
+struct Inner {
+    s: int64[],
+}
+
+enum Held { Some(c: *Inner), None }
+enum Opt { Some(n: int64), None }
+
+struct Wrap {
+    items: Held[1],
+    p: *Inner,
+}
+
+func mk() -> collector<Held[]> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    w := Wrap { items: [Held.Some(p)], p: p }
+    return collector<Held[]>(w.items)
+}
+
+func main() -> int32 {
+    c := mk()
+    match c[0] {
+        Some(q) => { println((*q).s[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

@@ -1,0 +1,40 @@
+@paradigm procedural
+@paradigm functional
+
+// The scrutinee of a match is a struct field, which infers unknown on the surface, so
+// the payload binder's type could only be read out of the table keyed by the bare
+// variant name. Tag declares Some too, that table answers with Tag's scalar, and the
+// binder p is then not known to be a pointer: the alias link from p back to the
+// scrutinee is never made, the frame slice stored through (*p).rows never reaches c,
+// and a pointer to an object holding a dead frame is returned. The enum is recovered
+// from the field chain's declared type instead. The pointer twin is
+// varshadow_ptrmatch_fail, the accept twin is varshadow_matchok.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+struct Box { o: Opt }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    b := Box { o: Opt.Some(c) }
+    local: int64[4] = [111, 222, 333, 444]
+    match b.o {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

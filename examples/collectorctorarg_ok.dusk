@@ -1,0 +1,33 @@
+@paradigm procedural
+@paradigm functional
+
+// The accept twin of collectorctorarg_fail, proving the embed walk's new descent
+// into constructor payloads did not turn every wrapped pointer into a reject. The
+// same array of constructors is collected, but the pointee holds a heap backed
+// slice rather than a view of mk's frame, so nothing the collected block reaches
+// dies with the frame and the mint stands.
+struct Inner {
+    s: int64[],
+}
+
+enum Held { Some(c: *Inner), None }
+
+func heap2() -> int64[] {
+    seed: int64[2] = [8, 9]
+    return map(seed[0..2], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> collector<Held[]> {
+    p := alloc(Inner { s: heap2() })
+    cells: Held[1] = [Held.Some(p)]
+    return collector<Held[]>(cells)
+}
+
+func main() -> int32 {
+    c := mk()
+    match c[0] {
+        Some(q) => { println((*q).s[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

@@ -1,0 +1,44 @@
+// Accept and run: the generic half of the enum name reservation's match arm rule. A
+// payload free arm is an identifier pattern, read as a variant of the scrutinee's enum
+// when it names one and as the catch all binder otherwise, and only the binder reading
+// takes a name the reservation can refuse. A generic body and a generic call result do
+// not name their enum on the surface pass, so judging the split there refused all three
+// shapes below the moment another enum in the program was also spelled A. The arm is
+// judged on whichever pass names the enum instead, so the surface leaves these alone and
+// the ground pass sees `A` as Tri's variant once mono makes the scrutinee concrete. The
+// reject twin is enumnamearm_generic_fail, where the same generic body binds a name that
+// is no variant of the ground scrutinee.
+@paradigm procedural
+
+enum Tri { A, B2, C }
+enum A { P, Q }
+
+func id<T>(v: T) -> T {
+    return v
+}
+
+func g<T>(x: T) -> int64 {
+    match x {
+        A => { return 10 }
+        B2 => { return 20 }
+        C => { return 30 }
+    }
+}
+
+func main() -> int32 {
+    t: Tri = Tri.B2
+    println(g(t))
+    u: Tri = Tri.A
+    match id(u) {
+        A => { println(10) }
+        B2 => { println(20) }
+        C => { println(30) }
+    }
+    w := id(u)
+    match w {
+        A => { println(10) }
+        B2 => { println(20) }
+        C => { println(30) }
+    }
+    return 0
+}

@@ -1,0 +1,41 @@
+// The legal shapes that put an interface inside a generic type argument. A bare
+// interface as a type argument is rejected, since a generic is monomorphized over
+// concrete types, but an interface behind a slice, a fixed array, or a pointer is a
+// carrier of interface values and stays legal: each element is already the two word
+// fat value the vtable dispatch expects. This pins all five carriers, including the
+// generic struct that holds another generic struct and the three deep nesting.
+@paradigm oop
+@paradigm procedural
+
+interface Speaker { speak() -> int64 }
+struct Dog { s: int64 }
+impl Speaker for Dog { func speak() -> int64 { return self.s } }
+
+struct Box<T> { v: T }
+struct Holder<T> { b: Box<T> }
+
+func main() -> int32 {
+    one: Speaker[1] = [Dog { s: 42 }]
+    sl := one[0..1]
+    b1: Box<Speaker[]> = Box { v: sl }
+    println(b1.v[0].speak())
+
+    b2: Box<Speaker[2]> = Box { v: [Dog { s: 1 }, Dog { s: 2 }] }
+    println(b2.v[1].speak())
+
+    p: *Speaker = alloc(Dog { s: 11 })
+    b3: Box<*Speaker> = Box { v: p }
+    println((*b3.v).speak())
+    free(p)
+
+    two: Speaker[1] = [Dog { s: 55 }]
+    sl2 := two[0..1]
+    h: Holder<Speaker[]> = Holder { b: Box { v: sl2 } }
+    println(h.b.v[0].speak())
+
+    three: Speaker[1] = [Dog { s: 77 }]
+    sl3 := three[0..1]
+    deep: Box<Box<Box<Speaker[]>>> = Box { v: Box { v: Box { v: sl3 } } }
+    println(deep.v.v.v[0].speak())
+    return 0
+}

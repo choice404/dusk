@@ -1,0 +1,32 @@
+@paradigm procedural
+
+// The declaration order twin of collectorvshadow_fail: the scalar Some is declared
+// first and the managed one second. The reject must land in both orders, since a
+// name keyed payload read is wrong in one order and right in the other by accident.
+struct Inner {
+    s: int64[],
+}
+
+enum Opt { Some(n: int64), None }
+enum Held { Some(c: *Inner), None }
+
+struct Wrap {
+    items: Held[1],
+    p: *Inner,
+}
+
+func mk() -> collector<Held[]> {
+    a: int64[3] = [1, 2, 3]
+    p := alloc(Inner { s: a[0..2] })
+    w := Wrap { items: [Held.Some(p)], p: p }
+    return collector<Held[]>(w.items)
+}
+
+func main() -> int32 {
+    c := mk()
+    match c[0] {
+        Some(q) => { println((*q).s[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

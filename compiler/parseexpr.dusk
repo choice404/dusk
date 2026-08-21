@@ -42,22 +42,29 @@ func parse_range(p: *Parser) -> int64 {
     return ast_expr(p_ast(p), xk_range(), l.lo, r.hi, lhs, rhs, incl, 0)
 }
 
+// a |> f |> g folds left in a loop, so each stage is one more AST level over the
+// stage before it. Every stage takes a unit of the nesting budget, and running out
+// ends the chain rather than growing a tree the later passes cannot walk.
 func parse_pipe(p: *Parser) -> int64 {
     mut lhs: int64 = parse_bin(p, 0)
+    mut links: int64 = 0
     mut going: bool = true
     while going {
-        if p_at(p, k_pipe_gt()) {
-            if !p_nl_here(p) {
-                p_bump(p)
-                rhs: int64 = parse_bin(p, 0)
-                lhs = make_pipe(p, lhs, rhs)
-            } else {
-                going = false
-            }
-        } else {
+        if !p_at(p, k_pipe_gt()) {
             going = false
+        } else if p_nl_here(p) {
+            going = false
+        } else if !p_enter_chain(p, p_chain_what(links, "chain")) {
+            p_leave_nesting(p)
+            going = false
+        } else {
+            links = links + 1
+            p_bump(p)
+            rhs: int64 = parse_bin(p, 0)
+            lhs = make_pipe(p, lhs, rhs)
         }
     }
+    p_leave_chain(p, links)
     return lhs
 }
 
@@ -73,40 +80,58 @@ export func parse_bin(p: *Parser, min_bp: int64) -> int64 {
     return e
 }
 
+// The operator that continues a chain at this binding power, or -1 where the chain
+// ends: a newline before the token, a token that is not an operator, or an operator
+// that binds looser than the level the caller is folding.
+func bin_chain_op(p: *Parser, min_bp: int64) -> int64 {
+    if p_nl_here(p) { return -1 }
+    op: int64 = binop_for_kind(p_kind(p))
+    if op < 0 { return -1 }
+    if bin_lbp(op) < min_bp { return -1 }
+    return op
+}
+
+// A comparison does not fold: a < b < c reads as a mistake, not as two comparisons,
+// so the second one is named and the chain stops there.
+func bin_chain_cmp_stop(p: *Parser, op: int64) -> bool {
+    if !is_cmp(op) { return false }
+    next: int64 = binop_for_kind(p_kind(p))
+    if next < 0 { return false }
+    if !is_cmp(next) { return false }
+    p_error(p, "comparison operators cannot be chained")
+    return true
+}
+
+// a + a + a folds left in a loop, one AST level per operator, so a chain deepens the
+// tree without ever recursing in the parser. Each folded operator takes a unit of the
+// nesting budget; when the budget runs out the chain ends where it stands and the
+// guard has already named it, so the tokens left over are reported by the statement
+// grammar rather than folded into a tree too deep to walk.
 func parse_bin_inner(p: *Parser, min_bp: int64) -> int64 {
     mut lhs: int64 = parse_unary(p)
+    mut links: int64 = 0
     mut going: bool = true
     while going {
-        if p_nl_here(p) {
+        op: int64 = bin_chain_op(p, min_bp)
+        if op < 0 {
+            going = false
+        } else if !p_enter_chain(p, p_chain_what(links, "chain")) {
+            p_leave_nesting(p)
             going = false
         } else {
-            op: int64 = binop_for_kind(p_kind(p))
-            if op < 0 {
+            links = links + 1
+            rbp: int64 = bin_rbp(op)
+            p_bump(p)
+            rhs: int64 = parse_bin(p, rbp)
+            l: ExprNode = vec_get((*p_ast(p)).exprs, lhs)
+            r: ExprNode = vec_get((*p_ast(p)).exprs, rhs)
+            lhs = ast_expr(p_ast(p), xk_binary(), l.lo, r.hi, op, lhs, rhs, 0)
+            if bin_chain_cmp_stop(p, op) {
                 going = false
-            } else {
-                lbp: int64 = bin_lbp(op)
-                if lbp < min_bp {
-                    going = false
-                } else {
-                    rbp: int64 = bin_rbp(op)
-                    p_bump(p)
-                    rhs: int64 = parse_bin(p, rbp)
-                    l: ExprNode = vec_get((*p_ast(p)).exprs, lhs)
-                    r: ExprNode = vec_get((*p_ast(p)).exprs, rhs)
-                    lhs = ast_expr(p_ast(p), xk_binary(), l.lo, r.hi, op, lhs, rhs, 0)
-                    next: int64 = binop_for_kind(p_kind(p))
-                    if is_cmp(op) {
-                        if next >= 0 {
-                            if is_cmp(next) {
-                                p_error(p, "comparison operators cannot be chained")
-                                going = false
-                            }
-                        }
-                    }
-                }
             }
         }
     }
+    p_leave_chain(p, links)
     return lhs
 }
 
@@ -171,41 +196,68 @@ func recook_format_arg(p: *Parser, callee: int64, args: *Vector<int64>) -> void 
     vec_set(args, 0, ns)
 }
 
+// Whether the current token opens one more postfix link on the value already parsed:
+// a call, an index, or a field.
+func at_postfix_link(p: *Parser) -> bool {
+    if p_at(p, k_lparen()) { return true }
+    if p_at(p, k_lbracket()) { return true }
+    if p_at(p, k_dot()) { return true }
+    return false
+}
+
+// One postfix link over e. The caller has established that the current token opens
+// one of the three, so the field case is the remaining alternative.
+func parse_postfix_link(p: *Parser, e: int64) -> int64 {
+    if p_at(p, k_lparen()) {
+        p_bump(p)
+        saved: bool = (*p).no_struct
+        (*p).no_struct = false
+        args: *Vector<int64> = parse_expr_list(p, k_rparen())
+        (*p).no_struct = saved
+        p_expect(p, k_rparen())
+        n: ExprNode = vec_get((*p_ast(p)).exprs, e)
+        recook_format_arg(p, e, args)
+        off, len := ast_kids(p_ast(p), args)
+        return ast_expr(p_ast(p), xk_call(), n.lo, p_prev_hi(p), e, off, len, 0)
+    }
+    if p_at(p, k_lbracket()) {
+        p_bump(p)
+        saved2: bool = (*p).no_struct
+        (*p).no_struct = false
+        idx: int64 = parse_expr(p)
+        (*p).no_struct = saved2
+        p_expect(p, k_rbracket())
+        n2: ExprNode = vec_get((*p_ast(p)).exprs, e)
+        return ast_expr(p_ast(p), xk_index(), n2.lo, p_prev_hi(p), e, idx, 0, 0)
+    }
+    p_bump(p)
+    name: int64 = p_ident(p)
+    n3: ExprNode = vec_get((*p_ast(p)).exprs, e)
+    return ast_expr(p_ast(p), xk_field(), n3.lo, p_prev_hi(p), e, name, 0, 0)
+}
+
+// x.f.g, f()(), and a[0][0] all fold left in this loop, one AST level per link, so a
+// postfix chain deepens the tree without recursing in the parser. A call link is the
+// most expensive level any later pass walks, so each link takes a unit of the nesting
+// budget; without the charge a 924 link chain overflowed the stack in typeck.
 func parse_postfix(p: *Parser) -> int64 {
     mut e: int64 = parse_primary(p)
+    mut links: int64 = 0
     mut going: bool = true
     while going {
         if p_nl_here(p) {
             going = false
-        } else if p_at(p, k_lparen()) {
-            p_bump(p)
-            saved: bool = (*p).no_struct
-            (*p).no_struct = false
-            args: *Vector<int64> = parse_expr_list(p, k_rparen())
-            (*p).no_struct = saved
-            p_expect(p, k_rparen())
-            n: ExprNode = vec_get((*p_ast(p)).exprs, e)
-            recook_format_arg(p, e, args)
-            off, len := ast_kids(p_ast(p), args)
-            e = ast_expr(p_ast(p), xk_call(), n.lo, p_prev_hi(p), e, off, len, 0)
-        } else if p_at(p, k_lbracket()) {
-            p_bump(p)
-            saved2: bool = (*p).no_struct
-            (*p).no_struct = false
-            idx: int64 = parse_expr(p)
-            (*p).no_struct = saved2
-            p_expect(p, k_rbracket())
-            n2: ExprNode = vec_get((*p_ast(p)).exprs, e)
-            e = ast_expr(p_ast(p), xk_index(), n2.lo, p_prev_hi(p), e, idx, 0, 0)
-        } else if p_at(p, k_dot()) {
-            p_bump(p)
-            name: int64 = p_ident(p)
-            n3: ExprNode = vec_get((*p_ast(p)).exprs, e)
-            e = ast_expr(p_ast(p), xk_field(), n3.lo, p_prev_hi(p), e, name, 0, 0)
-        } else {
+        } else if !at_postfix_link(p) {
             going = false
+        } else if !p_enter_chain(p, p_chain_what(links, "postfix")) {
+            p_leave_nesting(p)
+            going = false
+        } else {
+            links = links + 1
+            e = parse_postfix_link(p, e)
         }
     }
+    p_leave_chain(p, links)
     return e
 }
 
@@ -325,7 +377,9 @@ func parse_primary(p: *Parser) -> int64 {
         }
         return ast_expr(p_ast(p), xk_ident(), t.lo, t.hi, name, 0, 0, 0)
     }
-    p_error(p, expected_found("an expression", p))
+    if !p_muted(p) {
+        p_error_owned(p, expected_found("an expression", p))
+    }
     p_bump(p)
     empty: int64 = intern_id((*p_ast(p)).interner, "")
     return ast_expr(p_ast(p), xk_ident(), t.lo, t.hi, empty, 0, 0, 0)
@@ -373,7 +427,9 @@ func parse_fstring(p: *Parser, head: Token) -> int64 {
             p_bump(p)
             reading = false
         } else {
-            p_error(p, expected_found("the closing of the interpolated string", p))
+            if !p_muted(p) {
+                p_error_owned(p, expected_found("the closing of the interpolated string", p))
+            }
             reading = false
         }
     }

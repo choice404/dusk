@@ -1,0 +1,26 @@
+@paradigm procedural
+
+// The interprocedural twin: the shadowed name sits inside the callee, where the
+// summary walk builds pass2's transfer function. The walk resolved a bare callee name
+// against the variant table before it looked at the function's own bindings, so the
+// closure call was modeled as Tag's scalar constructor and pass2 was credited with
+// returning nothing derived from its argument. The caller's dead frame slice then
+// escaped through the call. The walk asks its locals, parameters, and resolvable
+// binds first now.
+enum Tag { Some(n: int64), None }
+
+func pass2(xs: int64[]) -> int64[] {
+    Some := lambda (ys: int64[]) -> int64[] { return ys }
+    return Some(xs)
+}
+
+func mk() -> int64[] {
+    local: int64[4] = [1, 2, 3, 4]
+    return pass2(local[0..4])
+}
+
+func main() -> int32 {
+    v := mk()
+    println(v[0])
+    return 0
+}

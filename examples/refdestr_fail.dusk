@@ -1,0 +1,20 @@
+// The compile fail twin: a `ref` destructuring binding borrows every name it
+// binds, so a binder can neither free what the source still owns nor move it
+// out from under the owner. Each member is bound on its own line when it needs
+// to own what it holds.
+@paradigm procedural
+
+struct Box { n: int64 }
+
+func main() -> int64 {
+    owner: *Box = alloc(Box { n: 1 })
+    spare: *Box = alloc(Box { n: 2 })
+    ref view, tag := (owner, 7)
+    ref alias, count := (spare, 9)
+    println((*view).n + (*alias).n + tag + count)
+    free(view)
+    taken: *Box = move(alias)
+    free(taken)
+    free(owner)
+    return 0
+}

@@ -13,11 +13,13 @@
 @import ty
 @import tysigs
 @import summary
+@import sumflow
 
 /** A function's frame-view escape summary as the type pass reads it: whether it is
  *  empty, which parameter or return its result aliases, which parameters it reads
- *  through, its sink and collect-sink parameter masks, and the encoded flow edges. */
-export struct SummaryHandle { empty: bool, returns_alias: int64, reads_through: int64, sinks: int64, collect_sinks: int64, flows: string }
+ *  through, its sink and collect-sink parameter masks, and its store-edge relation,
+ *  the 64 by 64 bit matrix sumflow defines. */
+export struct SummaryHandle { empty: bool, returns_alias: int64, reads_through: int64, sinks: int64, collect_sinks: int64, flows: int64[64] }
 /** The element type recorded for a mut tuple binding, kept so a later reassignment
  *  can be width-checked against the member it replaces. */
 export struct MutTupleEntry { ty: int64 }
@@ -242,7 +244,7 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
         for_iters: for_iters,
         for_iter_asts: for_iter_asts,
         match_ctx: 0,
-        summary: SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" },
+        summary: SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() },
         sum_tables: sum_tables_new(a),
         errors: errors,
     })

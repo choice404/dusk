@@ -1,0 +1,23 @@
+// Compile-fail: an interface declared with its own type parameters. An interface
+// value erases the type it carries, so no dispatch site can pin T, and every impl
+// shares one vtable slot whose signature has to be a single concrete type. The
+// declaration was parsed and silently treated as though T were int64, which built a
+// thunk that disagreed with any impl spelling a different type, so mono names it.
+@paradigm oop
+@paradigm procedural
+
+interface Speaker<T> {
+    speak(x: T) -> T
+}
+
+struct Dog { s: int64 }
+impl Speaker for Dog {
+    func speak(x: string) -> string { return x }
+}
+
+func main() -> int32 {
+    d := Dog { s: 6 }
+    a: Speaker = d
+    println(a.speak("hi"))
+    return 0
+}

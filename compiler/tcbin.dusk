@@ -294,9 +294,13 @@ export func float_suffix_width(s: string) -> int64 {
     return 0
 }
 
-func literal_fit_msg(val: int64, w: int64) -> string {
+// The signed width reject. The noun names what carried the value, a written
+// `literal` or a `constant` an expression of literals folded to, so the two read
+// as one family and the second still points at what the reader wrote.
+func literal_fit_msg(noun: string, val: int64, w: int64) -> string {
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, "literal ")
+    sb_push(b, noun)
+    sb_push(b, " ")
     sb_push_int(b, val)
     sb_push(b, " does not fit in ")
     sb_push_int(b, w)
@@ -311,9 +315,10 @@ func literal_fit_msg(val: int64, w: int64) -> string {
 // the bit count alone reads as if the bit pattern were the question: -1 does fit
 // in 8 bits, it just is not a uint8 value. The negative form names the cast, which
 // is how a deliberate wrap is written.
-func uint_fit_msg(val: int64, w: int64, negative: bool) -> string {
+func uint_fit_msg(noun: string, val: int64, w: int64, negative: bool) -> string {
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, "literal ")
+    sb_push(b, noun)
+    sb_push(b, " ")
     sb_push_int(b, val)
     sb_push(b, " does not fit in uint")
     sb_push_int(b, w)
@@ -368,19 +373,16 @@ func uint_wide_msg(val: int64, w: int64) -> string {
     return out
 }
 
-export func check_int_value_fits(tc: *TypeChecker, val: int64, w: int64, unsigned: bool, lo: int64, hi: int64) -> void {
+// The range judgment itself, over a value and the width that has to hold it. An
+// unsigned width refuses a negative at every width, since no bit count makes -1 an
+// unsigned value; a signed one has a range worth asking about only below 64 bits.
+func value_fits_width(val: int64, w: int64, unsigned: bool) -> bool {
     if unsigned {
-        if val < 0 {
-            tc_emit(tc, uint_fit_msg(val, w, true), lo, hi)
-            return
-        }
+        if val < 0 { return false }
         high0: int64 = uint_high(w)
-        if high0 >= 0 && val > high0 {
-            tc_emit(tc, uint_fit_msg(val, w, false), lo, hi)
-        }
-        return
+        return high0 < 0 || val <= high0
     }
-    if w != 8 && w != 16 && w != 32 { return }
+    if w != 8 && w != 16 && w != 32 { return true }
     mut low: int64 = -128
     mut high: int64 = 127
     if w == 16 {
@@ -390,9 +392,59 @@ export func check_int_value_fits(tc: *TypeChecker, val: int64, w: int64, unsigne
         low = -2147483648
         high = 2147483647
     }
-    if val < low || val > high {
-        tc_emit(tc, literal_fit_msg(val, w), lo, hi)
+    return val >= low && val <= high
+}
+
+// The reject the judgment earns. The noun is the caller's, since the same range
+// refuses a written literal and a folded constant alike, and only the word for what
+// was written differs.
+func check_value_fits_named(tc: *TypeChecker, noun: string, val: int64, w: int64, unsigned: bool, lo: int64, hi: int64) -> void {
+    if value_fits_width(val, w, unsigned) { return }
+    if unsigned {
+        tc_emit(tc, uint_fit_msg(noun, val, w, val < 0), lo, hi)
+        return
     }
+    tc_emit(tc, literal_fit_msg(noun, val, w), lo, hi)
+}
+
+// The written literal's range check, the spelling every existing fit site uses.
+export func check_int_value_fits(tc: *TypeChecker, val: int64, w: int64, unsigned: bool, lo: int64, hi: int64) -> void {
+    check_value_fits_named(tc, "literal", val, w, unsigned, lo, hi)
+}
+
+// The folded constant's range check. The value was computed rather than written, so
+// the reject names it a constant and the caret covers the whole expression that
+// produced it.
+//
+// A fold that left int64 on the way is judged apart, since the value it carries is a
+// wrapped pattern and not the value the expression names. uint64 holds every one of
+// those patterns and the store keeps the bits the fold computed, so
+// `9223372036854775807 + 1` is 9223372036854775808 there and nothing is refused. A
+// narrower target keeps ranging the wrapped value, which is what codegen computes, and
+// refuses a result outside the width without naming a value it does not have.
+func check_const_fits(tc: *TypeChecker, target: int64, nt: TyNode, val: int64, over: bool, lo: int64, hi: int64) -> void {
+    unsigned: bool = nt.a == 1
+    if !over {
+        check_value_fits_named(tc, "constant", val, nt.w, unsigned, lo, hi)
+        return
+    }
+    if unsigned && nt.w == 64 { return }
+    if value_fits_width(val, nt.w, unsigned) { return }
+    tc_emit(tc, const_overflow_msg(ty_render((*tc).ty, target)), lo, hi)
+}
+
+// The reject a folded constant earns when the fold itself left int64's range. No
+// value is named, since the one the fold holds is a wrapped pattern; what is named is
+// the target that cannot hold the result and the cast that spells a wrap on purpose.
+func const_overflow_msg(spelled: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "constant expression overflows int64 and does not fit in ")
+    sb_push(b, spelled)
+    sb_push(b, "; cast if the wrap is meant")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 // The range check for a suffixed literal, whose suffix already pinned its type at
@@ -409,11 +461,91 @@ export func check_suffix_value_fits(tc: *TypeChecker, val: int64, w: int64, unsi
     check_int_value_fits(tc, val, w, unsigned, lo, hi)
 }
 
-// The integer leaf of the fit walk: an unsuffixed literal, or a negated one, that
-// is stored as an integer target must name a value of that target's range. A
-// suffixed literal already pinned its own type and ranged itself at inference, so
-// it is left alone here, and every other expression shape carries no written value
-// to range.
+// The int64 value of an integer expression written entirely in bare literals, and
+// whether it has one. Codegen computes such an expression at int64 and truncates the
+// result at the store, so the folded value is exactly the value the target width has
+// to hold, and ranging it asks precisely whether that store would truncate.
+//
+// A suffixed operand stops the fold. `0u64 - 1u64` computes in its own width, where
+// wrapping to the top of the range is the deliberate spelling of that value, so a fold
+// reading it at int64 would see -1 and refuse a legal wrap. A name, a call, and a cast
+// stop the fold too, since none of them carries a value this pass knows.
+//
+// The two shapes with no int64 answer are left unfolded rather than computed: a zero
+// divisor, and the one signed overflow of int64's low value over -1. Folding either
+// would fault the compiler on a program it is supposed to judge, so both stay with the
+// runtime, which is where codegen already leaves them.
+//
+// The third answer is whether the fold left int64's range. The value stays the wrapped
+// one codegen computes either way, but a caller ranging it has to know the number in
+// hand is a pattern and not what the expression names, so the flag rides along and is
+// sticky: one step past the range taints every step after it.
+func bare_const_int(tc: *TypeChecker, expr: int64) -> (bool, int64, bool) {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, expr)
+    if e.kind == xk_int() {
+        if e.b >= 0 { return (false, 0, false) }
+        return (true, e.a, false)
+    }
+    if e.kind == xk_unary() {
+        if e.a != uop_neg() { return (false, 0, false) }
+        iok, iv, iover := bare_const_int(tc, e.b)
+        if !iok { return (false, 0, false) }
+        return (true, 0 - iv, iover || iv == int64_low())
+    }
+    if e.kind != xk_binary() { return (false, 0, false) }
+    lok, lv, lover := bare_const_int(tc, e.b)
+    if !lok { return (false, 0, false) }
+    rok, rv, rover := bare_const_int(tc, e.c)
+    if !rok { return (false, 0, false) }
+    over: bool = lover || rover
+    if e.a == bop_add() { return (true, lv + rv, over || add_overflows(lv, rv)) }
+    if e.a == bop_sub() { return (true, lv - rv, over || sub_overflows(lv, rv)) }
+    if e.a == bop_mul() { return (true, lv * rv, over || mul_overflows(lv, rv)) }
+    if e.a == bop_div() || e.a == bop_mod() {
+        if rv == 0 { return (false, 0, false) }
+        if lv == int64_low() && rv == 0 - 1 { return (false, 0, false) }
+        if e.a == bop_div() { return (true, lv / rv, over) }
+        return (true, lv % rv, over)
+    }
+    return (false, 0, false)
+}
+
+// int64's low value, spelled as the subtraction because its magnitude is one past
+// what a written literal holds, and its high value beside it.
+func int64_low() -> int64 { return -9223372036854775807 - 1 }
+func int64_high() -> int64 { return 9223372036854775807 }
+
+// Whether the fold's three arithmetic steps leave int64's range. Each answer is decided
+// before its operation runs, off operands that still name their values, and no division
+// here is by zero or by -1 under the low value, so none of them can fault.
+func add_overflows(lv: int64, rv: int64) -> bool {
+    if rv > 0 { return lv > int64_high() - rv }
+    if rv < 0 { return lv < int64_low() - rv }
+    return false
+}
+
+func sub_overflows(lv: int64, rv: int64) -> bool {
+    if rv > 0 { return lv < int64_low() + rv }
+    if rv < 0 { return lv > int64_high() + rv }
+    return false
+}
+
+func mul_overflows(lv: int64, rv: int64) -> bool {
+    if lv == 0 || rv == 0 { return false }
+    if lv > 0 {
+        if rv > 0 { return lv > int64_high() / rv }
+        return rv < int64_low() / lv
+    }
+    if rv > 0 { return lv < int64_low() / rv }
+    return rv < int64_high() / lv
+}
+
+// The integer leaf of the fit walk: an unsuffixed literal, a negated one, or an
+// expression of them, that is stored as an integer target must name a value of that
+// target's range. A suffixed literal already pinned its own type and ranged itself at
+// inference, so it is left alone here, and every other expression shape carries no
+// value this pass can range.
 func check_int_lit_fits(tc: *TypeChecker, expr: int64, target: int64) -> void {
     nt: TyNode = ty_get((*tc).ty, target)
     if nt.kind != tyk_int() { return }
@@ -427,12 +559,79 @@ func check_int_lit_fits(tc: *TypeChecker, expr: int64, target: int64) -> void {
     e: ExprNode = vec_get((*a).exprs, expr)
     if e.kind == xk_int() && e.b < 0 {
         check_int_value_fits(tc, e.a, nt.w, unsigned, e.lo, e.hi)
-    } else if e.kind == xk_unary() && e.a == uop_neg() {
+        return
+    }
+    if e.kind == xk_unary() && e.a == uop_neg() {
         inner: ExprNode = vec_get((*a).exprs, e.b)
         if inner.kind == xk_int() && inner.b < 0 {
             check_int_value_fits(tc, 0 - inner.a, nt.w, unsigned, e.lo, e.hi)
+            return
         }
     }
+    // A folded constant is held the same way a written one is: `x: uint8 = 128 + 128`
+    // stores 256 into eight bits exactly as `x: uint8 = 256` would, so it earns the
+    // same refusal instead of wrapping quietly in codegen. The caret covers the whole
+    // expression, since no single literal in it is the one that did not fit.
+    ok, v, over := bare_const_int(tc, expr)
+    if ok { check_const_fits(tc, target, nt, v, over, e.lo, e.hi) }
+}
+
+// The spelling a fixed array type has in source, built for the length reject below
+// so it can name the type the literal is written into. ty_render answers "an array"
+// for every array alike, which says nothing about the count that failed, so the
+// element type is rendered and the brackets are rebuilt around it: `uint8[2][2]`
+// and `int64[][2]` each render back as themselves.
+func render_arr_ty(t: *TyArena, id: int64) -> string {
+    n: TyNode = ty_get(t, id)
+    if n.kind == tyk_array() {
+        inner: string = render_arr_ty(t, n.a)
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, inner)
+        sb_push(b, "[")
+        sb_push_int(b, n.w)
+        sb_push(b, "]")
+        out: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        return out
+    }
+    if n.kind == tyk_slice() {
+        inner2: string = render_arr_ty(t, n.a)
+        b2: *StringBuilder = alloc(sb_new())
+        sb_push(b2, inner2)
+        sb_push(b2, "[]")
+        out2: string = substring(sb_cstr(b2), 0, sb_size(b2))
+        sb_free(b2)
+        free(b2)
+        return out2
+    }
+    if n.kind == tyk_named() { return ty_name(t, id) }
+    return ty_render(t, id)
+}
+
+// The reject an array literal earns when its element count is not the fixed length
+// it fills. The short form names the padding that does not happen, since `[0]` into
+// an `int64[64]` is written meaning a fill, and dusk has no fill form and no
+// initializer-less declaration to reach for instead; the long form names the two
+// ways out of a literal that overruns its type.
+func arr_lit_len_msg(tc: *TypeChecker, have: int64, want: int64, target: int64) -> string {
+    spelled: string = render_arr_ty((*tc).ty, target)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "the array literal has ")
+    sb_push_int(b, have)
+    sb_push(b, " element(s) but ")
+    sb_push(b, spelled)
+    sb_push(b, " holds ")
+    sb_push_int(b, want)
+    if have < want {
+        sb_push(b, "; a short literal is not padded, write every element")
+    } else {
+        sb_push(b, "; drop the extra elements or widen the type")
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 // The one target-directed literal fit walk. A literal is ranged against the type
@@ -472,6 +671,20 @@ export func check_lit_fits_target(tc: *TypeChecker, expr: int64, target: int64) 
     }
     if nt.kind == tyk_array() || nt.kind == tyk_slice() {
         if e.kind != xk_array() { return }
+        // A fixed array is exactly N elements wide and an array literal builds at
+        // its own length, so a literal of any other count stores a differently
+        // sized aggregate into the slot: `mut r: int64[64] = [0]` emitted a
+        // `[1 x i64]` into a `[64 x i64]` and died in clang with no dusk error to
+        // its name. Only the fixed form is counted: a slice target takes the
+        // literal's own length, so an array literal coerced to a slice keeps
+        // coercing, and a `char[N]` filled by a string literal returned one line
+        // up, since a string literal is not an array literal and its own rule
+        // counts bytes. The elements still range below, so a wrong length reports
+        // once and every element that was written is still checked against the
+        // element type.
+        if nt.kind == tyk_array() && e.b != nt.w {
+            tc_emit(tc, arr_lit_len_msg(tc, e.b, nt.w, target), e.lo, e.hi)
+        }
         mut i: int64 = 0
         while i < e.b {
             check_lit_fits_target(tc, vec_get((*a).kids, e.a + i), nt.a)

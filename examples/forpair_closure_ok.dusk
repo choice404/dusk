@@ -1,0 +1,29 @@
+@paradigm procedural
+@import std.map
+
+// A returned closure that walks a map with the two binder form and captures nothing.
+// The type checker's own capture walk bound only the first binder, so the loop's value
+// name read as a capture of the enclosing scalar of the same name and returning the
+// closure was refused as an escape. Both binders belong to the loop.
+func mkmap() -> *Map<string, int64> {
+    m: *Map<string, int64> = alloc(map_new())
+    map_put(m, "a", 1)
+    return m
+}
+
+func mk() -> () -> int64 {
+    v: int64 = 3
+    g := lambda () -> int64 {
+        mut t: int64 = 0
+        for k, v in mkmap() { t = t + v }
+        return t
+    }
+    println(v)
+    return g
+}
+
+func main() -> int32 {
+    f := mk()
+    println(f())
+    return 0
+}

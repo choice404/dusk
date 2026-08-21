@@ -304,6 +304,13 @@ func ren_stmt(r: *Renamer, id: int64, skip: *Map<string, int64>, bound: *Vector<
         ren_expr(r, s.b, skip, bound)
         push_scope(bound)
         add_bound(r, bound, s.a)
+        // `for k, v in m` binds a second name, the interned name plus one in d, and
+        // the privatizer sees that form because it runs before the for rewrite. Left
+        // out of the loop's scope the binder read as a free name, so a body that calls
+        // it, `v()` over a map of closures, was renamed to an imported file's private
+        // top level of the same name and called that instead: the wrong function,
+        // silently, with no diagnostic anywhere.
+        if s.d != 0 { add_bound(r, bound, s.d - 1) }
         ren_block(r, s.c, skip, bound)
         pop_scope(bound)
     } else if s.kind == sk_match() {

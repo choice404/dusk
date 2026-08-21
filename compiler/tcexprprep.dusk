@@ -157,6 +157,60 @@ export func error_field_msg(fname: string) -> string {
     return out
 }
 
+// Whether a field access has anything to read off this base. A named type is a
+// struct, an enum, or an interface and carries its declared fields; an array and a
+// slice carry '.len'; an error carries '.message'; and an unknown base is the hole a
+// generic body leaves on the surface pass, which the ground pass judges once mono has
+// made it concrete. Everything left is a scalar with no member at all. A pointer stays
+// permissive here: a field read through one without an explicit deref is a separate
+// divergence this rule does not close, so `(*p).x` is the spelling that lowers and
+// `p.x` still reaches codegen. A tuple, a function, a future, a collector, and a
+// thread handle stay permissive for the same reason, rather than widening this repair
+// into classes no program reaches by accident.
+export func ty_has_fields(t: *TyArena, id: int64) -> bool {
+    n: TyNode = ty_get(t, id)
+    if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_bool() { return false }
+    if n.kind == tyk_char() || n.kind == tyk_rune() || n.kind == tyk_str() { return false }
+    if n.kind == tyk_unit() { return false }
+    return true
+}
+
+// Whether an index or a range slice has anything to read off this base. The same
+// scalar set as ty_has_fields minus the string, whose bytes an index does read:
+// `s[i]` is a char and `s[0..3]` is a slice of its bytes.
+export func ty_is_indexable(t: *TyArena, id: int64) -> bool {
+    n: TyNode = ty_get(t, id)
+    if n.kind == tyk_int() || n.kind == tyk_float() || n.kind == tyk_bool() { return false }
+    if n.kind == tyk_char() || n.kind == tyk_rune() || n.kind == tyk_unit() { return false }
+    return true
+}
+
+// Named for both directions, a read and an assignment target, since the assignment
+// path infers its left side through the same arm. The legal set names the spellings
+// that lower: a pointer is left out deliberately, since a field through one is read
+// as `(*p).x` rather than `p.x`.
+export func no_fields_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot access a field of ")
+    sb_push(b, rendered)
+    sb_push(b, "; a field access takes a struct, an array or a slice '.len', or an error '.message'")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+export func cannot_index_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "cannot index ")
+    sb_push(b, rendered)
+    sb_push(b, "; an index or a range slice takes an array, a slice, a string, or a pointer")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64 {
     sigs: *TypeSigs = (*tc).sigtab
     mut i: int64 = 0
@@ -324,6 +378,7 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
         pname: string = ast_name(a, p2.name)
         declare(tc, pname, vec_get(ps, j))
         reject_builtin_binding(tc, pname, vec_get(ps, j), true, e.lo, e.hi)
+        reject_enum_name_binding(tc, pname, e.lo, e.hi)
         declare_binding_ast(tc, pname, p2.ty)
         set_esc(tc, pname, false, false)
         // A lambda parameter of a bare type parameter is a borrow, the same rule a

@@ -1,0 +1,38 @@
+@paradigm procedural
+@paradigm functional
+
+// The match scrutinee is a binding whose value came out of a struct field, one step
+// further than a binding a constructor initialized. A field read of an enum infers
+// unknown on the surface, so the binding carried no type and no record, the payload
+// binder fell back to the table keyed by the bare variant name, and Tag's scalar
+// answered for Opt's pointer. A binding now records the enum of the place it read.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+struct Box { o: Opt }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    b := Box { o: Opt.Some(c) }
+    x := b.o
+    local: int64[4] = [111, 222, 333, 444]
+    match x {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

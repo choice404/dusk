@@ -1,0 +1,45 @@
+@paradigm procedural
+@paradigm functional
+
+// The accept twin of the varshadow match rejects. The same two enums share the variant
+// name Some, and the same three scrutinee shapes are matched, a binding, a struct
+// field, and the constructor itself, but every payload is heap backed, so nothing a
+// binder holds dies with the frame and all three matches are legal. Resolving the
+// scrutinee's enum must not turn a legal match into a reject.
+struct Cell { rows: int64[] }
+
+enum Opt { Some(c: *Cell), None }
+enum Tag { Some(n: int64), None }
+
+struct Box { o: Opt }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    o := Opt.Some(c)
+    b := Box { o: Opt.Some(c) }
+    match o {
+        Some(p) => { (*p).rows = heap4() }
+        None => {}
+    }
+    match b.o {
+        Some(q) => { println((*q).rows[1]) }
+        None => { println(0) }
+    }
+    match Tag.Some(9) {
+        Some(n) => { println(n) }
+        None => { println(0) }
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

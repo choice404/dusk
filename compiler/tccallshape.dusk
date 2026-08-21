@@ -199,15 +199,9 @@ func base_lookup(tc: *TypeChecker, id: int64) -> int64 {
 }
 
 func enum_contains_variant(tc: *TypeChecker, en: string, v: string) -> bool {
-    enums: *Map<string, EnumSig> = (*tc).enums
-    es: EnumSig = unwrap_or(map_get(enums, en), EnumSig { off: 0, len: 0 })
-    sigs: *TypeSigs = (*tc).sigtab
-    mut i: int64 = 0
-    while i < es.len {
-        if str_eq(vec_get((*sigs).names, es.off + i), v) { return true }
-        i = i + 1
-    }
-    return false
+    // One keyed lookup against the per enum variant table, the same answer the
+    // old slot scan gave without the walk over every variant per constructor call.
+    return sig_has_variant_in((*tc).sigtab, en, v)
 }
 
 func ctor_arity_msg(en: string, v: string, want: int64, got: int64) -> string {

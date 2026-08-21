@@ -1,0 +1,36 @@
+@paradigm procedural
+@import std.map
+
+// A closure that walks a map with the two binder form, `for k, v in m`, and captures
+// nothing: the map comes from a call and both binders belong to the loop. The capture
+// walk bound only the first binder, so the loop's own v read as a free use of the
+// enclosing frame slice named v, the closure was charged with a capture it never
+// makes, and storing it through a parameter was refused. Both binders are bound now,
+// so this legal program builds and runs.
+struct Holder { f: () -> int64 }
+
+func mkmap() -> *Map<string, int64> {
+    m: *Map<string, int64> = alloc(map_new())
+    map_put(m, "a", 4)
+    return m
+}
+
+func fill(dst: *Holder) -> void {
+    arr: int64[4] = [1, 2, 3, 4]
+    v: int64[] = arr[0..4]
+    g := lambda () -> int64 {
+        mut t: int64 = 0
+        for k, v in mkmap() { t = t + v }
+        return t
+    }
+    println(v.len)
+    (*dst).f = g
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { f: lambda () -> int64 { return 0 } })
+    fill(h)
+    println(((*h).f)())
+    free(h)
+    return 0
+}

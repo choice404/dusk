@@ -126,15 +126,37 @@ export func p_prev_hi(p: *Parser) -> int64 {
     return 0
 }
 
+// Whether the parser has stopped reporting. The nesting guard fires once, and past
+// that point the token stream is desynchronized: the guard refuses a subtree without
+// consuming its tokens, so the grammar restarts mid-construct and every later fault
+// is an artifact of that one rejection rather than a separate mistake. A 3000 deep
+// parenthesis nest used to bury the guard's message under eighteen thousand lines of
+// "expected ')'", so the guard's diagnostic is the last one the file produces.
+// Nothing is lost: the guard's message is already recorded, so the parse still fails.
+export func p_muted(p: *Parser) -> bool { return (*p).hit_depth_limit }
+
 export func p_error(p: *Parser, msg: string) -> void {
+    if p_muted(p) { return }
+    vec_push((*p).errors, located(p_lo(p), p_hi(p), msg))
+}
+
+// Reports a message the caller allocated. A muted parser frees it rather than
+// recording it, so suppression drops no allocation on the floor.
+export func p_error_owned(p: *Parser, msg: string) -> void {
+    if p_muted(p) {
+        free(msg)
+        return
+    }
     vec_push((*p).errors, located(p_lo(p), p_hi(p), msg))
 }
 
 export func p_error_at(p: *Parser, lo: int64, msg: string) -> void {
+    if p_muted(p) { return }
     vec_push((*p).errors, located(lo, p_hi(p), msg))
 }
 
 export func p_error_span(p: *Parser, lo: int64, hi: int64, msg: string) -> void {
+    if p_muted(p) { return }
     vec_push((*p).errors, located(lo, hi, msg))
 }
 
@@ -156,7 +178,9 @@ export func p_expect(p: *Parser, k: int64) -> bool {
     if p_eat(p, k) {
         return true
     }
-    p_error(p, expected_found(kind_name(k), p))
+    if !p_muted(p) {
+        p_error_owned(p, expected_found(kind_name(k), p))
+    }
     return false
 }
 
@@ -223,23 +247,27 @@ export func p_ident(p: *Parser) -> int64 {
         p_bump(p)
         return id
     }
-    p_error(p, expected_found("identifier", p))
+    if !p_muted(p) {
+        p_error_owned(p, expected_found("identifier", p))
+    }
     return intern_id((*(*p).ast).interner, "")
 }
 
 export func p_guard_progress(p: *Parser, before: int64, ctx: string) -> bool {
     if (*p).pos == before {
-        // "<ctx>: <token>", the stuck token rendered in stage0's Debug form.
-        b: *StringBuilder = alloc(sb_new())
-        sb_push(b, ctx)
-        sb_push(b, ": ")
-        found: string = token_found((*p).src, (*p).n, p_tok(p))
-        sb_push(b, found)
-        free(found)
-        msg: string = substring(sb_cstr(b), 0, sb_size(b))
-        p_error(p, msg)
-        sb_free(b)
-        free(b)
+        if !p_muted(p) {
+            // "<ctx>: <token>", the stuck token rendered in stage0's Debug form.
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, ctx)
+            sb_push(b, ": ")
+            found: string = token_found((*p).src, (*p).n, p_tok(p))
+            sb_push(b, found)
+            free(found)
+            msg: string = substring(sb_cstr(b), 0, sb_size(b))
+            p_error_owned(p, msg)
+            sb_free(b)
+            free(b)
+        }
         p_bump(p)
         return true
     }
@@ -269,13 +297,15 @@ export func p_skip_stmt_decl(p: *Parser) -> bool {
     } else {
         return false
     }
-    b: *StringBuilder = alloc(sb_new())
-    sb_push(b, what)
-    sb_push(b, " is declared at the top level, not inside a function body")
-    msg: string = substring(sb_cstr(b), 0, sb_size(b))
-    p_error(p, msg)
-    sb_free(b)
-    free(b)
+    if !p_muted(p) {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, what)
+        sb_push(b, " is declared at the top level, not inside a function body")
+        msg: string = substring(sb_cstr(b), 0, sb_size(b))
+        p_error_owned(p, msg)
+        sb_free(b)
+        free(b)
+    }
     p_bump(p)
     mut depth: int64 = 0
     mut seen: bool = false
@@ -304,19 +334,65 @@ export func p_skip_stmt_decl(p: *Parser) -> bool {
     return true
 }
 
+// Names the construct that ran out of budget, once per file. The message is recorded
+// before the mute latches, so the guard's own diagnostic is the one that survives.
+func p_depth_report(p: *Parser, what: string) -> void {
+    if (*p).hit_depth_limit {
+        return
+    }
+    if str_eq(what, "block") {
+        p_error(p, "block nesting is too deep; simplify the function")
+    } else if str_eq(what, "type") {
+        p_error(p, "type nesting is too deep; simplify the type")
+    } else if str_eq(what, "chain") {
+        p_error(p, "expression chain is too long; split it across bindings")
+    } else if str_eq(what, "postfix") {
+        p_error(p, "field and call chain is too long; bind an intermediate value")
+    } else if str_eq(what, "do") {
+        p_error(p, "do block has too many steps; move some of them into a helper function")
+    } else {
+        p_error(p, "expression nesting is too deep; simplify the expression")
+    }
+    (*p).hit_depth_limit = true
+}
+
+// One budget covers every way a program can deepen the tree the later passes walk: a
+// nested block, a nested type, a nested expression, and, through p_enter_chain, each
+// link of a chain the grammar folds in a loop.
 export func p_enter_nesting(p: *Parser, what: string, fix: string) -> bool {
     (*p).depth = (*p).depth + 1
     if (*p).depth > 500 {
-        if !(*p).hit_depth_limit {
-            (*p).hit_depth_limit = true
-            if str_eq(what, "block") {
-                p_error(p, "block nesting is too deep; simplify the function")
-            } else if str_eq(what, "type") {
-                p_error(p, "type nesting is too deep; simplify the type")
-            } else {
-                p_error(p, "expression nesting is too deep; simplify the expression")
-            }
-        }
+        p_depth_report(p, what)
+        return false
+    }
+    return true
+}
+
+// One link of a chain the grammar folds in a loop, charged to the same budget. The
+// charge matters because a chain nests in the AST without nesting in the parser: a + a
+// + ... parses iteratively but builds a left deep tree one node per operator, and
+// resolve, typeck, mono, and codegen all descend it recursively. Uncharged, a 3370 term
+// sum and a 924 link call chain each killed the compiler with a stack overflow before
+// any diagnostic. Charging to the one budget is also what makes the shapes compose: a
+// chain buried under nested calls spends the same 500 units, so the tree depth a
+// program can reach is bounded however the shapes are mixed. The two units the link's
+// own operand parse will spend are reserved here, so a chain that runs out is named as
+// a long chain rather than as ordinary nesting one operand deeper.
+// Names the fault a chain loop reports. A loop that has already folded a link ran out
+// of budget because the chain itself is long, so it names the chain. A loop that has
+// folded none was at the limit before it started, and what is too deep is the nesting
+// around it, not a chain of one, so it names that instead.
+export func p_chain_what(links: int64, long: string) -> string {
+    if links > 0 {
+        return long
+    }
+    return "expression"
+}
+
+export func p_enter_chain(p: *Parser, what: string) -> bool {
+    (*p).depth = (*p).depth + 1
+    if (*p).depth + 2 > 500 {
+        p_depth_report(p, what)
         return false
     }
     return true
@@ -324,6 +400,17 @@ export func p_enter_nesting(p: *Parser, what: string, fix: string) -> bool {
 
 export func p_leave_nesting(p: *Parser) -> void {
     (*p).depth = (*p).depth - 1
+}
+
+// Releases the budget a chain loop charged, one unit per link it folded. A loop that
+// stopped on the guard has already released the unit that failed, so links counts only
+// the links it built.
+export func p_leave_chain(p: *Parser, links: int64) -> void {
+    mut n: int64 = links
+    while n > 0 {
+        p_leave_nesting(p)
+        n = n - 1
+    }
 }
 
 export func p_at_type_close(p: *Parser) -> bool {
@@ -353,7 +440,9 @@ export func p_expect_gt(p: *Parser) -> void {
         t.lo = rest_lo
         vec_set((*p).toks, (*p).pos, t)
     } else {
-        p_error(p, expected_found("'>'", p))
+        if !p_muted(p) {
+            p_error_owned(p, expected_found("'>'", p))
+        }
     }
 }
 

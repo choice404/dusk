@@ -1,0 +1,23 @@
+// The accept twin. A moved member hands its ownership to the binder, a freshly
+// allocated member is the binder's own, and a member that names an owner reads
+// through the borrow while the original name frees. Packing a live pointer into a
+// tuple stays legal the way a struct literal embeds one.
+@paradigm procedural
+
+struct Box { n: int64 }
+
+func main() -> int64 {
+    owner: *Box = alloc(Box { n: 11 })
+    a, b := (move(owner), 7)
+    println((*a).n + b)
+    free(a)
+    fresh, k := (alloc(Box { n: 12 }), 5)
+    println((*fresh).n + k)
+    free(fresh)
+    keep: *Box = alloc(Box { n: 13 })
+    t := (keep, 1)
+    v, m := t
+    println((*v).n + m)
+    free(keep)
+    return 0
+}

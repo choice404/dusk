@@ -1,0 +1,20 @@
+// Compile-fail: the generic-carrier twin of covariance_field. A slice of concrete
+// structs handed to a Box<Speaker[]> is the same reinterpretation the non-generic
+// field case rejects, one word of payload read as a two word fat value, so passing
+// it through a generic type argument must not launder it.
+@paradigm oop
+@paradigm procedural
+
+interface Speaker { speak() -> int64 }
+struct Dog { s: int64 }
+impl Speaker for Dog { func speak() -> int64 { return self.s } }
+
+struct Box<T> { v: T }
+
+func main() -> int32 {
+    d: Dog[2] = [Dog { s: 10 }, Dog { s: 20 }]
+    sl := d[0..2]
+    b: Box<Speaker[]> = Box { v: sl }
+    println(b.v[0].speak())
+    return 0
+}

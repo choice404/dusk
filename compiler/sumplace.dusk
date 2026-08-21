@@ -13,6 +13,7 @@
 @import ast
 @import tcstate
 @import summary
+@import sumflow
 @import sumwalk
 
 // Routes a stored value to its destination. The destination's caller reachability
@@ -40,20 +41,18 @@ export func record_store(c: *SumCtx, place_id: int64, src: SumVal, via_call: boo
     }
     srcps: int64 = src.origins | src.reads
     if targets != 0 {
-        place: ExprNode = vec_get((*a).exprs, place_id)
-        mut j: int64 = 0
-        while j < 64 {
-            if ps_has(targets, j) {
-                mut k: int64 = 0
-                while k < 64 {
-                    if ps_has(srcps, k) { (*c).flows = flow_add((*c).flows, k, j) }
-                    k = k + 1
-                }
-                if src.frame && !via_call {
+        // Every source in srcps reaches every destination in targets, which is one
+        // row write per source rather than a scan of the 64 by 64 pairs.
+        ctx_flow_edges(c, srcps, targets)
+        if src.frame && !via_call {
+            place: ExprNode = vec_get((*a).exprs, place_id)
+            mut j: int64 = 0
+            while j < 64 {
+                if ps_has(targets, j) {
                     vec_push((*c).frame_stores, FlowProv { lo: place.lo, hi: place.hi, src: 0, dst: j })
                 }
+                j = j + 1
             }
-            j = j + 1
         }
     }
     locals: *Map<string, int64> = (*c).locals

@@ -1,0 +1,32 @@
+@paradigm procedural
+@paradigm functional
+
+// The declaration order twin of varshadow_matchstore_fail, so the alias link the
+// payload binder makes does not depend on which enum declared Some last.
+struct Cell { rows: int64[] }
+
+enum Tag { Some(n: int64), None }
+enum Opt { Some(c: *Cell), None }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func mk() -> *Cell {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    o := Opt.Some(c)
+    local: int64[4] = [111, 222, 333, 444]
+    match o {
+        Some(p) => { (*p).rows = local[0..4] }
+        None => {}
+    }
+    return c
+}
+
+func main() -> int32 {
+    c := mk()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

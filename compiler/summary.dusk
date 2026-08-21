@@ -1,7 +1,8 @@
 /** summary: native interprocedural escape summaries for dusk, S4. This file holds
  *  the immutable name and type tables the summary walk reads, the parameter-set
  *  bitmask primitives, the view and managed-pointer classification of surface AST
- *  types, the audited builtin summaries, and the canonical dump renderer. The
+ *  types, and the audited builtin summaries. The store-edge relation each summary
+ *  carries lives in sumflow. The
  *  per-function abstract walk lives in sumwalk/sumplace/sumhof, and the fixpoint
  *  driver plus collection pass in sumfix. Every message and dump line mirrors
  *  the archived Rust summary pass exactly, since the esc dump is a byte-for-byte gate. */
@@ -14,6 +15,7 @@
 @import std.functional.maybe
 @import ast
 @import tcstate
+@import sumflow
 
 /** The abstract value of a place during the walk: whether it may hold a
  *  frame-local view (frame), which parameters' views it may alias (origins), and
@@ -30,15 +32,25 @@ export struct SpanKey { lo: int64, hi: int64 }
 export struct CapFlow { idx: int64, name: string }
 
 /** The immutable tables the summary walk reads: interface names, struct and enum
- *  and variant node indices by name, and the module function name set. Field and
- *  generic lists are read back out of the AST arenas through these indices. */
+ *  and variant node indices by name, and the module function name set. A variant is
+ *  indexed twice: by its bare name, which two enums may share, and by its enum and
+ *  name together, which the constructor walk reads so one enum's payload is never
+ *  read out of another's slot. Field and
+ *  generic lists are read back out of the AST arenas through these indices.
+ *  fn_bind_cache memoizes the resolvable function binds of one body id, a purely
+ *  lexical read of the AST that the fixpoint would otherwise recompute on every
+ *  reanalysis of the same function; fn_bind_empty is the shared read-only fallback
+ *  a cache read names, never handed out and never written. */
 export struct SumTables {
     ast: *Ast,
     ifaces: *Map<string, int64>,
     struct_idx: *Map<string, int64>,
     enum_idx: *Map<string, int64>,
     variant_idx: *Map<string, int64>,
+    variant_by_enum: *Map<string, int64>,
     module_fns: *Map<string, int64>,
+    fn_bind_cache: *Map<int64, *Map<string, string>>,
+    fn_bind_empty: *Map<string, string>,
     infer_ty: int64,
 }
 
@@ -98,12 +110,26 @@ export func val_join(a: SumVal, b: SumVal) -> SumVal {
  *  through one, distinct from not_builtin's empty sentinel by carrying empty false.
  *  @return a real SummaryHandle with no aliasing, reads, sinks, or flows */
 export func empty_summary() -> SummaryHandle {
-    return SummaryHandle { empty: false, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+    return SummaryHandle { empty: false, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() }
 }
 /** A sentinel meaning "not a recognized builtin": the walk falls through to the
  *  summary table, a constructor, a resolvable bind, or the opaque TOP. */
 export func not_builtin() -> SummaryHandle {
-    return SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+    return SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() }
+}
+
+/** The key of one enum's variant in the enum keyed variant table. A bare variant
+ *  name is not unique across a module, so the constructor walk asks with the enum
+ *  too and never reads one enum's payload out of another's slot. */
+export func sum_variant_key(en: string, v: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, en)
+    sb_push_char(b, 35)
+    sb_push(b, v)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 /** The span key used for the lambda tables. The dump orders lambda lines by the
@@ -119,107 +145,6 @@ export func sum_span_key(lo: int64, hi: int64) -> string {
     return out
 }
 
-// A flow edge is stored as the delimited token ";i,j;" in a flows string; the
-// leading and trailing semicolons make each token self-delimiting so a scan never
-// confuses "1,2" with "11,2". flows_canon rebuilds a summary's flows in sorted,
-// deduplicated order for stable equality and rendering.
-func flow_token(i: int64, j: int64) -> string {
-    b: *StringBuilder = alloc(sb_new())
-    sb_push_char(b, 59)
-    sb_push_int(b, i)
-    sb_push_char(b, 44)
-    sb_push_int(b, j)
-    sb_push_char(b, 59)
-    out: string = substring(sb_cstr(b), 0, sb_size(b))
-    sb_free(b)
-    free(b)
-    return out
-}
-/** Whether the flow edge from parameter i to parameter j is present in an encoded
- *  flows string, matched by its self-delimiting token.
- *  @param flows the encoded flows string
- *  @param i the source parameter index
- *  @param j the destination parameter index
- *  @return true when the edge i to j is encoded in flows */
-export func flow_has(flows: string, i: int64, j: int64) -> bool {
-    tok: string = flow_token(i, j)
-    mut p: int64 = 0
-    while flows[p] != 0 {
-        mut k: int64 = 0
-        while tok[k] != 0 && flows[p + k] == tok[k] { k = k + 1 }
-        if tok[k] == 0 { return true }
-        p = p + 1
-    }
-    return false
-}
-/** Adds the flow edge from parameter i to parameter j to a flows string, a no-op when
- *  the edge is already present or either index is past the 64-parameter bound.
- *  @param flows the encoded flows string to extend
- *  @param i the source parameter index
- *  @param j the destination parameter index
- *  @return the flows string with the edge present */
-export func flow_add(flows: string, i: int64, j: int64) -> string {
-    if i >= 64 || j >= 64 { return flows }
-    if flow_has(flows, i, j) { return flows }
-    b: *StringBuilder = alloc(sb_new())
-    sb_push(b, flows)
-    sb_push(b, flow_token(i, j))
-    out: string = substring(sb_cstr(b), 0, sb_size(b))
-    sb_free(b)
-    free(b)
-    return out
-}
-/** Rebuilds a flows string in sorted, deduplicated order, so two summaries with the
- *  same edges compare and render identically regardless of insertion order.
- *  @param flows the encoded flows string to canonicalize
- *  @return the same edge set in canonical order */
-export func flows_canon(flows: string) -> string {
-    b: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < 64 {
-        mut j: int64 = 0
-        while j < 64 {
-            if flow_has(flows, i, j) {
-                sb_push_char(b, 59)
-                sb_push_int(b, i)
-                sb_push_char(b, 44)
-                sb_push_int(b, j)
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-    if sb_size(b) > 0 { sb_push_char(b, 59) }
-    out: string = substring(sb_cstr(b), 0, sb_size(b))
-    sb_free(b)
-    free(b)
-    return out
-}
-
-/** Closes a function's sink set backward over its store edges: if argument i's view
- *  flows into argument j's place and j is sunk, then i reaches the same boundary and
- *  sinks too. Iterated to a fixed point. */
-export func close_sinks(sinks: int64, flows: string) -> int64 {
-    mut cur: int64 = sinks
-    mut changed: bool = true
-    while changed {
-        changed = false
-        mut i: int64 = 0
-        while i < 64 {
-            mut j: int64 = 0
-            while j < 64 {
-                if ps_has(cur, j) && flow_has(flows, i, j) && !ps_has(cur, i) {
-                    cur = cur | ps_single(i)
-                    changed = true
-                }
-                j = j + 1
-            }
-            i = i + 1
-        }
-    }
-    return cur
-}
-
 /** The audited escape behavior of each builtin, so a call to one does not fall
  *  through to the conservative TOP an unknown callee gets. move and alloc hand
  *  their argument back through the result; the rest return fresh heap values,
@@ -228,10 +153,10 @@ export func close_sinks(sinks: int64, flows: string) -> int64 {
  *  send sink by name and then treats the call as opaque TOP, matching stage0. */
 export func builtin_summary(name: string) -> SummaryHandle {
     if str_eq(name, "move") {
-        return SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+        return SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() }
     }
     if str_eq(name, "alloc") {
-        return SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: "" }
+        return SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() }
     }
     if is_neutral_builtin(name) { return empty_summary() }
     return not_builtin()
@@ -277,6 +202,7 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
     struct_idx: *Map<string, int64> = alloc(map_new())
     enum_idx: *Map<string, int64> = alloc(map_new())
     variant_idx: *Map<string, int64> = alloc(map_new())
+    variant_by_enum: *Map<string, int64> = alloc(map_new())
     module_fns: *Map<string, int64> = alloc(map_new())
     items: *Vector<ItemNode> = (*a).items
     mut i: int64 = 0
@@ -291,10 +217,16 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
         } else if it.kind == ik_enum() {
             en: EnumNode = vec_get((*a).enums, it.id)
             map_put(enum_idx, ast_name(a, en.name), it.id)
+            ename: string = ast_name(a, en.name)
             mut k: int64 = 0
             while k < en.variants_len {
-                v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, en.variants_off + k))
-                if v.fields_len > 0 { map_put(variant_idx, ast_name(a, v.name), vec_get((*a).kids, en.variants_off + k)) }
+                vid: int64 = vec_get((*a).kids, en.variants_off + k)
+                v: VariantNode = vec_get((*a).variants, vid)
+                if v.fields_len > 0 {
+                    vname: string = ast_name(a, v.name)
+                    map_put(variant_idx, vname, vid)
+                    map_put(variant_by_enum, sum_variant_key(ename, vname), vid)
+                }
                 k = k + 1
             }
         } else if it.kind == ik_func() {
@@ -304,7 +236,9 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
         i = i + 1
     }
     infer_ty: int64 = ast_type(a, tk_infer(), 0, 0, 0)
-    return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, enum_idx: enum_idx, variant_idx: variant_idx, module_fns: module_fns, infer_ty: infer_ty })
+    fn_bind_cache: *Map<int64, *Map<string, string>> = alloc(map_new())
+    fn_bind_empty: *Map<string, string> = alloc(map_new())
+    return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, enum_idx: enum_idx, variant_idx: variant_idx, variant_by_enum: variant_by_enum, module_fns: module_fns, fn_bind_cache: fn_bind_cache, fn_bind_empty: fn_bind_empty, infer_ty: infer_ty })
 }
 
 func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {

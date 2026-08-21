@@ -1,0 +1,38 @@
+// Reject: an enum's name is reserved at every binding position, this file at the three
+// value positions. Codegen reads `A.Some` as a constructor off the base identifier's
+// spelling alone, with no scope to ask, so a binding that takes an enum's name made a
+// later field read through it lower to a zeroed constructor of that enum instead of
+// the read: `Opt := S { Some: B.X }` then `Opt.Some` printed a value nobody wrote, and
+// the checker's own constructor readers agreed with codegen while its field arm asked
+// the scope, so the two disagreed. The name is refused where it is bound: a let here,
+// a destructure binder, and a for binder. The parameter and binder positions are
+// enumnamebindparam_fail, and the accept twin is enumnamebind_ok, where a struct field
+// spelled like a variant is read through a binding of another name.
+@paradigm procedural
+
+enum Opt { Some(n: int64), None }
+enum B { X, Y }
+enum Pick { One, Two }
+enum Tag { First, Second }
+
+struct S { Some: B }
+
+func pair() -> (int64, int64) {
+    return (1, 2)
+}
+
+func use_s(v: S) -> int64 {
+    return 1
+}
+
+func main() -> int32 {
+    Opt := S { Some: B.X }
+    println(use_s(Opt))
+    Pick, n := pair()
+    println(Pick + n)
+    xs := [1, 2, 3]
+    for Tag in xs {
+        println(Tag)
+    }
+    return 0
+}

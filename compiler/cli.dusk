@@ -135,9 +135,10 @@ export func cmd_lex(path: string) -> int32 {
         i = i + 1
     }
     errs: *Vector<Located> = lx_errors(lx)
+    lines: *LineTable = line_table_new()
     mut j: int64 = 0
     while j < vec_len(errs) {
-        emit_located(path, src, n, vec_get(errs, j))
+        emit_located_in(path, src, n, lines, vec_get(errs, j))
         j = j + 1
     }
     if vec_len(errs) > 0 {
@@ -158,9 +159,10 @@ export func cmd_scan(path: string) -> int32 {
     p: Prescan = prescan(s.text, s.len)
     scan_dump(p)
     errs: *Vector<Located> = p.errors
+    lines: *LineTable = line_table_new()
     mut j: int64 = 0
     while j < vec_len(errs) {
-        emit_located(path, s.text, s.len, vec_get(errs, j))
+        emit_located_in(path, s.text, s.len, lines, vec_get(errs, j))
         j = j + 1
     }
     if vec_len(errs) > 0 {
@@ -185,16 +187,17 @@ export func cmd_parse(path: string) -> int32 {
     out: string = ast_dump(a)
     println(out)
     free(out)
+    lines: *LineTable = line_table_new()
     lex_errs: *Vector<Located> = lx_errors(lx)
     mut i: int64 = 0
     while i < vec_len(lex_errs) {
-        emit_located(path, s.text, s.len, vec_get(lex_errs, i))
+        emit_located_in(path, s.text, s.len, lines, vec_get(lex_errs, i))
         i = i + 1
     }
     parse_errs: *Vector<Located> = p_errors(p)
     mut j: int64 = 0
     while j < vec_len(parse_errs) {
-        emit_located(path, s.text, s.len, vec_get(parse_errs, j))
+        emit_located_in(path, s.text, s.len, lines, vec_get(parse_errs, j))
         j = j + 1
     }
     if vec_len(lex_errs) > 0 {
