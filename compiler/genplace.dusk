@@ -26,7 +26,7 @@ func gp_enum_id(a: *Ast, name: string) -> int64 {
     while i < vec_len(enums) {
         e: EnumNode = vec_get(enums, i)
         if str_eq(ast_name(a, e.name), name) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -39,9 +39,7 @@ func gp_iface_method_ret(s: *GenFuncState, iface_name: string, method: string) -
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     ifaces: *Vector<InterfaceNode> = (*a).interfaces
-    mut i: int64 = 0
-    while i < vec_len(ifaces) {
-        iface: InterfaceNode = vec_get(ifaces, i)
+    for iface in ifaces {
         if str_eq(ast_name(a, iface.name), iface_name) {
             mut j: int64 = 0
             while j < iface.methods_len {
@@ -49,10 +47,9 @@ func gp_iface_method_ret(s: *GenFuncState, iface_name: string, method: string) -
                 if str_eq(ast_name(a, ms.name), method) {
                     return cty_lower_ast(c, a, ms.ret)
                 }
-                j = j + 1
+                j++
             }
         }
-        i = i + 1
     }
     return cty_void(c)
 }
@@ -149,7 +146,7 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
         mut ti: int64 = 0
         while ti < e.b {
             vec_push(tys, gp_lit_ty(s, vec_get((*a).kids, e.a + ti)))
-            ti = ti + 1
+            ti++
         }
         return cty_tuple_make(c, tys)
     }
@@ -334,7 +331,7 @@ export func elem_addr(s: *GenFuncState, base_id: int64, index: string) -> Place 
     if bp.ok {
         n: CTyNode = vec_get(cty_nodes(c), bp.ty)
         mut data: string = bp.ptr
-        mut elem: int64 = n.a
+        elem: int64 = n.a
         if n.kind == ctyk_array() {
             nb: *StringBuilder = alloc(sb_new())
             sb_push_int(nb, n.b)
@@ -462,10 +459,4 @@ export func gen_place(s: *GenFuncState, id: int64) -> Place {
         return elem_addr(s, e.a, io)
     }
     return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") }
-}
-
-export func gen_load(s: *GenFuncState, id: int64) -> Val {
-    p: Place = gen_place(s, id)
-    if p.ok { return Val { ty: p.ty, op: gen_load_slot(s, p.ty, p.ptr) } }
-    return gen_expr(s, id)
 }

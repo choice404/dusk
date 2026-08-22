@@ -63,7 +63,7 @@ export func map_new<K, V>() -> Map<K, V> {
     mut i: int64 = 0
     while i < cap {
         u[i] = false
-        i = i + 1
+        i++
     }
     k: *raw K = alloc_bytes(cap * sizeof(K))
     v: *raw V = alloc_bytes(cap * sizeof(V))
@@ -94,7 +94,7 @@ func map_grow<K, V>(m: *Map<K, V>) -> void {
     mut i: int64 = 0
     while i < ncap {
         nu[i] = false
-        i = i + 1
+        i++
     }
     (*m).used = nu
     (*m).keys = alloc_bytes(ncap * sizeof(K))
@@ -109,7 +109,7 @@ func map_grow<K, V>(m: *Map<K, V>) -> void {
             // is discarded because a grow never records a new key.
             map_place(m, old_keys[j], old_vals[j])
         }
-        j = j + 1
+        j++
     }
     free(old_used)
     free(old_keys)
@@ -127,7 +127,7 @@ func map_place<K, V>(m: *Map<K, V>, k: K, v: V) -> bool {
             (*m).vals[idx] = v
             return false
         }
-        idx = idx + 1
+        idx++
         if idx == (*m).cap {
             idx = 0
         }
@@ -135,7 +135,7 @@ func map_place<K, V>(m: *Map<K, V>, k: K, v: V) -> bool {
     (*m).used[idx] = true
     (*m).keys[idx] = k
     (*m).vals[idx] = v
-    (*m).len = (*m).len + 1
+    (*m).len++
     return true
 }
 
@@ -167,9 +167,9 @@ func map_forget_order<K, V>(m: *Map<K, V>, k: K) -> void {
             if write != read {
                 vec_set(o, write, cur)
             }
-            write = write + 1
+            write++
         }
-        read = read + 1
+        read++
     }
     (*o).len = write
 }
@@ -187,9 +187,9 @@ export func map_remove<K, V>(m: *Map<K, V>, k: K) -> bool {
     while (*m).used[idx] {
         if (*m).keys[idx] == k {
             (*m).used[idx] = false
-            (*m).len = (*m).len - 1
+            (*m).len--
             map_forget_order(m, k)
-            idx = idx + 1
+            idx++
             if idx == (*m).cap {
                 idx = 0
             }
@@ -197,16 +197,16 @@ export func map_remove<K, V>(m: *Map<K, V>, k: K) -> bool {
                 rk: K = (*m).keys[idx]
                 rv: V = (*m).vals[idx]
                 (*m).used[idx] = false
-                (*m).len = (*m).len - 1
+                (*m).len--
                 map_place(m, rk, rv)
-                idx = idx + 1
+                idx++
                 if idx == (*m).cap {
                     idx = 0
                 }
             }
             return true
         }
-        idx = idx + 1
+        idx++
         if idx == (*m).cap {
             idx = 0
         }
@@ -239,7 +239,7 @@ export owning func map_take<K, V>(m: *Map<K, V>, k: K) -> V {
             map_remove(m, k)
             return out
         }
-        idx = idx + 1
+        idx++
         if idx == (*m).cap {
             idx = 0
         }
@@ -260,7 +260,7 @@ export func map_get<K, V>(m: *Map<K, V>, k: K) -> Maybe<V> {
         if (*m).keys[idx] == k {
             return Maybe.Some((*m).vals[idx])
         }
-        idx = idx + 1
+        idx++
         if idx == (*m).cap {
             idx = 0
         }
@@ -278,7 +278,7 @@ export func map_has<K, V>(m: *Map<K, V>, k: K) -> bool {
         if (*m).keys[idx] == k {
             return true
         }
-        idx = idx + 1
+        idx++
         if idx == (*m).cap {
             idx = 0
         }
@@ -329,7 +329,7 @@ export func map_val_at<K, V>(m: *Map<K, V>, i: int64) -> V {
         if (*m).keys[idx] == k {
             return (*m).vals[idx]
         }
-        idx = idx + 1
+        idx++
         if idx == (*m).cap {
             idx = 0
         }
@@ -354,7 +354,7 @@ export func map_keys<K, V>(m: *Map<K, V>) -> *Vector<K> {
     mut i: int64 = 0
     while i < vec_len(src) {
         vec_push(out, vec_get(src, i))
-        i = i + 1
+        i++
     }
     return out
 }

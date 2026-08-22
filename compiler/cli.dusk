@@ -44,7 +44,7 @@ func emit_errors(errs: *Vector<LoadDiag>) -> void {
         rendered: string = render_load_diag(vec_get(errs, i))
         printerr(rendered)
         free(rendered)
-        i = i + 1
+        i++
     }
 }
 
@@ -54,7 +54,7 @@ func emit_span_errors(files: *Vector<FileSrc>, errs: *Vector<SpanDiagnostic>) ->
         rendered: string = render_diag(files, vec_get(errs, i))
         printerr(rendered)
         free(rendered)
-        i = i + 1
+        i++
     }
 }
 
@@ -85,21 +85,15 @@ func collect_ground_pass(m: *Mono, mono_errs: *Vector<SpanDiagnostic>) -> *Vecto
     gdiags: *Vector<SpanDiagnostic> = typeck_check_ground(ground, m_future_table(m))
     seen: *Map<string, int64> = alloc(map_new())
     out: *Vector<SpanDiagnostic> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < vec_len(mono_errs) {
-        e: SpanDiagnostic = vec_get(mono_errs, i)
+    for e in mono_errs {
         map_put(seen, diag_dedup_key(e.lo, e.hi, e.msg), 1)
-        i = i + 1
     }
-    mut j: int64 = 0
-    while j < vec_len(gdiags) {
-        g: SpanDiagnostic = vec_get(gdiags, j)
+    for g in gdiags {
         k: string = diag_dedup_key(g.lo, g.hi, g.msg)
         if !map_has(seen, k) {
             map_put(seen, k, 1)
             vec_push(out, g)
         }
-        j = j + 1
     }
     return out
 }
@@ -126,20 +120,17 @@ export func cmd_lex(path: string) -> int32 {
     n: int64 = s.len
     lx: *Lexer = lex(src, n)
     toks: *Vector<Token> = lx_tokens(lx)
-    mut i: int64 = 0
-    while i < vec_len(toks) {
-        t: Token = vec_get(toks, i)
+    for t in toks {
         line: string = render_token(src, n, t)
         println(line)
         free(line)
-        i = i + 1
     }
     errs: *Vector<Located> = lx_errors(lx)
     lines: *LineTable = line_table_new()
     mut j: int64 = 0
     while j < vec_len(errs) {
         emit_located_in(path, src, n, lines, vec_get(errs, j))
-        j = j + 1
+        j++
     }
     if vec_len(errs) > 0 {
         return 1
@@ -163,7 +154,7 @@ export func cmd_scan(path: string) -> int32 {
     mut j: int64 = 0
     while j < vec_len(errs) {
         emit_located_in(path, s.text, s.len, lines, vec_get(errs, j))
-        j = j + 1
+        j++
     }
     if vec_len(errs) > 0 {
         return 1
@@ -192,13 +183,13 @@ export func cmd_parse(path: string) -> int32 {
     mut i: int64 = 0
     while i < vec_len(lex_errs) {
         emit_located_in(path, s.text, s.len, lines, vec_get(lex_errs, i))
-        i = i + 1
+        i++
     }
     parse_errs: *Vector<Located> = p_errors(p)
     mut j: int64 = 0
     while j < vec_len(parse_errs) {
         emit_located_in(path, s.text, s.len, lines, vec_get(parse_errs, j))
-        j = j + 1
+        j++
     }
     if vec_len(lex_errs) > 0 {
         return 1

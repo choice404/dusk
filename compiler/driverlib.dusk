@@ -16,7 +16,7 @@ export func c_object_name(path: string) -> string {
     while i < n {
         if path[i] == 47 { last = i }
         if path[i] == 46 { dot = i }
-        i = i + 1
+        i++
     }
     base_start: int64 = last + 1
     mut base_end: int64 = n
@@ -61,7 +61,7 @@ export func header_guard_stem(stem: string) -> string {
         } else {
             sb_push_char(b, 95)
         }
-        i = i + 1
+        i++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -75,9 +75,7 @@ export func header_guard_stem(stem: string) -> string {
 // host's to link, so the header names it.
 export func extra_link_note(links: *Vector<string>) -> string {
     b: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < vec_len(links) {
-        v: string = vec_get(links, i)
+    for v in links {
         sb_push_char(b, 32)
         if link_is_file(v) {
             sb_push(b, v)
@@ -85,7 +83,6 @@ export func extra_link_note(links: *Vector<string>) -> string {
             sb_push(b, "-l")
             sb_push(b, v)
         }
-        i = i + 1
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -122,7 +119,7 @@ export func write_lib_header(out: string, stem: string, exports: *Vector<string>
     while i < vec_len(exports) {
         sb_push(b, vec_get(exports, i))
         sb_push_char(b, 10)
-        i = i + 1
+        i++
     }
     sb_push(b, "\n#ifdef __cplusplus\n}\n#endif\n\n#endif\n")
     text: string = substring(sb_cstr(b), 0, sb_size(b))
@@ -198,7 +195,7 @@ export func export_symbol_name(proto: string) -> string {
             lp = i
             break
         }
-        i = i + 1
+        i++
     }
     if sp < 0 || lp < 0 || lp <= sp + 1 {
         return substring(proto, 0, 0)
@@ -230,7 +227,7 @@ export func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<st
     mut i: int64 = 0
     while i < vec_len(cs_objs) {
         push_arg(cmd, vec_get(cs_objs, i))
-        i = i + 1
+        i++
     }
     sb_push(cmd, " -o")
     push_arg(cmd, merged)
@@ -252,10 +249,10 @@ export func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<st
         if str_len(sym) > 0 {
             sb_push(oc, " -G ")
             sb_push(oc, sym)
-            kept = kept + 1
+            kept++
         }
         free(sym)
-        j = j + 1
+        j++
     }
     // With no exports, llvm-objcopy given no keep-global flag would leave every
     // symbol global, the interposition hole this whole step exists to close. A
@@ -303,7 +300,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
             return cc
         }
         vec_push(cs_objs, obj2)
-        ci = ci + 1
+        ci++
     }
 
     mc: int64 = merge_and_localize(out, mod_obj, cs_objs, exports)
@@ -327,7 +324,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
             return rc
         }
         vec_push(objs, obj)
-        ri = ri + 1
+        ri++
     }
 
     ar: string = path_join(out, archive_name(stem))
@@ -348,7 +345,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
     mut oi: int64 = 0
     while oi < vec_len(objs) {
         push_arg(arcmd, vec_get(objs, oi))
-        oi = oi + 1
+        oi++
     }
     arline: string = substring(sb_cstr(arcmd), 0, sb_size(arcmd))
     sb_free(arcmd)

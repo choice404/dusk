@@ -64,7 +64,7 @@ func export_prototype(c: *CTyArena, a: *Ast, f: FuncNode) -> string {
             sb_push(b, c_header_type(c, pty))
             sb_push(b, " a")
             sb_push_int(b, i)
-            i = i + 1
+            i++
         }
     }
     sb_push(b, ");")
@@ -147,7 +147,7 @@ func joined_faults(errs: *Vector<string>) -> string {
     while i < vec_len(errs) {
         if i > 0 { sb_push_char(b, 10) }
         sb_push(b, vec_get(errs, i))
-        i = i + 1
+        i++
     }
     out: string = gen_built(b)
     sb_free(b)
@@ -159,9 +159,7 @@ func emit_ground_types(m: *EmitModule, ctx: *GenCtx) -> void {
     a: *Ast = (*ctx).ast
     c: *CTyArena = genctx_ctys(ctx)
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_struct() {
             s: StructNode = vec_get((*a).structs, it.id)
             b: *StringBuilder = alloc(sb_new())
@@ -174,7 +172,7 @@ func emit_ground_types(m: *EmitModule, ctx: *GenCtx) -> void {
                 ll: string = cty_ll(c, cty_lower_ast(c, a, f.ty))
                 sb_push(b, ll)
                 free(ll)
-                j = j + 1
+                j++
             }
             sb_push(b, " }")
             body: string = gen_built(b)
@@ -183,11 +181,8 @@ func emit_ground_types(m: *EmitModule, ctx: *GenCtx) -> void {
             emit_define_type(m, ast_name(a, s.name), body)
             free(body)
         }
-        i = i + 1
     }
-    mut k: int64 = 0
-    while k < vec_len(items) {
-        it2: ItemNode = vec_get(items, k)
+    for it2 in items {
         if it2.kind == ik_enum() {
             e: EnumNode = vec_get((*a).enums, it2.id)
             ename: string = ast_name(a, e.name)
@@ -203,7 +198,6 @@ func emit_ground_types(m: *EmitModule, ctx: *GenCtx) -> void {
             emit_define_type(m, ename, body2)
             free(body2)
         }
-        k = k + 1
     }
 }
 
@@ -211,9 +205,7 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
     a: *Ast = (*ctx).ast
     c: *CTyArena = genctx_ctys(ctx)
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
             if im.iface >= 0 {
@@ -225,7 +217,7 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                 while ii < vec_len(interfaces) {
                     cand: InterfaceNode = vec_get(interfaces, ii)
                     if str_eq(ast_name(a, cand.name), iname) { iid = ii }
-                    ii = ii + 1
+                    ii++
                 }
                 if iid >= 0 {
                     iface: InterfaceNode = vec_get(interfaces, iid)
@@ -265,7 +257,7 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                             sb_push(fb, " %a")
                             sb_push_int(fb, pi)
                             free(pll)
-                            pi = pi + 1
+                            pi++
                         }
                         sb_push(fb, ") {\nentry:\n")
                         if !str_eq(retll, "void") { sb_push(fb, "  %r = ") } else { sb_push(fb, "  ") }
@@ -286,7 +278,7 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                             sb_push(fb, " %a")
                             sb_push_int(fb, ai)
                             free(all)
-                            ai = ai + 1
+                            ai++
                         }
                         sb_push(fb, ")\n  ret ")
                         sb_push(fb, retll)
@@ -299,7 +291,7 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                         free(ftext)
                         free(retll)
                         free(thunk)
-                        mi = mi + 1
+                        mi++
                     }
                     slottext: string = gen_built(slots)
                     sb_free(slots)
@@ -323,7 +315,6 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                 }
             }
         }
-        i = i + 1
     }
 }
 
@@ -409,7 +400,7 @@ func foreign_declare(m: *EmitModule, ctx: *GenCtx, ff: ForeignFuncNode) -> void 
         } else {
             vec_push(parts, cty_ll(c, pty))
         }
-        pi = pi + 1
+        pi++
     }
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, retll)
@@ -421,7 +412,7 @@ func foreign_declare(m: *EmitModule, ctx: *GenCtx, ff: ForeignFuncNode) -> void 
         if k > 0 { sb_push(b, ", ") }
         pp: string = vec_get(parts, k)
         sb_push(b, pp)
-        k = k + 1
+        k++
     }
     if ff.variadic {
         if vec_len(parts) > 0 { sb_push(b, ", ...") } else { sb_push(b, "...") }
@@ -444,9 +435,7 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> Gen
     emit_ground_types(m, ctx)
     exports: *Vector<string> = alloc(vec_new())
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             name: string = ast_name(a, f.name)
@@ -493,7 +482,7 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> Gen
                 mb: string = gen_method_func(m, ctx, mf, ast_name(a, im.ty))
                 emit_push_function(m, mb)
                 free(mb)
-                mi = mi + 1
+                mi++
             }
         } else if it.kind == ik_foreign() {
             fb: ForeignNode = vec_get((*a).foreigns, it.id)
@@ -501,13 +490,12 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> Gen
             while fi < fb.funcs_len {
                 ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + fi))
                 foreign_declare(m, ctx, ff)
-                fi = fi + 1
+                fi++
             }
         } else if it.kind == ik_struct() {
         } else if it.kind == ik_enum() {
         } else if it.kind == ik_interface() {
         }
-        i = i + 1
     }
     // cool_lib_init is declared only when the module has an export to call it, so a
     // program with no `export "C"` carries no reference to it and its emitted IR

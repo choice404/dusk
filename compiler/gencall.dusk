@@ -48,7 +48,7 @@ func gc_funcval_thunk(s: *GenFuncState, name: string, sig: GenFnSig) -> void {
         sb_push(b, " %a")
         sb_push_int(b, i)
         free(pll)
-        i = i + 1
+        i++
     }
     sb_push(b, ") {\nentry:\n  ")
     if !str_eq(retll, "void") { sb_push(b, "%r = ") }
@@ -65,7 +65,7 @@ func gc_funcval_thunk(s: *GenFuncState, name: string, sig: GenFnSig) -> void {
         sb_push(b, " %a")
         sb_push_int(b, j)
         free(all)
-        j = j + 1
+        j++
     }
     sb_push(b, ")\n  ret ")
     sb_push(b, retll)
@@ -87,16 +87,13 @@ func gfv_closure_ty(s: *GenFuncState, name: string) -> int64 {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             if str_eq(ast_name(a, f.name), name) {
                 return cty_intern_full(c, ctyk_closure(), f.params_off, f.params_len, f.ret, "lambda")
             }
         }
-        i = i + 1
     }
     return cty_intern(c, ctyk_closure(), 0, 0, "")
 }
@@ -309,7 +306,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
         if sig.variadic { return gen_variadic_foreign_call(s, name, sig, args_off, args_len) }
         if sig.is_async { return gen_async_call(s, name, args_off, args_len) }
         if sig.is_foreign && fscall_needs_abi(c, sig) { return gen_foreign_struct_call(s, name, sig, args_off, args_len) }
-        mut call_ret: string = cty_ll(c, sig.ret)
+        call_ret: string = cty_ll(c, sig.ret)
         args: *StringBuilder = alloc(sb_new())
         mut i: int64 = 0
         while i < args_len {
@@ -337,7 +334,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
                 sb_push(args, out)
                 free(ll)
             }
-            i = i + 1
+            i++
         }
         arg_text: string = gs_built(args)
         sb_free(args)

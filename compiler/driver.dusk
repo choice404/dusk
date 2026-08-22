@@ -35,7 +35,7 @@ export func stem_of(path: string) -> string {
     mut i: int64 = 0
     while i < str_len(path) {
         if path[i] == 47 { start = i + 1 }
-        i = i + 1
+        i++
     }
     // A dot in the first basename position is part of the name, not an
     // extension boundary, so ".dusk" keeps its basename the way file_stem
@@ -44,7 +44,7 @@ export func stem_of(path: string) -> string {
     mut j: int64 = start + 1
     while j < str_len(path) {
         if path[j] == 46 { end = j }
-        j = j + 1
+        j++
     }
     if end <= start { return substring("out", 0, 3) }
     return substring(path, start, end)
@@ -99,16 +99,6 @@ export func build_module(prog: string, path: string, run_it: bool, argv: string[
     return build_module_to_pkg(prog, path, run_it, argv, arg_start, out_dir(), from_manifest)
 }
 
-/** The general form: build into an explicit output directory. build_module fixes
- *  that directory to target/dusk-out; dawn passes its own target/dawn-out so a
- *  package build and the compiler's own build never overwrite each other's IR or
- *  binary. Everything else, the front end gates, the readback check, the clang
- *  line, and the exit-code passthrough, is shared, so the two entry points differ
- *  only in where the two files land. */
-export func build_module_to(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string) -> int32 {
-    return build_module_to_pkg(prog, path, run_it, argv, arg_start, out, false)
-}
-
 /** The same build, told whether the path came from a package.dawn rather than from the
  *  command line. A build from a manifest registers the project's own files under a
  *  manifest relative spelling, so two checkouts of one project emit identical bytes;
@@ -150,8 +140,8 @@ export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: 
         mut out: int32 = 0
         mut i: int64 = 0
         while i < low {
-            out = out + 1
-            i = i + 1
+            out++
+            i++
         }
         return out
     }

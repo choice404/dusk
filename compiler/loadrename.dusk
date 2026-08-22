@@ -55,13 +55,10 @@ func new_text_map() -> *Map<string, string> {
 func file_scope(m: *FileMeta) -> FoldNs {
     t: FoldNs = fold_ns_new()
     imps: *Vector<ImportRes> = (*m).imports
-    mut i: int64 = 0
-    while i < vec_len(imps) {
-        r: ImportRes = vec_get(imps, i)
+    for r in imps {
         if r.has_mod_ns {
             fold_ns_add(t, r.mod_ns, r.suffix, r.moving)
         }
-        i = i + 1
     }
     return t
 }
@@ -72,19 +69,13 @@ func file_scope(m: *FileMeta) -> FoldNs {
 // picking one.
 func program_scope(metas: *Vector<*FileMeta>) -> FoldNs {
     t: FoldNs = fold_ns_new()
-    mut i: int64 = 0
-    while i < vec_len(metas) {
-        m: *FileMeta = vec_get(metas, i)
+    for m in metas {
         imps: *Vector<ImportRes> = (*m).imports
-        mut j: int64 = 0
-        while j < vec_len(imps) {
-            r: ImportRes = vec_get(imps, j)
+        for r in imps {
             if r.has_mod_ns {
                 fold_ns_add(t, r.mod_ns, r.suffix, r.moving)
             }
-            j = j + 1
         }
-        i = i + 1
     }
     return t
 }
@@ -99,11 +90,8 @@ func reachable_fixed(m: *FileMeta, pkg_fixed: *Map<string, *Map<string, int64>>)
         load_add_keys(out, load_lookup_set(pkg_fixed, (*m).suffix))
     }
     imps: *Vector<ImportRes> = (*m).imports
-    mut i: int64 = 0
-    while i < vec_len(imps) {
-        r: ImportRes = vec_get(imps, i)
+    for r in imps {
         load_add_keys(out, r.fixed)
-        i = i + 1
     }
     return out
 }
@@ -148,7 +136,7 @@ func claim_all(sm: ScopeMap, a: *Ast, names: *Map<string, int64>, suffix: string
     mut i: int64 = 0
     while i < vec_len(keys) {
         claim_as(sm, a, vec_get(keys, i), suffix, moves)
-        i = i + 1
+        i++
     }
     vec_free(keys)
     free(keys)
@@ -158,13 +146,10 @@ func claim_all(sm: ScopeMap, a: *Ast, names: *Map<string, int64>, suffix: string
 // any import and a rename would take its own scope away from it.
 func drop_shadowed(sm: ScopeMap, shadow: *Map<string, int64>) -> void {
     keys: *Vector<string> = map_keys(shadow)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        k: string = vec_get(keys, i)
+    for k in keys {
         map_remove(sm.names, k).ignore()
         map_remove(sm.claim, k).ignore()
         map_remove(sm.ambiguous, k).ignore()
-        i = i + 1
     }
     vec_free(keys)
     free(keys)
@@ -182,9 +167,7 @@ func scope_map_for(a: *Ast, m: *FileMeta, pkg_moving: *Map<string, *Map<string, 
         claim_all(sm, a, load_lookup_set(pkg_fixed, suffix), suffix, false)
     }
     imps: *Vector<ImportRes> = (*m).imports
-    mut i: int64 = 0
-    while i < vec_len(imps) {
-        r: ImportRes = vec_get(imps, i)
+    for r in imps {
         if str_len(r.suffix) > 0 {
             if r.has_leaf {
                 // A leaf import names one symbol, so it brings that one and no other.
@@ -201,7 +184,6 @@ func scope_map_for(a: *Ast, m: *FileMeta, pkg_moving: *Map<string, *Map<string, 
                 claim_all(sm, a, r.fixed, r.suffix, false)
             }
         }
-        i = i + 1
     }
     return sm
 }
@@ -215,9 +197,7 @@ func scope_map_for(a: *Ast, m: *FileMeta, pkg_moving: *Map<string, *Map<string, 
 func collide_for(sm: ScopeMap, own: string, outside: *Map<string, int64>, where_of: *Map<string, string>) -> *Map<string, string> {
     out: *Map<string, string> = new_text_map()
     keys: *Vector<string> = map_keys(sm.names)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        k: string = vec_get(keys, i)
+    for k in keys {
         if map_has(outside, k) {
             claimant: string = unwrap_or(map_get(sm.claim, k), "")
             mut mine: bool = false
@@ -228,7 +208,6 @@ func collide_for(sm: ScopeMap, own: string, outside: *Map<string, int64>, where_
                 map_put(out, k, load_also_declared_msg(k, claimant, unwrap_or(map_get(where_of, k), "")))
             }
         }
-        i = i + 1
     }
     vec_free(keys)
     free(keys)
@@ -243,7 +222,7 @@ func out_keys(t: *Map<string, string>) -> *Map<string, int64> {
     mut i: int64 = 0
     while i < vec_len(keys) {
         map_put(out, vec_get(keys, i), 1)
-        i = i + 1
+        i++
     }
     vec_free(keys)
     free(keys)
@@ -262,7 +241,7 @@ func unreachable_for(m: *FileMeta, sm: ScopeMap, collide: *Map<string, string>, 
     mut z: int64 = 0
     while z < vec_len(keys0) {
         map_put(cand, vec_get(keys0, z), 1)
-        z = z + 1
+        z++
     }
     vec_free(keys0)
     free(keys0)
@@ -270,9 +249,7 @@ func unreachable_for(m: *FileMeta, sm: ScopeMap, collide: *Map<string, string>, 
         load_add_keys(cand, app)
     }
     keys: *Vector<string> = map_keys(cand)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        k: string = vec_get(keys, i)
+    for k in keys {
         mut reachable: bool = map_has(sm.names, k)
         if map_has(sm.ambiguous, k) { reachable = true }
         if map_has(collide, k) { reachable = true }
@@ -293,7 +270,6 @@ func unreachable_for(m: *FileMeta, sm: ScopeMap, collide: *Map<string, string>, 
                 map_put(out, k, load_project_only_msg(k))
             }
         }
-        i = i + 1
     }
     vec_free(keys)
     free(keys)
@@ -306,7 +282,7 @@ func zeroes(n: int64) -> *Vector<int64> {
     mut i: int64 = 0
     while i < n {
         vec_push(v, 0)
-        i = i + 1
+        i++
     }
     return v
 }
@@ -337,7 +313,7 @@ func check_coverage(a: *Ast, m: *FileMeta, seen_expr: *Vector<int64>, seen_type:
                 vec_push(errors, load_diag_global(files, e.lo, e.hi, load_missed_msg("name", ast_name(a, e.a))))
             }
         }
-        i = i + 1
+        i++
     }
     types: *Vector<TypeNode> = (*a).types
     mut j: int64 = (*m).types_lo
@@ -348,7 +324,7 @@ func check_coverage(a: *Ast, m: *FileMeta, seen_expr: *Vector<int64>, seen_type:
                 vec_push(errors, load_diag_plain((*m).disp, load_missed_msg("type", ast_name(a, t.a))))
             }
         }
-        j = j + 1
+        j++
     }
 }
 
@@ -402,9 +378,7 @@ export func load_rename_module(a: *Ast, metas: *Vector<*FileMeta>, ns: *Map<stri
         n_fold = vec_len((*a).exprs)
     }
     folded_at: *Vector<int64> = zeroes(n_fold)
-    mut i: int64 = 0
-    while i < vec_len(metas) {
-        m: *FileMeta = vec_get(metas, i)
+    for m in metas {
         // Only a file the rename actually rewrote is proved covered. Every one of those
         // reached the merged arenas through the copy walker, so every node in its range is
         // reachable from an item and a node the walk misses is a real gap. The root file's
@@ -432,26 +406,22 @@ export func load_rename_module(a: *Ast, metas: *Vector<*FileMeta>, ns: *Map<stri
             mut j: int64 = (*m).items_lo
             while j < (*m).items_hi {
                 ren_item(r, vec_get(items, j))
-                j = j + 1
+                j++
             }
             if covered {
                 check_coverage(a, m, seen_expr, seen_type, files, errors)
             }
         }
-        i = i + 1
     }
 }
 
 // Folds one message table into another, first message winning.
 func add_messages(dst: *Map<string, string>, src: *Map<string, string>) -> void {
     keys: *Vector<string> = map_keys(src)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        k: string = vec_get(keys, i)
+    for k in keys {
         if !map_has(dst, k) {
             map_put(dst, k, unwrap_or(map_get(src, k), ""))
         }
-        i = i + 1
     }
     vec_free(keys)
     free(keys)

@@ -102,7 +102,7 @@ export func lx_docs(lx: *Lexer) -> *Vector<DocBlock> {
 
 // Advances the offset by m bytes.
 export func lx_advance(lx: *Lexer, m: int64) -> void {
-    (*lx).pos = (*lx).pos + m
+    (*lx).pos += m
 }
 
 // Moves the offset to an absolute position, used after an escape scanner returns
@@ -151,13 +151,13 @@ export func lx_skip_trivia(lx: *Lexer) -> void {
         c: int64 = lx_peek(lx)
         if c == 10 {
             (*lx).pending_nl = true
-            (*lx).pos = (*lx).pos + 1
+            (*lx).pos++
         } else if c == 32 {
-            (*lx).pos = (*lx).pos + 1
+            (*lx).pos++
         } else if c == 9 {
-            (*lx).pos = (*lx).pos + 1
+            (*lx).pos++
         } else if c == 13 {
-            (*lx).pos = (*lx).pos + 1
+            (*lx).pos++
         } else if c == 47 {
             if lx_peek2(lx) == 47 {
                 lx_skip_line_comment(lx)
@@ -181,7 +181,7 @@ func lx_skip_line_comment(lx: *Lexer) -> void {
         } else if c < 0 {
             going = false
         } else {
-            (*lx).pos = (*lx).pos + 1
+            (*lx).pos++
         }
     }
 }
@@ -223,7 +223,7 @@ func lx_is_doc_open(lx: *Lexer) -> bool {
 func lx_skip_block_comment(lx: *Lexer) -> void {
     open: int64 = lx_pos(lx)
     is_doc: bool = lx_is_doc_open(lx)
-    (*lx).pos = (*lx).pos + 2
+    (*lx).pos += 2
     mut depth: int64 = 1
     mut going: bool = true
     while going {
@@ -233,8 +233,8 @@ func lx_skip_block_comment(lx: *Lexer) -> void {
             going = false
         } else if b == 42 {
             if lx_peek2(lx) == 47 {
-                (*lx).pos = (*lx).pos + 2
-                depth = depth - 1
+                (*lx).pos += 2
+                depth--
                 if depth == 0 {
                     if is_doc {
                         vec_push((*lx).docs, DocBlock { lo: open, hi: (*lx).pos })
@@ -242,11 +242,11 @@ func lx_skip_block_comment(lx: *Lexer) -> void {
                     going = false
                 }
             } else {
-                (*lx).pos = (*lx).pos + 1
+                (*lx).pos++
             }
         } else if b == 47 {
             if lx_peek2(lx) == 42 {
-                (*lx).pos = (*lx).pos + 2
+                (*lx).pos += 2
                 // A plain block comment nests, so a commented-out block of code that
                 // holds its own comment closes where it should. A doc block does not: it
                 // is prose about the item below it, and prose holds glob patterns like
@@ -255,16 +255,16 @@ func lx_skip_block_comment(lx: *Lexer) -> void {
                 // end of input rather than on the sentence that caused it. A doc block
                 // ends at its first "*/".
                 if !is_doc {
-                    depth = depth + 1
+                    depth++
                 }
             } else {
-                (*lx).pos = (*lx).pos + 1
+                (*lx).pos++
             }
         } else if b == 10 {
             (*lx).pending_nl = true
-            (*lx).pos = (*lx).pos + 1
+            (*lx).pos++
         } else {
-            (*lx).pos = (*lx).pos + 1
+            (*lx).pos++
         }
     }
 }

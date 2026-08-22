@@ -137,7 +137,7 @@ export func dawn_is_hex40(s: string) -> bool {
         if !ok {
             return false
         }
-        i = i + 1
+        i++
     }
     return true
 }
@@ -147,9 +147,7 @@ export func dawn_is_hex40(s: string) -> bool {
 func sha_for_ref(out: string, want: string) -> string {
     lines: *Vector<string> = str_split(out, "\n")
     mut found: string = ""
-    mut i: int64 = 0
-    while i < vec_len(lines) {
-        one: string = vec_get(lines, i)
+    for one in lines {
         cut: int64 = str_find(one, "\t")
         if cut > 0 {
             name: string = substring(one, cut + 1, str_len(one))
@@ -160,7 +158,6 @@ func sha_for_ref(out: string, want: string) -> string {
             }
             free(name)
         }
-        i = i + 1
     }
     while vec_len(lines) > 0 {
         s: string = vec_take(lines, vec_len(lines) - 1)
@@ -221,7 +218,7 @@ export func dawn_git_resolve(scratch: string, url: string, ref: string) -> DawnR
     }
     dawn_shell_free(r)
     if !dawn_is_hex40(sha) {
-        bad: string = "git named '" + sha + "' for this ref, which is not an object id"
+        bad: string = f"git named '{sha}' for this ref, which is not an object id"
         free(sha)
         return DawnRef { ok: false, commit: "", detail: bad }
     }
@@ -274,7 +271,7 @@ export func dawn_git_detach(scratch: string, dir: string, commit: string) -> Daw
 export func dawn_git_checkout(scratch: string, url: string, ref: string, commit: string, dir: string) -> DawnClone {
     named: bool = !dawn_is_hex40(ref)
     if !dawn_rm_rf(dir) {
-        return DawnClone { ok: false, detail: "could not clear the checkout directory " + dir }
+        return DawnClone { ok: false, detail: f"could not clear the checkout directory {dir}" }
     }
     first: DawnShell = clone_into(scratch, url, ref, dir, named)
     if first.code != 0 {
@@ -295,7 +292,7 @@ export func dawn_git_checkout(scratch: string, url: string, ref: string, commit:
     }
     if str_len(put_detail) > 0 { free(put_detail) }
     if !dawn_rm_rf(dir) {
-        return DawnClone { ok: false, detail: "could not clear the checkout directory " + dir }
+        return DawnClone { ok: false, detail: f"could not clear the checkout directory {dir}" }
     }
     whole: DawnShell = clone_into(scratch, url, ref, dir, false)
     if whole.code != 0 {
@@ -342,7 +339,7 @@ func status_clean(out: string) -> bool {
             }
         }
         free(one)
-        i = i + 1
+        i++
     }
     while vec_len(lines) > 0 {
         s: string = vec_take(lines, vec_len(lines) - 1)

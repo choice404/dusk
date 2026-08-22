@@ -71,7 +71,7 @@ export func emit_errors(m: *EmitModule) -> *Vector<string> {
 
 export func emit_fresh_lambda(m: *EmitModule) -> int64 {
     n: int64 = (*m).lambda_count
-    (*m).lambda_count = (*m).lambda_count + 1
+    (*m).lambda_count++
     return n
 }
 
@@ -105,13 +105,11 @@ export func emit_declare(m: *EmitModule, sig: string) -> void {
     free(b)
 
     externs: *Vector<string> = (*m).externs
-    mut i: int64 = 0
-    while i < vec_len(externs) {
-        if str_eq(vec_get(externs, i), line) {
+    for ext in externs {
+        if str_eq(ext, line) {
             free(line)
             return
         }
-        i = i + 1
     }
     vec_push(externs, line)
 }
@@ -137,7 +135,7 @@ export func encode_cstring_n(text: string, n: int64) -> EncodedCString {
     while i < n {
         mut byte: int64 = text[i]
         if byte < 0 {
-            byte = byte + 256
+            byte += 256
         }
         if byte == 92 {
             sb_push(b, "\\5C")
@@ -152,7 +150,7 @@ export func encode_cstring_n(text: string, n: int64) -> EncodedCString {
         } else {
             push_hex_byte(b, byte)
         }
-        i = i + 1
+        i++
     }
     sb_push(b, "\\00")
     out: string = built_string(b)
@@ -181,7 +179,7 @@ func emit_intern_cstr(m: *EmitModule, enc_text: string, enc_len: int64) -> strin
     label: string = built_string(lb)
     sb_free(lb)
     free(lb)
-    (*m).str_count = (*m).str_count + 1
+    (*m).str_count++
 
     gb: *StringBuilder = alloc(sb_new())
     sb_push(gb, label)
@@ -273,11 +271,11 @@ export func emit_cstring_body(m: *EmitModule, body: string) -> string {
                             else if body[p] == 125 { scanning = false }
                             else {
                                 cp = cp * 16 + emit_hex_val(body[p])
-                                p = p + 1
+                                p++
                             }
                         }
                         if p < str_len(body) {
-                            count = count + emit_encode_scalar(b, cp)
+                            count += emit_encode_scalar(b, cp)
                             i = p + 1
                             consumed = true
                         }
@@ -287,8 +285,8 @@ export func emit_cstring_body(m: *EmitModule, body: string) -> string {
         }
         if !consumed {
             emit_encode_byte(b, body[i])
-            count = count + 1
-            i = i + 1
+            count++
+            i++
         }
     }
     sb_push(b, "\\00")
@@ -312,11 +310,9 @@ func emit_section(out: *StringBuilder, lines: *Vector<string>) -> void {
     if vec_len(lines) == 0 {
         return
     }
-    mut i: int64 = 0
-    while i < vec_len(lines) {
-        sb_push(out, vec_get(lines, i))
+    for section_line in lines {
+        sb_push(out, section_line)
         sb_push_char(out, 10)
-        i = i + 1
     }
     sb_push_char(out, 10)
 }
@@ -336,11 +332,9 @@ export func emit_render(m: *EmitModule) -> string {
     emit_section(out, (*m).externs)
 
     funcs: *Vector<string> = (*m).funcs
-    mut i: int64 = 0
-    while i < vec_len(funcs) {
-        sb_push(out, vec_get(funcs, i))
+    for func_text in funcs {
+        sb_push(out, func_text)
         sb_push(out, "\n\n")
-        i = i + 1
     }
 
     rendered: string = built_string(out)

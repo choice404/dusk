@@ -20,9 +20,7 @@ export func load_shift_module(a: *Ast, base: int64) -> void {
         return
     }
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             shift_block(a, f.body, base)
@@ -32,10 +30,9 @@ export func load_shift_module(a: *Ast, base: int64) -> void {
             while j < im.methods_len {
                 mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
                 shift_block(a, mf.body, base)
-                j = j + 1
+                j++
             }
         }
-        i = i + 1
     }
 }
 
@@ -44,7 +41,7 @@ func shift_block(a: *Ast, id: int64, base: int64) -> void {
     mut i: int64 = 0
     while i < b.len {
         shift_stmt(a, vec_get((*a).kids, b.off + i), base)
-        i = i + 1
+        i++
     }
 }
 
@@ -91,15 +88,15 @@ func shift_match(a: *Ast, scrut: int64, off: int64, len: int64, base: int64) -> 
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         shift_block(a, arm.body, base)
-        i = i + 1
+        i++
     }
 }
 
 func shift_expr(a: *Ast, id: int64, base: int64) -> void {
     exprs: *Vector<ExprNode> = (*a).exprs
     mut e: ExprNode = vec_get(exprs, id)
-    e.lo = e.lo + base
-    e.hi = e.hi + base
+    e.lo += base
+    e.hi += base
     if e.kind == xk_unary() {
         shift_expr(a, e.b, base)
     } else if e.kind == xk_binary() {
@@ -110,7 +107,7 @@ func shift_expr(a: *Ast, id: int64, base: int64) -> void {
         mut i: int64 = 0
         while i < e.c {
             shift_expr(a, vec_get((*a).kids, e.b + i), base)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_field() {
         shift_expr(a, e.a, base)
@@ -130,7 +127,7 @@ func shift_expr(a: *Ast, id: int64, base: int64) -> void {
         mut j: int64 = 0
         while j < e.c {
             shift_expr(a, vec_get((*a).kids, e.b + j + 1), base)
-            j = j + 2
+            j += 2
         }
     } else if e.kind == xk_lambda() {
         shift_block(a, e.d, base)
@@ -140,7 +137,7 @@ func shift_expr(a: *Ast, id: int64, base: int64) -> void {
         // d is the operator token's low byte, a span like lo and hi, so it shifts with
         // them; left where it was, a diagnostic against an imported increment would
         // point into another file's text.
-        e.d = e.d + base
+        e.d += base
         shift_expr(a, e.a, base)
     } else if e.kind == xk_ifexpr() {
         shift_expr(a, e.a, base)
@@ -151,7 +148,7 @@ func shift_expr(a: *Ast, id: int64, base: int64) -> void {
         while k < e.c {
             d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + k))
             shift_expr(a, d.expr, base)
-            k = k + 1
+            k++
         }
     } else if e.kind == xk_await() {
         shift_expr(a, e.a, base)
@@ -165,7 +162,7 @@ func shift_expr_slice(a: *Ast, off: int64, len: int64, base: int64) -> void {
     mut i: int64 = 0
     while i < len {
         shift_expr(a, vec_get((*a).kids, off + i), base)
-        i = i + 1
+        i++
     }
 }
 
@@ -279,7 +276,7 @@ func fold_ns_put_one(t: FoldNs, prefix: string, suffix: string, moving: *Map<str
         mut i: int64 = 0
         while i < vec_len(keys) {
             map_put(target, vec_get(keys, i), 1)
-            i = i + 1
+            i++
         }
         vec_free(keys)
         free(keys)
@@ -290,7 +287,7 @@ func fold_ns_put_one(t: FoldNs, prefix: string, suffix: string, moving: *Map<str
         mut j: int64 = 0
         while j < vec_len(keys2) {
             map_put(target2, vec_get(keys2, j), 1)
-            j = j + 1
+            j++
         }
         vec_free(keys2)
         free(keys2)
@@ -314,7 +311,7 @@ export func fold_ns_add(t: FoldNs, modpath: string, suffix: string, moving: *Map
         } else {
             sb_push_char(b, modpath[i])
         }
-        i = i + 1
+        i++
     }
     if sb_size(b) > 0 {
         full: string = substring(sb_cstr(b), 0, sb_size(b))
@@ -334,7 +331,7 @@ func fold_push_scope(fc: FoldCtx) -> void {
 
 func fold_pop_scope(fc: FoldCtx) -> void {
     b: *Vector<*Map<string, int64>> = fc.bound
-    (*b).len = (*b).len - 1
+    (*b).len--
 }
 
 // Binds one name in the innermost scope. The stack is read into an annotated local
@@ -362,7 +359,7 @@ func fold_is_bound(fc: FoldCtx, name: string) -> bool {
         if map_has(vec_get(b, i), name) {
             return true
         }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -391,7 +388,7 @@ func fold_bind_pattern(fc: FoldCtx, a: *Ast, id: int64) -> void {
         mut i: int64 = 0
         while i < p.c {
             fold_bind(fc, a, vec_get((*a).kids, p.b + i))
-            i = i + 1
+            i++
         }
     }
 }
@@ -400,7 +397,7 @@ func fold_expr_slice(a: *Ast, off: int64, len: int64, fc: FoldCtx) -> void {
     mut i: int64 = 0
     while i < len {
         fold_expr(a, vec_get((*a).kids, off + i), fc)
-        i = i + 1
+        i++
     }
 }
 
@@ -413,7 +410,7 @@ func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, fc: FoldCtx) -> v
         fold_bind_pattern(fc, a, arm.pat)
         fold_block(a, arm.body, fc)
         fold_pop_scope(fc)
-        i = i + 1
+        i++
     }
 }
 
@@ -423,7 +420,7 @@ func fold_block(a: *Ast, id: int64, fc: FoldCtx) -> void {
     mut i: int64 = 0
     while i < b.len {
         fold_stmt(a, vec_get((*a).kids, b.off + i), fc)
-        i = i + 1
+        i++
     }
     fold_pop_scope(fc)
 }
@@ -436,7 +433,7 @@ func fold_bind_let(a: *Ast, s: StmtNode, fc: FoldCtx) -> void {
     while i < s.b {
         bn: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
         fold_bind(fc, a, bn.name)
-        i = i + 1
+        i++
     }
 }
 
@@ -646,7 +643,7 @@ func fold_do(a: *Ast, e: ExprNode, fc: FoldCtx) -> void {
         if d.name >= 0 {
             fold_bind(fc, a, d.name)
         }
-        i = i + 1
+        i++
     }
     fold_pop_scope(fc)
 }
@@ -657,7 +654,7 @@ func fold_lambda(a: *Ast, e: ExprNode, fc: FoldCtx) -> void {
     while i < e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         fold_bind(fc, a, pn.name)
-        i = i + 1
+        i++
     }
     fold_block(a, e.d, fc)
     fold_pop_scope(fc)
@@ -692,7 +689,7 @@ func fold_expr(a: *Ast, id: int64, fc: FoldCtx) -> void {
         mut i: int64 = 0
         while i < e.c {
             fold_expr(a, vec_get((*a).kids, e.b + i + 1), fc)
-            i = i + 2
+            i += 2
         }
     } else if e.kind == xk_lambda() {
         fold_lambda(a, e, fc)
@@ -726,7 +723,7 @@ func fold_func(a: *Ast, id: int64, is_method: bool, fc: FoldCtx) -> void {
     while i < f.params_len {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         fold_bind(fc, a, pn.name)
-        i = i + 1
+        i++
     }
     fold_block(a, f.body, fc)
     fold_pop_scope(fc)
@@ -753,9 +750,9 @@ export func load_fold_range(a: *Ast, ns: *Map<string, int64>, exports: *Map<stri
             mut j: int64 = 0
             while j < im.methods_len {
                 fold_func(a, vec_get((*a).kids, im.methods_off + j), true, fc)
-                j = j + 1
+                j++
             }
         }
-        i = i + 1
+        i++
     }
 }

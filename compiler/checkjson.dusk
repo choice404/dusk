@@ -97,14 +97,11 @@ func push_elem_sep(b: *StringBuilder, idx: int64, total: int64) -> void {
 // span, and raw message. Returns the running element index for the next group.
 func push_load_group(b: *StringBuilder, level: int64, diags: *Vector<LoadDiag>, total: int64, idx0: int64) -> int64 {
     mut idx: int64 = idx0
-    mut i: int64 = 0
-    while i < vec_len(diags) {
-        d: LoadDiag = vec_get(diags, i)
+    for d in diags {
         ind(b, level)
         push_diag_obj(b, level, d.path, d.has_span, d.src, d.len, d.lines, d.lo, d.hi, d.msg, d.line)
-        idx = idx + 1
+        idx++
         push_elem_sep(b, idx, total)
-        i = i + 1
     }
     return idx
 }
@@ -115,9 +112,7 @@ func push_load_group(b: *StringBuilder, level: int64, diags: *Vector<LoadDiag>, 
 // and a null span. Returns the running element index for the next group.
 func push_span_group(b: *StringBuilder, level: int64, root_file: string, files: *Vector<FileSrc>, diags: *Vector<SpanDiagnostic>, total: int64, idx0: int64) -> int64 {
     mut idx: int64 = idx0
-    mut i: int64 = 0
-    while i < vec_len(diags) {
-        d: SpanDiagnostic = vec_get(diags, i)
+    for d in diags {
         fi: int64 = file_for_span(files, d.lo)
         ind(b, level)
         if fi < 0 {
@@ -126,9 +121,8 @@ func push_span_group(b: *StringBuilder, level: int64, root_file: string, files: 
             f: FileSrc = vec_get(files, fi)
             push_diag_obj(b, level, f.path, true, f.src, f.len, f.lines, d.lo - f.base, d.hi - f.base, d.msg, 0)
         }
-        idx = idx + 1
+        idx++
         push_elem_sep(b, idx, total)
-        i = i + 1
     }
     return idx
 }

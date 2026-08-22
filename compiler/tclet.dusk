@@ -53,11 +53,11 @@ export func str_lit_byte_len(text: string) -> int64 {
                             else if text[p] == 125 { scanning = false }
                             else {
                                 cp = cp * 16 + lit_hex_val(text[p])
-                                p = p + 1
+                                p++
                             }
                         }
                         if p < str_len(text) {
-                            count = count + utf8_width_of(cp)
+                            count += utf8_width_of(cp)
                             i = p + 1
                             consumed = true
                         }
@@ -66,8 +66,8 @@ export func str_lit_byte_len(text: string) -> int64 {
             }
         }
         if !consumed {
-            count = count + 1
-            i = i + 1
+            count++
+            i++
         }
     }
     return count
@@ -223,7 +223,7 @@ func record_mut_tuple(tc: *TypeChecker, stmt: StmtNode, bind: BindNode, tyid: in
     while i < val.b {
         m: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, val.a + i))
         if m.kind == xk_array() { has_array = true }
-        i = i + 1
+        i++
     }
     if !has_array { return }
     map_put((*tc).mut_tuple_types, span_key(val.lo, val.hi), MutTupleEntry { ty: tyid })
@@ -259,16 +259,13 @@ func copy_member_subtree(tc: *TypeChecker, src_prefix: string, dst_prefix: strin
     keys: *Vector<string> = map_keys(m)
     pfx: string = member_key_cat(src_prefix, "#")
     plen: int64 = str_len(src_prefix)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        k: string = vec_get(keys, i)
+    for k in keys {
         if str_eq(k, src_prefix) {
             map_put(m, dst_prefix, unwrap_or(map_get(m, k), own_borrow()))
         } else if starts_with(k, pfx) {
             rest: string = substring(k, plen, str_len(k))
             map_put(m, member_key_cat(dst_prefix, rest), unwrap_or(map_get(m, k), own_borrow()))
         }
-        i = i + 1
     }
 }
 
@@ -310,7 +307,7 @@ func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) ->
             mv: int64 = match_own_of(tc, mid)
             if mv == own_borrow() { map_put((*tc).tuple_member_own, key, own_borrow()) }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -343,7 +340,7 @@ func record_ref_member_borrows(tc: *TypeChecker, prefix: string, tyid: int64) ->
         key: string = tuple_member_key(prefix, i)
         if is_managed_ty(tc, mt) { map_put((*tc).tuple_member_own, key, own_borrow()) }
         record_ref_member_borrows(tc, key, mt)
-        i = i + 1
+        i++
     }
 }
 
@@ -366,7 +363,7 @@ func tuple_has_error(tc: *TypeChecker, tyid: int64) -> bool {
     while i < n.len {
         mt: TyNode = ty_get((*tc).ty, vec_get((*(*tc).ty).kids, n.off + i))
         if mt.kind == tyk_error() { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -453,20 +450,20 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         mut i: int64 = 0
         while i < n.len {
             vec_push(parts, vec_get((*(*tc).ty).kids, n.off + i))
-            i = i + 1
+            i++
         }
     } else if n.kind == tyk_unknown() {
         mut j: int64 = 0
         while j < stmt.b {
             vec_push(parts, ty_unknown((*tc).ty))
-            j = j + 1
+            j++
         }
     } else {
         tc_emit(tc, "destructuring binding expects a tuple of matching arity", value.lo, value.hi)
         mut k: int64 = 0
         while k < stmt.b {
             vec_push(parts, ty_unknown((*tc).ty))
-            k = k + 1
+            k++
         }
     }
     mut m: int64 = 0
@@ -551,7 +548,7 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             declare_own(tc, ast_name(a, b.name), own_tag)
         }
         if (stmt.d & 2) != 0 { record_ref_member_borrows(tc, binder_name, tyid) }
-        m = m + 1
+        m++
     }
     if value.kind == xk_tuple() && value.b == stmt.b {
         mut n: int64 = 0
@@ -562,7 +559,7 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             set_esc(tc, ast_name(a, b2.name), esc.slice, esc.closure)
             link_binding_aliases(tc, ast_name(a, b2.name), member_id, false)
             record_ptr_borrow_member(tc, ast_name(a, b2.name), member_id)
-            n = n + 1
+            n++
         }
     } else {
         whole: EscPair = value_escape(tc, stmt.c)
@@ -576,7 +573,7 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             if links_as_alias(tc, part) {
                 link_binding_aliases(tc, ast_name(a, b3.name), stmt.c, false)
             }
-            q = q + 1
+            q++
         }
     }
 }

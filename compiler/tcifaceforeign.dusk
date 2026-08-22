@@ -75,7 +75,7 @@ func foreign_ty_ok(t: *TyArena, id: int64) -> bool {
             k: int64 = vec_get((*t).kids, n.off + i)
             if ty_get(t, k).kind == tyk_func() { return false }
             if !foreign_ty_ok(t, k) { return false }
-            i = i + 1
+            i++
         }
         if ty_get(t, n.a).kind == tyk_func() { return false }
         return foreign_ty_ok(t, n.a)
@@ -94,7 +94,7 @@ func callback_has_nested_fn(tc: *TypeChecker, tyid: int64) -> bool {
     mut i: int64 = 0
     while i < n.len {
         if ty_get(t, vec_get((*t).kids, n.off + i)).kind == tyk_func() { return true }
-        i = i + 1
+        i++
     }
     return ty_get(t, n.a).kind == tyk_func()
 }
@@ -155,7 +155,7 @@ func foreign_struct_cplain(tc: *TypeChecker, name: string) -> string {
         f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
         r: string = foreign_cplain_field(tc, f.ty, f.name)
         if str_len(r) > 0 { return r }
-        i = i + 1
+        i++
     }
     return ""
 }
@@ -275,7 +275,7 @@ export func check_foreign(tc: *TypeChecker, fb: ForeignNode) -> void {
             if str_len(preject) > 0 {
                 tc_emit(tc, preject, fb.lo, fb.hi)
             }
-            j = j + 1
+            j++
         }
         rt: int64 = tc_type(tc, ff.ret)
         rtn: TyNode = ty_get((*tc).ty, rt)
@@ -293,7 +293,7 @@ export func check_foreign(tc: *TypeChecker, fb: ForeignNode) -> void {
                 tc_emit(tc, rreject, fb.lo, fb.hi)
             }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -311,7 +311,7 @@ func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>
         while i < n.len {
             r: int64 = async_cross_reason(tc, vec_get((*(*tc).ty).kids, n.off + i), seen)
             if r != cross_ok() { return r }
-            i = i + 1
+            i++
         }
         return cross_ok()
     }
@@ -327,7 +327,7 @@ func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>
             while j < list.len {
                 r2: int64 = async_cross_reason(tc, sig_ty_at((*tc).sigtab, list, j), seen)
                 if r2 != cross_ok() { return r2 }
-                j = j + 1
+                j++
             }
         }
     }
@@ -356,7 +356,7 @@ export func ret_embeds_iface(tc: *TypeChecker, tyid: int64, seen: *Map<string, i
             mut j: int64 = 0
             while j < list.len {
                 if ret_embeds_iface(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
-                j = j + 1
+                j++
             }
         }
         return false
@@ -371,7 +371,7 @@ export func ret_embeds_iface(tc: *TypeChecker, tyid: int64, seen: *Map<string, i
         mut i: int64 = 0
         while i < n.len {
             if ret_embeds_iface(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i = i + 1
+            i++
         }
     }
     return false
@@ -393,7 +393,7 @@ export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
         } else if reason == cross_view() {
             tc_emit(tc, async_take_msg(ast_name(a, p.name), false), f.lo, f.hi)
         }
-        i = i + 1
+        i++
     }
     raw_ret: int64 = tc_raw_type(tc, f.ret)
     seen_ret: *Map<string, int64> = alloc(map_new())

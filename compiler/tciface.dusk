@@ -189,7 +189,7 @@ export func reject_collector_iface_box(tc: *TypeChecker, expected: int64, actual
         mut i: int64 = 0
         while i < en.len {
             reject_collector_iface_box(tc, vec_get((*(*tc).ty).kids, en.off + i), vec_get((*(*tc).ty).kids, an.off + i), lo, hi)
-            i = i + 1
+            i++
         }
     }
 }
@@ -212,7 +212,7 @@ export func reject_iface_targ_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi
                 }
             }
             reject_iface_targ_annot(tc, arg_id, lo, hi)
-            i = i + 1
+            i++
         }
     } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
         reject_iface_targ_annot(tc, n.a, lo, hi)
@@ -220,13 +220,13 @@ export func reject_iface_targ_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi
         mut j: int64 = 0
         while j < n.b {
             reject_iface_targ_annot(tc, vec_get((*a).kids, n.a + j), lo, hi)
-            j = j + 1
+            j++
         }
     } else if n.kind == tk_func() {
         mut k: int64 = 0
         while k < n.b {
             reject_iface_targ_annot(tc, vec_get((*a).kids, n.a + k), lo, hi)
-            k = k + 1
+            k++
         }
         reject_iface_targ_annot(tc, n.c, lo, hi)
     }
@@ -292,7 +292,7 @@ export func tuple_iface_mismatch(tc: *TypeChecker, expected: int64, actual: int6
                 found = true
             }
         }
-        i = i + 1
+        i++
     }
     return found
 }
@@ -332,7 +332,7 @@ export func chain_ty(tc: *TypeChecker, expr_id: int64) -> int64 {
             while i < st.len {
                 f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
                 if str_eq(f.name, fname) { return f.ty }
-                i = i + 1
+                i++
             }
         }
         if bn.kind == tyk_error() && str_eq(fname, "message") { return ty_str((*tc).ty) }
@@ -363,7 +363,7 @@ export func check_covariance_deep(tc: *TypeChecker, expected: int64, actual: int
                 sub: int64 = vec_get((*(*tc).ast).kids, v.a + i)
                 se: ExprNode = vec_get((*(*tc).ast).exprs, sub)
                 check_covariance_deep(tc, vec_get((*(*tc).ty).kids, en.off + i), vec_get((*(*tc).ty).kids, an.off + i), sub, se.lo, se.hi)
-                i = i + 1
+                i++
             }
             return
         }
@@ -377,7 +377,7 @@ export func check_covariance_deep(tc: *TypeChecker, expected: int64, actual: int
                 se2: ExprNode = vec_get((*(*tc).ast).exprs, sub2)
                 at: int64 = chain_ty(tc, sub2)
                 check_covariance_deep(tc, en.a, at, sub2, se2.lo, se2.hi)
-                j = j + 1
+                j++
             }
             return
         }
@@ -423,41 +423,41 @@ func parse_format_string(fmt: string) -> (bool, int64, string) {
         if fmt[i] == 92 {
             if fmt[i + 1] == 117 {
                 if fmt[i + 2] == 123 {
-                    i = i + 3
+                    i += 3
                     mut esc: bool = true
                     while esc {
                         if fmt[i] == 0 {
                             esc = false
                         } else if fmt[i] == 125 {
-                            i = i + 1
+                            i++
                             esc = false
                         } else {
-                            i = i + 1
+                            i++
                         }
                     }
                 } else {
-                    i = i + 2
+                    i += 2
                 }
             } else {
-                i = i + 1
+                i++
             }
         } else if fmt[i] == 123 {
             if fmt[i + 1] == 123 {
-                i = i + 2
+                i += 2
             } else if fmt[i + 1] == 125 {
-                holes = holes + 1
-                i = i + 2
+                holes++
+                i += 2
             } else {
                 return (false, holes, "unmatched '{' in format string, write '{{' for a literal brace")
             }
         } else if fmt[i] == 125 {
             if fmt[i + 1] == 125 {
-                i = i + 2
+                i += 2
             } else {
                 return (false, holes, "unmatched '}' in format string, write '}}' for a literal brace")
             }
         } else {
-            i = i + 1
+            i++
         }
     }
     return (true, holes, "")
@@ -483,7 +483,7 @@ func method_index(a: *Ast, im: ImplNode, name: string) -> int64 {
     while i < im.methods_len {
         f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
         if str_eq(ast_name(a, f.name), name) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -507,7 +507,7 @@ export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
                 tc_emit(tc, impl_arity_msg(iface, tyname, req.name, m.params_len, req.arity), m.lo, m.hi)
             }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -531,7 +531,7 @@ export func check_duplicate_impls(tc: *TypeChecker) -> void {
                 }
             }
         }
-        i = i + 1
+        i++
     }
 }
 

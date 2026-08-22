@@ -108,14 +108,11 @@ func gc_closure(s: *GenFuncState, arg: int64) -> Val {
     }
     caps: *Vector<LocalVal> = clos_captures(s, e)
     loaded: *Vector<Val> = alloc(vec_new())
-    mut li: int64 = 0
-    while li < vec_len(caps) {
-        cap0: LocalVal = vec_get(caps, li)
+    for cap0 in caps {
         found0, got0 := gs_lookup(s, cap0.op)
         mut lv0: LocalVal = got0
         if !found0 { lv0 = LocalVal { ty: cty_void(c), op: gs_copy("") } }
         vec_push(loaded, Val { ty: cap0.ty, op: gen_load_slot(s, lv0.ty, lv0.op) })
-        li = li + 1
     }
     name: string = clos_lambda_name((*s).module)
     env_ty: string = clos_env_ty(s, caps)
@@ -163,7 +160,7 @@ func gc_closure(s: *GenFuncState, arg: int64) -> Val {
             line((*s).fb, gt)
             free(gt)
             gen_store_slot(s, cap.ty, vec_get(loaded, i).op, slot)
-            i = i + 1
+            i++
         }
     }
     clos_emit_lambda(s, e, name, env_ty, caps)
@@ -339,7 +336,3 @@ export func gen_debug_free(s: *GenFuncState, off: int64, len: int64) -> Val {
 
 export func gen_debug_leaks(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_debug_leaks", cty_int(genctx_ctys((*s).ctx), 64)) }
 export func gen_debug_double_frees(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_debug_double_frees", cty_int(genctx_ctys((*s).ctx), 64)) }
-export func gen_gc_collect(s: *GenFuncState) -> Val { return gc_call0(s, "void", "cool_gc_collect", cty_void(genctx_ctys((*s).ctx))) }
-export func gen_gc_live_blocks(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_gc_live_blocks", cty_int(genctx_ctys((*s).ctx), 64)) }
-export func gen_gc_live_bytes(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_gc_live_bytes", cty_int(genctx_ctys((*s).ctx), 64)) }
-export func gen_gc_collections(s: *GenFuncState) -> Val { return gc_call0(s, "i64", "cool_gc_collections", cty_int(genctx_ctys((*s).ctx), 64)) }

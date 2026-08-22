@@ -24,7 +24,7 @@ func build_gens(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
     mut i: int64 = 0
     while i < len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
-        i = i + 1
+        i++
     }
     return g
 }
@@ -52,8 +52,8 @@ func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: Fun
     while i < f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         ctx_bind_param(c, ast_name(a, p.name), p.ty, idx)
-        idx = idx + 1
-        i = i + 1
+        idx++
+        i++
     }
     sum_block(c, f.body)
     return ctx_summary(c)
@@ -84,9 +84,7 @@ func sum_eq(a: SummaryHandle, b: SummaryHandle) -> bool {
 func build_funcs_order(a: *Ast, funcs: *Map<string, int64>, order: *Vector<string>) -> void {
     items: *Vector<ItemNode> = (*a).items
     seen: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             name: string = ast_name(a, f.name)
@@ -96,7 +94,6 @@ func build_funcs_order(a: *Ast, funcs: *Map<string, int64>, order: *Vector<strin
                 vec_push(order, name)
             }
         }
-        i = i + 1
     }
 }
 
@@ -107,9 +104,7 @@ func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<stri
     a: *Ast = (*t).ast
     mfns: *Map<string, int64> = (*t).module_fns
     keys: *Vector<string> = map_keys(funcs)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        fname: string = vec_get(keys, i)
+    for fname in keys {
         f: FuncNode = vec_get((*a).funcs, unwrap_or(map_get(funcs, fname), 0))
         callees: *Map<string, int64> = alloc(map_new())
         collect_callees_block(t, mfns, f.body, callees)
@@ -124,9 +119,8 @@ func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<stri
             map_put(callers, c, substring(sb_cstr(b), 0, sb_size(b)))
             sb_free(b)
             free(b)
-            j = j + 1
+            j++
         }
-        i = i + 1
     }
 }
 
@@ -145,7 +139,7 @@ func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
         map_put(summaries, name, empty_summary())
         vec_push(queue, name)
         map_put(queued, name, 1)
-        i = i + 1
+        i++
     }
     // Termination is guaranteed by monotonicity; the cap only guards against a
     // future bug turning the walk non-monotone.
@@ -154,9 +148,9 @@ func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
     mut steps: int64 = 0
     while head < vec_len(queue) {
         name: string = vec_get(queue, head)
-        head = head + 1
+        head++
         map_remove(queued, name).ignore()
-        steps = steps + 1
+        steps++
         if steps > cap { return }
         if map_has(funcs, name) {
             f: FuncNode = vec_get((*a).funcs, unwrap_or(map_get(funcs, name), 0))
@@ -184,7 +178,7 @@ func enqueue_callers(callers: *Map<string, string>, name: string, queue: *Vector
             }
             start = j + 1
         }
-        j = j + 1
+        j++
     }
 }
 
@@ -197,7 +191,7 @@ func collect_callees_block(t: *SumTables, mfns: *Map<string, int64>, bid: int64,
     mut i: int64 = 0
     while i < b.len {
         collect_callees_stmt(t, mfns, vec_get((*a).kids, b.off + i), out)
-        i = i + 1
+        i++
     }
 }
 
@@ -236,7 +230,7 @@ func collect_callees_match(t: *SumTables, mfns: *Map<string, int64>, scrut: int6
     while i < arms_len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + i))
         collect_callees_block(t, mfns, arm.body, out)
-        i = i + 1
+        i++
     }
 }
 
@@ -254,7 +248,7 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
         mut i: int64 = 0
         while i < e.c {
             collect_callees_expr(t, mfns, vec_get((*a).kids, e.b + i), out)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_unary() {
         collect_callees_expr(t, mfns, e.b, out)
@@ -270,13 +264,13 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
         mut i: int64 = 0
         while i < e.b {
             collect_callees_expr(t, mfns, vec_get((*a).kids, e.a + i), out)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_struct_lit() {
         mut i: int64 = 1
         while i < e.c {
             collect_callees_expr(t, mfns, vec_get((*a).kids, e.b + i), out)
-            i = i + 2
+            i += 2
         }
     } else if e.kind == xk_lambda() {
         collect_callees_block(t, mfns, e.d, out)
@@ -295,7 +289,7 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
         while i < e.c {
             db: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + i))
             collect_callees_expr(t, mfns, db.expr, out)
-            i = i + 1
+            i++
         }
     }
 }
@@ -303,9 +297,7 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
 func collect_methods(t: *SumTables, summaries: *Map<string, SummaryHandle>, method_summaries: *Map<string, SummaryHandle>) -> void {
     a: *Ast = (*t).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
             recv: string = ast_name(a, im.ty)
@@ -314,10 +306,9 @@ func collect_methods(t: *SumTables, summaries: *Map<string, SummaryHandle>, meth
                 m: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
                 sum: SummaryHandle = throwaway_transfer(t, summaries, m, recv)
                 map_put(method_summaries, method_key(recv, ast_name(a, m.name)), sum)
-                j = j + 1
+                j++
             }
         }
-        i = i + 1
     }
 }
 
@@ -326,9 +317,7 @@ func collect_methods(t: *SumTables, summaries: *Map<string, SummaryHandle>, meth
 func collect_pass(t: *SumTables, summaries: *Map<string, SummaryHandle>, info: EscapeInfo) -> void {
     a: *Ast = (*t).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             collect_one(t, summaries, vec_get((*a).funcs, it.id), "", info)
         } else if it.kind == ik_impl() {
@@ -337,10 +326,9 @@ func collect_pass(t: *SumTables, summaries: *Map<string, SummaryHandle>, info: E
             mut j: int64 = 0
             while j < im.methods_len {
                 collect_one(t, summaries, vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j)), recv, info)
-                j = j + 1
+                j++
             }
         }
-        i = i + 1
     }
     sort_frame_stores(info.frame_stores)
 }
@@ -370,13 +358,13 @@ func sort_frame_stores(fs: *Vector<FlowProv>) -> void {
             cur: FlowProv = vec_get(fs, j)
             if fp_less(key, cur) {
                 vec_set(fs, j + 1, cur)
-                j = j - 1
+                j--
             } else {
                 placed = true
             }
         }
         vec_set(fs, j + 1, key)
-        i = i + 1
+        i++
     }
     dedup_frame_stores(fs)
 }
@@ -394,9 +382,9 @@ func dedup_frame_stores(fs: *Vector<FlowProv>) -> void {
         prev: FlowProv = vec_get(fs, write - 1)
         if !fp_eq(cur, prev) {
             vec_set(fs, write, cur)
-            write = write + 1
+            write++
         }
-        read = read + 1
+        read++
     }
     (*fs).len = write
 }
@@ -445,7 +433,7 @@ func render_mask(m: int64) -> string {
         mut ch: int64 = 48 + d
         if d >= 10 { ch = 87 + d }
         sb_push_char(b, ch)
-        k = k - 1
+        k--
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -470,9 +458,9 @@ func render_flows(flows: int64[64]) -> string {
                 sb_push_char(b, 41)
                 first = false
             }
-            j = j + 1
+            j++
         }
-        i = i + 1
+        i++
     }
     sb_push_char(b, 93)
     out: string = substring(sb_cstr(b), 0, sb_size(b))
@@ -491,15 +479,15 @@ func render_capture(s: string) -> string {
         sb_push_char(b, 40)
         while s[p] != 44 {
             sb_push_char(b, s[p])
-            p = p + 1
+            p++
         }
         sb_push_char(b, 44)
-        p = p + 1
+        p++
         while s[p] != 59 {
             sb_push_char(b, s[p])
-            p = p + 1
+            p++
         }
-        p = p + 1
+        p++
         sb_push_char(b, 41)
         first = false
     }
@@ -533,13 +521,13 @@ func sort_spans(v: *Vector<SpanKey>) -> void {
             cur: SpanKey = vec_get(v, j)
             if span_less(key, cur) {
                 vec_set(v, j + 1, cur)
-                j = j - 1
+                j--
             } else {
                 placed = true
             }
         }
         vec_set(v, j + 1, key)
-        i = i + 1
+        i++
     }
 }
 
@@ -583,7 +571,7 @@ export func render_escape_info(info: EscapeInfo) -> string {
         sb_push_char(b, 32)
         render_summary(b, unwrap_or(map_get(sums, k), empty_summary()))
         sb_push_char(b, 10)
-        i = i + 1
+        i++
     }
     mkeys: *Vector<string> = map_keys(msums)
     sort_strings(mkeys)
@@ -595,7 +583,7 @@ export func render_escape_info(info: EscapeInfo) -> string {
         sb_push_char(b, 32)
         render_summary(b, unwrap_or(map_get(msums, mk), empty_summary()))
         sb_push_char(b, 10)
-        i = i + 1
+        i++
     }
     sort_spans(spans)
     i = 0
@@ -608,7 +596,7 @@ export func render_escape_info(info: EscapeInfo) -> string {
         lambda_line(b, sp.lo, sp.hi, "lambda_collect_sinks", render_mask(unwrap_or(map_get(lcoll, key), 0)))
         lambda_line(b, sp.lo, sp.hi, "lambda_returns", render_mask(unwrap_or(map_get(lret, key), 0)))
         lambda_line(b, sp.lo, sp.hi, "lambda_sinks", render_mask(unwrap_or(map_get(lsink, key), 0)))
-        i = i + 1
+        i++
     }
     stores: *Vector<FlowProv> = info.frame_stores
     mut prev_set: bool = false
@@ -629,7 +617,7 @@ export func render_escape_info(info: EscapeInfo) -> string {
         }
         prev = st
         prev_set = true
-        i = i + 1
+        i++
     }
     // stage0 joins its lines with newlines and lets println add the trailing one;
     // this builds each line with a trailing newline, so drop the final one to match

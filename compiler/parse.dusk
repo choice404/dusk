@@ -88,7 +88,7 @@ export func p_take_doc(p: *Parser) -> (int64, int64) {
                     best_lo = d.lo
                     best_hi = d.hi
                 }
-                (*p).doc_pos = (*p).doc_pos + 1
+                (*p).doc_pos++
             } else {
                 going = false
             }
@@ -172,13 +172,13 @@ export func p_error_span(p: *Parser, lo: int64, hi: int64, msg: string) -> void 
 
 export func p_bump(p: *Parser) -> void {
     if !p_at_eof(p) {
-        (*p).pos = (*p).pos + 1
+        (*p).pos++
     }
 }
 
 export func p_eat(p: *Parser, k: int64) -> bool {
     if p_at(p, k) {
-        (*p).pos = (*p).pos + 1
+        (*p).pos++
         return true
     }
     return false
@@ -211,7 +211,7 @@ export func expected_found(what: string, p: *Parser) -> string {
 }
 
 export func p_kw(p: *Parser, lit: string) -> bool {
-    mut t: Token = p_tok(p)
+    t: Token = p_tok(p)
     if t.kind != k_kw() {
         return false
     }
@@ -219,15 +219,7 @@ export func p_kw(p: *Parser, lit: string) -> bool {
 }
 
 export func p_ident_text_is(p: *Parser, lit: string) -> bool {
-    mut t: Token = p_tok(p)
-    if t.kind != k_ident() {
-        return false
-    }
-    return str_eq_range((*p).src, t.lo, t.hi, lit)
-}
-
-export func p_ident2_text_is(p: *Parser, lit: string) -> bool {
-    t: Token = p_tok2(p)
+    t: Token = p_tok(p)
     if t.kind != k_ident() {
         return false
     }
@@ -346,12 +338,12 @@ export func p_skip_stmt_decl(p: *Parser) -> bool {
         if p_at_eof(p) {
             going = false
         } else if p_at(p, k_lbrace()) {
-            depth = depth + 1
+            depth++
             seen = true
             p_bump(p)
         } else if p_at(p, k_rbrace()) {
             if seen {
-                depth = depth - 1
+                depth--
                 p_bump(p)
                 if depth == 0 {
                     going = false
@@ -392,7 +384,7 @@ func p_depth_report(p: *Parser, what: string) -> void {
 // nested block, a nested type, a nested expression, and, through p_enter_chain, each
 // link of a chain the grammar folds in a loop.
 export func p_enter_nesting(p: *Parser, what: string, fix: string) -> bool {
-    (*p).depth = (*p).depth + 1
+    (*p).depth++
     if (*p).depth > 500 {
         p_depth_report(p, what)
         return false
@@ -422,7 +414,7 @@ export func p_chain_what(links: int64, long: string) -> string {
 }
 
 export func p_enter_chain(p: *Parser, what: string) -> bool {
-    (*p).depth = (*p).depth + 1
+    (*p).depth++
     if (*p).depth + 2 > 500 {
         p_depth_report(p, what)
         return false
@@ -431,7 +423,7 @@ export func p_enter_chain(p: *Parser, what: string) -> bool {
 }
 
 export func p_leave_nesting(p: *Parser) -> void {
-    (*p).depth = (*p).depth - 1
+    (*p).depth--
 }
 
 // Releases the budget a chain loop charged, one unit per link it folded. A loop that
@@ -441,7 +433,7 @@ export func p_leave_chain(p: *Parser, links: int64) -> void {
     mut n: int64 = links
     while n > 0 {
         p_leave_nesting(p)
-        n = n - 1
+        n--
     }
 }
 
@@ -481,7 +473,7 @@ export func p_expect_gt(p: *Parser) -> void {
 export func p_split_starstar(p: *Parser) -> void {
     mut t: Token = p_tok(p)
     t.kind = k_star()
-    t.lo = t.lo + 1
+    t.lo++
     vec_set((*p).toks, (*p).pos, t)
 }
 
@@ -511,13 +503,13 @@ func is_alpha(c: int64) -> bool {
 export func p_num_body_end(p: *Parser, t: Token) -> int64 {
     mut i: int64 = t.lo
     while is_digit(byte_at((*p).src, (*p).n, i)) {
-        i = i + 1
+        i++
     }
     if byte_at((*p).src, (*p).n, i) == 46 {
         if is_digit(byte_at((*p).src, (*p).n, i + 1)) {
-            i = i + 1
+            i++
             while is_digit(byte_at((*p).src, (*p).n, i)) {
-                i = i + 1
+                i++
             }
         }
     }
@@ -544,7 +536,7 @@ func p_uint_pattern(p: *Parser, t: Token, body_end: int64) -> int64 {
     mut i: int64 = t.lo
     while i < body_end {
         acc = acc * 10 + (byte_at((*p).src, (*p).n, i) - 48)
-        i = i + 1
+        i++
     }
     return acc
 }

@@ -138,7 +138,7 @@ func pkg_dir_of(path: string) -> string {
         if path[i] == 47 {
             last = i
         }
-        i = i + 1
+        i++
     }
     if last < 0 {
         return substring(path, 0, 0)
@@ -200,8 +200,8 @@ func split_fault(path: string, fault: string) -> (int64, int64, bool) {
                 scanning = false
             } else {
                 line = line * 10 + (c - 48)
-                digits = digits + 1
-                i = i + 1
+                digits++
+                i++
             }
         }
     }
@@ -240,7 +240,7 @@ func push_faults(errors: *Vector<LoadDiag>, real: string, shown: string, faults:
     mut i: int64 = 0
     while i < vec_len(faults) {
         push_fault(errors, real, shown, vec_get(faults, i))
-        i = i + 1
+        i++
     }
 }
 
@@ -281,7 +281,7 @@ func check_project(m: *Manifest, l: *Lock, path: string, errors: *Vector<LoadDia
     mut i: int64 = 0
     while i < vec_len(faults) {
         push_project_fault(errors, path, vec_get(faults, i))
-        i = i + 1
+        i++
     }
     vec_free(faults)
     free(faults)
@@ -677,9 +677,7 @@ func collision_fault(disp: string, name: string, prior: string) -> LoadDiag {
  *  it, so a third file colliding is reported against the same file the second one was. */
 export func pkg_check_exports(owner_file: *Map<string, string>, owner_pkg: *Map<string, int64>, ex: *Map<string, int64>, disp: string, pkg: int64, errors: *Vector<LoadDiag>) -> void {
     keys: *Vector<string> = map_keys(ex)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        k: string = vec_get(keys, i)
+    for k in keys {
         if map_has(owner_pkg, k) {
             other: int64 = unwrap_or(map_get(owner_pkg, k), 0)
             if other != pkg {
@@ -689,7 +687,6 @@ export func pkg_check_exports(owner_file: *Map<string, string>, owner_pkg: *Map<
             map_put(owner_pkg, k, pkg)
             map_put(owner_file, k, disp)
         }
-        i = i + 1
     }
     vec_free(keys)
     free(keys)
@@ -704,7 +701,7 @@ export func pkg_first_segment(imp: string) -> string {
         if imp[i] == 46 {
             return substring(imp, 0, i)
         }
-        i = i + 1
+        i++
     }
     return copy_string(imp)
 }
@@ -717,7 +714,7 @@ export func pkg_rest_segments(imp: string) -> string {
         if imp[i] == 46 {
             return substring(imp, i + 1, n)
         }
-        i = i + 1
+        i++
     }
     return substring(imp, 0, 0)
 }
@@ -734,7 +731,7 @@ func faults_from(m: *Manifest, from: int64) -> string {
             sb_push_char(b, 10)
         }
         sb_push(b, vec_get(errs, i))
-        i = i + 1
+        i++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)

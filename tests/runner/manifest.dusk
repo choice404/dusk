@@ -89,13 +89,10 @@ struct Unesc {
 // Whether v already holds s. A linear scan is fine for the small key and name
 // sets a single record and a single manifest carry.
 func vec_has(v: *Vector<string>, s: string) -> bool {
-    mut i: int64 = 0
-    while i < vec_len(v) {
-        cur: string = vec_get(v, i)
+    for cur in v {
         if str_eq(cur, s) {
             return true
         }
-        i = i + 1
     }
     return false
 }
@@ -103,7 +100,7 @@ func vec_has(v: *Vector<string>, s: string) -> bool {
 // Records a lint error, tagged with the line it was found on so the report names
 // a spot in the file.
 func push_err(errors: *Vector<string>, no: int64, msg: string) -> void {
-    vec_push(errors, "line " + int_to_string(no) + ": " + msg)
+    vec_push(errors, f"line {no}: {msg}")
 }
 
 // Splits the manifest text into numbered lines, normalizing a trailing carriage
@@ -120,19 +117,19 @@ func split_lines(text: string) -> *Vector<Line> {
             mut hi: int64 = i
             if hi > start {
                 if text[hi - 1] == 13 {
-                    hi = hi - 1
+                    hi--
                 }
             }
             vec_push(out, Line { no: no, text: substring(text, start, hi) })
-            no = no + 1
+            no++
             start = i + 1
         }
-        i = i + 1
+        i++
     }
     if start < n {
         mut hi2: int64 = n
         if text[hi2 - 1] == 13 {
-            hi2 = hi2 - 1
+            hi2--
         }
         vec_push(out, Line { no: no, text: substring(text, start, hi2) })
     }
@@ -170,10 +167,10 @@ func unescape(raw: string) -> Unesc {
                     }
                 }
             }
-            i = i + 2
+            i += 2
         } else {
             sb_push_char(b, c)
-            i = i + 1
+            i++
         }
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
@@ -395,7 +392,7 @@ func parse_range(lines: *Vector<Line>, lo: int64, hi: int64, records: *Vector<Re
         ln: Line = vec_get(lines, i)
         txt: string = ln.text
         if str_len(txt) == 0 || starts_with(txt, "#") {
-            i = i + 1
+            i++
         } else {
             if !started {
                 (*st).start_line = ln.no
@@ -413,8 +410,8 @@ func parse_range(lines: *Vector<Line>, lo: int64, hi: int64, records: *Vector<Re
                 (*st).valid = false
             }
             apply_field(st, key, rawval, ln.no, errors)
-            nfields = nfields + 1
-            i = i + 1
+            nfields++
+            i++
         }
     }
     if !started {
@@ -440,7 +437,7 @@ export func parse_manifest(text: string) -> ParseResult {
             parse_range(lines, lo, i, records, errors, seen)
             lo = i + 1
         }
-        i = i + 1
+        i++
     }
     parse_range(lines, lo, n, records, errors, seen)
     return ParseResult { records: records, errors: errors }

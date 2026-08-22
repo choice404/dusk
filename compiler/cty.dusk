@@ -128,7 +128,7 @@ func cty_named(c: *CTyArena, name: string) -> int64 {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)
             if str_eq(ast_name(a, iface.name), name) { return cty_intern(c, ctyk_iface(), 0, 0, name) }
         }
-        i = i + 1
+        i++
     }
     return cty_intern(c, ctyk_unknown(), 0, 0, name)
 }
@@ -242,7 +242,7 @@ export func cty_ll(c: *CTyArena, id: int64) -> string {
             ll: string = cty_ll(c, cty_lower_ast(c, (*c).ast, tid))
             sb_push(b4, ll)
             free(ll)
-            i = i + 1
+            i++
         }
         sb_push(b4, " }")
         out4: string = cty_built(b4)
@@ -265,7 +265,7 @@ export func cty_struct_id(c: *CTyArena, name: string) -> int64 {
     while i < vec_len(structs) {
         s: StructNode = vec_get(structs, i)
         if str_eq(ast_name(a, s.name), name) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -282,7 +282,7 @@ export func cty_struct_field(c: *CTyArena, ty: int64, name: string) -> int64 {
         fid: int64 = vec_get((*a).kids, s.fields_off + i)
         f: FieldNode = vec_get((*a).fields, fid)
         if str_eq(ast_name(a, f.name), name) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -369,7 +369,7 @@ export func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
         mut ti: int64 = 0
         while ti < n.b {
             vec_push(elems, cty_to_ast(c, cty_tuple_elem(c, ty, ti)))
-            ti = ti + 1
+            ti++
         }
         off, len := ast_kids(a, elems)
         return ast_type(a, tk_tuple(), off, len, 0)
@@ -380,7 +380,7 @@ export func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
         mut pi: int64 = 0
         while pi < n.b {
             vec_push(ptypes, cty_to_ast(c, cty_closure_param(c, ty, pi)))
-            pi = pi + 1
+            pi++
         }
         poff, plen := ast_kids(a, ptypes)
         return ast_type(a, tk_func(), poff, plen, rid)
@@ -393,7 +393,7 @@ export func cty_tuple_make(c: *CTyArena, elems: *Vector<int64>) -> int64 {
     mut i: int64 = 0
     while i < vec_len(elems) {
         vec_push(types, cty_to_ast(c, vec_get(elems, i)))
-        i = i + 1
+        i++
     }
     off, len := ast_kids((*c).ast, types)
     return cty_intern(c, ctyk_tuple(), off, len, "")
@@ -406,7 +406,7 @@ func cty_enum_id(c: *CTyArena, name: string) -> int64 {
     while i < vec_len(enums) {
         e: EnumNode = vec_get(enums, i)
         if str_eq(ast_name(a, e.name), name) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -422,7 +422,7 @@ func cty_fields_size_align(c: *CTyArena, off: int64, len: int64) -> SizeAlign {
         sa: SizeAlign = cty_size_align(c, cty_lower_ast(c, a, f.ty))
         size = cty_align_up(size, sa.align) + sa.size
         if sa.align > align { align = sa.align }
-        i = i + 1
+        i++
     }
     return SizeAlign { size: cty_align_up(size, align), align: align }
 }
@@ -448,7 +448,7 @@ export func cty_enum_blob_lanes(c: *CTyArena, name: string) -> int64 {
         v: VariantNode = vec_get((*a).variants, vid)
         sa: SizeAlign = cty_fields_size_align(c, v.fields_off, v.fields_len)
         if sa.size > largest { largest = sa.size }
-        i = i + 1
+        i++
     }
     return (largest + 7) / 8
 }
@@ -489,7 +489,7 @@ export func cty_size_align(c: *CTyArena, id: int64) -> SizeAlign {
             tsa: SizeAlign = cty_size_align(c, cty_lower_ast(c, a, tid))
             size2 = cty_align_up(size2, tsa.align) + tsa.size
             if tsa.align > align2 { align2 = tsa.align }
-            i = i + 1
+            i++
         }
         return SizeAlign { size: cty_align_up(size2, align2), align: align2 }
     }
@@ -508,14 +508,6 @@ export func cty_int_bits(c: *CTyArena, id: int64) -> int64 {
 export func cty_is_float(c: *CTyArena, id: int64) -> bool {
     n: CTyNode = vec_get(cty_nodes(c), id)
     return n.kind == ctyk_f64() || n.kind == ctyk_f32()
-}
-
-export func cty_is_aggregate(c: *CTyArena, id: int64) -> bool {
-    n: CTyNode = vec_get(cty_nodes(c), id)
-    if n.kind == ctyk_ptr() || n.kind == ctyk_slice() || n.kind == ctyk_array() { return true }
-    if n.kind == ctyk_struct() || n.kind == ctyk_enum() || n.kind == ctyk_iface() { return true }
-    if n.kind == ctyk_closure() || n.kind == ctyk_thread() || n.kind == ctyk_tuple() { return true }
-    return false
 }
 
 export func cty_is_stub(c: *CTyArena, id: int64) -> bool {

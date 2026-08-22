@@ -77,14 +77,6 @@ export func gs_built(b: *StringBuilder) -> string {
     return substring(sb_cstr(b), 0, sb_size(b))
 }
 
-/** A lowered value from a type and an operand, copying the operand so the Val owns it.
- *  @param ty the value's ctype id
- *  @param op the LLVM operand carrying the value
- *  @return the Val pairing ty with an owned copy of op */
-export func gen_val(ty: int64, op: string) -> Val {
-    return Val { ty: ty, op: gs_copy(op) }
-}
-
 /** The interned "path:line" constant for the statement being lowered, the argument
  *  every location-carrying fault call passes. The label is owned by the module's
  *  string table, so the caller must not free it. */
@@ -460,7 +452,7 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
                 mut si: int64 = 0
                 while si < fn.b {
                     if cty_tuple_elem(c, from, si) != cty_tuple_elem(c, to, si) { same = false }
-                    si = si + 1
+                    si++
                 }
                 if same { return gs_copy(op) }
                 mut agg: string = gs_copy("undef")
@@ -505,7 +497,7 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
                     line((*s).fb, tx2)
                     free(tx2)
                     agg = d3
-                    i = i + 1
+                    i++
                 }
                 return agg
             }
@@ -554,7 +546,7 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
                     line((*s).fb, tx4)
                     free(tx4)
                     agg2 = d4
-                    j = j + 1
+                    j++
                 }
                 return agg2
             }
@@ -672,7 +664,7 @@ export func iface_slot(s: *GenFuncState, value_ty: int64, value: string, method:
     while ii < vec_len(interfaces) {
         cand: InterfaceNode = vec_get(interfaces, ii)
         if str_eq(ast_name(a, cand.name), n.text) { iface_id = ii }
-        ii = ii + 1
+        ii++
     }
     if iface_id < 0 { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
     iface: InterfaceNode = vec_get(interfaces, iface_id)
@@ -682,7 +674,7 @@ export func iface_slot(s: *GenFuncState, value_ty: int64, value: string, method:
         mid: int64 = vec_get((*a).kids, iface.methods_off + mi)
         ms: MethodSigNode = vec_get((*a).method_sigs, mid)
         if str_eq(ast_name(a, ms.name), method) { slot_index = mi }
-        mi = mi + 1
+        mi++
     }
     if slot_index < 0 { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
     data: string = next_tmp((*s).fb)

@@ -91,7 +91,7 @@ func rebind_lambda_sink(tc: *TypeChecker, name: string, sb: LambdaSinkBind) -> v
             }
             return
         }
-        i = i - 1
+        i--
     }
     sink_last_put(tc, name, sb)
 }
@@ -105,7 +105,7 @@ func drop_lambda_sink(tc: *TypeChecker, name: string) -> void {
             map_remove(m, name).ignore()
             return
         }
-        i = i - 1
+        i--
     }
 }
 
@@ -124,7 +124,7 @@ func rebind_lambda_capture(tc: *TypeChecker, name: string, cf: string) -> void {
             }
             return
         }
-        i = i - 1
+        i--
     }
     cap_last_put(tc, name, cf)
 }
@@ -138,7 +138,7 @@ func drop_lambda_capture(tc: *TypeChecker, name: string) -> void {
             map_remove(m, name).ignore()
             return
         }
-        i = i - 1
+        i--
     }
 }
 
@@ -155,7 +155,7 @@ export func lambda_sink_bind_lookup(tc: *TypeChecker, name: string) -> SinkLooku
             sb: LambdaSinkBind = unwrap_or(map_get(m, name), LambdaSinkBind { sinks: 0, collect: 0 })
             return SinkLookup { found: true, sinks: sb.sinks, collect: sb.collect }
         }
-        i = i - 1
+        i--
     }
     return SinkLookup { found: false, sinks: 0, collect: 0 }
 }
@@ -168,7 +168,7 @@ export func lambda_capture_bind_lookup(tc: *TypeChecker, name: string) -> CapLoo
     while i >= 0 {
         m: *Map<string, string> = vec_get(stack, i)
         if map_has(m, name) { return CapLookup { found: true, edges: unwrap_or(map_get(m, name), "") } }
-        i = i - 1
+        i--
     }
     return CapLookup { found: false, edges: "" }
 }
@@ -189,15 +189,15 @@ func cap_parse_into(s: string, out: *Vector<CapFlow>) -> void {
         while s[p] != 44 {
             d: int64 = s[p]
             idx = idx * 10 + (d - 48)
-            p = p + 1
+            p++
         }
-        p = p + 1
+        p++
         b: *StringBuilder = alloc(sb_new())
         while s[p] != 59 {
             sb_push_char(b, s[p])
-            p = p + 1
+            p++
         }
-        p = p + 1
+        p++
         nm: string = substring(sb_cstr(b), 0, sb_size(b))
         sb_free(b)
         free(b)
@@ -215,13 +215,13 @@ func cap_serialize_sorted(v: *Vector<CapFlow>) -> string {
             cur: CapFlow = vec_get(v, j)
             if cap_edge_less(key, cur) {
                 vec_set(v, j + 1, cur)
-                j = j - 1
+                j--
             } else {
                 placed = true
             }
         }
         vec_set(v, j + 1, key)
-        i = i + 1
+        i++
     }
     b: *StringBuilder = alloc(sb_new())
     mut k: int64 = 0
@@ -238,7 +238,7 @@ func cap_serialize_sorted(v: *Vector<CapFlow>) -> string {
             sb_push(b, cf.name)
             sb_push_char(b, 59)
         }
-        k = k + 1
+        k++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -264,7 +264,7 @@ export func param_alias_of(tc: *TypeChecker, name: string) -> int64 {
     while i >= 0 {
         m: *Map<string, int64> = vec_get(stack, i)
         if map_has(m, name) { return unwrap_or(map_get(m, name), -1) }
-        i = i - 1
+        i--
     }
     return -1
 }
@@ -284,7 +284,7 @@ export func summary_alias_mask(tc: *TypeChecker, callee_id: int64, arg_len: int6
         mut i: int64 = 0
         while i < arg_len && i < 64 {
             m = m | (1 << i)
-            i = i + 1
+            i++
         }
         return m
     }
@@ -310,7 +310,7 @@ export func call_result_alias_targets(tc: *TypeChecker, call_id: int64, out: *Ve
     mut k: int64 = 0
     while k < e.c && k < 64 {
         if ps_has(mask, k) { collect_embedded(tc, vec_get((*a).kids, e.b + k), out) }
-        k = k + 1
+        k++
     }
 }
 
@@ -422,7 +422,7 @@ export func record_ptr_borrows(tc: *TypeChecker, name: string, value_id: int64, 
                             }
                         }
                     }
-                    i = i + 1
+                    i++
                 }
             }
         }
@@ -443,7 +443,7 @@ export func record_ptr_borrows(tc: *TypeChecker, name: string, value_id: int64, 
                     done = true
                 }
             }
-            i = i + 1
+            i++
         }
     }
 }
@@ -497,7 +497,7 @@ export func check_method_call_escape(tc: *TypeChecker, callee_id: int64, arg_off
     mut i: int64 = 0
     while i < arg_len {
         vec_push(eff, vec_get((*a).kids, arg_off + i))
-        i = i + 1
+        i++
     }
     method_check_sinks(tc, rm.mname, rm.sum, eff, lo, hi)
     method_apply_flows(tc, rm.sum, eff, lo, hi)
@@ -517,7 +517,7 @@ func method_check_sinks(tc: *TypeChecker, mname: string, sum: SummaryHandle, eff
                 }
             }
         }
-        j = j + 1
+        j++
     }
 }
 
@@ -527,7 +527,7 @@ func method_apply_flows(tc: *TypeChecker, sum: SummaryHandle, eff: *Vector<int64
     mut s: int64 = 0
     while s < n {
         vec_push(src, value_escape(tc, vec_get(eff, s)))
-        s = s + 1
+        s++
     }
     mut x: int64 = 0
     while x < n && x < 64 {
@@ -538,9 +538,9 @@ func method_apply_flows(tc: *TypeChecker, sum: SummaryHandle, eff: *Vector<int64
                 if flow_has(sum.flows, x, y) {
                     route_flow_edge(tc, x, y, src_esc, vec_get(eff, y), lo, hi)
                 }
-                y = y + 1
+                y++
             }
         }
-        x = x + 1
+        x++
     }
 }

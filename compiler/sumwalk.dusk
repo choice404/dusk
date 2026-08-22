@@ -111,7 +111,7 @@ export func ctx_flow_edges(c: *SumCtx, srcps: int64, dests: int64) -> void {
     mut k: int64 = 0
     while k < 64 {
         if ps_has(srcps, k) { (*c).flows = flow_add_row((*c).flows, k, dests) }
-        k = k + 1
+        k++
     }
 }
 
@@ -126,7 +126,7 @@ export func sum_block(c: *SumCtx, bid: int64) -> void {
     mut i: int64 = 0
     while i < b.len {
         sum_stmt(c, kid(a, b.off, i))
-        i = i + 1
+        i++
     }
 }
 
@@ -197,7 +197,7 @@ func sum_let(c: *SumCtx, s: StmtNode) -> void {
         mut i: int64 = 0
         while i < s.b {
             note_local(c, vec_get((*a).binds, kid(a, s.a, i)))
-            i = i + 1
+            i++
         }
         return
     }
@@ -215,7 +215,7 @@ func sum_let(c: *SumCtx, s: StmtNode) -> void {
             b: BindNode = vec_get((*a).binds, kid(a, s.a, i))
             note_local(c, b)
             raise_env(c, ast_name(a, b.name), mv)
-            i = i + 1
+            i++
         }
         return
     }
@@ -225,7 +225,7 @@ func sum_let(c: *SumCtx, s: StmtNode) -> void {
         b2: BindNode = vec_get((*a).binds, kid(a, s.a, j))
         note_local(c, b2)
         raise_env(c, ast_name(a, b2.name), v2)
-        j = j + 1
+        j++
     }
 }
 
@@ -245,7 +245,7 @@ func sum_stmt_match(c: *SumCtx, s: StmtNode) -> void {
         arm: ArmNode = vec_get((*a).arms, kid(a, s.b, i))
         bind_arm(c, arm.pat, scrut)
         sum_block(c, arm.body)
-        i = i + 1
+        i++
     }
 }
 
@@ -258,7 +258,7 @@ export func bind_arm(c: *SumCtx, pat_id: int64, scrut: SumVal) -> void {
             name: string = ast_name(a, kid(a, p.b, i))
             map_put((*c).locals, name, 1)
             map_put((*c).env, name, scrut)
-            i = i + 1
+            i++
         }
     } else if p.kind == pk_ident() {
         name: string = ast_name(a, p.a)
@@ -301,7 +301,7 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
             ev: SumVal = sum_eval(c, kid(a, e.a, i))
             origins = origins | ev.origins
             reads = reads | ev.reads
-            i = i + 1
+            i++
         }
         return SumVal { origins: origins, reads: reads, frame: true }
     }
@@ -310,7 +310,7 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         mut j: int64 = 0
         while j < e.b {
             v = val_join(v, sum_eval(c, kid(a, e.a, j)))
-            j = j + 1
+            j++
         }
         return v
     }
@@ -321,7 +321,7 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         mut fi: int64 = 0
         while fi < e.b {
             sum_eval(c, kid(a, e.a, fi))
-            fi = fi + 1
+            fi++
         }
         return val_none()
     }
@@ -378,7 +378,7 @@ export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         while k < e.c {
             db: DoBindNode = vec_get((*a).do_binds, kid(a, e.b, k))
             sum_eval(c, db.expr)
-            k = k + 1
+            k++
         }
         return val_none()
     }
@@ -397,7 +397,7 @@ func sum_struct_lit(c: *SumCtx, e: ExprNode) -> SumVal {
         init: int64 = kid(a, e.b, j + 1)
         iv: SumVal = sum_eval(c, init)
         v = val_join(v, member_contrib(t, iv, struct_field_ty_id(c, sname, fname), gens))
-        j = j + 2
+        j += 2
     }
     return v
 }
@@ -430,20 +430,9 @@ func struct_field_ty_id(c: *SumCtx, sname: string, fname: string) -> int64 {
     while i < st.fields_len {
         fld: FieldNode = vec_get((*a).fields, kid(a, st.fields_off, i))
         if str_eq(ast_name(a, fld.name), fname) { return fld.ty }
-        i = i + 1
+        i++
     }
     return -1
-}
-
-export func struct_gens(t: *SumTables, st: StructNode) -> *Map<string, int64> {
-    a: *Ast = (*t).ast
-    g: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < st.generics_len {
-        map_put(g, ast_name(a, vec_get((*a).kids, st.generics_off + i)), 1)
-        i = i + 1
-    }
-    return g
 }
 
 // An if used as a value contributes the join of its branch tails, the same way a match
@@ -463,7 +452,7 @@ func sum_eval_ifexpr(c: *SumCtx, e: ExprNode) -> SumVal {
             last: StmtNode = vec_get((*a).stmts, kid(a, b.off, b.len - 1))
             if last.kind == sk_expr() { r = val_join(r, sum_eval(c, last.a)) }
         }
-        i = i + 1
+        i++
     }
     return r
 }
@@ -482,7 +471,7 @@ func sum_eval_match(c: *SumCtx, e: ExprNode) -> SumVal {
             last: StmtNode = vec_get((*a).stmts, kid(a, blk.off, blk.len - 1))
             if last.kind == sk_expr() { r = val_join(r, sum_eval(c, last.a)) }
         }
-        i = i + 1
+        i++
     }
     return r
 }
@@ -499,7 +488,7 @@ export func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len:
     mut i: int64 = 0
     while i < arg_len {
         vec_push(argvals, sum_eval(c, kid(a, arg_off, i)))
-        i = i + 1
+        i++
     }
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind == xk_ident() {
@@ -574,10 +563,10 @@ export func apply_summary(c: *SumCtx, sum: SummaryHandle, arg_off: int64, arg_le
             mut j: int64 = 0
             while j < arg_len && j < 64 {
                 if (row & (1 << j)) != 0 { flow_into_place(c, kid(a, arg_off, j), vi) }
-                j = j + 1
+                j++
             }
         }
-        i = i + 1
+        i++
     }
     mut r: SumVal = val_none()
     mut k: int64 = 0
@@ -590,7 +579,7 @@ export func apply_summary(c: *SumCtx, sum: SummaryHandle, arg_off: int64, arg_le
             (*c).sinks = (*c).sinks | ps
             if ps_has(sum.collect_sinks, k) { (*c).collect_sinks = (*c).collect_sinks | ps }
         }
-        k = k + 1
+        k++
     }
     return r
 }
@@ -605,15 +594,15 @@ export func apply_top(c: *SumCtx, arg_off: int64, arg_len: int64, argvals: *Vect
         mut j: int64 = 0
         while j < arg_len {
             if i != j { flow_into_place(c, kid(a, arg_off, j), vi) }
-            j = j + 1
+            j++
         }
-        i = i + 1
+        i++
     }
     mut k: int64 = 0
     while k < arg_len {
         av: SumVal = vec_get(argvals, k)
         (*c).sinks = (*c).sinks | av.origins | av.reads
-        k = k + 1
+        k++
     }
     return join_all(argvals)
 }
@@ -639,7 +628,7 @@ func ctor_val(c: *SumCtx, vid: int64, argvals: *Vector<SumVal>) -> SumVal {
             ft = fld.ty
         }
         v = val_join(v, member_contrib(t, vec_get(argvals, i), ft, gens))
-        i = i + 1
+        i++
     }
     return v
 }
@@ -649,7 +638,7 @@ export func join_all(argvals: *Vector<SumVal>) -> SumVal {
     mut i: int64 = 0
     while i < vec_len(argvals) {
         r = val_join(r, vec_get(argvals, i))
-        i = i + 1
+        i++
     }
     return r
 }
@@ -671,9 +660,7 @@ func loop_state(c: *SumCtx) -> string {
     env: *Map<string, SumVal> = (*c).env
     keys: *Vector<string> = map_keys(env)
     sort_strings(keys)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        k: string = vec_get(keys, i)
+    for k in keys {
         av: SumVal = unwrap_or(map_get(env, k), val_none())
         sb_push(b, k)
         sb_push_char(b, 61)
@@ -683,7 +670,6 @@ func loop_state(c: *SumCtx) -> string {
         sb_push_char(b, 44)
         if av.frame { sb_push_char(b, 49) } else { sb_push_char(b, 48) }
         sb_push_char(b, 59)
-        i = i + 1
     }
     sb_push_char(b, 124)
     sb_push_int(b, (*c).returns_alias)
@@ -722,7 +708,7 @@ func loop_fixpoint(c: *SumCtx, bid: int64) -> void {
         now: string = loop_state(c)
         if str_eq(now, prev) { return }
         prev = now
-        n = n + 1
+        n++
     }
 }
 
@@ -736,13 +722,13 @@ export func sort_strings(v: *Vector<string>) -> void {
             cur: string = vec_get(v, j)
             if str_less(key, cur) {
                 vec_set(v, j + 1, cur)
-                j = j - 1
+                j--
             } else {
                 placed = true
             }
         }
         vec_set(v, j + 1, key)
-        i = i + 1
+        i++
     }
 }
 
@@ -751,7 +737,7 @@ export func str_less(x: string, y: string) -> bool {
     while x[i] != 0 && y[i] != 0 {
         if x[i] < y[i] { return true }
         if x[i] > y[i] { return false }
-        i = i + 1
+        i++
     }
     return x[i] == 0 && y[i] != 0
 }
@@ -766,12 +752,12 @@ export func lret_push(c: *SumCtx, v: SumVal) -> void {
     } else {
         vec_push(lr, v)
     }
-    (*c).lambda_depth = (*c).lambda_depth + 1
+    (*c).lambda_depth++
 }
 export func lret_pop(c: *SumCtx) -> SumVal {
     if (*c).lambda_depth <= 0 { return val_none() }
     lr: *Vector<SumVal> = (*c).lambda_rets
-    (*c).lambda_depth = (*c).lambda_depth - 1
+    (*c).lambda_depth--
     return vec_get(lr, (*c).lambda_depth)
 }
 export func lret_top(c: *SumCtx) -> SumVal {

@@ -91,7 +91,7 @@ export func substring_n(s: string, n: int64, lo: int64, hi: int64) -> string {
     mut i: int64 = 0
     while i < count {
         d[i] = s[a + i]
-        i = i + 1
+        i++
     }
     d[count] = 0
     return cstr(d)
@@ -109,7 +109,7 @@ export func str_eq_range(s: string, lo: int64, hi: int64, lit: string) -> bool {
         if s[lo + i] != lit[i] {
             return false
         }
-        i = i + 1
+        i++
     }
     return lo + i == hi
 }
@@ -163,7 +163,7 @@ export func valid_utf8(s: string, n: int64) -> bool {
     while i < n {
         b0: int64 = byte_at(s, n, i)
         if b0 < 128 {
-            i = i + 1
+            i++
         } else {
             if b0 < 194 {
                 return false
@@ -172,7 +172,7 @@ export func valid_utf8(s: string, n: int64) -> bool {
                 if !is_cont(byte_at(s, n, i + 1)) {
                     return false
                 }
-                i = i + 2
+                i += 2
             } else if b0 < 240 {
                 c1: int64 = byte_at(s, n, i + 1)
                 c2: int64 = byte_at(s, n, i + 2)
@@ -191,7 +191,7 @@ export func valid_utf8(s: string, n: int64) -> bool {
                         return false
                     }
                 }
-                i = i + 3
+                i += 3
             } else if b0 < 245 {
                 c1: int64 = byte_at(s, n, i + 1)
                 c2: int64 = byte_at(s, n, i + 2)
@@ -212,36 +212,11 @@ export func valid_utf8(s: string, n: int64) -> bool {
                 if cp > 1114111 {
                     return false
                 }
-                i = i + 4
+                i += 4
             } else {
                 return false
             }
         }
     }
     return true
-}
-
-// Appends the UTF-8 encoding of a Unicode scalar to a builder, the standard one to
-// four byte form. The scalar is assumed valid, 0 to 0x10FFFF and not a surrogate,
-// which every caller guarantees before encoding.
-export func push_utf8(b: *StringBuilder, cp: int64) -> void {
-    if cp < 128 {
-        sb_push_char(b, cp)
-        return
-    }
-    if cp < 2048 {
-        sb_push_char(b, 192 + (cp >> 6))
-        sb_push_char(b, 128 + (cp & 63))
-        return
-    }
-    if cp < 65536 {
-        sb_push_char(b, 224 + (cp >> 12))
-        sb_push_char(b, 128 + ((cp >> 6) & 63))
-        sb_push_char(b, 128 + (cp & 63))
-        return
-    }
-    sb_push_char(b, 240 + (cp >> 18))
-    sb_push_char(b, 128 + ((cp >> 12) & 63))
-    sb_push_char(b, 128 + ((cp >> 6) & 63))
-    sb_push_char(b, 128 + (cp & 63))
 }

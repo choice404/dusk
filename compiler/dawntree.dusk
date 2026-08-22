@@ -44,7 +44,7 @@ func dir_name(dir: string) -> string {
         if dir[i] == 47 {
             start = i + 1
         }
-        i = i + 1
+        i++
     }
     if start >= n {
         return copy_string("package")
@@ -64,7 +64,7 @@ func root_line(m: *Manifest) -> string {
     if str_len((*m).version) == 0 {
         return name
     }
-    out: string = name + " " + (*m).version
+    out: string = f"{name} {(*m).version}"
     free(name)
     return out
 }
@@ -122,7 +122,7 @@ func status_tail(m: *Manifest, l: *Lock, r: *Require) -> string {
     if here {
         return shown
     }
-    out: string = shown + " (not fetched)"
+    out: string = f"{shown} (not fetched)"
     free(shown)
     return out
 }
@@ -155,7 +155,7 @@ func already(seen: *Vector<string>, alias: string) -> bool {
         if str_eq(vec_get(seen, i), alias) {
             return true
         }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -184,9 +184,7 @@ func walk_dep(m: *Manifest, l: *Lock, alias: string, depth: int64, seen: *Vector
  *  package in the graph lands in one flat dawn_modules however deep it was required
  *  from. */
 func walk(m: *Manifest, l: *Lock, rs: *Vector<*Require>, depth: int64, seen: *Vector<string>) -> void {
-    mut i: int64 = 0
-    while i < vec_len(rs) {
-        r: *Require = vec_get(rs, i)
+    for r in rs {
         line: string = require_line(m, l, r, depth)
         println(line)
         free(line)
@@ -194,7 +192,6 @@ func walk(m: *Manifest, l: *Lock, rs: *Vector<*Require>, depth: int64, seen: *Ve
             vec_push(seen, copy_string((*r).alias))
             walk_dep(m, l, (*r).alias, depth + 1, seen)
         }
-        i = i + 1
     }
 }
 

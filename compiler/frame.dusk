@@ -42,8 +42,8 @@ export func frame_prefix(ret_size: int64, ret_align: int64, sizes: *Vector<int64
         al: int64 = vec_get(aligns, i)
         off = frame_align_up(off, al)
         vec_push(offs, off)
-        off = off + vec_get(sizes, i)
-        i = i + 1
+        off += vec_get(sizes, i)
+        i++
     }
     return FramePrefix { result_off: 24, param_offs: offs, first_free: off }
 }
@@ -87,8 +87,8 @@ export func frame_finalize(f: *FrameCtx) -> int64 {
         off = frame_align_up(off, slot.align)
         slot.off = off
         vec_set(slots, i, slot)
-        off = off + slot.size
-        i = i + 1
+        off += slot.size
+        i++
     }
     off = frame_align_up(off, 16)
     if off < 16 { off = 16 }
@@ -110,18 +110,12 @@ export func frame_entry_text(f: *FrameCtx, state_tmp: string) -> string {
     frame_gep(b, (*f).pend_g, 16)
     frame_gep(b, (*f).res, (*f).result_off)
     params: *Vector<FrameParam> = (*f).params
-    mut i: int64 = 0
-    while i < vec_len(params) {
-        p: FrameParam = vec_get(params, i)
+    for p in params {
         frame_gep(b, p.name, p.off)
-        i = i + 1
     }
     slots: *Vector<FrameSlot> = (*f).slots
-    mut j: int64 = 0
-    while j < vec_len(slots) {
-        slot: FrameSlot = vec_get(slots, j)
+    for slot in slots {
         frame_gep(b, slot.name, slot.off)
-        j = j + 1
     }
     sb_push(b, "  ")
     sb_push(b, state_tmp)
@@ -130,14 +124,11 @@ export func frame_entry_text(f: *FrameCtx, state_tmp: string) -> string {
     sb_push(b, state_tmp)
     sb_push(b, ", label %badstate [ i64 0, label %start")
     cases: *Vector<FrameCase> = (*f).resume_cases
-    mut k: int64 = 0
-    while k < vec_len(cases) {
-        c: FrameCase = vec_get(cases, k)
+    for c in cases {
         sb_push(b, " i64 ")
         sb_push_int(b, c.state)
         sb_push(b, ", label %")
         sb_push(b, c.label)
-        k = k + 1
     }
     sb_push(b, " ]\n")
     sb_push(b, "badstate:\n  call void @cool_task_state_fault()\n  unreachable\n")

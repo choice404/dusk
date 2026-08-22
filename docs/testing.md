@@ -245,3 +245,72 @@ runner accepts a correct expectation and rejects a wrong one across every mode.
 ```sh
 tools/testrun-selftest.sh
 ```
+
+`tools/runner-differential.sh` proves the other direction, that a change to the
+runner itself changed nothing the suite can see. It takes the previous
+release's runner source out of git at the tag you name, builds it with the
+previous release's compiler in a tree of its own, and runs it over the current
+manifest beside the runner built from this tree. Both reports must be byte
+identical and both must pass, so a reworded line or a comparison that drifted
+shows up as a difference rather than as a suite that still says green.
+
+```sh
+tools/runner-differential.sh v1.14.1 /path/to/v1.14.1/dusk target/dusk-out/dusk
+```
+
+## The dump differential
+
+`tools/dump-differential.sh` proves the other half of a change: not that the
+suite still passes, but that two compilers cannot be told apart. It runs both
+over one source set and requires every dump the pipeline can print to be byte
+identical, with identical exit codes.
+
+```sh
+tools/dump-differential.sh <old-dusk> <new-dusk> [allow-file] [source-list]
+```
+
+Thirteen commands run per file: `lex`, `scan`, `parse`, `load`, `desugar`,
+`check`, `check --json`, `mono`, `esc`, `ir`, `ir --target=wasm32`, `doc`, and
+`doc --json`. Each run's stdout, stderr, and exit code are compared as one byte
+stream, so a compiler that reaches the same verdict through a different fault
+line, a different diagnostic order, or a different exit code still fails. Both
+binaries read this tree through `DUSK_HOME`, which is what makes the comparison
+fair: two correct compilers over one standard library and one runtime must agree
+on every dump, the compiler's own roots included.
+
+The default source set is every `.dusk` under `examples/`, each static package
+fixture's root under `tests/dawn/`, every standard library module,
+`tests/runner/testrun.dusk`, and both compiler roots, `compiler/dusk.dusk` and
+`compiler/dawn.dusk`. Pass a file of paths, one per line, as the fourth argument
+to run a narrower set while chasing one difference.
+
+```sh
+tools/dump-differential.sh /path/to/v1.14.1/dusk target/dusk-out/dusk
+```
+
+The script prints a `DIFF <file> [<command>]` line and the first lines of the
+diff for every disagreement, then a tally, and exits non zero when anything
+differed:
+
+```
+dump-differential: same=16559 allowed=16 differ=0
+```
+
+Use it where a change is supposed to be invisible: a refactor, a file split, an
+idiom sweep, a rename that should not reach the emitted symbol. A change that is
+meant to alter behavior fails this gate by design, and the golden suite, not
+this script, is where that change is pinned.
+
+The third argument is an allow list, one `<stem> <command>` line per tolerated
+difference, with the stem being the source path with `/` replaced by `_`. It
+exists so a deliberate exception can be written down and reviewed rather than
+the gate being skipped around it, and it holds only what a release can name.
+Across a version bump that is the version number itself: the two package
+fixtures declaring a `@dusk` floor no compiler meets print the running version
+in their refusal, so `tools/dump-allow-1.15.0.txt` carries those pairs and
+nothing else. An allow list that is growing past that is the sign that a change
+is not the invisible one it was described as.
+
+Each command runs caged, under an address space limit, a timeout, and low
+priority, and the whole script runs serially. It compiles the compiler's own
+roots many times over, so never start one beside a self build.

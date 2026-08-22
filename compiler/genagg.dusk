@@ -49,7 +49,7 @@ export func gen_struct_lit(s: *GenFuncState, e: ExprNode) -> Val {
         while z < e.c {
             ni: int64 = vec_get((*a).kids, e.b + z)
             if str_eq(ast_name(a, ni), "message") { msg = gen_expr(s, vec_get((*a).kids, e.b + z + 1)).op }
-            z = z + 2
+            z += 2
         }
         return Val { ty: cty_error(c), op: msg }
     }
@@ -65,7 +65,7 @@ export func gen_struct_lit(s: *GenFuncState, e: ExprNode) -> Val {
             av: Val = adapt(s, fv, fty)
             agg = ga_insert(s, ty, agg, fty, av.op, index)
         }
-        i = i + 2
+        i += 2
     }
     return Val { ty: ty, op: agg }
 }
@@ -93,7 +93,7 @@ export func gen_array_lit(s: *GenFuncState, e: ExprNode, hint: int64) -> Val {
         if !hinted { v = gen_expr(s, eid) }
         if elem < 0 { elem = v.ty }
         vec_push(vals, v)
-        i = i + 1
+        i++
     }
     if elem < 0 { elem = cty_int(c, 64) }
     aty: int64 = cty_intern(c, ctyk_array(), elem, e.b, "")
@@ -102,7 +102,7 @@ export func gen_array_lit(s: *GenFuncState, e: ExprNode, hint: int64) -> Val {
     while j < vec_len(vals) {
         av: Val = adapt(s, vec_get(vals, j), elem)
         agg = ga_insert(s, aty, agg, elem, av.op, j)
-        j = j + 1
+        j++
     }
     return Val { ty: aty, op: agg }
 }
@@ -117,7 +117,7 @@ export func gen_tuple(s: *GenFuncState, e: ExprNode) -> Val {
         v: Val = gen_expr(s, vec_get((*a).kids, e.a + i))
         vec_push(vals, v)
         vec_push(tys, v.ty)
-        i = i + 1
+        i++
     }
     tty: int64 = cty_tuple_make(c, tys)
     mut agg: string = gs_copy("undef")
@@ -125,7 +125,7 @@ export func gen_tuple(s: *GenFuncState, e: ExprNode) -> Val {
     while j < vec_len(vals) {
         v2: Val = vec_get(vals, j)
         agg = ga_insert(s, tty, agg, v2.ty, v2.op, j)
-        j = j + 1
+        j++
     }
     return Val { ty: tty, op: agg }
 }

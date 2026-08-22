@@ -183,7 +183,7 @@ func push_interface(b: *StringBuilder, level: int64, a: *Ast, src: string, n: in
             push_method_sig(b, l + 1, a, src, n, msid)
             if i + 1 < it.methods_len { sb_push_char(b, 44) }
             sb_push_char(b, 10)
-            i = i + 1
+            i++
         }
         ind(b, l)
         sb_push_char(b, 93)
@@ -225,7 +225,7 @@ func push_impl(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int64, 
             push_impl_method(b, l + 1, a, src, n, fid)
             if i + 1 < im.methods_len { sb_push_char(b, 44) }
             sb_push_char(b, 10)
-            i = i + 1
+            i++
         }
         ind(b, l)
         sb_push_char(b, 93)
@@ -300,7 +300,7 @@ func push_foreign(b: *StringBuilder, level: int64, a: *Ast, src: string, n: int6
             push_foreign_func(b, l + 1, a, src, n, ffid)
             if i + 1 < fn.funcs_len { sb_push_char(b, 44) }
             sb_push_char(b, 10)
-            i = i + 1
+            i++
         }
         ind(b, l)
         sb_push_char(b, 93)
@@ -320,18 +320,15 @@ func push_foreign_array(b: *StringBuilder, level: int64, a: *Ast, src: string, n
     }
     sb_push(b, "[\n")
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
     mut seen: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_foreign() {
             ind(b, level + 1)
             push_foreign(b, level + 1, a, src, n, it.id)
-            seen = seen + 1
+            seen++
             if seen < total { sb_push_char(b, 44) }
             sb_push_char(b, 10)
         }
-        i = i + 1
     }
     ind(b, level)
     sb_push_char(b, 93)
@@ -343,7 +340,7 @@ func count_kind(a: *Ast, kind: int64) -> int64 {
     mut i: int64 = 0
     while i < vec_len(items) {
         if vec_get(items, i).kind == kind { c = c + 1 }
-        i = i + 1
+        i++
     }
     return c
 }
@@ -360,10 +357,8 @@ func push_item_array(b: *StringBuilder, level: int64, a: *Ast, src: string, n: i
     }
     sb_push(b, "[\n")
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
     mut seen: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == kind {
             ind(b, level + 1)
             if kind == ik_func() {
@@ -377,11 +372,10 @@ func push_item_array(b: *StringBuilder, level: int64, a: *Ast, src: string, n: i
             } else {
                 push_impl(b, level + 1, a, src, n, it.id)
             }
-            seen = seen + 1
+            seen++
             if seen < total { sb_push_char(b, 44) }
             sb_push_char(b, 10)
         }
-        i = i + 1
     }
     ind(b, level)
     sb_push_char(b, 93)

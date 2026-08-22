@@ -39,7 +39,7 @@ func genctx_param_ctys(ctx: *GenCtx, f: FuncNode) -> *Vector<int64> {
         pid: int64 = vec_get((*a).kids, f.params_off + i)
         p: ParamNode = vec_get((*a).params, pid)
         vec_push(out, cty_lower_ast((*ctx).ctys, a, p.ty))
-        i = i + 1
+        i++
     }
     return out
 }
@@ -55,22 +55,17 @@ export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
     // The files arrive in base order, so the newlines collected file by file are
     // already globally sorted.
     newlines: *Vector<int64> = alloc(vec_new())
-    mut fi: int64 = 0
-    while fi < vec_len(files) {
-        f: FileSrc = vec_get(files, fi)
+    for f in files {
         mut nj: int64 = 0
         while nj < f.len {
             if f.src[nj] == 10 { vec_push(newlines, f.base + nj) }
-            nj = nj + 1
+            nj++
         }
-        fi = fi + 1
     }
     ctx: *GenCtx = alloc(GenCtx { ast: a, ctys: ctys, fns: fns, methods: methods, structs: structs, enums: enums, files: files, newlines: newlines })
 
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_struct() {
             s: StructNode = vec_get((*a).structs, it.id)
             map_put(structs, genctx_copy(ast_name(a, s.name)), 1)
@@ -78,12 +73,9 @@ export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
             e: EnumNode = vec_get((*a).enums, it.id)
             map_put(enums, genctx_copy(ast_name(a, e.name)), 1)
         }
-        i = i + 1
     }
 
-    mut j: int64 = 0
-    while j < vec_len(items) {
-        it2: ItemNode = vec_get(items, j)
+    for it2 in items {
         if it2.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it2.id)
             ret: int64 = cty_lower_ast(ctys, a, f.ret)
@@ -97,9 +89,7 @@ export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
                 ps: *Vector<int64> = alloc(vec_new())
                 vec_push(ps, cty_intern(ctys, ctyk_struct(), 0, 0, ast_name(a, im.ty)))
                 extra: *Vector<int64> = genctx_param_ctys(ctx, mf)
-                mut pi: int64 = 0
-                while pi < vec_len(extra) { vec_push(ps, vec_get(extra, pi))
- pi = pi + 1 }
+                for param_ty in extra { vec_push(ps, param_ty) }
                 kb: *StringBuilder = alloc(sb_new())
                 sb_push(kb, ast_name(a, im.ty))
  sb_push_char(kb, 46)
@@ -108,7 +98,7 @@ export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
                 sb_free(kb)
  free(kb)
                 map_put(methods, key, GenFnSig { ret: cty_lower_ast(ctys, a, mf.ret), params: ps, is_async: false, variadic: false, is_foreign: false })
-                mi = mi + 1
+                mi++
             }
         } else if it2.kind == ik_foreign() {
             fb: ForeignNode = vec_get((*a).foreigns, it2.id)
@@ -122,13 +112,12 @@ export func genctx_new(a: *Ast, files: *Vector<FileSrc>) -> *GenCtx {
                     pid2: int64 = vec_get((*a).kids, ff.params_off + p)
                     param: ParamNode = vec_get((*a).params, pid2)
                     vec_push(out, cty_lower_foreign(ctys, a, param.ty))
-                    p = p + 1
+                    p++
                 }
                 map_put(fns, genctx_copy(ast_name(a, ff.name)), GenFnSig { ret: cty_lower_foreign(ctys, a, ff.ret), params: out, is_async: false, variadic: ff.variadic, is_foreign: true })
-                k = k + 1
+                k++
             }
         }
-        j = j + 1
     }
     return ctx
 }
@@ -153,14 +142,6 @@ export func genctx_has_method(ctx: *GenCtx, name: string) -> bool { return map_h
 export func genctx_method(ctx: *GenCtx, name: string) -> GenFnSig {
     empty: *Vector<int64> = alloc(vec_new())
     return unwrap_or(map_get(genctx_methods(ctx), name), GenFnSig { ret: cty_void((*ctx).ctys), params: empty, is_async: false, variadic: false, is_foreign: false })
-}
-
-// Classifies a nominal name for later aggregate lowering while Phase A keeps those
-// tables as faultable stubs.
-export func genctx_nom(ctx: *GenCtx, name: string) -> int64 {
-    if map_has(genctx_structs(ctx), name) { return 1 }
-    if map_has(genctx_enums(ctx), name) { return 2 }
-    return 0
 }
 
 // The number of newlines before the merged-source offset, a binary search over
@@ -200,7 +181,7 @@ export func genctx_loc_text(ctx: *GenCtx, off: int64) -> string {
             free(b)
             return out
         }
-        i = i - 1
+        i--
     }
     return genctx_copy("?:0")
 }

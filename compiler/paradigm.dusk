@@ -25,7 +25,7 @@ func declares(a: *Ast, name: string) -> bool {
         if str_eq(ast_name(a, vec_get(ps, i)), name) {
             return true
         }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -33,14 +33,11 @@ func declares(a: *Ast, name: string) -> bool {
 func collect_user_fns(a: *Ast) -> *Map<string, int64> {
     fns: *Map<string, int64> = alloc(map_new())
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             map_put(fns, ast_name(a, f.name), 1)
         }
-        i = i + 1
     }
     return fns
 }
@@ -132,7 +129,7 @@ func gate_block(g: *Gate, a: *Ast, id: int64) -> void {
     mut i: int64 = 0
     while i < b.len {
         gate_stmt(g, a, vec_get((*a).kids, b.off + i))
-        i = i + 1
+        i++
     }
 }
 
@@ -142,7 +139,7 @@ func gate_match(g: *Gate, a: *Ast, scrut: int64, off: int64, len: int64) -> void
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         gate_block(g, a, arm.body)
-        i = i + 1
+        i++
     }
 }
 
@@ -201,7 +198,7 @@ func gate_expr_slice(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
     mut i: int64 = 0
     while i < len {
         gate_expr(g, a, vec_get((*a).kids, off + i))
-        i = i + 1
+        i++
     }
 }
 
@@ -209,7 +206,7 @@ func gate_field_pairs(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
     mut i: int64 = 0
     while i < len {
         gate_expr(g, a, vec_get((*a).kids, off + i + 1))
-        i = i + 2
+        i += 2
     }
 }
 
@@ -218,7 +215,7 @@ func gate_do_binds(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
     while i < len {
         d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, off + i))
         gate_expr(g, a, d.expr)
-        i = i + 1
+        i++
     }
 }
 
@@ -282,21 +279,16 @@ func gate_expr(g: *Gate, a: *Ast, id: int64) -> void {
 
 func gate_monads(g: *Gate, a: *Ast) -> void {
     ms: *Vector<MonadNode> = (*a).monads
-    mut i: int64 = 0
-    while i < vec_len(ms) {
-        m: MonadNode = vec_get(ms, i)
+    for m in ms {
         what: string = named_what(ast_name(a, m.name), "monad block")
         need_functional(g, what, m.lo, m.hi)
         free(what)
-        i = i + 1
     }
 }
 
 func gate_items(g: *Gate, a: *Ast) -> void {
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             // A top-level function cannot take a functional builtin's name in any file,
@@ -318,7 +310,7 @@ func gate_items(g: *Gate, a: *Ast) -> void {
             while j < im.methods_len {
                 mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
                 gate_block(g, a, mf.body)
-                j = j + 1
+                j++
             }
         } else if it.kind == ik_interface() {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)
@@ -326,7 +318,6 @@ func gate_items(g: *Gate, a: *Ast) -> void {
             need_oop(g, what2, 0, 0)
             free(what2)
         }
-        i = i + 1
     }
 }
 

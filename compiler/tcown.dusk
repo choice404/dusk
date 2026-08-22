@@ -89,7 +89,7 @@ export func ty_has_error(tc: *TypeChecker, tyid: int64) -> bool {
         mut i: int64 = 0
         while i < n.len {
             if ty_has_error(tc, vec_get((*(*tc).ty).kids, n.off + i)) { return true }
-            i = i + 1
+            i++
         }
     }
     return false
@@ -124,7 +124,7 @@ func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
         mut i: int64 = 0
         while i < e.c {
             mark_errs_in_rec(tc, vec_get((*a).kids, e.b + i))
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_field() || e.kind == xk_index() {
         mark_errs_in_rec(tc, e.a)
@@ -133,13 +133,13 @@ func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
         mut j: int64 = 0
         while j < e.b {
             mark_errs_in_rec(tc, vec_get((*a).kids, e.a + j))
-            j = j + 1
+            j++
         }
     } else if e.kind == xk_struct_lit() {
         mut k: int64 = 1
         while k < e.c {
             mark_errs_in_rec(tc, vec_get((*a).kids, e.b + k))
-            k = k + 2
+            k += 2
         }
     } else if e.kind == xk_match() {
         mark_errs_in_rec(tc, e.a)
@@ -154,7 +154,7 @@ func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
         while m < e.c {
             d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + m))
             mark_errs_in_rec(tc, d.expr)
-            m = m + 1
+            m++
         }
     } else if e.kind == xk_await() {
         mark_errs_in_rec(tc, e.a)
@@ -275,7 +275,7 @@ func pat_binds_name(a: *Ast, pat_id: int64, name: string) -> bool {
     mut i: int64 = 0
     while i < p.c {
         if str_eq(ast_name(a, vec_get((*a).kids, p.b + i)), name) { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -392,7 +392,7 @@ func binder_payload_ty(tc: *TypeChecker, subj_id: int64, pat_id: int64, binder: 
     mut i: int64 = 0
     while i < p.c {
         if str_eq(ast_name(a, vec_get((*a).kids, p.b + i)), binder) { idx = i }
-        i = i + 1
+        i++
     }
     if idx < 0 || idx >= vs.len { return ty_unknown((*tc).ty) }
     return sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, idx)
@@ -456,7 +456,7 @@ func subject_generic_enum_arg(tc: *TypeChecker, subj_id: int64) -> bool {
     mut i: int64 = 0
     while i < en.c {
         if is_typaram_ast(tc, vec_get((*a).kids, en.b + i)) { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -560,7 +560,7 @@ func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64
     while i < st.len {
         f: FieldSig = vec_get((*sigs).fields, st.off + i)
         if str_eq(f.name, fname) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }

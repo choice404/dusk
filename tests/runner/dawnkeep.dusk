@@ -46,7 +46,7 @@ func out_lines(text: string) -> *Vector<string> {
         if i + 1 < vec_len(raw) || str_len(one) > 0 {
             vec_push(out, one)
         }
-        i = i + 1
+        i++
     }
     return out
 }
@@ -58,7 +58,7 @@ func indent_of(line: string) -> int64 {
         if line[n] != 32 {
             return n
         }
-        n = n + 1
+        n++
     }
     return n
 }
@@ -67,20 +67,20 @@ func indent_of(line: string) -> int64 {
 // ref it names. The commit is read by the caller, which knows what the lock pinned.
 func graph_line_bad(line: string, indent: int64, alias: string, source: string, ref: string) -> string {
     if indent_of(line) != indent {
-        return "the line '" + escape_show(line) + "' is indented " + int_to_string(indent_of(line)) + " spaces, want " + int_to_string(indent)
+        return f"the line '{escape_show(line)}' is indented {indent_of(line)} spaces, want {indent}"
     }
     w: *Vector<string> = split_ws(line)
     if vec_len(w) < 4 {
-        return "the line '" + escape_show(line) + "' has " + int_to_string(vec_len(w)) + " fields, want at least 4: <alias> <source> <ref> <commit>"
+        return f"the line '{escape_show(line)}' has {vec_len(w)} fields, want at least 4: <alias> <source> <ref> <commit>"
     }
     if !str_eq(vec_get(w, 0), alias) {
-        return "the line '" + escape_show(line) + "' names alias '" + vec_get(w, 0) + "', want '" + alias + "'"
+        return f"the line '{escape_show(line)}' names alias '{vec_get(w, 0)}', want '{alias}'"
     }
     if !str_eq(vec_get(w, 1), source) {
-        return "the line '" + escape_show(line) + "' names source '" + vec_get(w, 1) + "', want '" + source + "'"
+        return f"the line '{escape_show(line)}' names source '{vec_get(w, 1)}', want '{source}'"
     }
     if !str_eq(vec_get(w, 2), ref) {
-        return "the line '" + escape_show(line) + "' names ref '" + vec_get(w, 2) + "', want '" + ref + "'"
+        return f"the line '{escape_show(line)}' names ref '{vec_get(w, 2)}', want '{ref}'"
     }
     return ""
 }
@@ -99,12 +99,12 @@ func graph_mark(line: string) -> string {
 func graph_commit_bad(c: Ctx, line: string, alias: string) -> string {
     locked: string = lock_commit(lock_line_for(c, alias))
     if !is_hex40(locked) {
-        return "dawn.lock pins '" + locked + "' for '" + alias + "', which is not a 40 character git object id"
+        return f"dawn.lock pins '{locked}' for '{alias}', which is not a 40 character git object id"
     }
     want: string = substring(locked, 0, 12)
     got: string = graph_mark(line)
     if !str_eq(got, want) {
-        return "the line '" + escape_show(line) + "' shows '" + got + "' for '" + alias + "', want the locked commit's first twelve characters '" + want + "'"
+        return f"the line '{escape_show(line)}' shows '{got}' for '{alias}', want the locked commit's first twelve characters '{want}'"
     }
     return ""
 }
@@ -136,7 +136,7 @@ func cache_offline_get(bin: string) -> string {
     // than for one exact name.
     mirrors: Shell = sh(c, c.root, "find " + qw(cache_dir(c)) + " -type d -name 'dep-*.git'")
     if !str_contains(mirrors.out, "/dep-") {
-        return "after dawn get the cache at '" + cache_dir(c) + "' holds no mirror named dep-<hash>.git, only '" + escape_show(clip(mirrors.out, 400)) + "'"
+        return f"after dawn get the cache at '{cache_dir(c)}' holds no mirror named dep-<hash>.git, only '{escape_show(clip(mirrors.out, 400))}'"
     }
     hide: Shell = sh(c, c.root, "mv " + qw(dep.path) + " " + qw(dep.path + ".hidden"))
     if hide.code != 0 {
@@ -153,7 +153,7 @@ func cache_offline_get(bin: string) -> string {
     }
     lines: *Vector<string> = lines_of(other + "/dawn.lock")
     if vec_len(lines) != 1 {
-        return "the offline project's dawn.lock holds " + int_to_string(vec_len(lines)) + " lines, want 1"
+        return f"the offline project's dawn.lock holds {vec_len(lines)} lines, want 1"
     }
     lb: string = lock_line_bad(vec_get(lines, 0), "dep", dep.source, "v0.1.0")
     if str_len(lb) > 0 {
@@ -161,14 +161,14 @@ func cache_offline_get(bin: string) -> string {
     }
     stamp: string = other + "/dawn_modules/dep/.dawn"
     if !exists(stamp) {
-        return "the offline fetch left no clone stamp at '" + stamp + "'"
+        return f"the offline fetch left no clone stamp at '{stamp}'"
     }
     r: Shell = sh(c, other, dawn_cmd(c, "run"))
     if r.code != 0 {
         return shell_detail("dawn run in the offline project", r)
     }
     if !str_contains(r.out, "dep v1\n") {
-        return "the offline project printed '" + escape_show(r.out) + "', want the line 'dep v1' from the package the cache supplied"
+        return f"the offline project printed '{escape_show(r.out)}', want the line 'dep v1' from the package the cache supplied"
     }
     return ""
 }
@@ -210,10 +210,10 @@ func tree_prints_graph(bin: string) -> string {
     }
     lines: *Vector<string> = out_lines(t.out)
     if vec_len(lines) != 3 {
-        return "dawn tree printed " + int_to_string(vec_len(lines)) + " lines for a root with one requirement that has one of its own, want 3: '" + escape_show(t.out) + "'"
+        return f"dawn tree printed {vec_len(lines)} lines for a root with one requirement that has one of its own, want 3: '{escape_show(t.out)}'"
     }
     if !str_eq(vec_get(lines, 0), "app 0.1.0") {
-        return "dawn tree opened with '" + escape_show(vec_get(lines, 0)) + "', want the package and its version, 'app 0.1.0'"
+        return f"dawn tree opened with '{escape_show(vec_get(lines, 0))}', want the package and its version, 'app 0.1.0'"
     }
     ab: string = graph_line_bad(vec_get(lines, 1), 2, "a", mid.source, "v0.1.0")
     if str_len(ab) > 0 {
@@ -248,17 +248,17 @@ func tree_prints_graph(bin: string) -> string {
     }
     l2: *Vector<string> = out_lines(t2.out)
     if vec_len(l2) != 4 {
-        return "dawn tree printed " + int_to_string(vec_len(l2)) + " lines for a root with two requirements, want 4: '" + escape_show(t2.out) + "'"
+        return f"dawn tree printed {vec_len(l2)} lines for a root with two requirements, want 4: '{escape_show(t2.out)}'"
     }
     if !str_contains(vec_get(l2, 2), "(not fetched)") {
-        return "with the checkout of 'b' deleted its line reads '" + escape_show(vec_get(l2, 2)) + "', want it marked '(not fetched)'"
+        return f"with the checkout of 'b' deleted its line reads '{escape_show(vec_get(l2, 2))}', want it marked '(not fetched)'"
     }
     cb: string = graph_line_bad(vec_get(l2, 3), 2, "c", ghost.source, "v0.1.0")
     if str_len(cb) > 0 {
         return cb
     }
     if !str_contains(vec_get(l2, 3), "(not locked)") {
-        return "the requirement nothing has locked reads '" + escape_show(vec_get(l2, 3)) + "', want it marked '(not locked)'"
+        return f"the requirement nothing has locked reads '{escape_show(vec_get(l2, 3))}', want it marked '(not locked)'"
     }
     return ""
 }
@@ -287,12 +287,12 @@ func tampered_checkout_refreshed(bin: string) -> string {
     }
     locked: string = lock_commit(lock_line_for(c, "dep"))
     if !is_hex40(locked) {
-        return "after dawn get the lock pins '" + locked + "', which is not a 40 character git object id"
+        return f"after dawn get the lock pins '{locked}', which is not a 40 character git object id"
     }
     module: string = module_dir(c, "dep") + "/src/greet.dusk"
     want: string = slurp(module)
     if str_len(want) == 0 {
-        return "the fetched package carries no module at '" + module + "'"
+        return f"the fetched package carries no module at '{module}'"
     }
     we: string = put_file(module, "// something else entirely\n")
     if str_len(we) > 0 {
@@ -303,11 +303,11 @@ func tampered_checkout_refreshed(bin: string) -> string {
         return shell_detail("dawn get over an edited checkout", edited)
     }
     if !str_contains(edited.out, "refreshing dep") {
-        return "dawn get over an edited checkout printed '" + escape_show(edited.out) + "', want it to say it is refreshing 'dep'"
+        return f"dawn get over an edited checkout printed '{escape_show(edited.out)}', want it to say it is refreshing 'dep'"
     }
     back: string = slurp(module)
     if !str_eq(back, want) {
-        return "the refreshed checkout carries '" + escape_show(clip(back, 200)) + "', want the package's own module back"
+        return f"the refreshed checkout carries '{escape_show(clip(back, 200))}', want the package's own module back"
     }
     se: string = stamp_bad(c, "dep", dep.source, "v0.1.0", locked)
     if str_len(se) > 0 {
@@ -324,11 +324,11 @@ func tampered_checkout_refreshed(bin: string) -> string {
         return shell_detail("dawn get over a moved head", again)
     }
     if !str_contains(again.out, "refreshing dep") {
-        return "dawn get over a checkout detached at another commit printed '" + escape_show(again.out) + "', want it to say it is refreshing 'dep'"
+        return f"dawn get over a checkout detached at another commit printed '{escape_show(again.out)}', want it to say it is refreshing 'dep'"
     }
     head: Shell = sh(c, c.root, "git -C " + qw(module_dir(c, "dep")) + " rev-parse HEAD")
     if !str_eq(trim(head.out), locked) {
-        return "after the refresh the checkout is at '" + escape_show(trim(head.out)) + "', want the locked commit '" + locked + "'"
+        return f"after the refresh the checkout is at '{escape_show(trim(head.out))}', want the locked commit '{locked}'"
     }
     // A checkout that is not there at all is not a refresh but a fetch, and the next get
     // says so and puts it back.
@@ -341,7 +341,7 @@ func tampered_checkout_refreshed(bin: string) -> string {
         return shell_detail("dawn get with the checkout deleted", third)
     }
     if !str_contains(third.out, "fetching dep") {
-        return "dawn get with the checkout deleted printed '" + escape_show(third.out) + "', want it to fetch 'dep' again"
+        return f"dawn get with the checkout deleted printed '{escape_show(third.out)}', want it to fetch 'dep' again"
     }
     return stamp_bad(c, "dep", dep.source, "v0.1.0", locked)
 }
@@ -359,5 +359,5 @@ export func run_dawn_keep(name: string, bin: string) -> string {
     if str_eq(name, "dawn_tampered_checkout_refreshed") {
         return tampered_checkout_refreshed(bin)
     }
-    return "unknown dawn special '" + name + "'"
+    return f"unknown dawn special '{name}'"
 }

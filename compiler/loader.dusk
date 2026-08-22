@@ -103,7 +103,7 @@ func has_slash(s: string) -> bool {
         if s[i] == 47 {
             return true
         }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -117,7 +117,7 @@ func dotted_to_rel(s: string) -> string {
         } else {
             sb_push_char(b, s[i])
         }
-        i = i + 1
+        i++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -143,7 +143,7 @@ func dir_of(path: string) -> string {
         if path[i] == 47 {
             last = i
         }
-        i = i + 1
+        i++
     }
     if last < 0 {
         // Rust's Path::parent of a bare filename is the empty path, and the
@@ -160,7 +160,7 @@ func dir_of(path: string) -> string {
     mut stripping: bool = end > 0
     while stripping {
         if path[end - 1] == 47 {
-            end = end - 1
+            end--
             stripping = end > 0
         } else {
             stripping = false
@@ -176,7 +176,7 @@ func last_slash(s: string) -> int64 {
         if s[i] == 47 {
             last = i
         }
-        i = i + 1
+        i++
     }
     return last
 }
@@ -362,24 +362,21 @@ func parse_file(path: string, disp: string, errors: *Vector<LoadDiag>) -> Parsed
     while i < vec_len(lex_errs) {
         vec_push(errors, located_diag(disp, s.text, s.len, t, vec_get(lex_errs, i)))
         ok = false
-        i = i + 1
+        i++
     }
     parse_errs: *Vector<Located> = p_errors(p)
     mut j: int64 = 0
     while j < vec_len(parse_errs) {
         vec_push(errors, located_diag(disp, s.text, s.len, t, vec_get(parse_errs, j)))
         ok = false
-        j = j + 1
+        j++
     }
     struct_ok: bool = ok
     if ok {
         paradigm_errs: *Vector<SpanDiagnostic> = paradigm_check(a)
-        mut k: int64 = 0
-        while k < vec_len(paradigm_errs) {
-            sd: SpanDiagnostic = vec_get(paradigm_errs, k)
+        for sd in paradigm_errs {
             vec_push(errors, load_diag_span(disp, s.text, s.len, t, sd.lo, sd.hi, sd.msg))
             ok = false
-            k = k + 1
         }
     }
     return ParsedFile { ok: ok, struct_ok: struct_ok, ast: a, src: s }
@@ -391,7 +388,7 @@ func ast_import_strings(a: *Ast) -> *Vector<string> {
     mut i: int64 = 0
     while i < vec_len(imps) {
         vec_push(out, ast_name(a, vec_get(imps, i)))
-        i = i + 1
+        i++
     }
     return out
 }
@@ -416,73 +413,73 @@ func shift_item_spans(a: *Ast, base: int64) -> void {
     mut i: int64 = 0
     while i < vec_len(funcs) {
         mut f: FuncNode = vec_get(funcs, i)
-        f.lo = f.lo + base
-        f.hi = f.hi + base
+        f.lo += base
+        f.hi += base
         vec_set(funcs, i, f)
-        i = i + 1
+        i++
     }
     structs: *Vector<StructNode> = (*a).structs
     mut j: int64 = 0
     while j < vec_len(structs) {
         mut st: StructNode = vec_get(structs, j)
-        st.lo = st.lo + base
-        st.hi = st.hi + base
+        st.lo += base
+        st.hi += base
         vec_set(structs, j, st)
-        j = j + 1
+        j++
     }
     enums: *Vector<EnumNode> = (*a).enums
     mut k: int64 = 0
     while k < vec_len(enums) {
         mut en: EnumNode = vec_get(enums, k)
-        en.lo = en.lo + base
-        en.hi = en.hi + base
+        en.lo += base
+        en.hi += base
         vec_set(enums, k, en)
-        k = k + 1
+        k++
     }
     ifaces: *Vector<InterfaceNode> = (*a).interfaces
     mut m: int64 = 0
     while m < vec_len(ifaces) {
         mut ifc: InterfaceNode = vec_get(ifaces, m)
-        ifc.lo = ifc.lo + base
-        ifc.hi = ifc.hi + base
+        ifc.lo += base
+        ifc.hi += base
         vec_set(ifaces, m, ifc)
-        m = m + 1
+        m++
     }
     impls: *Vector<ImplNode> = (*a).impls
     mut n: int64 = 0
     while n < vec_len(impls) {
         mut im: ImplNode = vec_get(impls, n)
-        im.lo = im.lo + base
-        im.hi = im.hi + base
+        im.lo += base
+        im.hi += base
         vec_set(impls, n, im)
-        n = n + 1
+        n++
     }
     foreigns: *Vector<ForeignNode> = (*a).foreigns
     mut q: int64 = 0
     while q < vec_len(foreigns) {
         mut fb: ForeignNode = vec_get(foreigns, q)
-        fb.lo = fb.lo + base
-        fb.hi = fb.hi + base
+        fb.lo += base
+        fb.hi += base
         vec_set(foreigns, q, fb)
-        q = q + 1
+        q++
     }
     sigs: *Vector<MethodSigNode> = (*a).method_sigs
     mut t: int64 = 0
     while t < vec_len(sigs) {
         mut ms: MethodSigNode = vec_get(sigs, t)
-        ms.lo = ms.lo + base
-        ms.hi = ms.hi + base
+        ms.lo += base
+        ms.hi += base
         vec_set(sigs, t, ms)
-        t = t + 1
+        t++
     }
     ffs: *Vector<ForeignFuncNode> = (*a).foreign_funcs
     mut u: int64 = 0
     while u < vec_len(ffs) {
         mut ff: ForeignFuncNode = vec_get(ffs, u)
-        ff.lo = ff.lo + base
-        ff.hi = ff.hi + base
+        ff.lo += base
+        ff.hi += base
         vec_set(ffs, u, ff)
-        u = u + 1
+        u++
     }
 }
 
@@ -548,9 +545,7 @@ func require_aliases(ps: *PkgSet, idx: int64, alias_file: *Map<string, string>, 
     out: *Map<string, int64> = new_set()
     m: *Manifest = pkg_manifest(ps, idx)
     rv: *Vector<*Require> = (*m).requires
-    mut i: int64 = 0
-    while i < vec_len(rv) {
-        rq: *Require = vec_get(rv, i)
+    for rq in rv {
         key: string = copy_string((*rq).alias)
         map_put(out, key, 1)
         // Where the alias was chosen, so a fault about the alias itself is raised at the
@@ -561,7 +556,6 @@ func require_aliases(ps: *PkgSet, idx: int64, alias_file: *Map<string, string>, 
             map_put(alias_file, key, pkg_manifest_display(ps, idx))
             map_put(alias_line, key, (*rq).line)
         }
-        i = i + 1
     }
     return out
 }
@@ -650,9 +644,7 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
     while vec_len(work) > 0 {
         w: WorkItem = pop_work(work)
         imps: *Vector<string> = w.imports
-        mut i: int64 = 0
-        while i < vec_len(imps) {
-            imp: string = vec_get(imps, i)
+        for imp in imps {
             r: Resolved = resolve(imp, w.dir, stdlib, ps, w.pkg, w.importer, errors)
             if !r.ok {
                 // A resolution that failed with a fault of its own, a checkout that is
@@ -737,7 +729,6 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
                     }
                 }
             }
-            i = i + 1
         }
     }
 

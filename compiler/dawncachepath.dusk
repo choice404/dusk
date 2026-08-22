@@ -74,7 +74,7 @@ func safe_part(part: string) -> string {
         if part[i] != 46 {
             all_dots = false
         }
-        i = i + 1
+        i++
     }
     b: *StringBuilder = alloc(sb_new())
     mut j: int64 = 0
@@ -87,7 +87,7 @@ func safe_part(part: string) -> string {
         } else {
             sb_push_char(b, 95)
         }
-        j = j + 1
+        j++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -108,7 +108,7 @@ func url_tail(url: string) -> string {
         if cut > 0 {
             head: string = substring(body, 0, cut)
             rest: string = substring(body, cut + 1, str_len(body))
-            out: string = head + "/" + rest
+            out: string = f"{head}/{rest}"
             free(head)
             free(rest)
             free(body)
@@ -142,7 +142,7 @@ func drop_git_suffix(tail: string) -> string {
     mut cutting: bool = n > 0
     while cutting {
         if tail[n - 1] == 47 {
-            n = n - 1
+            n--
             cutting = n > 0
         } else {
             cutting = false
@@ -186,9 +186,7 @@ func cache_key(url: string) -> string {
     parts: *Vector<string> = str_split(trimmed, "/")
     b: *StringBuilder = alloc(sb_new())
     mut wrote: int64 = 0
-    mut i: int64 = 0
-    while i < vec_len(parts) {
-        one: string = vec_get(parts, i)
+    for one in parts {
         if str_len(one) > 0 {
             safe: string = safe_part(one)
             if str_len(safe) > 0 {
@@ -196,11 +194,10 @@ func cache_key(url: string) -> string {
                     sb_push_char(b, 47)
                 }
                 sb_push(b, safe)
-                wrote = wrote + 1
+                wrote++
             }
             free(safe)
         }
-        i = i + 1
     }
     if wrote > 0 {
         mark: string = identity_mark(trimmed)
@@ -238,7 +235,7 @@ export func dawn_mirror_path(url: string) -> string {
     base: string = path_join(root, key)
     free(root)
     free(key)
-    out: string = base + ".git"
+    out: string = f"{base}.git"
     free(base)
     return out
 }

@@ -41,7 +41,7 @@ func unbind_scoped(bound: *Map<string, int64>, added: *Vector<string>) -> void {
     mut i: int64 = 0
     while i < vec_len(added) {
         map_remove(bound, vec_get(added, i))
-        i = i + 1
+        i++
     }
 }
 
@@ -64,7 +64,7 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, 
         mut i: int64 = 0
         while i < e.c {
             collect_capture_expr(tc, vec_get((*a).kids, e.b + i), bound, seen, out)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_field() || e.kind == xk_index() {
         collect_capture_expr(tc, e.a, bound, seen, out)
@@ -73,13 +73,13 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, 
         mut j: int64 = 0
         while j < e.b {
             collect_capture_expr(tc, vec_get((*a).kids, e.a + j), bound, seen, out)
-            j = j + 1
+            j++
         }
     } else if e.kind == xk_struct_lit() {
         mut k: int64 = 1
         while k < e.c {
             collect_capture_expr(tc, vec_get((*a).kids, e.b + k), bound, seen, out)
-            k = k + 2
+            k += 2
         }
     } else if e.kind == xk_lambda() {
         added: *Vector<string> = alloc(vec_new())
@@ -87,7 +87,7 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, 
         while p < e.b {
             pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
             bind_scoped(bound, ast_name(a, pn.name), added)
-            p = p + 1
+            p++
         }
         collect_capture_block(tc, e.d, bound, seen, out)
         unbind_scoped(bound, added)
@@ -100,7 +100,7 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, 
             collect_capture_pat(tc, arm.pat, bound, marm)
             collect_capture_block(tc, arm.body, bound, seen, out)
             unbind_scoped(bound, marm)
-            m = m + 1
+            m++
         }
     } else if e.kind == xk_ifexpr() {
         // A branch body is a block with its own scope, so each is walked with the block's
@@ -128,7 +128,7 @@ func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<string, in
         mut i: int64 = 0
         while i < p.c {
             bind_scoped(bound, ast_name(a, vec_get((*a).kids, p.b + i)), added)
-            i = i + 1
+            i++
         }
     }
 }
@@ -142,7 +142,7 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, 
         while i < s.b {
             b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             bind_scoped(bound, ast_name(a, b.name), added)
-            i = i + 1
+            i++
         }
     } else if s.kind == sk_assign() {
         collect_capture_expr(tc, s.a, bound, seen, out)
@@ -178,7 +178,7 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, 
             collect_capture_pat(tc, arm.pat, bound, marm)
             collect_capture_block(tc, arm.body, bound, seen, out)
             unbind_scoped(bound, marm)
-            m = m + 1
+            m++
         }
     }
 }
@@ -197,7 +197,7 @@ func collect_capture_block(tc: *TypeChecker, block_id: int64, bound: *Map<string
     mut i: int64 = 0
     while i < b.len {
         collect_capture_stmt(tc, vec_get((*a).kids, b.off + i), bound, seen, out, added)
-        i = i + 1
+        i++
     }
     unbind_scoped(bound, added)
 }
@@ -211,7 +211,7 @@ export func lambda_captures(tc: *TypeChecker, e: ExprNode) -> *Vector<string> {
     while i < e.b {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         map_put(bound, ast_name(a, p.name), 1)
-        i = i + 1
+        i++
     }
     collect_capture_block(tc, e.d, bound, seen, out)
     return out
@@ -231,13 +231,13 @@ export func collect_embedded(tc: *TypeChecker, expr_id: int64, out: *Vector<stri
         mut i: int64 = 0
         while i < e.b {
             collect_embedded(tc, vec_get((*a).kids, e.a + i), out)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_struct_lit() {
         mut j: int64 = 1
         while j < e.c {
             collect_embedded(tc, vec_get((*a).kids, e.b + j), out)
-            j = j + 2
+            j += 2
         }
     } else if e.kind == xk_call() {
         // An enum constructor is a carrier like a literal: its payload arguments are
@@ -250,7 +250,7 @@ export func collect_embedded(tc: *TypeChecker, expr_id: int64, out: *Vector<stri
             mut k: int64 = 0
             while k < e.c {
                 collect_embedded(tc, vec_get((*a).kids, e.b + k), out)
-                k = k + 1
+                k++
             }
         }
     }
@@ -280,13 +280,13 @@ func binding_alias_targets(tc: *TypeChecker, expr_id: int64) -> *Vector<string> 
         mut i: int64 = 0
         while i < e.b {
             collect_embedded(tc, vec_get((*a).kids, e.a + i), out)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_struct_lit() {
         mut j: int64 = 1
         while j < e.c {
             collect_embedded(tc, vec_get((*a).kids, e.b + j), out)
-            j = j + 2
+            j += 2
         }
     } else if e.kind == xk_call() {
         vname: string = variant_name(tc, e.a)
@@ -294,7 +294,7 @@ func binding_alias_targets(tc: *TypeChecker, expr_id: int64) -> *Vector<string> 
             mut k: int64 = 0
             while k < e.c {
                 collect_embedded(tc, vec_get((*a).kids, e.b + k), out)
-                k = k + 1
+                k++
             }
         } else {
             callee: ExprNode = vec_get((*a).exprs, e.a)
@@ -318,7 +318,7 @@ export func link_binding_aliases(tc: *TypeChecker, name: string, expr_id: int64,
     mut i: int64 = 0
     while i < vec_len(targets) {
         alias_link(tc, name, vec_get(targets, i))
-        i = i + 1
+        i++
     }
 }
 
@@ -331,16 +331,13 @@ func slice_source_buries_view(tc: *TypeChecker, expr_id: int64) -> bool {
         mut i: int64 = 0
         while i < vec_len(group) {
             vec_push(ptrs, vec_get(group, i))
-            i = i + 1
+            i++
         }
     } else {
         collect_embedded(tc, expr_id, ptrs)
     }
-    mut j: int64 = 0
-    while j < vec_len(ptrs) {
-        name: string = vec_get(ptrs, j)
+    for name in ptrs {
         if is_managed_ty(tc, lookup(tc, name)) && (is_esc_slice(tc, name) || is_esc_closure(tc, name)) { return true }
-        j = j + 1
     }
     return false
 }
@@ -367,9 +364,7 @@ export func check_collect_captures(tc: *TypeChecker, arg_id: int64, lo: int64, h
         return
     }
     caps: *Vector<string> = lambda_captures(tc, arg)
-    mut i: int64 = 0
-    while i < vec_len(caps) {
-        name: string = vec_get(caps, i)
+    for name in caps {
         if ty_reaches_view(tc, lookup(tc, name)) || is_esc_slice(tc, name) || is_esc_closure(tc, name) {
             b: *StringBuilder = alloc(sb_new())
             sb_push(b, "cannot collect a closure that captures '")
@@ -382,7 +377,6 @@ export func check_collect_captures(tc: *TypeChecker, arg_id: int64, lo: int64, h
             free(b)
             tc_emit(tc, msg, lo, hi)
         }
-        i = i + 1
     }
 }
 
@@ -440,7 +434,7 @@ export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_ty: int
                 oname: string = ast_name(a, vec_get((*a).kids, p.b + oi))
                 set_esc(tc, oname, scrut.slice, scrut.closure)
                 link_binding_aliases(tc, oname, scrut_id, false)
-                oi = oi + 1
+                oi++
             }
             return
         }
@@ -452,7 +446,7 @@ export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_ty: int
             pty: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
             if (scrut.slice || scrut.closure) && member_carries_view(tc, pty) { set_esc(tc, bname, scrut.slice, scrut.closure) }
             if links_as_alias(tc, pty) { link_binding_aliases(tc, bname, scrut_id, false) }
-            i = i + 1
+            i++
         }
     } else if p.kind == pk_ident() {
         name: string = ast_name(a, p.a)
@@ -474,21 +468,15 @@ export func esc_snapshot(tc: *TypeChecker) -> string {
 }
 
 func snap_stack(b: *StringBuilder, stack: *Vector<*Map<string, int64>>) -> void {
-    mut i: int64 = 0
-    while i < vec_len(stack) {
-        m: *Map<string, int64> = vec_get(stack, i)
+    for m in stack {
         keys: *Vector<string> = map_keys(m)
-        mut j: int64 = 0
-        while j < vec_len(keys) {
-            k: string = vec_get(keys, j)
+        for k in keys {
             sb_push(b, k)
             sb_push_char(b, 61)
             sb_push_int(b, unwrap_or(map_get(m, k), 0))
             sb_push_char(b, 59)
-            j = j + 1
         }
         sb_push_char(b, 47)
-        i = i + 1
     }
 }
 

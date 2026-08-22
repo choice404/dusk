@@ -97,7 +97,7 @@ export func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFn
         }
         vec_push(argfrags, fscall_arg(vll, vop))
         free(vll)
-        i = i + 1
+        i++
     }
     argb: *StringBuilder = alloc(sb_new())
     mut ai: int64 = 0
@@ -105,7 +105,7 @@ export func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFn
         if ai > 0 { sb_push(argb, ", ") }
         frag: string = vec_get(argfrags, ai)
         sb_push(argb, frag)
-        ai = ai + 1
+        ai++
     }
     arg_text: string = gs_built(argb)
     sb_free(argb)
@@ -123,8 +123,8 @@ export func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFn
         pll: string = cty_ll(c, vec_get(params, p))
         sb_push(sigb, pll)
         free(pll)
-        wrote = wrote + 1
-        p = p + 1
+        wrote++
+        p++
     }
     if wrote > 0 { sb_push(sigb, ", ...") } else { sb_push(sigb, "...") }
     sb_push_char(sigb, 41)
@@ -350,10 +350,8 @@ func fscall_emit(s: *GenFuncState, retll: string, name: string, arg_text: string
 export func fscall_needs_abi(c: *CTyArena, sig: GenFnSig) -> bool {
     if cabi_is_struct(c, sig.ret) { return true }
     ps: *Vector<int64> = sig.params
-    mut i: int64 = 0
-    while i < vec_len(ps) {
-        if cabi_is_struct(c, vec_get(ps, i)) { return true }
-        i = i + 1
+    for pty in ps {
+        if cabi_is_struct(c, pty) { return true }
     }
     return false
 }
@@ -419,7 +417,7 @@ export func gen_foreign_struct_call(s: *GenFuncState, name: string, sig: GenFnSi
                 free(ll)
             }
         }
-        i = i + 1
+        i++
     }
     argb: *StringBuilder = alloc(sb_new())
     mut k: int64 = 0
@@ -427,7 +425,7 @@ export func gen_foreign_struct_call(s: *GenFuncState, name: string, sig: GenFnSi
         if k > 0 { sb_push(argb, ", ") }
         frag: string = vec_get(args, k)
         sb_push(argb, frag)
-        k = k + 1
+        k++
     }
     arg_text: string = gs_built(argb)
     sb_free(argb)

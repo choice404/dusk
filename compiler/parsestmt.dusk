@@ -354,15 +354,12 @@ func parse_do_stmt(p: *Parser) -> int64 {
             cond: int64 = parse_expr_no_struct(p)
             if monad_id >= 0 { p_error(p, "a 'do while' loop takes no monad name") }
             stmts: *Vector<int64> = alloc(vec_new())
-            mut i: int64 = 0
-            while i < vec_len(elems) {
-                el: DoElemNode = vec_get(elems, i)
+            for el in elems {
                 if el.kind == 1 {
                     vec_push(stmts, el.a)
                 } else {
                     p_error(p, "monadic bind '<-' is not allowed in a do while loop")
                 }
-                i = i + 1
             }
             body: int64 = ast_block(p_ast(p), stmts)
             return ast_stmt(p_ast(p), sk_while(), cond, body, 1, 0)
@@ -412,7 +409,7 @@ func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
             p_leave_nesting(p)
             reading = false
         } else {
-            steps = steps + 1
+            steps++
             before: int64 = (*p).pos
             if p_kind(p) == k_ident() {
                 if p_kind2(p) == k_larrow() {
@@ -445,9 +442,7 @@ func parse_do_block_elems(p: *Parser) -> (int64, *Vector<DoElemNode>) {
 
 func do_to_expr(p: *Parser, monad_id: int64, elems: *Vector<DoElemNode>, lo: int64) -> int64 {
     binds: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < vec_len(elems) {
-        el: DoElemNode = vec_get(elems, i)
+    for el in elems {
         if el.kind == 0 {
             vec_push(binds, ast_do_bind(p_ast(p), el.a, el.b))
         } else {
@@ -458,7 +453,6 @@ func do_to_expr(p: *Parser, monad_id: int64, elems: *Vector<DoElemNode>, lo: int
                 p_error(p, "do notation allows only 'x <- e' binds and a final expression")
             }
         }
-        i = i + 1
     }
     if vec_len(binds) > 0 {
         last_id: int64 = vec_get(binds, vec_len(binds) - 1)

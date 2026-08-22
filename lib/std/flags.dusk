@@ -84,7 +84,7 @@ func flags_find(f: *Flags, name: string) -> int64 {
         if str_eq(s.name, name) {
             return i
         }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -263,13 +263,13 @@ export func flags_parse(f: *Flags, argv: string[], start: int64) -> error {
         tok: string = argv[i]
         if only_pos {
             vec_push((*f).pos, tok)
-            i = i + 1
+            i++
         } else if str_eq(tok, "--") {
             only_pos = true
-            i = i + 1
+            i++
         } else if !starts_with(tok, "--") {
             vec_push((*f).pos, tok)
-            i = i + 1
+            i++
         } else {
             mut nexttok: string = ""
             mut has_next: bool = false
@@ -281,7 +281,7 @@ export func flags_parse(f: *Flags, argv: string[], start: int64) -> error {
             if e.exists() {
                 return e
             }
-            i = i + adv
+            i += adv
         }
     }
     return error {}
@@ -401,9 +401,7 @@ export func flags_usage(f: *Flags) -> string {
     sb_push(sb, (*f).about)
     sb_push(sb, "\n")
     specs: *Vector<FlagSpec> = (*f).specs
-    mut i: int64 = 0
-    while i < vec_len(specs) {
-        s: FlagSpec = vec_get(specs, i)
+    for s in specs {
         sb_push(sb, "  --")
         sb_push(sb, s.name)
         if s.kind == flag_kind_str() {
@@ -423,7 +421,6 @@ export func flags_usage(f: *Flags) -> string {
             sb_push(sb, ")")
         }
         sb_push(sb, "\n")
-        i = i + 1
     }
     out: string = substring(sb_cstr(sb), 0, sb_size(sb))
     sb_free(sb)
@@ -449,7 +446,7 @@ export func flags_free(f: *Flags) -> void {
                 free(s.sval)
             }
         }
-        i = i + 1
+        i++
     }
     vec_free(sv)
     free(sv)

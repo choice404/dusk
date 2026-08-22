@@ -69,7 +69,7 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -
         mut i: int64 = 0
         while i < n.len {
             if managed_reaches(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i = i + 1
+            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -82,7 +82,7 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -
             while j < st.len {
                 f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + j)
                 if managed_reaches(tc, f.ty, seen) { return true }
-                j = j + 1
+                j++
             }
         }
         enums: *Map<string, EnumSig> = (*tc).enums
@@ -94,9 +94,9 @@ func managed_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -
                 mut q: int64 = 0
                 while q < vs.len {
                     if managed_reaches(tc, sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, q), seen) { return true }
-                    q = q + 1
+                    q++
                 }
-                k = k + 1
+                k++
             }
         }
     }
@@ -155,7 +155,7 @@ func view_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> b
         mut i: int64 = 0
         while i < n.len {
             if view_reaches(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i = i + 1
+            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -169,7 +169,7 @@ func view_reaches(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> b
             mut j: int64 = 0
             while j < list.len {
                 if view_reaches(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
-                j = j + 1
+                j++
             }
         }
     }
@@ -206,7 +206,7 @@ func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
     while i < st.len {
         f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
         if str_eq(f.name, fname) { return f.ty }
-        i = i + 1
+        i++
     }
     return ty_unknown((*tc).ty)
 }
@@ -221,7 +221,7 @@ func field_kind_escape(tc: *TypeChecker, expr_id: int64, fty: int64) -> EscPair 
             mut i: int64 = 0
             while i < e.b {
                 out = esc_or(out, field_kind_escape(tc, vec_get((*a).kids, e.a + i), fn.a))
-                i = i + 1
+                i++
             }
             return out
         }
@@ -373,7 +373,7 @@ func value_escape_call(tc: *TypeChecker, e: ExprNode) -> EscPair {
             mut oi: int64 = 0
             while oi < e.c {
                 opaque = esc_or(opaque, value_escape(tc, vec_get((*a).kids, e.b + oi)))
-                oi = oi + 1
+                oi++
             }
             return opaque
         }
@@ -382,7 +382,7 @@ func value_escape_call(tc: *TypeChecker, e: ExprNode) -> EscPair {
         mut i: int64 = 0
         while i < e.c && i < vs.len {
             out = esc_or(out, field_kind_escape(tc, vec_get((*a).kids, e.b + i), sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)))
-            i = i + 1
+            i++
         }
         return out
     }
@@ -401,7 +401,7 @@ func pat_binds_name(tc: *TypeChecker, pat_id: int64, name: string) -> bool {
         mut i: int64 = 0
         while i < p.c {
             if str_eq(ast_name(a, vec_get((*a).kids, p.b + i)), name) { return true }
-            i = i + 1
+            i++
         }
     }
     return false
@@ -425,7 +425,7 @@ func value_escape_match(tc: *TypeChecker, e: ExprNode) -> EscPair {
                 if projects { out = esc_or(out, scrut) } else { out = esc_or(out, value_escape(tc, st.a)) }
             }
         }
-        i = i + 1
+        i++
     }
     return out
 }
@@ -441,7 +441,7 @@ func value_escape_ifexpr(tc: *TypeChecker, e: ExprNode) -> EscPair {
     while i < branch_count(a, e) {
         tail: int64 = branch_tail_at(a, e, i)
         if tail >= 0 { out = esc_or(out, value_escape(tc, tail)) }
-        i = i + 1
+        i++
     }
     return out
 }
@@ -478,7 +478,7 @@ export func value_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
         mut i: int64 = 0
         while i < e.b {
             out = esc_or(out, value_escape(tc, vec_get((*a).kids, e.a + i)))
-            i = i + 1
+            i++
         }
         return out
     }
@@ -490,7 +490,7 @@ export func value_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
             fname: string = ast_name(a, vec_get((*a).kids, e.b + j))
             val: int64 = vec_get((*a).kids, e.b + j + 1)
             out2 = esc_or(out2, field_kind_escape(tc, val, struct_field_ty(tc, sname, fname)))
-            j = j + 2
+            j += 2
         }
         return out2
     }
@@ -552,7 +552,7 @@ func escape_walk(tc: *TypeChecker, expr_id: int64, declared: int64, inferred: in
                 mut it: int64 = ty_unknown((*tc).ty)
                 if inf.kind == tyk_tuple() && i < inf.len { it = vec_get((*(*tc).ty).kids, inf.off + i) }
                 escape_walk(tc, vec_get((*a).kids, e.a + i), vec_get((*(*tc).ty).kids, dn.off + i), it)
-                i = i + 1
+                i++
             }
         } else {
             esc2: EscPair = value_escape(tc, expr_id)
@@ -571,7 +571,7 @@ func escape_walk(tc: *TypeChecker, expr_id: int64, declared: int64, inferred: in
             mut j: int64 = 0
             while j < e.b {
                 escape_walk(tc, vec_get((*a).kids, e.a + j), dn.a, ty_unknown((*tc).ty))
-                j = j + 1
+                j++
             }
         } else {
             esc4: EscPair = value_escape(tc, expr_id)

@@ -168,7 +168,7 @@ func fi_block(a: *Ast, fc: ForCtx, bid: int64) -> int64 {
             if nsid != sid { changed = true }
             vec_push(ids, nsid)
         }
-        i = i + 1
+        i++
     }
     if !changed { return bid }
     return ast_block(a, ids)
@@ -188,7 +188,7 @@ func fi_arms(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool
             vec_push(ids, ast_arm(a, arm.pat, nbody))
             changed = true
         }
-        i = i + 1
+        i++
     }
     if !changed { return (off, len, false) }
     noff, nlen := ast_kids(a, ids)
@@ -271,7 +271,7 @@ func fi_expr_list(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64,
         ncid: int64 = fi_expr(a, fc, cid)
         if ncid != cid { changed = true }
         vec_push(ids, ncid)
-        i = i + 1
+        i++
     }
     if !changed { return (off, len, false) }
     noff, nlen := ast_kids(a, ids)
@@ -291,7 +291,7 @@ func fi_field_pairs(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int6
         if nexpr != expr_kid { changed = true }
         vec_push(ids, name_kid)
         vec_push(ids, nexpr)
-        i = i + 2
+        i += 2
     }
     if !changed { return (off, len, false) }
     noff, nlen := ast_kids(a, ids)
@@ -425,7 +425,7 @@ func fi_impl(a: *Ast, fc: ForCtx, id: int64) -> int64 {
         nmid: int64 = fi_func(a, fc, mid)
         if nmid != mid { changed = true }
         vec_push(methods, nmid)
-        i = i + 1
+        i++
     }
     if !changed { return id }
     return ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)
@@ -443,9 +443,7 @@ export func foriter(a: *Ast, for_iters: *Map<int64, int64>, for_iter_asts: *Map<
     fc: ForCtx = ForCtx { classes: for_iters, asts: for_iter_asts }
     old_items: *Vector<ItemNode> = (*a).items
     new_items: *Vector<ItemNode> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < vec_len(old_items) {
-        it: ItemNode = vec_get(old_items, i)
+    for it in old_items {
         if it.kind == ik_func() {
             vec_push(new_items, ItemNode { kind: ik_func(), id: fi_func(a, fc, it.id) })
         } else if it.kind == ik_impl() {
@@ -453,7 +451,6 @@ export func foriter(a: *Ast, for_iters: *Map<int64, int64>, for_iter_asts: *Map<
         } else {
             vec_push(new_items, it)
         }
-        i = i + 1
     }
     (*a).items = new_items
 }

@@ -29,7 +29,7 @@ func has_slash(s: string) -> bool {
         if s[i] == 47 {
             return true
         }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -45,7 +45,7 @@ func dir_of(path: string) -> string {
         if path[i] == 47 {
             last = i
         }
-        i = i + 1
+        i++
     }
     if last < 0 {
         return substring(path, 0, 0)
@@ -54,7 +54,7 @@ func dir_of(path: string) -> string {
     mut stripping: bool = end > 0
     while stripping {
         if path[end - 1] == 47 {
-            end = end - 1
+            end--
             stripping = end > 0
         } else {
             stripping = false
@@ -152,9 +152,7 @@ export func collect_pkg_directives(ps: *PkgSet, pkg: int64, links: *Vector<strin
     alias: string = pkg_alias(ps, pkg)
     dep: bool = str_len(alias) > 0
     lv: *Vector<string> = (*m).links
-    mut i: int64 = 0
-    while i < vec_len(lv) {
-        v: string = vec_get(lv, i)
+    for v in lv {
         mut allowed: bool = true
         if dep {
             if has_slash(v) {
@@ -171,7 +169,6 @@ export func collect_pkg_directives(ps: *PkgSet, pkg: int64, links: *Vector<strin
                 vec_push(links, c)
             }
         }
-        i = i + 1
     }
     cv: *Vector<string> = (*m).csources
     mut j: int64 = 0
@@ -194,7 +191,7 @@ export func collect_pkg_directives(ps: *PkgSet, pkg: int64, links: *Vector<strin
         if usable {
             add_csource(csources, seen_csources, resolved)
         }
-        j = j + 1
+        j++
     }
 }
 
@@ -220,25 +217,22 @@ export func collect_directives(src: string, len: int64, file: string, disp: stri
         mut d: int64 = 0
         while d < vec_len(pe) {
             vec_push(errors, located_diag(disp, src, len, t, vec_get(pe, d)))
-            d = d + 1
+            d++
         }
     }
     lv: *Vector<string> = p.links
-    mut i: int64 = 0
-    while i < vec_len(lv) {
-        v: string = vec_get(lv, i)
+    for v in lv {
         if !map_has(seen_links, v) {
             map_put(seen_links, v, 1)
             vec_push(links, v)
         }
-        i = i + 1
     }
     cv: *Vector<string> = p.csources
     dir: string = dir_of(file)
     mut j: int64 = 0
     while j < vec_len(cv) {
         add_csource(csources, seen_csources, resolve_csource(dir, vec_get(cv, j)))
-        j = j + 1
+        j++
     }
 }
 

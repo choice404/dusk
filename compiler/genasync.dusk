@@ -34,15 +34,13 @@ export func gen_async_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode) -> string 
         vec_push(param_tys, pt)
         vec_push(sizes, sa.size)
         vec_push(aligns, sa.align)
-        i = i + 1
+        i++
     }
     // The frame layout never handles alignment over 8; a wider type must stop
     // loud rather than misplace a frame slot.
     if ret_sa.align > 8 { emit_error(m, "async frame alignment over 8") }
-    mut ai: int64 = 0
-    while ai < vec_len(aligns) {
-        if vec_get(aligns, ai) > 8 { emit_error(m, "async frame alignment over 8") }
-        ai = ai + 1
+    for align in aligns {
+        if align > 8 { emit_error(m, "async frame alignment over 8") }
     }
     prefix: FramePrefix = frame_prefix(ret_sa.size, ret_sa.align, sizes, aligns)
     mut ret_size: int64 = ret_sa.size
@@ -61,7 +59,7 @@ export func gen_async_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode) -> string 
         gep: string = next_tmp(fb)
         frame_add_param(fr, gep, vec_get(prefix.param_offs, j))
         gs_bind(st, ga_copy(ast_name(a, p2.name)), LocalVal { ty: vec_get(param_tys, j), op: gep })
-        j = j + 1
+        j++
     }
     // A using parameter names the ambient allocator, the same scan gen_func runs. The
     // param lives in the async frame (bound to its frame GEP above), so alloc and free in
@@ -75,14 +73,14 @@ export func gen_async_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode) -> string 
             (*st).allocator_name = ga_copy(ast_name(a, up.name))
             (*st).allocator_ty = cty_lower_ast(c, a, up.ty)
         }
-        ui = ui + 1
+        ui++
     }
     place_named_label(fb, "start")
     block: BlockNode = vec_get((*a).blocks, f.body)
     mut k: int64 = 0
     while k < block.len {
         if !(*st).terminated { gen_stmt(st, vec_get((*a).kids, block.off + k)) }
-        k = k + 1
+        k++
     }
     if !(*st).terminated { gen_async_return(st, -1) }
     frame_size: int64 = frame_finalize(fr)

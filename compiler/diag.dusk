@@ -169,7 +169,7 @@ func clamp_boundary(src: string, n: int64, off: int64) -> int64 {
         if is_boundary(src, n, p) {
             return p
         }
-        p = p - 1
+        p--
     }
     return p
 }
@@ -180,13 +180,13 @@ func scalar_count(src: string, n: int64, lo: int64, hi: int64) -> int64 {
     while i < hi {
         b: int64 = bytes.byte_at(src, n, i)
         if b < 128 {
-            count = count + 1
-            i = i + 1
+            count++
+            i++
         } else if b >= 192 {
-            count = count + 1
-            i = i + bytes.utf8_len(b)
+            count++
+            i += bytes.utf8_len(b)
         } else {
-            i = i + 1
+            i++
         }
     }
     return count
@@ -229,7 +229,7 @@ func line_table_fill(t: *LineTable, src: string, n: int64) -> void {
         if b >= 128 {
             ascii = false
         }
-        i = i + 1
+        i++
     }
     (*t).ascii = ascii
     (*t).built = true
@@ -281,10 +281,10 @@ func loc_at(src: string, n: int64, off0: int64) -> Loc {
     mut i: int64 = 0
     while i < off {
         if bytes.byte_at(src, n, i) == 10 {
-            line = line + 1
+            line++
             line_start = i + 1
         }
-        i = i + 1
+        i++
     }
     mut line_end: int64 = off
     mut finding_end: bool = true
@@ -294,7 +294,7 @@ func loc_at(src: string, n: int64, off0: int64) -> Loc {
         } else if bytes.byte_at(src, n, line_end) == 10 {
             finding_end = false
         } else {
-            line_end = line_end + 1
+            line_end++
         }
     }
     return loc_of(src, n, off, line, line_start, line_end, false)
@@ -357,7 +357,7 @@ export func file_for_span(files: *Vector<FileSrc>, lo: int64) -> int64 {
         if lo >= f.base {
             return i
         }
-        i = i - 1
+        i--
     }
     return -1
 }
@@ -368,15 +368,15 @@ func push_pad(b: *StringBuilder, src: string, n: int64, lo: int64, hi: int64) ->
         c: int64 = bytes.byte_at(src, n, i)
         if c == 9 {
             sb_push_char(b, 9)
-            i = i + 1
+            i++
         } else if c < 128 {
             sb_push_char(b, 32)
-            i = i + 1
+            i++
         } else if c >= 192 {
             sb_push_char(b, 32)
-            i = i + bytes.utf8_len(c)
+            i += bytes.utf8_len(c)
         } else {
-            i = i + 1
+            i++
         }
     }
 }
@@ -457,7 +457,7 @@ func caret_block(src: string, n: int64, loc: Loc, hi: int64) -> string {
     mut i: int64 = 1
     while i < width {
         sb_push_char(b, 126)
-        i = i + 1
+        i++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -533,7 +533,7 @@ export func render_diag(files: *Vector<FileSrc>, d: SpanDiagnostic) -> string {
             local_d: SpanDiagnostic = span_diag(d.lo, d.hi, d.msg)
             return with_path(f.path, render_local_in(f.src, f.len, f.lines, local_d, d.lo - f.base))
         }
-        i = i - 1
+        i--
     }
     b2: *StringBuilder = alloc(sb_new())
     sb_push(b2, "error: ")
@@ -555,7 +555,7 @@ export func load_diag_global(files: *Vector<FileSrc>, lo: int64, hi: int64, msg:
         if lo >= f.base {
             return load_diag_span(f.path, f.src, f.len, f.lines, lo - f.base, hi - f.base, msg)
         }
-        i = i - 1
+        i--
     }
     return load_diag_plain("", msg)
 }

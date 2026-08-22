@@ -38,7 +38,7 @@ func param_sig(ctx: *GenCtx, a: *Ast, f: FuncNode) -> string {
         free(ll)
         sb_push(b, " %a")
         sb_push_int(b, i)
-        i = i + 1
+        i++
     }
     out: string = gf_built(b)
     sb_free(b)
@@ -99,7 +99,7 @@ func bind_params(s: *GenFuncState, f: FuncNode) -> void {
         ptr: string = gen_alloca(s, ty)
         gen_store_slot(s, ty, op, ptr)
         gs_bind(s, gf_copy(ast_name(a, p.name)), LocalVal { ty: ty, op: ptr })
-        i = i + 1
+        i++
     }
 }
 
@@ -116,7 +116,7 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
         pc: ParamNode = vec_get((*a).params, pidc)
         pty: int64 = cty_lower_ast(c, a, pc.ty)
         if cty_is_stub(c, pty) { emit_error(m, "unsupported codegen type in function parameter") }
-        pcheck = pcheck + 1
+        pcheck++
     }
     ret_ll: string = cty_ll(c, ret_ty)
     sig: string = param_sig(ctx, a, f)
@@ -164,7 +164,7 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
             (*st).allocator_name = gf_copy(ast_name(a, up.name))
             (*st).allocator_ty = cty_lower_ast(c, a, up.ty)
         }
-        ui = ui + 1
+        ui++
     }
     block: BlockNode = vec_get((*a).blocks, f.body)
     mut i: int64 = 0
@@ -172,7 +172,7 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
         if !(*st).terminated {
             gen_stmt(st, vec_get((*a).kids, block.off + i))
         }
-        i = i + 1
+        i++
     }
     if !(*st).terminated { default_ret(st) }
     out: string = finish(fb)
@@ -204,7 +204,7 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
  sb_push(sb, " %a")
  sb_push_int(sb, i + 1)
         free(ll)
- i = i + 1
+ i++
     }
     sig: string = gf_built(sb)
  sb_free(sb)
@@ -233,7 +233,7 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
         ptr: string = gen_alloca(st, ty)
  gen_store_slot(st, ty, op, ptr)
         gs_bind(st, gf_copy(ast_name(a, p2.name)), LocalVal { ty: ty, op: ptr })
-        j = j + 1
+        j++
     }
     // A method takes a `using` allocator like a free function does; without this
     // scan the parameter binds but the ambient allocator stays unset, and bare
@@ -245,7 +245,7 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
             (*st).allocator_name = gf_copy(ast_name(a, mup.name))
             (*st).allocator_ty = cty_lower_ast(c, a, mup.ty)
         }
-        mu = mu + 1
+        mu++
     }
     block: BlockNode = vec_get((*a).blocks, f.body)
     mut k: int64 = 0

@@ -74,7 +74,7 @@ func reject_unknown_param_type(tc: *TypeChecker, tyid: int64, lo: int64, hi: int
         mut i: int64 = 0
         while i < n.c {
             reject_unknown_param_type(tc, vec_get((*a).kids, n.b + i), lo, hi)
-            i = i + 1
+            i++
         }
     } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
         reject_unknown_param_type(tc, n.a, lo, hi)
@@ -82,13 +82,13 @@ func reject_unknown_param_type(tc: *TypeChecker, tyid: int64, lo: int64, hi: int
         mut j: int64 = 0
         while j < n.b {
             reject_unknown_param_type(tc, vec_get((*a).kids, n.a + j), lo, hi)
-            j = j + 1
+            j++
         }
     } else if n.kind == tk_func() {
         mut k: int64 = 0
         while k < n.b {
             reject_unknown_param_type(tc, vec_get((*a).kids, n.a + k), lo, hi)
-            k = k + 1
+            k++
         }
         reject_unknown_param_type(tc, n.c, lo, hi)
     }
@@ -158,7 +158,7 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
         }
         n: TyNode = ty_get((*tc).ty, tyid)
         if n.kind == tyk_error() { declare_err(tc, ast_name(a, p.name), f.lo, f.hi) }
-        i = i + 1
+        i++
     }
 }
 
@@ -243,7 +243,7 @@ func check_export_sig(tc: *TypeChecker, f: FuncNode) -> void {
         } else if !export_scalar_ok(tc, tyid) {
             tc_emit(tc, export_ty_msg("parameter", ast_name(a, p.name)), f.lo, f.hi)
         }
-        i = i + 1
+        i++
     }
     rid: int64 = tc_type(tc, f.ret)
     rn: TyNode = ty_get((*tc).ty, rid)
@@ -336,7 +336,7 @@ func stmt_returns(a: *Ast, sid: int64) -> bool {
         while i < s.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
             if !block_returns(a, arm.body) { return false }
-            i = i + 1
+            i++
         }
         return true
     }
@@ -348,7 +348,7 @@ export func block_returns(a: *Ast, bid: int64) -> bool {
     mut i: int64 = 0
     while i < b.len {
         if stmt_returns(a, vec_get((*a).kids, b.off + i)) { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -357,9 +357,7 @@ export func tc_run(tc: *TypeChecker) -> void {
     check_duplicate_impls(tc)
     a: *Ast = (*tc).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             check_func(tc, vec_get((*a).funcs, it.id), "")
         } else if it.kind == ik_impl() {
@@ -379,13 +377,12 @@ export func tc_run(tc: *TypeChecker) -> void {
                 mut j: int64 = 0
                 while j < im.methods_len {
                     check_func(tc, vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j)), ast_name(a, im.ty))
-                    j = j + 1
+                    j++
                 }
             }
         } else if it.kind == ik_foreign() {
             check_foreign(tc, vec_get((*a).foreigns, it.id))
         }
-        i = i + 1
     }
 }
 
@@ -406,7 +403,7 @@ export func typeck_run_with_info(a: *Ast, info: EscapeInfo) -> *TypeChecker {
     while i < vec_len(stores) {
         fs: FlowProv = vec_get(stores, i)
         tc_emit(tc, frame_store_msg(fs.dst), fs.lo, fs.hi)
-        i = i + 1
+        i++
     }
     tc_run(tc)
     return tc
@@ -415,10 +412,6 @@ export func typeck_run_with_info(a: *Ast, info: EscapeInfo) -> *TypeChecker {
 export func typeck_check_with_info(a: *Ast, info: EscapeInfo) -> *Vector<SpanDiagnostic> {
     tc: *TypeChecker = typeck_run_with_info(a, info)
     return (*tc).errors
-}
-
-export func typeck_check(a: *Ast) -> *Vector<SpanDiagnostic> {
-    return typeck_check_with_info(a, compute_escape_info(a))
 }
 
 // The ground double pass: types, widths, arguments, and exhaustiveness only, over

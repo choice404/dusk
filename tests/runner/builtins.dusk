@@ -21,7 +21,7 @@ func trim_end(s: string) -> string {
     while n > 0 {
         c: char = s[n - 1]
         if c == 10 || c == 13 || c == 32 || c == 9 {
-            n = n - 1
+            n--
         } else {
             return substring(s, 0, n)
         }
@@ -130,10 +130,10 @@ func run_installed(prefix: string, qp: string) -> string {
     code: int64 = slurp_int(prefix + "/code.txt")
     out: string = slurp(prefix + "/out.txt")
     if code != 0 {
-        return "the installed compiler exited with code " + int_to_string(code)
+        return f"the installed compiler exited with code {code}"
     }
     if !str_eq(out, "hello, world\n") {
-        return "installed run printed '" + out + "', want 'hello, world\\n'"
+        return f"installed run printed '{out}', want 'hello, world\\n'"
     }
     return ""
 }
@@ -166,12 +166,12 @@ func embed_c_lib(bin: string) -> string {
     }
     code: int64 = slurp_int("target/testrun/embed_code.txt")
     if code != 0 {
-        return "the embedded host exited with code " + int_to_string(code)
+        return f"the embedded host exited with code {code}"
     }
     out: string = slurp("target/testrun/embed_out.txt")
     want: string = "add=42\nscale=4.50\nsum=10\n"
     if !str_eq(out, want) {
-        return "embedded host printed '" + out + "', want '" + want + "'"
+        return f"embedded host printed '{out}', want '{want}'"
     }
     free(qbin)
     return ""
@@ -185,15 +185,15 @@ func expect_fault(cmd: string, want_err: string, tag: string) -> string {
     rc: int64 = run(line)
     free(line)
     if rc != 0 {
-        return "the harness could not run the " + tag + " host"
+        return f"the harness could not run the {tag} host"
     }
     code: int64 = slurp_int("target/testrun/efault_code.txt")
     if code == 0 {
-        return "the " + tag + " export returned instead of faulting"
+        return f"the {tag} export returned instead of faulting"
     }
     err: string = slurp("target/testrun/efault_err.txt")
     if !str_contains(err, want_err) {
-        return "the " + tag + " fault printed '" + err + "', want a line containing '" + want_err + "'"
+        return f"the {tag} fault printed '{err}', want a line containing '{want_err}'"
     }
     return ""
 }
@@ -247,5 +247,5 @@ export func run_special(rec: Record, bin: string) -> string {
     if starts_with(name, "dawn_") {
         return run_dawn_special(name, bin)
     }
-    return "unknown special '" + name + "'"
+    return f"unknown special '{name}'"
 }

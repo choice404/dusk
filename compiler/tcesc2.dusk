@@ -72,14 +72,14 @@ export func call_result_escape(tc: *TypeChecker, callee_id: int64, arg_off: int6
         mut i: int64 = 0
         while i < arg_len && i < 64 {
             out = esc_or(out, value_escape(tc, vec_get((*a).kids, arg_off + i)))
-            i = i + 1
+            i++
         }
     } else {
         mask: int64 = ce.sum.returns_alias | ce.sum.reads_through
         mut j: int64 = 0
         while j < arg_len && j < 64 {
             if ps_has(mask, j) { out = esc_or(out, value_escape(tc, vec_get((*a).kids, arg_off + j))) }
-            j = j + 1
+            j++
         }
     }
     return out
@@ -105,7 +105,7 @@ export func call_frame_origin(tc: *TypeChecker, e: ExprNode) -> FrameOrigin {
         while i < e.c && i < 64 {
             esc: EscPair = value_escape(tc, vec_get((*a).kids, e.b + i))
             if esc.slice || esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: i } }
-            i = i + 1
+            i++
         }
     } else {
         mask: int64 = ce.sum.returns_alias | ce.sum.reads_through
@@ -115,7 +115,7 @@ export func call_frame_origin(tc: *TypeChecker, e: ExprNode) -> FrameOrigin {
                 esc: EscPair = value_escape(tc, vec_get((*a).kids, e.b + j))
                 if esc.slice || esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: j } }
             }
-            j = j + 1
+            j++
         }
     }
     return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 }
@@ -229,7 +229,7 @@ export func struct_lit_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
             name: string = ast_name(a, ie.a)
             if map_has(fp, name) { return unwrap_or(map_get(fp, name), no_flow_prov()) }
         }
-        j = j + 2
+        j += 2
     }
     return no_flow_prov()
 }
@@ -490,7 +490,7 @@ func check_opaque_call_send(tc: *TypeChecker, callee_id: int64, arg_off: int64, 
                 tc_emit(tc, "this call may store a closure that captures the current frame beyond it; put the captured backing on the heap", lo, hi)
             }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -542,15 +542,15 @@ func apply_lambda_capture_flows(tc: *TypeChecker, callee_id: int64, arg_off: int
         while caps[p] != 44 {
             digit: int64 = caps[p]
             idx = idx * 10 + (digit - 48)
-            p = p + 1
+            p++
         }
-        p = p + 1
+        p++
         cb: *StringBuilder = alloc(sb_new())
         while caps[p] != 59 {
             sb_push_char(cb, caps[p])
-            p = p + 1
+            p++
         }
-        p = p + 1
+        p++
         bname: string = substring(sb_cstr(cb), 0, sb_size(cb))
         sb_free(cb)
         free(cb)
@@ -599,7 +599,7 @@ func check_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
                 }
             }
         }
-        j = j + 1
+        j++
     }
 }
 
@@ -629,7 +629,7 @@ func check_lambda_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64,
                 }
             }
         }
-        j = j + 1
+        j++
     }
 }
 
@@ -694,7 +694,7 @@ func apply_call_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
     mut s: int64 = 0
     while s < arg_len {
         vec_push(src, value_escape(tc, vec_get((*a).kids, arg_off + s)))
-        s = s + 1
+        s++
     }
     mut x: int64 = 0
     while x < arg_len && x < 64 {
@@ -711,10 +711,10 @@ func apply_call_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
                 if edge {
                     route_flow_edge(tc, x, y, src_esc, vec_get((*a).kids, arg_off + y), lo, hi)
                 }
-                y = y + 1
+                y++
             }
         }
-        x = x + 1
+        x++
     }
 }
 

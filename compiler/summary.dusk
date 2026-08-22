@@ -76,7 +76,7 @@ export struct SumTables {
  *  never read back out of the cache. The lexical caches are untouched: the AST they
  *  read does not move. */
 export func sum_lambda_cache_reset(t: *SumTables) -> void {
-    (*t).lam_cache_gen = (*t).lam_cache_gen + 1
+    (*t).lam_cache_gen++
 }
 
 /** The escape info the enforcement step reads. summaries and method_summaries are
@@ -112,12 +112,6 @@ export func ps_single(i: int64) -> int64 {
 export func ps_has(mask: int64, i: int64) -> bool {
     return i >= 0 && i < 64 && (mask & (1 << i)) != 0
 }
-/** The union of two parameter-index sets.
- *  @param a the first bitmask
- *  @param b the second bitmask
- *  @return the bitmask holding every index in either set */
-export func ps_union(a: int64, b: int64) -> int64 { return a | b }
-
 /** The bottom abstract value: no origins, no reads, and not a frame view, the lattice
  *  identity the dataflow join starts from.
  *  @return an empty SumVal */
@@ -230,9 +224,7 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
     variant_by_enum: *Map<string, int64> = alloc(map_new())
     module_fns: *Map<string, int64> = alloc(map_new())
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_interface() {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)
             map_put(ifaces, ast_name(a, iface.name), 1)
@@ -252,13 +244,12 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
                     map_put(variant_idx, vname, vid)
                     map_put(variant_by_enum, sum_variant_key(ename, vname), vid)
                 }
-                k = k + 1
+                k++
             }
         } else if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             map_put(module_fns, ast_name(a, f.name), 1)
         }
-        i = i + 1
     }
     infer_ty: int64 = ast_type(a, tk_infer(), 0, 0, 0)
     fn_bind_cache: *Map<int64, *Map<string, string>> = alloc(map_new())
@@ -276,7 +267,7 @@ func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
     mut i: int64 = 0
     while i < len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
-        i = i + 1
+        i++
     }
     return g
 }
@@ -300,7 +291,7 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
         while i < n.b {
             elem: int64 = vec_get(kids, n.a + i)
             if is_view_rec(t, elem, gens, seen) { return true }
-            i = i + 1
+            i++
         }
         return false
     }
@@ -325,7 +316,7 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
                 fid: int64 = vec_get(kids, st.fields_off + j)
                 fld: FieldNode = vec_get((*a).fields, fid)
                 if is_view_rec(t, fld.ty, sgen, seen) { return true }
-                j = j + 1
+                j++
             }
             return false
         }
@@ -343,9 +334,9 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
                     f2id: int64 = vec_get(kids, vr.fields_off + q)
                     fld2: FieldNode = vec_get((*a).fields, f2id)
                     if is_view_rec(t, fld2.ty, egen, seen) { return true }
-                    q = q + 1
+                    q++
                 }
-                k = k + 1
+                k++
             }
             return false
         }
@@ -377,7 +368,7 @@ func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<string, int64>) -> bool 
         while i < n.b {
             elem: int64 = vec_get(kids, n.a + i)
             if reaches_rec(t, elem, seen) { return true }
-            i = i + 1
+            i++
         }
         return false
     }
@@ -388,7 +379,7 @@ func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<string, int64>) -> bool 
         while c < n.c {
             arg: int64 = vec_get(kids, n.b + c)
             if reaches_rec(t, arg, seen) { return true }
-            c = c + 1
+            c++
         }
         name: string = ast_name(a, n.a)
         if map_has(seen, name) { return false }
@@ -400,7 +391,7 @@ func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<string, int64>) -> bool 
                 fid: int64 = vec_get(kids, st.fields_off + j)
                 fld: FieldNode = vec_get((*a).fields, fid)
                 if reaches_rec(t, fld.ty, seen) { return true }
-                j = j + 1
+                j++
             }
         }
         if map_has(eidx, name) {
@@ -414,9 +405,9 @@ func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<string, int64>) -> bool 
                     f2id: int64 = vec_get(kids, vr.fields_off + q)
                     fld2: FieldNode = vec_get((*a).fields, f2id)
                     if reaches_rec(t, fld2.ty, seen) { return true }
-                    q = q + 1
+                    q++
                 }
-                k = k + 1
+                k++
             }
         }
         return false

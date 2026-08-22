@@ -87,7 +87,7 @@ func check_branch_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
                 tc_emit(tc, "a branch of an if expression cannot yield a lambda; bind the function to a name outside the if", tail.lo, tail.hi)
             }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -124,7 +124,7 @@ export func walk_ifexpr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
     if cn.kind != tyk_bool() && cn.kind != tyk_unknown() {
         tc_emit(tc, "if condition must be a bool", cond.lo, cond.hi)
     }
-    (*tc).branch_depth = (*tc).branch_depth + 1
+    (*tc).branch_depth++
     own_vals: *Vector<int64> = alloc(vec_new())
     copy_faults: *Vector<int64> = alloc(vec_new())
     own_tails: *Vector<int64> = alloc(vec_new())
@@ -168,9 +168,9 @@ export func walk_ifexpr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
         }
         if tail_id >= 0 {
             if nest_hint { (*tc).match_ctx = 1 }
-            (*tc).suppress = (*tc).suppress + 1
+            (*tc).suppress++
             at: int64 = infer_expr(tc, tail_id)
-            (*tc).suppress = (*tc).suppress - 1
+            (*tc).suppress--
             if nest_hint { (*tc).match_ctx = 0 }
             if (*tc).types_only {
                 atn: TyNode = ty_get((*tc).ty, at)
@@ -191,9 +191,9 @@ export func walk_ifexpr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
             }
         }
         pop_scope(tc)
-        i = i + 1
+        i++
     }
-    (*tc).branch_depth = (*tc).branch_depth - 1
+    (*tc).branch_depth--
     check_branch_lambdas(tc, e)
     if !(*tc).types_only && (ctx == 1 || any_managed) {
         finalize_result_own(tc, id, own_vals, copy_faults, own_tails, "the branches of an if expression must agree on ownership of its result")

@@ -55,7 +55,7 @@ func params_have(a: *Ast, off: int64, len: int64, name: string) -> bool {
         if str_eq(ast_name(a, p.name), name) {
             return true
         }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -70,7 +70,7 @@ func generics_have(a: *Ast, goff: int64, glen: int64, name: string) -> bool {
         if str_eq(gname, name) {
             return true
         }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -150,14 +150,14 @@ func check_func_drift(a: *Ast, di: DocInfo, name: string, off: int64, len: int64
             if str_eq(q.name, p.name) {
                 dup = true
             }
-            k = k + 1
+            k++
         }
         if dup {
             vec_push(errs, located(p.name_lo, p.name_hi, msg_param_dup(p.name)))
         } else if !params_have(a, off, len, p.name) && !generics_have(a, goff, glen, p.name) {
             vec_push(errs, located(p.name_lo, p.name_hi, msg_param_drift(name, p.name)))
         }
-        i = i + 1
+        i++
     }
     if di.has_ret {
         if type_is_void(a, ret) {
@@ -181,13 +181,10 @@ func check_nonfunc_drift(di: DocInfo, name: string, errs: *Vector<Located>) -> v
 
 func find_docnode(a: *Ast, lo: int64, hi: int64) -> (bool, int64, int64) {
     docs: *Vector<DocNode> = (*a).docs
-    mut i: int64 = 0
-    while i < vec_len(docs) {
-        d: DocNode = vec_get(docs, i)
+    for d in docs {
         if d.lo == lo && d.hi == hi {
             return (true, d.kind, d.id)
         }
-        i = i + 1
     }
     return (false, 0, 0)
 }
@@ -216,7 +213,7 @@ func check_bound(a: *Ast, src: string, n: int64, kind: int64, id: int64, lo: int
     mut e: int64 = 0
     while e < vec_len(derrs) {
         vec_push(errs, vec_get(derrs, e))
-        e = e + 1
+        e++
     }
     if kind == dk_func() {
         f: FuncNode = vec_get((*a).funcs, id)
@@ -240,16 +237,13 @@ func check_bound(a: *Ast, src: string, n: int64, kind: int64, id: int64, lo: int
 // bound block is drift-checked. Faults accumulate in errs in source order.
 func collect_doc_errors(a: *Ast, docs: *Vector<DocBlock>, src: string, n: int64, stem: string) -> *Vector<Located> {
     errs: *Vector<Located> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < vec_len(docs) {
-        blk: DocBlock = vec_get(docs, i)
+    for blk in docs {
         found, kind, id := find_docnode(a, blk.lo, blk.hi)
         if !found {
             vec_push(errs, located(blk.lo, blk.hi, dangling_msg()))
         } else {
             check_bound(a, src, n, kind, id, blk.lo, blk.hi, stem, errs)
         }
-        i = i + 1
     }
     return errs
 }
@@ -280,12 +274,12 @@ func doc_check(path: string) -> DocCheckResult {
         mut i: int64 = 0
         while i < vec_len(lex_errs) {
             emit_located(path, src, n, vec_get(lex_errs, i))
-            i = i + 1
+            i++
         }
         mut j: int64 = 0
         while j < vec_len(parse_errs) {
             emit_located(path, src, n, vec_get(parse_errs, j))
-            j = j + 1
+            j++
         }
         return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }
     }
@@ -296,7 +290,7 @@ func doc_check(path: string) -> DocCheckResult {
         mut k: int64 = 0
         while k < vec_len(doc_errs) {
             emit_located(path, src, n, vec_get(doc_errs, k))
-            k = k + 1
+            k++
         }
         return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }
     }

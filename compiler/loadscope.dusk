@@ -235,7 +235,7 @@ export func load_add_keys(dst: *Map<string, int64>, src: *Map<string, int64>) ->
     mut i: int64 = 0
     while i < vec_len(keys) {
         map_put(dst, vec_get(keys, i), 1)
-        i = i + 1
+        i++
     }
     vec_free(keys)
     free(keys)
@@ -275,16 +275,13 @@ export func load_package_tables(a: *Ast, metas: *Vector<*FileMeta>) -> PkgTables
     moving: *Map<string, *Map<string, int64>> = alloc(map_new())
     fixed: *Map<string, *Map<string, int64>> = alloc(map_new())
     globals: *Map<string, *Map<string, int64>> = alloc(map_new())
-    mut i: int64 = 0
-    while i < vec_len(metas) {
-        m: *FileMeta = vec_get(metas, i)
+    for m in metas {
         s: string = (*m).suffix
         if str_len(s) > 0 {
             load_add_keys(bucket(moving, s), (*m).moving)
             load_add_keys(bucket(fixed, s), (*m).fixed)
             load_range_globals(a, bucket(globals, s), (*m).items_lo, (*m).items_hi)
         }
-        i = i + 1
     }
     return PkgTables { moving: moving, fixed: fixed, globals: globals }
 }
@@ -361,7 +358,7 @@ func decl_spans(a: *Ast, lo: int64, hi: int64, bare: string, scoped: string, out
                 vec_push(out, dhi)
             }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -373,25 +370,18 @@ func decl_spans(a: *Ast, lo: int64, hi: int64, bare: string, scoped: string, out
  *  declaration, in the order the loader registered the package's files. */
 export func load_check_export_dups(a: *Ast, metas: *Vector<*FileMeta>, pt: PkgTables, files: *Vector<FileSrc>, errors: *Vector<LoadDiag>) -> void {
     suffixes: *Vector<string> = map_keys(pt.moving)
-    mut i: int64 = 0
-    while i < vec_len(suffixes) {
-        sfx: string = vec_get(suffixes, i)
+    for sfx in suffixes {
         moving: *Map<string, int64> = load_lookup_set(pt.moving, sfx)
         fixed: *Map<string, int64> = load_lookup_set(pt.fixed, sfx)
         names: *Vector<string> = map_keys(moving)
-        mut j: int64 = 0
-        while j < vec_len(names) {
-            n: string = vec_get(names, j)
+        for n in names {
             if map_has(fixed, n) {
                 spans: *Vector<int64> = alloc(vec_new())
                 scoped: string = load_scoped_name(n, sfx)
-                mut k: int64 = 0
-                while k < vec_len(metas) {
-                    m: *FileMeta = vec_get(metas, k)
+                for m in metas {
                     if str_eq((*m).suffix, sfx) {
                         decl_spans(a, (*m).items_lo, (*m).items_hi, n, scoped, spans)
                     }
-                    k = k + 1
                 }
                 if vec_len(spans) >= 4 {
                     vec_push(errors, load_diag_global(files, vec_get(spans, 2), vec_get(spans, 3), exported_twice_msg(n, sfx)))
@@ -399,11 +389,9 @@ export func load_check_export_dups(a: *Ast, metas: *Vector<*FileMeta>, pt: PkgTa
                     vec_push(errors, load_diag_plain(sfx, exported_twice_msg(n, sfx)))
                 }
             }
-            j = j + 1
         }
         vec_free(names)
         free(names)
-        i = i + 1
     }
     vec_free(suffixes)
     free(suffixes)
@@ -412,24 +400,18 @@ export func load_check_export_dups(a: *Ast, metas: *Vector<*FileMeta>, pt: PkgTa
 /** Which package first exported each renamed name, over the whole program. */
 export func load_dep_export_owners(metas: *Vector<*FileMeta>) -> *Map<string, string> {
     out: *Map<string, string> = new_text_map()
-    mut i: int64 = 0
-    while i < vec_len(metas) {
-        m: *FileMeta = vec_get(metas, i)
+    for m in metas {
         s: string = (*m).suffix
         if str_len(s) > 0 {
             keys: *Vector<string> = map_keys((*m).moving)
-            mut j: int64 = 0
-            while j < vec_len(keys) {
-                k: string = vec_get(keys, j)
+            for k in keys {
                 if !map_has(out, k) {
                     map_put(out, k, s)
                 }
-                j = j + 1
             }
             vec_free(keys)
             free(keys)
         }
-        i = i + 1
     }
     return out
 }
@@ -452,15 +434,12 @@ export struct RootTables {
 export func load_root_tables(a: *Ast, metas: *Vector<*FileMeta>) -> RootTables {
     app: *Map<string, int64> = new_set()
     std_all: *Map<string, int64> = new_set()
-    mut i: int64 = 0
-    while i < vec_len(metas) {
-        m: *FileMeta = vec_get(metas, i)
+    for m in metas {
         if (*m).is_std {
             load_range_globals(a, std_all, (*m).items_lo, (*m).items_hi)
         } else if str_len((*m).suffix) == 0 {
             load_range_globals(a, app, (*m).items_lo, (*m).items_hi)
         }
-        i = i + 1
     }
     return RootTables { app: app, std_all: std_all }
 }
@@ -477,18 +456,13 @@ export func load_root_tables(a: *Ast, metas: *Vector<*FileMeta>) -> RootTables {
  *  against the file whose private names it collides with otherwise. */
 export func load_check_alias_clash(metas: *Vector<*FileMeta>, alias_file: *Map<string, string>, alias_line: *Map<string, int64>, errors: *Vector<LoadDiag>) -> void {
     loaded: *Map<string, int64> = new_set()
-    mut z: int64 = 0
-    while z < vec_len(metas) {
-        mz: *FileMeta = vec_get(metas, z)
+    for mz in metas {
         if str_len((*mz).suffix) > 0 {
             map_put(loaded, (*mz).suffix, 1)
         }
-        z = z + 1
     }
     seen: *Map<string, int64> = new_set()
-    mut i: int64 = 0
-    while i < vec_len(metas) {
-        m: *FileMeta = vec_get(metas, i)
+    for m in metas {
         p: string = (*m).priv
         if str_len(p) > 0 {
             if map_has(loaded, p) {
@@ -502,7 +476,6 @@ export func load_check_alias_clash(metas: *Vector<*FileMeta>, alias_file: *Map<s
                 }
             }
         }
-        i = i + 1
     }
 }
 
@@ -512,25 +485,19 @@ export func load_check_alias_clash(metas: *Vector<*FileMeta>, alias_file: *Map<s
 /** Which standard library file declares each of its names, so a collision message can name the module to import. */
 export func load_std_declarers(a: *Ast, metas: *Vector<*FileMeta>) -> *Map<string, string> {
     out: *Map<string, string> = new_text_map()
-    mut i: int64 = 0
-    while i < vec_len(metas) {
-        m: *FileMeta = vec_get(metas, i)
+    for m in metas {
         if (*m).is_std {
             one: *Map<string, int64> = new_set()
             load_range_globals(a, one, (*m).items_lo, (*m).items_hi)
             keys: *Vector<string> = map_keys(one)
-            mut j: int64 = 0
-            while j < vec_len(keys) {
-                k: string = vec_get(keys, j)
+            for k in keys {
                 if !map_has(out, k) {
                     map_put(out, k, (*m).disp)
                 }
-                j = j + 1
             }
             vec_free(keys)
             free(keys)
         }
-        i = i + 1
     }
     return out
 }

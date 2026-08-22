@@ -25,11 +25,11 @@
 func check_single_lock(c: Ctx, dep: Repo, alias: string, ref: string) -> string {
     lockp: string = app_dir(c) + "/dawn.lock"
     if !exists(lockp) {
-        return "dawn get wrote no lock at '" + lockp + "'"
+        return f"dawn get wrote no lock at '{lockp}'"
     }
     lines: *Vector<string> = lock_lines(c)
     if vec_len(lines) != 1 {
-        return "dawn.lock holds " + int_to_string(vec_len(lines)) + " lines, want 1 for a manifest with one require"
+        return f"dawn.lock holds {vec_len(lines)} lines, want 1 for a manifest with one require"
     }
     line: string = vec_get(lines, 0)
     bad: string = lock_line_bad(line, alias, dep.source, ref)
@@ -39,10 +39,10 @@ func check_single_lock(c: Ctx, dep: Repo, alias: string, ref: string) -> string 
     commit: string = lock_commit(line)
     head: string = git_head(c, dep.path)
     if str_len(head) == 0 {
-        return "could not read the fixture repository head at '" + dep.path + "'"
+        return f"could not read the fixture repository head at '{dep.path}'"
     }
     if !str_eq(commit, head) {
-        return "the lock pins commit '" + commit + "' but the fixture tag " + ref + " is at '" + head + "'"
+        return f"the lock pins commit '{commit}' but the fixture tag {ref} is at '{head}'"
     }
     return stamp_bad(c, alias, dep.source, ref, commit)
 }
@@ -79,7 +79,7 @@ func get_lock(bin: string) -> string {
     }
     after: string = slurp(app + "/dawn.lock")
     if !str_eq(before, after) {
-        return "a second dawn get rewrote dawn.lock, from '" + before + "' to '" + after + "'"
+        return f"a second dawn get rewrote dawn.lock, from '{before}' to '{after}'"
     }
     return ""
 }
@@ -109,7 +109,7 @@ func run_alias(bin: string) -> string {
         return shell_detail("dawn run", r)
     }
     if !str_contains(r.out, "dep v1\n") {
-        return "dawn run printed '" + escape_show(r.out) + "', want a line 'dep v1' from the required module"
+        return f"dawn run printed '{escape_show(r.out)}', want a line 'dep v1' from the required module"
     }
     if !exists(app + "/target/dawn-out") {
         return "dawn run built nothing into 'target/dawn-out' inside the project"
@@ -134,7 +134,7 @@ func run_args(bin: string) -> string {
         return shell_detail("dawn run a b", r)
     }
     if !str_contains(r.out, "a\nb\n") {
-        return "dawn run a b printed '" + escape_show(r.out) + "', want the forwarded arguments 'a' and 'b' on their own lines"
+        return f"dawn run a b printed '{escape_show(r.out)}', want the forwarded arguments 'a' and 'b' on their own lines"
     }
     return ""
 }
@@ -166,7 +166,7 @@ func transitive(bin: string) -> string {
     }
     lines: *Vector<string> = lock_lines(c)
     if vec_len(lines) != 2 {
-        return "dawn.lock holds " + int_to_string(vec_len(lines)) + " lines, want 2: the direct require and the one it requires in turn"
+        return f"dawn.lock holds {vec_len(lines)} lines, want 2: the direct require and the one it requires in turn"
     }
     ae: string = check_locked(c, mid, "a", "v0.1.0")
     if str_len(ae) > 0 {
@@ -181,7 +181,7 @@ func transitive(bin: string) -> string {
         return shell_detail("dawn run", r)
     }
     if !str_contains(r.out, "a+leaf\n") {
-        return "dawn run printed '" + escape_show(r.out) + "', want the line 'a+leaf' composed across both packages"
+        return f"dawn run printed '{escape_show(r.out)}', want the line 'a+leaf' composed across both packages"
     }
     return ""
 }
@@ -190,7 +190,7 @@ func transitive(bin: string) -> string {
 func check_locked(c: Ctx, dep: Repo, alias: string, ref: string) -> string {
     line: string = lock_line_for(c, alias)
     if str_len(line) == 0 {
-        return "dawn.lock names no alias '" + alias + "'"
+        return f"dawn.lock names no alias '{alias}'"
     }
     bad: string = lock_line_bad(line, alias, dep.source, ref)
     if str_len(bad) > 0 {
@@ -236,16 +236,16 @@ func manifest_requires(path: string, alias: string, source: string, ref: string)
         w: *Vector<string> = split_ws(vec_get(lines, i))
         if vec_len(w) == 4 && str_eq(vec_get(w, 0), "@require") && str_eq(vec_get(w, 1), alias) {
             if !str_eq(vec_get(w, 2), source) {
-                return "the manifest requires '" + alias + "' from '" + vec_get(w, 2) + "', want '" + source + "'"
+                return f"the manifest requires '{alias}' from '{vec_get(w, 2)}', want '{source}'"
             }
             if !str_eq(vec_get(w, 3), ref) {
-                return "the manifest requires '" + alias + "' at ref '" + vec_get(w, 3) + "', want '" + ref + "'"
+                return f"the manifest requires '{alias}' at ref '{vec_get(w, 3)}', want '{ref}'"
             }
             return ""
         }
-        i = i + 1
+        i++
     }
-    return "the manifest '" + path + "' carries no '@require " + alias + "' line after dawn add"
+    return f"the manifest '{path}' carries no '@require {alias}' line after dawn add"
 }
 
 // The root a manifest declares, or the empty string when it declares none and the
@@ -258,7 +258,7 @@ func manifest_root(path: string) -> string {
         if vec_len(w) == 2 && str_eq(vec_get(w, 0), "@root") {
             return vec_get(w, 1)
         }
-        i = i + 1
+        i++
     }
     return ""
 }
@@ -270,7 +270,7 @@ func has_root(dir: string, declared: string) -> string {
         if exists(dir + "/" + declared) {
             return ""
         }
-        return "the manifest declares root '" + declared + "' but no such file was written"
+        return f"the manifest declares root '{declared}' but no such file was written"
     }
     if exists(dir + "/main.dusk") || exists(dir + "/src/main.dusk") {
         return ""
@@ -296,15 +296,15 @@ func init_layout(bin: string) -> string {
     }
     mpath: string = dir + "/package.dawn"
     if !exists(mpath) {
-        return "dawn init wrote no manifest at '" + mpath + "'"
+        return f"dawn init wrote no manifest at '{mpath}'"
     }
     text: string = slurp(mpath)
     if !str_contains(text, "@package hello") {
-        return "the manifest dawn init wrote does not declare '@package hello': '" + escape_show(text) + "'"
+        return f"the manifest dawn init wrote does not declare '@package hello': '{escape_show(text)}'"
     }
     gpath: string = dir + "/.gitignore"
     if !exists(gpath) {
-        return "dawn init wrote no .gitignore at '" + gpath + "'"
+        return f"dawn init wrote no .gitignore at '{gpath}'"
     }
     if !str_contains(slurp(gpath), "dawn_modules/") {
         return "the .gitignore dawn init wrote does not ignore 'dawn_modules/'"
@@ -318,7 +318,7 @@ func init_layout(bin: string) -> string {
         return shell_detail("dawn run in the project dawn init wrote", run_r)
     }
     if !str_contains(run_r.out, "hello") {
-        return "the project dawn init wrote printed '" + escape_show(run_r.out) + "', want a line naming the package"
+        return f"the project dawn init wrote printed '{escape_show(run_r.out)}', want a line naming the package"
     }
     return ""
 }

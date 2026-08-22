@@ -133,19 +133,16 @@ func struct_field_ast(tc: *TypeChecker, struct_ast: int64, field: string) -> int
     if named.kind != tk_named() { return -1 }
     sname: string = ast_name(a, named.a)
     structs: *Vector<StructNode> = (*a).structs
-    mut i: int64 = 0
-    while i < vec_len(structs) {
-        st: StructNode = vec_get(structs, i)
+    for st in structs {
         if str_eq(ast_name(a, st.name), sname) {
             mut j: int64 = 0
             while j < st.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + j))
                 if str_eq(ast_name(a, fld.name), field) { return fld.ty }
-                j = j + 1
+                j++
             }
             return -1
         }
-        i = i + 1
     }
     return -1
 }
@@ -156,14 +153,11 @@ func struct_field_ast(tc: *TypeChecker, struct_ast: int64, field: string) -> int
 func func_ret_ast(tc: *TypeChecker, fname: string) -> int64 {
     a: *Ast = (*tc).ast
     funcs: *Vector<FuncNode> = (*a).funcs
-    mut i: int64 = 0
-    while i < vec_len(funcs) {
-        f: FuncNode = vec_get(funcs, i)
+    for f in funcs {
         if str_eq(ast_name(a, f.name), fname) {
             if f.generics_len > 0 { return -1 }
             return f.ret
         }
-        i = i + 1
     }
     return -1
 }
@@ -302,15 +296,15 @@ func check_return_value(tc: *TypeChecker, expr_id: int64) -> void {
 
 func branch_block(tc: *TypeChecker, block_id: int64) -> void {
     saved: *Vector<*Map<string, int64>> = clone_owns(tc)
-    (*tc).branch_depth = (*tc).branch_depth + 1
+    (*tc).branch_depth++
     check_block(tc, block_id)
-    (*tc).branch_depth = (*tc).branch_depth - 1
+    (*tc).branch_depth--
     restore_owns(tc, saved)
 }
 
 func loop_body_fixpoint(tc: *TypeChecker, block_id: int64) -> void {
-    (*tc).loop_depth = (*tc).loop_depth + 1
-    (*tc).suppress = (*tc).suppress + 1
+    (*tc).loop_depth++
+    (*tc).suppress++
     mut prev: string = esc_snapshot(tc)
     mut i: int64 = 0
     mut done: bool = false
@@ -322,18 +316,18 @@ func loop_body_fixpoint(tc: *TypeChecker, block_id: int64) -> void {
         } else {
             prev = now
         }
-        i = i + 1
+        i++
     }
-    (*tc).suppress = (*tc).suppress - 1
+    (*tc).suppress--
     branch_block(tc, block_id)
-    (*tc).loop_depth = (*tc).loop_depth - 1
+    (*tc).loop_depth--
 }
 
 func check_match_stmt(tc: *TypeChecker, scrut: int64, off: int64, len: int64) -> void {
     st: int64 = infer_expr(tc, scrut)
     scrut_esc: EscPair = value_escape(tc, scrut)
     a: *Ast = (*tc).ast
-    (*tc).branch_depth = (*tc).branch_depth + 1
+    (*tc).branch_depth++
     mut i: int64 = 0
     while i < len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
@@ -342,9 +336,9 @@ func check_match_stmt(tc: *TypeChecker, scrut: int64, off: int64, len: int64) ->
         bind_match_arm_escape(tc, arm.pat, st, scrut, scrut_esc)
         check_block_no_scope(tc, arm.body)
         pop_scope(tc)
-        i = i + 1
+        i++
     }
-    (*tc).branch_depth = (*tc).branch_depth - 1
+    (*tc).branch_depth--
     check_match_scrutinee(tc, st, scrut, off, len)
 }
 
@@ -644,13 +638,13 @@ func check_let_await(tc: *TypeChecker, s: StmtNode, value: ExprNode) -> void {
         while i < en.len && i < nbinds {
             b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             declare_await_bind(tc, b, (s.d & 1) != 0, vec_get((*(*tc).ty).kids, en.off + i), value.lo, value.hi)
-            i = i + 1
+            i++
         }
         while i < nbinds {
             b2: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             reject_enum_name_binding(tc, ast_name(a, b2.name), value.lo, value.hi)
             declare(tc, ast_name(a, b2.name), ty_unknown((*tc).ty))
-            i = i + 1
+            i++
         }
     } else if nbinds == 2 {
         b0: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a))
@@ -669,7 +663,7 @@ func check_let_await(tc: *TypeChecker, s: StmtNode, value: ExprNode) -> void {
             bx: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + j))
             reject_enum_name_binding(tc, ast_name(a, bx.name), value.lo, value.hi)
             declare(tc, ast_name(a, bx.name), ty_unknown((*tc).ty))
-            j = j + 1
+            j++
         }
     }
 }
@@ -680,7 +674,7 @@ export func check_block_no_scope(tc: *TypeChecker, block_id: int64) -> void {
     mut i: int64 = 0
     while i < b.len {
         check_stmt(tc, vec_get((*a).kids, b.off + i))
-        i = i + 1
+        i++
     }
 }
 

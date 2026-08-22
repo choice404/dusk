@@ -31,7 +31,7 @@ func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int
         mut i: int64 = 0
         while i < n.len {
             if ptr_reaches_future_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i = i + 1
+            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -43,7 +43,7 @@ func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int
             mut j: int64 = 0
             while j < list.len {
                 if ptr_reaches_future_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
-                j = j + 1
+                j++
             }
         }
     }
@@ -60,7 +60,7 @@ func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, 
         mut i: int64 = 0
         while i < n.len {
             if ptr_reaches_collector_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i = i + 1
+            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -72,7 +72,7 @@ func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, 
             mut j: int64 = 0
             while j < list.len {
                 if ptr_reaches_collector_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
-                j = j + 1
+                j++
             }
         }
     }
@@ -94,7 +94,7 @@ func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64
         mut i: int64 = 0
         while i < n.len {
             if !spawn_capturable_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return false }
-            i = i + 1
+            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -108,7 +108,7 @@ func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64
             mut j: int64 = 0
             while j < list.len {
                 if !spawn_capturable_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return false }
-                j = j + 1
+                j++
             }
         }
     }
@@ -122,7 +122,7 @@ export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, ar
         mut i: int64 = 0
         while i < arg_len {
             infer_expr(tc, vec_get((*a).kids, arg_off + i))
-            i = i + 1
+            i++
         }
         return
     }
@@ -140,9 +140,7 @@ export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, ar
     }
     caps: *Vector<string> = lambda_captures(tc, arg)
     borrowed: *Vector<string> = alloc(vec_new())
-    mut cidx: int64 = 0
-    while cidx < vec_len(caps) {
-        cap: string = vec_get(caps, cidx)
+    for cap in caps {
         t: int64 = lookup(tc, cap)
         seen: *Map<string, int64> = alloc(map_new())
         fseen: *Map<string, int64> = alloc(map_new())
@@ -171,7 +169,6 @@ export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, ar
         if is_managed_or_typaram_name(tc, t, cap) && own_of(tc, cap) != own_moved() {
             vec_push(borrowed, cap)
         }
-        cidx = cidx + 1
     }
     infer_lambda_with_borrows(tc, arg, borrowed)
 }
@@ -305,7 +302,7 @@ export func check_variadic_call(tc: *TypeChecker, cn: TyNode, arg_off: int64, ar
         }
         check_int_fits(tc, arg_id, p)
         check_slice_covariance(tc, p, av, arg_id, arg.lo, arg.hi)
-        i = i + 1
+        i++
     }
     while i < arg_len {
         av2: int64 = vec_get(arg_tys, i)
@@ -315,7 +312,7 @@ export func check_variadic_call(tc: *TypeChecker, cn: TyNode, arg_off: int64, ar
         if str_len(msg) > 0 {
             tc_emit(tc, msg, arg2.lo, arg2.hi)
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -375,14 +372,11 @@ func callback_generic_msg(argno: int64, name: string) -> string {
 func top_fn_is_generic(tc: *TypeChecker, name: string) -> bool {
     a: *Ast = (*tc).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             if str_eq(ast_name(a, f.name), name) { return f.generics_len > 0 }
         }
-        i = i + 1
     }
     return false
 }

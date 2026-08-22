@@ -88,7 +88,7 @@ export func rw_method(m: *Mono, fid: int64, subst: *Map<string, int64>, mangled:
         check_future_spell(m, applied, f.lo, f.hi)
         map_put(env, ast_name(a, p.name), applied)
         vec_push(params_out, ast_param(a, p.is_using, p.name, emit_ty(m, applied, f.lo, f.hi)))
-        i = i + 1
+        i++
     }
     ret_applied: int64 = subst_apply(m, f.ret, subst)
     check_future_spell(m, ret_applied, f.lo, f.hi)
@@ -122,7 +122,7 @@ export func rw_block(m: *Mono, bid: int64, subst: *Map<string, int64>, env: *Map
     mut i: int64 = 0
     while i < b.len {
         vec_push(stmts_out, rw_stmt(m, vec_get((*a).kids, b.off + i), subst, env, ret))
-        i = i + 1
+        i++
     }
     return ast_block(a, stmts_out)
 }
@@ -145,7 +145,7 @@ func rw_branch(m: *Mono, bid: int64, subst: *Map<string, int64>, env: *Map<strin
         } else {
             vec_push(stmts_out, rw_stmt(m, sid, subst, env, ret))
         }
-        i = i + 1
+        i++
     }
     return ast_block(a, stmts_out)
 }
@@ -216,7 +216,7 @@ func rw_let(m: *Mono, s: StmtNode, subst: *Map<string, int64>, env: *Map<string,
         if b.ty >= 0 {
             check_future_spell(m, subst_apply(m, b.ty, subst), val.lo, val.hi)
         }
-        bi = bi + 1
+        bi++
     }
     value: int64 = rw_expr(m, s.c, subst, env, exp)
     mut vt: int64 = exp
@@ -230,7 +230,7 @@ func rw_let(m: *Mono, s: StmtNode, subst: *Map<string, int64>, env: *Map<string,
             mut ti: int64 = 0
             while ti < vn.b {
                 vec_push(parts, vec_get((*a).kids, vn.a + ti))
-                ti = ti + 1
+                ti++
             }
             parts_ok = true
         }
@@ -270,7 +270,7 @@ func rw_let(m: *Mono, s: StmtNode, subst: *Map<string, int64>, env: *Map<string,
             map_put(env, ast_name(a, b2.name), envt)
         }
         vec_push(binds_out, ast_bind(a, b2.name, bty))
-        i = i + 1
+        i++
     }
     boff, blen := ast_kids(a, binds_out)
     return ast_stmt(a, sk_let(), boff, blen, value, s.d)
@@ -288,7 +288,7 @@ func rw_match(m: *Mono, scrut: int64, off: int64, len: int64, subst: *Map<string
         bind_pattern(m, arm.pat, scrut_ty, subst, e2)
         body: int64 = rw_block(m, arm.body, subst, e2, ret)
         vec_push(arms_out, ast_arm(a, arm.pat, body))
-        i = i + 1
+        i++
     }
     aoff, alen := ast_kids(a, arms_out)
     return (new_scrut, aoff, alen)
@@ -334,11 +334,11 @@ func bind_pattern(m: *Mono, patid: int64, scrut_ty: int64, subst: *Map<string, i
                     bname: string = ast_name(a, vec_get((*a).kids, pat.b + fi))
                     ft: int64 = subst_apply(m, subst_apply(m, fld.ty, vsubst), subst)
                     map_put(env, bname, ft)
-                    fi = fi + 1
+                    fi++
                 }
                 vi = ge.variants_len
             } else {
-                vi = vi + 1
+                vi++
             }
         }
     }
@@ -395,7 +395,7 @@ export func rw_expr(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<
         mut i: int64 = 0
         while i < e.b {
             vec_push(ids, rw_expr(m, vec_get((*a).kids, e.a + i), subst, env, elem))
-            i = i + 1
+            i++
         }
         off2, len2 := ast_kids(a, ids)
         return ast_expr(a, xk_array(), e.lo, e.hi, off2, len2, 0, 0)
@@ -458,7 +458,7 @@ func rw_lambda_plain(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map
     while i < e.b {
         lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         map_put(e2, ast_name(a, lp.name), subst_apply(m, lp.ty, subst))
-        i = i + 1
+        i++
     }
     ret: int64 = subst_apply(m, e.c, subst)
     body: int64 = rw_block(m, e.d, subst, e2, ret)
@@ -467,7 +467,7 @@ func rw_lambda_plain(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map
     while j < e.b {
         lp2: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + j))
         vec_push(params_out, ast_param(a, lp2.is_using, lp2.name, emit_ty(m, subst_apply(m, lp2.ty, subst), e.lo, e.hi)))
-        j = j + 1
+        j++
     }
     poff, plen := ast_kids(a, params_out)
     return ast_expr(a, xk_lambda(), e.lo, e.hi, poff, plen, emit_ty(m, ret, e.lo, e.hi), body)
@@ -479,7 +479,7 @@ func rw_expr_list(m: *Mono, off: int64, len: int64, subst: *Map<string, int64>, 
     mut i: int64 = 0
     while i < len {
         vec_push(ids, rw_expr(m, vec_get((*a).kids, off + i), subst, env, -1))
-        i = i + 1
+        i++
     }
     return ast_kids(a, ids)
 }
@@ -562,7 +562,7 @@ func rw_call(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<string,
                 if !done {
                     vec_push(out_args, rw_expr(m, x, subst, env, pty))
                 }
-                i = i + 1
+                i++
             }
             aoff, alen := ast_kids(a, out_args)
             return ast_expr(a, xk_call(), e.lo, e.hi, c, aoff, alen, 0)
@@ -589,11 +589,11 @@ func rw_enum_ctor_call(m: *Mono, e: ExprNode, callee: ExprNode, base: ExprNode, 
             while fi < va.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + fi))
                 vec_push(field_tys, subst_apply(m, fld.ty, fsubst))
-                fi = fi + 1
+                fi++
             }
             vi = ge.variants_len
         } else {
-            vi = vi + 1
+            vi++
         }
     }
     cargs: *Vector<int64> = alloc(vec_new())
@@ -602,7 +602,7 @@ func rw_enum_ctor_call(m: *Mono, e: ExprNode, callee: ExprNode, base: ExprNode, 
         mut exp: int64 = -1
         if ai < vec_len(field_tys) { exp = vec_get(field_tys, ai) }
         vec_push(cargs, rw_expr(m, vec_get(args, ai), subst, env, exp))
-        ai = ai + 1
+        ai++
     }
     mgname: string = instantiate(m, g, r.targs, base.lo, base.hi)
     mg: int64 = mk_ident(a, mgname, base.lo, base.hi)
@@ -631,7 +631,7 @@ func rw_generic_call(m: *Mono, e: ExprNode, callee: ExprNode, f: string, args: *
             decl = p.ty
         }
         vec_push(cargs, rw_arg(m, vec_get(args, i), decl, inf_full, subst, env))
-        i = i + 1
+        i++
     }
     mgname: string = instantiate(m, f, sr.targs, callee.lo, callee.hi)
     mg: int64 = mk_ident(a, mgname, callee.lo, callee.hi)
@@ -674,7 +674,7 @@ func rw_lambda_pinned(m: *Mono, argid: int64, fty: int64, subst: *Map<string, in
         mut pty: int64 = lp.ty
         if j < fn.b { pty = vec_get((*a).kids, fn.a + j) }
         vec_push(params_out, ast_param(a, lp.is_using, lp.name, pty))
-        j = j + 1
+        j++
     }
     poff, plen := ast_kids(a, params_out)
     patched: int64 = ast_expr(a, xk_lambda(), lam.lo, lam.hi, poff, plen, fn.c, lam.d)
@@ -712,11 +712,11 @@ func rw_struct_lit(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<s
                 if str_eq(ast_name(a, fld.name), fname) {
                     exp = subst_apply(m, fld.ty, fsubst)
                 }
-                si = si + 1
+                si++
             }
             vec_push(new_pairs, fname_id)
             vec_push(new_pairs, rw_expr(m, fexpr, subst, env, exp))
-            i = i + 2
+            i += 2
         }
         poff, plen := ast_kids(a, new_pairs)
         mgname: string = instantiate(m, name, r.targs, e.lo, e.hi)
@@ -730,7 +730,7 @@ func rw_struct_lit(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<s
         fexpr2: int64 = vec_get((*a).kids, e.b + j + 1)
         vec_push(new_pairs2, fname_id2)
         vec_push(new_pairs2, rw_expr(m, fexpr2, subst, env, -1))
-        j = j + 2
+        j += 2
     }
     poff2, plen2 := ast_kids(a, new_pairs2)
     return ast_expr(a, xk_struct_lit(), e.lo, e.hi, e.a, poff2, plen2, 0)

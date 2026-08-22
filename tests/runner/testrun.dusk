@@ -58,24 +58,24 @@ func parse_argv(argv: string[]) -> Config {
     while i < argv.len {
         a: string = argv[i]
         if str_eq(a, "--filter") {
-            i = i + 1
+            i++
             if !has_value(argv, i) { return cfg_err("--filter needs a value") }
             filter = argv[i]
         } else {
             if str_eq(a, "--timeout") {
-                i = i + 1
+                i++
                 if !has_value(argv, i) { return cfg_err("--timeout needs a value") }
                 t, e := parse_int(argv[i])
                 if e.exists() { return cfg_err("--timeout needs an integer") }
                 timeout = t
             } else {
                 if str_eq(a, "--bin") {
-                    i = i + 1
+                    i++
                     if !has_value(argv, i) { return cfg_err("--bin needs a value") }
                     bin = argv[i]
                 } else {
                     if str_eq(a, "--limit-kb") {
-                        i = i + 1
+                        i++
                         if !has_value(argv, i) { return cfg_err("--limit-kb needs a value") }
                         lk, le := parse_int(argv[i])
                         if le.exists() { return cfg_err("--limit-kb needs an integer") }
@@ -92,7 +92,7 @@ func parse_argv(argv: string[]) -> Config {
                 }
             }
         }
-        i = i + 1
+        i++
     }
     if str_eq(bin, "") {
         bin = env("DUSK_BIN")
@@ -124,9 +124,9 @@ func reason_nonzero(code: int64) -> string {
         return "timed out"
     }
     if code >= 128 {
-        return "killed by signal " + int_to_string(code - 128)
+        return f"killed by signal {code - 128}"
     }
-    return "exited with code " + int_to_string(code)
+    return f"exited with code {code}"
 }
 
 // The first err_has fragment missing from a captured stream, rendered with its
@@ -136,7 +136,7 @@ func missing_detail(hay: string, needles: *Vector<string>) -> string {
     if miss < 0 {
         return ""
     }
-    return "stderr missing: " + escape_show(vec_get(needles, miss))
+    return f"stderr missing: {escape_show(vec_get(needles, miss))}"
 }
 
 // The first err_absent fragment that appeared in a captured stream, rendered with
@@ -147,7 +147,7 @@ func forbidden_detail(hay: string, needles: *Vector<string>) -> string {
     if hit < 0 {
         return ""
     }
-    return "stderr contains forbidden: " + escape_show(vec_get(needles, hit))
+    return f"stderr contains forbidden: {escape_show(vec_get(needles, hit))}"
 }
 
 // Decides one record against its captured result. Returns the empty string on a
@@ -177,7 +177,7 @@ func verdict(rec: Record, rr: RunResult) -> string {
             if rec.ok {
                 want = "a clean exit"
             }
-            return "expected " + want + ", got code " + int_to_string(rr.code)
+            return f"expected {want}, got code {rr.code}"
         }
         if rec.has_out && !exact_eq(rr.out, rr.out_bytes, rec.out) {
             return diff_detail("stdout", rec.out, rr.out, rr.out_bytes)
@@ -207,7 +207,7 @@ func verdict(rec: Record, rr: RunResult) -> string {
     }
     if str_eq(mode, "check_ok") {
         if rr.code != 0 {
-            return "check failed: " + reason_nonzero(rr.code)
+            return f"check failed: {reason_nonzero(rr.code)}"
         }
         return ""
     }
@@ -223,14 +223,14 @@ func verdict(rec: Record, rr: RunResult) -> string {
     }
     if str_eq(mode, "tool") {
         if rec.has_code && rr.code != rec.code {
-            return "exit code " + int_to_string(rr.code) + ", want " + int_to_string(rec.code)
+            return f"exit code {rr.code}, want {rec.code}"
         }
         if rec.has_out && !exact_eq(rr.out, rr.out_bytes, rec.out) {
             return diff_detail("stdout", rec.out, rr.out, rr.out_bytes)
         }
         return ""
     }
-    return "internal: unhandled mode '" + mode + "'"
+    return f"internal: unhandled mode '{mode}'"
 }
 
 // Runs one record and reports it, returning whether it passed. A special record
@@ -257,13 +257,10 @@ func run_one(rec: Record, bin: string, timeout: int64, limit_kb: int64) -> bool 
 // empty.
 func select_records(recs: *Vector<Record>, filter: string) -> *Vector<Record> {
     out: *Vector<Record> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < vec_len(recs) {
-        r: Record = vec_get(recs, i)
+    for r in recs {
         if str_eq(filter, "") || str_contains(r.name, filter) {
             vec_push(out, r)
         }
-        i = i + 1
     }
     return out
 }
@@ -271,18 +268,18 @@ func select_records(recs: *Vector<Record>, filter: string) -> *Vector<Record> {
 func main(argc: int32, argv: string[]) -> int32 {
     cfg: Config = parse_argv(argv)
     if !cfg.ok {
-        printerr("testrun: " + cfg.err)
+        printerr(f"testrun: {cfg.err}")
         usage()
         return 2
     }
     text, re := read_file(cfg.manifest)
     if re.exists() {
-        printerr("testrun: cannot read manifest '" + cfg.manifest + "'")
+        printerr(f"testrun: cannot read manifest '{cfg.manifest}'")
         return 2
     }
     nbytes: int64 = file_bytes(cfg.manifest)
     if nbytes >= 0 && nbytes != str_len(text) {
-        printerr("testrun: manifest '" + cfg.manifest + "' contains a NUL byte")
+        printerr(f"testrun: manifest '{cfg.manifest}' contains a NUL byte")
         return 2
     }
     pr: ParseResult = parse_manifest(text)
@@ -297,15 +294,12 @@ func main(argc: int32, argv: string[]) -> int32 {
     report_selected(vec_len(selected))
     mut passed: int64 = 0
     mut failed: int64 = 0
-    mut j: int64 = 0
-    while j < vec_len(selected) {
-        r: Record = vec_get(selected, j)
+    for r in selected {
         if run_one(r, cfg.bin, cfg.timeout, cfg.limit_kb) {
-            passed = passed + 1
+            passed++
         } else {
-            failed = failed + 1
+            failed++
         }
-        j = j + 1
     }
     report_summary(vec_len(selected), passed, failed)
     if failed == 0 {

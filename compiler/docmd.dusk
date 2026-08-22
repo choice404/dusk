@@ -44,14 +44,14 @@ func push_fence(b: *StringBuilder, code: string) -> void {
     mut i: int64 = 0
     while i < n {
         if bytes.byte_at(code, n, i) == 96 {
-            run = run + 1
+            run++
             if run > longest {
                 longest = run
             }
         } else {
             run = 0
         }
-        i = i + 1
+        i++
     }
     mut flen: int64 = 3
     if longest >= 3 {
@@ -61,7 +61,7 @@ func push_fence(b: *StringBuilder, code: string) -> void {
     mut j: int64 = 0
     while j < flen {
         sb_push_char(fb, 96)
-        j = j + 1
+        j++
     }
     sb_push(fb, "dusk\n")
     sb_push(fb, code)
@@ -69,7 +69,7 @@ func push_fence(b: *StringBuilder, code: string) -> void {
     mut k: int64 = 0
     while k < flen {
         sb_push_char(fb, 96)
-        k = k + 1
+        k++
     }
     out: string = substring(sb_cstr(fb), 0, sb_size(fb))
     push_block(b, out)
@@ -92,13 +92,10 @@ func render_prose(b: *StringBuilder, di: DocInfo) -> void {
     }
     if str_len(di.body) > 0 {
         parts: *Vector<string> = str_split(di.body, "\n")
-        mut i: int64 = 0
-        while i < vec_len(parts) {
-            para: string = vec_get(parts, i)
+        for para in parts {
             if str_len(para) > 0 {
                 push_block(b, para)
             }
-            i = i + 1
         }
     }
     ps: *Vector<DocParam> = di.params
@@ -118,7 +115,7 @@ func render_prose(b: *StringBuilder, di: DocInfo) -> void {
                 sb_push(lb, inl)
                 free(inl)
             }
-            j = j + 1
+            j++
         }
         list: string = substring(sb_cstr(lb), 0, sb_size(lb))
         push_block(b, list)
@@ -146,7 +143,7 @@ func render_prose(b: *StringBuilder, di: DocInfo) -> void {
         mut k: int64 = 0
         while k < vec_len(exs) {
             push_fence(b, vec_get(exs, k))
-            k = k + 1
+            k++
         }
     }
 }
@@ -154,13 +151,10 @@ func render_prose(b: *StringBuilder, di: DocInfo) -> void {
 // Finds the doc block bound to (kind, id), returning whether one exists and its span.
 export func find_doc(a: *Ast, kind: int64, id: int64) -> (bool, int64, int64) {
     docs: *Vector<DocNode> = (*a).docs
-    mut i: int64 = 0
-    while i < vec_len(docs) {
-        d: DocNode = vec_get(docs, i)
+    for d in docs {
         if d.kind == kind && d.id == id {
             return (true, d.lo, d.hi)
         }
-        i = i + 1
     }
     return (false, 0, 0)
 }
@@ -180,7 +174,7 @@ func count_kind(a: *Ast, kind: int64) -> int64 {
     mut i: int64 = 0
     while i < vec_len(items) {
         if vec_get(items, i).kind == kind { c = c + 1 }
-        i = i + 1
+        i++
     }
     return c
 }
@@ -229,7 +223,7 @@ func render_interface(b: *StringBuilder, a: *Ast, src: string, n: int64, iid: in
         push_fence(b, msig)
         free(msig)
         render_bound(b, a, src, n, dk_method_sig(), msid)
-        i = i + 1
+        i++
     }
 }
 
@@ -248,7 +242,7 @@ func render_impl(b: *StringBuilder, a: *Ast, src: string, n: int64, imid: int64)
         push_fence(b, sig)
         free(sig)
         render_bound(b, a, src, n, dk_func(), fid)
-        i = i + 1
+        i++
     }
 }
 
@@ -266,14 +260,11 @@ func render_foreign_func(b: *StringBuilder, a: *Ast, src: string, n: int64, ffid
 func count_foreign_funcs(a: *Ast) -> int64 {
     items: *Vector<ItemNode> = (*a).items
     mut c: int64 = 0
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_foreign() {
             fn: ForeignNode = vec_get((*a).foreigns, it.id)
-            c = c + fn.funcs_len
+            c += fn.funcs_len
         }
-        i = i + 1
     }
     return c
 }
@@ -285,19 +276,16 @@ func render_foreign_section(b: *StringBuilder, a: *Ast, src: string, n: int64) -
     if count_foreign_funcs(a) == 0 { return }
     push_heading(b, "##", "Foreign Functions")
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_foreign() {
             fn: ForeignNode = vec_get((*a).foreigns, it.id)
             mut j: int64 = 0
             while j < fn.funcs_len {
                 ffid: int64 = vec_get((*a).kids, fn.funcs_off + j)
                 render_foreign_func(b, a, src, n, ffid)
-                j = j + 1
+                j++
             }
         }
-        i = i + 1
     }
 }
 
@@ -306,9 +294,7 @@ func render_section(b: *StringBuilder, a: *Ast, src: string, n: int64, kind: int
     if count_kind(a, kind) == 0 { return }
     push_heading(b, "##", title)
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == kind {
             if kind == ik_func() {
                 render_func(b, a, src, n, it.id)
@@ -322,7 +308,6 @@ func render_section(b: *StringBuilder, a: *Ast, src: string, n: int64, kind: int
                 render_impl(b, a, src, n, it.id)
             }
         }
-        i = i + 1
     }
 }
 
@@ -339,7 +324,7 @@ func push_paradigm_line(b: *StringBuilder, a: *Ast) -> void {
         while i < vec_len(ps) {
             if i > 0 { sb_push(pb, ", ") }
             sb_push(pb, ast_name(a, vec_get(ps, i)))
-            i = i + 1
+            i++
         }
     }
     out: string = substring(sb_cstr(pb), 0, sb_size(pb))

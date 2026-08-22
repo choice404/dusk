@@ -32,7 +32,7 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
     while p < e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
         map_put(bound, ast_name(a, pn.name), 1)
-        p = p + 1
+        p++
     }
     used: *Vector<string> = lambda_used_names((*c).t, e, id, bound)
     env: *Map<string, SumVal> = (*c).env
@@ -41,9 +41,7 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
     mut origins: int64 = 0
     mut reads: int64 = 0
     mut frame: bool = false
-    mut i: int64 = 0
-    while i < vec_len(used) {
-        n: string = vec_get(used, i)
+    for n in used {
         if !map_has(bound, n) {
             if map_has(env, n) {
                 av: SumVal = unwrap_or(map_get(env, n), val_none())
@@ -52,7 +50,6 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
             }
             if map_has(locals, n) || map_has(pidx, n) { frame = true }
         }
-        i = i + 1
     }
     empty_seeds: *Vector<SumVal> = alloc(vec_new())
     walk_lambda_inline(c, e, empty_seeds)
@@ -151,7 +148,7 @@ func sum_transfer_lambda(c: *SumCtx, e: ExprNode) -> (SummaryHandle, *Vector<Cap
     while i < e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         ctx_bind_param(syn, ast_name(a, pn.name), pn.ty, i)
-        i = i + 1
+        i++
     }
     sum_block(syn, e.d)
     caps: *Vector<CapFlow> = sort_caps((*syn).capture_flows)
@@ -178,7 +175,7 @@ export func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) 
         ht: bool = map_has(lt, name)
         tv: int64 = unwrap_or(map_get(lt, name), -1)
         vec_push(saved, SavedParam { name: name, had_env: he, env_val: ev, had_ty: ht, ty_val: tv })
-        i = i + 1
+        i++
     }
     mut j: int64 = 0
     while j < e.b {
@@ -191,17 +188,14 @@ export func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) 
         mut seed: SumVal = val_none()
         if (view || reaches) && j < vec_len(seeds) { seed = vec_get(seeds, j) }
         map_put(env, name2, seed)
-        j = j + 1
+        j++
     }
     lret_push(c, val_none())
     sum_block(c, e.d)
     ret: SumVal = lret_pop(c)
-    mut k: int64 = 0
-    while k < vec_len(saved) {
-        sp: SavedParam = vec_get(saved, k)
+    for sp in saved {
         if sp.had_env { map_put(env, sp.name, sp.env_val) } else { map_remove(env, sp.name).ignore() }
         if sp.had_ty { map_put(lt, sp.name, sp.ty_val) } else { map_remove(lt, sp.name).ignore() }
-        k = k + 1
     }
     return ret
 }
@@ -270,7 +264,7 @@ func mapper_result(c: *SumCtx, fexpr_id: int64, seeds: *Vector<SumVal>) -> SumVa
                 mut i: int64 = 0
                 while i < vec_len(seeds) && i < 64 {
                     if ps_has(m, i) { r = val_join(r, vec_get(seeds, i)) }
-                    i = i + 1
+                    i++
                 }
                 mut x: int64 = 0
                 while x < vec_len(seeds) && x < 64 {
@@ -278,7 +272,7 @@ func mapper_result(c: *SumCtx, fexpr_id: int64, seeds: *Vector<SumVal>) -> SumVa
                     // and the join is idempotent, so one test per row says the same
                     // thing the scan of that row's 64 destinations said.
                     if flow_row_any(sum.flows, x) { r = val_join(r, vec_get(seeds, x)) }
-                    x = x + 1
+                    x++
                 }
                 return r
             }
@@ -299,7 +293,7 @@ func opaque_mapper(c: *SumCtx, fexpr_id: int64, seeds: *Vector<SumVal>) -> SumVa
     mut i: int64 = 0
     while i < vec_len(seeds) {
         r = val_join(r, vec_get(seeds, i))
-        i = i + 1
+        i++
     }
     return r
 }
@@ -314,13 +308,13 @@ func sort_caps(caps: *Vector<CapFlow>) -> *Vector<CapFlow> {
             cur: CapFlow = vec_get(caps, j)
             if cap_less(key, cur) {
                 vec_set(caps, j + 1, cur)
-                j = j - 1
+                j--
             } else {
                 placed = true
             }
         }
         vec_set(caps, j + 1, key)
-        i = i + 1
+        i++
     }
     out: *Vector<CapFlow> = alloc(vec_new())
     mut k: int64 = 0
@@ -332,7 +326,7 @@ func sort_caps(caps: *Vector<CapFlow>) -> *Vector<CapFlow> {
             prev: CapFlow = vec_get(caps, k - 1)
             if cf.idx != prev.idx || !str_eq(cf.name, prev.name) { vec_push(out, cf) }
         }
-        k = k + 1
+        k++
     }
     return out
 }
@@ -345,14 +339,11 @@ func cap_less(x: CapFlow, y: CapFlow) -> bool {
 
 export func serialize_caps(caps: *Vector<CapFlow>) -> string {
     b: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < vec_len(caps) {
-        cf: CapFlow = vec_get(caps, i)
+    for cf in caps {
         sb_push_int(b, cf.idx)
         sb_push_char(b, 44)
         sb_push(b, cf.name)
         sb_push_char(b, 59)
-        i = i + 1
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -390,7 +381,7 @@ func fnb_block(t: *SumTables, bid: int64, cand: *Map<string, string>, pois: *Map
     mut i: int64 = 0
     while i < b.len {
         fnb_stmt(t, vec_get((*a).kids, b.off + i), cand, pois)
-        i = i + 1
+        i++
     }
 }
 
@@ -422,7 +413,7 @@ func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string, string>, pois: *Map<
             while i < s.b {
                 bind2: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
                 fnb_poison(ast_name(a, bind2.name), cand, pois)
-                i = i + 1
+                i++
             }
         }
     } else if s.kind == sk_assign() {
@@ -465,13 +456,13 @@ func fnb_match(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, ca
             mut k: int64 = 0
             while k < p.c {
                 fnb_poison(ast_name(a, vec_get((*a).kids, p.b + k)), cand, pois)
-                k = k + 1
+                k++
             }
         } else if p.kind == pk_ident() {
             fnb_poison(ast_name(a, p.a), cand, pois)
         }
         fnb_block(t, arm.body, cand, pois)
-        i = i + 1
+        i++
     }
 }
 
@@ -485,7 +476,7 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
         mut i: int64 = 0
         while i < e.c {
             fnb_expr(t, vec_get((*a).kids, e.b + i), cand, pois)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_unary() {
         fnb_expr(t, e.b, cand, pois)
@@ -501,13 +492,13 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
         mut j: int64 = 0
         while j < e.b {
             fnb_expr(t, vec_get((*a).kids, e.a + j), cand, pois)
-            j = j + 1
+            j++
         }
     } else if e.kind == xk_struct_lit() {
         mut k: int64 = 1
         while k < e.c {
             fnb_expr(t, vec_get((*a).kids, e.b + k), cand, pois)
-            k = k + 2
+            k += 2
         }
     } else if e.kind == xk_lambda() {
         fnb_block(t, e.d, cand, pois)
@@ -526,7 +517,7 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
         while m < e.c {
             db: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + m))
             fnb_expr(t, db.expr, cand, pois)
-            m = m + 1
+            m++
         }
     }
 }
@@ -550,7 +541,7 @@ export func collect_block_used(t: *SumTables, bid: int64, used: *Vector<string>,
     mut i: int64 = 0
     while i < b.len {
         collect_stmt_used(t, vec_get((*a).kids, b.off + i), used, bound, added)
-        i = i + 1
+        i++
     }
     used_unbind(bound, added)
 }
@@ -571,7 +562,7 @@ func used_unbind(bound: *Map<string, int64>, added: *Vector<string>) -> void {
     mut i: int64 = 0
     while i < vec_len(added) {
         map_remove(bound, vec_get(added, i))
-        i = i + 1
+        i++
     }
 }
 
@@ -584,7 +575,7 @@ func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: 
         while i < s.b {
             bind: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             used_bind(bound, ast_name(a, bind.name), added)
-            i = i + 1
+            i++
         }
     } else if s.kind == sk_assign() {
         collect_expr_used(t, s.a, used, bound)
@@ -628,14 +619,14 @@ func collect_match_used(t: *SumTables, scrut: int64, arms_off: int64, arms_len: 
             mut k: int64 = 0
             while k < p.c {
                 used_bind(bound, ast_name(a, vec_get((*a).kids, p.b + k)), marm)
-                k = k + 1
+                k++
             }
         } else if p.kind == pk_ident() {
             used_bind(bound, ast_name(a, p.a), marm)
         }
         collect_block_used(t, arm.body, used, bound)
         used_unbind(bound, marm)
-        i = i + 1
+        i++
     }
 }
 
@@ -659,7 +650,7 @@ func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *
         mut i: int64 = 0
         while i < e.c {
             collect_expr_used(t, vec_get((*a).kids, e.b + i), used, bound)
-            i = i + 1
+            i++
         }
     } else if e.kind == xk_field() {
         collect_expr_used(t, e.a, used, bound)
@@ -667,13 +658,13 @@ func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *
         mut j: int64 = 0
         while j < e.b {
             collect_expr_used(t, vec_get((*a).kids, e.a + j), used, bound)
-            j = j + 1
+            j++
         }
     } else if e.kind == xk_struct_lit() {
         mut k: int64 = 1
         while k < e.c {
             collect_expr_used(t, vec_get((*a).kids, e.b + k), used, bound)
-            k = k + 2
+            k += 2
         }
     } else if e.kind == xk_lambda() {
         lam: *Vector<string> = alloc(vec_new())
@@ -681,7 +672,7 @@ func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *
         while p < e.b {
             pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
             used_bind(bound, ast_name(a, pn.name), lam)
-            p = p + 1
+            p++
         }
         collect_block_used(t, e.d, used, bound)
         used_unbind(bound, lam)

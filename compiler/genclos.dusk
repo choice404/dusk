@@ -24,10 +24,8 @@
 func clos_bound_clone(m: *Map<string, int64>) -> *Map<string, int64> {
     out: *Map<string, int64> = alloc(map_new())
     keys: *Vector<string> = map_keys(m)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
-        map_put(out, vec_get(keys, i), 1)
-        i = i + 1
+    for key in keys {
+        map_put(out, key, 1)
     }
     vec_free(keys)
     free(keys)
@@ -62,7 +60,7 @@ func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, boun
         mut i: int64 = 0
         while i < e.c {
             clos_collect_expr(s, vec_get((*a).kids, e.b + i), used, bound)
-            i = i + 1
+            i++
         }
         return
     }
@@ -74,7 +72,7 @@ func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, boun
         mut j: int64 = 0
         while j < e.b {
             clos_collect_expr(s, vec_get((*a).kids, e.a + j), used, bound)
-            j = j + 1
+            j++
         }
         return
     }
@@ -82,7 +80,7 @@ func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, boun
         mut k: int64 = 0
         while k < e.c {
             clos_collect_expr(s, vec_get((*a).kids, e.b + k + 1), used, bound)
-            k = k + 2
+            k += 2
         }
         return
     }
@@ -95,7 +93,7 @@ func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, boun
         while p < e.b {
             lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
             map_put(lam_bound, ast_name(a, lp.name), 1)
-            p = p + 1
+            p++
         }
         clos_collect_block(s, e.d, used, lam_bound)
         map_free(lam_bound)
@@ -147,7 +145,7 @@ func clos_collect_match(s: *GenFuncState, scrut: int64, off: int64, len: int64, 
             mut j: int64 = 0
             while j < pat.c {
                 map_put(arm_bound, ast_name(a, vec_get((*a).kids, pat.b + j)), 1)
-                j = j + 1
+                j++
             }
         } else if pat.kind == pk_ident() {
             map_put(arm_bound, ast_name(a, pat.a), 1)
@@ -155,7 +153,7 @@ func clos_collect_match(s: *GenFuncState, scrut: int64, off: int64, len: int64, 
         clos_collect_block(s, arm.body, used, arm_bound)
         map_free(arm_bound)
         free(arm_bound)
-        i = i + 1
+        i++
     }
 }
 
@@ -168,7 +166,7 @@ func clos_collect_stmt(s: *GenFuncState, sid: int64, used: *Vector<string>, boun
         while i < st.b {
             bn: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a + i))
             map_put(bound, ast_name(a, bn.name), 1)
-            i = i + 1
+            i++
         }
         return
     }
@@ -230,7 +228,7 @@ func clos_collect_block(s: *GenFuncState, bid: int64, used: *Vector<string>, bou
     mut i: int64 = 0
     while i < block.len {
         clos_collect_stmt(s, vec_get((*a).kids, block.off + i), used, bound)
-        i = i + 1
+        i++
     }
 }
 
@@ -242,14 +240,12 @@ export func clos_captures(s: *GenFuncState, e: ExprNode) -> *Vector<LocalVal> {
     while p < e.b {
         lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
         map_put(bound, ast_name(a, lp.name), 1)
-        p = p + 1
+        p++
     }
     clos_collect_block(s, e.d, used, bound)
     caps: *Vector<LocalVal> = alloc(vec_new())
     seen: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < vec_len(used) {
-        name: string = vec_get(used, i)
+    for name in used {
         if !map_has(bound, name) {
             if !map_has(seen, name) {
                 map_put(seen, gs_copy(name), 1)
@@ -259,7 +255,6 @@ export func clos_captures(s: *GenFuncState, e: ExprNode) -> *Vector<LocalVal> {
                 }
             }
         }
-        i = i + 1
     }
     return caps
 }
@@ -274,7 +269,7 @@ export func clos_env_ty(s: *GenFuncState, caps: *Vector<LocalVal>) -> string {
         ll: string = cty_ll(c, vec_get(caps, i).ty)
         sb_push(b, ll)
         free(ll)
-        i = i + 1
+        i++
     }
     sb_push(b, " }")
     out: string = gs_built(b)
@@ -327,9 +322,9 @@ export func clos_emit_lambda_ex(s: *GenFuncState, e: ExprNode, name: string, env
         sb_push(sigb, pll)
         sb_push(sigb, " %a")
         sb_push_int(sigb, i)
-        wrote = wrote + 1
+        wrote++
         free(pll)
-        i = i + 1
+        i++
     }
     sig: string = gs_built(sigb)
     sb_free(sigb)
@@ -362,7 +357,7 @@ export func clos_emit_lambda_ex(s: *GenFuncState, e: ExprNode, name: string, env
         ptr: string = gen_alloca(inner, cap.ty)
         gen_store_slot(inner, cap.ty, val, ptr)
         gs_bind(inner, gs_copy(cap.op), LocalVal { ty: cap.ty, op: ptr })
-        ci = ci + 1
+        ci++
     }
     mut pi: int64 = 0
     while pi < e.b {
@@ -377,7 +372,7 @@ export func clos_emit_lambda_ex(s: *GenFuncState, e: ExprNode, name: string, env
         pp: string = gen_alloca(inner, pty)
         gen_store_slot(inner, pty, arg, pp)
         gs_bind(inner, gs_copy(ast_name(a, p2.name)), LocalVal { ty: pty, op: pp })
-        pi = pi + 1
+        pi++
     }
     gen_block(inner, e.d)
     if !(*inner).terminated {
@@ -412,7 +407,7 @@ export func gen_lambda(s: *GenFuncState, e: ExprNode) -> Val {
                 csa: SizeAlign = cty_size_align(c, vec_get(caps, si).ty)
                 env_size = ((env_size + csa.align - 1) / csa.align) * csa.align + csa.size
                 if csa.align > env_align { env_align = csa.align }
-                si = si + 1
+                si++
             }
             env_size = ((env_size + env_align - 1) / env_align) * env_align
             sb_push(eb, env)
@@ -452,7 +447,7 @@ export func gen_lambda(s: *GenFuncState, e: ExprNode) -> Val {
             line((*s).fb, gt)
             free(gt)
             gen_store_slot(s, cap.ty, v, slot)
-            i = i + 1
+            i++
         }
     }
     clos_emit_lambda(s, e, name, env_ty, caps)
@@ -527,7 +522,7 @@ export func invoke_closure(s: *GenFuncState, cv: Val, vals: *Vector<Val>) -> Val
         sb_push_char(args, 32)
         sb_push(args, av.op)
         free(ll)
-        i = i + 1
+        i++
     }
     argtext: string = gs_built(args)
     sb_free(args)
@@ -572,7 +567,7 @@ export func gen_closure_call(s: *GenFuncState, cv: Val, args_off: int64, args_le
     mut i: int64 = 0
     while i < args_len {
         vec_push(vals, gen_expr(s, vec_get((*a).kids, args_off + i)))
-        i = i + 1
+        i++
     }
     return invoke_closure(s, cv, vals)
 }

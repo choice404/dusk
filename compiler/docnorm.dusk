@@ -34,7 +34,7 @@ func lead_ws(src: string, n: int64, ps: int64, pe: int64) -> int64 {
         if !is_ws(bytes.byte_at(src, n, i)) {
             return i - ps
         }
-        i = i + 1
+        i++
     }
     return pe - ps
 }
@@ -51,7 +51,7 @@ export func str_lead_ws(s: string) -> int64 {
         if !is_ws(s[i]) {
             return i
         }
-        i = i + 1
+        i++
     }
     return m
 }
@@ -67,7 +67,7 @@ func collect_phys(src: string, n: int64, clo: int64, chi: int64) -> *Vector<PLin
             vec_push(v, PLine { ps: s, pe: i })
             s = i + 1
         }
-        i = i + 1
+        i++
     }
     vec_push(v, PLine { ps: s, pe: chi })
     return v
@@ -87,7 +87,7 @@ func detect_gutter(src: string, n: int64, phys: *Vector<PLine>) -> bool {
             }
             saw = true
         }
-        i = i + 1
+        i++
     }
     return saw
 }
@@ -107,7 +107,7 @@ func interior_min_indent(src: string, n: int64, phys: *Vector<PLine>) -> int64 {
                 best = w
             }
         }
-        i = i + 1
+        i++
     }
     if best < 0 { return 0 }
     return best
@@ -125,7 +125,7 @@ func normalize_interior(src: string, n: int64, p: PLine, gutter: bool, indent: i
         star: int64 = p.ps + lead_ws(src, n, p.ps, p.pe)
         start = star + 1
         if bytes.byte_at(src, n, start) == 32 {
-            start = start + 1
+            start++
         }
     } else {
         start = p.ps + indent
@@ -156,7 +156,7 @@ export func normalize_all(src: string, n: int64, lo: int64, hi: int64) -> *Vecto
     mut i: int64 = 1
     while i < vec_len(phys) {
         vec_push(out, normalize_interior(src, n, vec_get(phys, i), gutter, indent))
-        i = i + 1
+        i++
     }
     return out
 }
@@ -170,7 +170,7 @@ func to_paragraphs(lines: *Vector<string>) -> *Vector<string> {
     mut i: int64 = 0
     while i < total {
         if str_len(trim(vec_get(lines, i))) == 0 {
-            i = i + 1
+            i++
         } else {
             b: *StringBuilder = alloc(sb_new())
             mut first: bool = true
@@ -186,7 +186,7 @@ func to_paragraphs(lines: *Vector<string>) -> *Vector<string> {
                         if !first { sb_push_char(b, 32) }
                         sb_push(b, t)
                         first = false
-                        i = i + 1
+                        i++
                     }
                 }
             }
@@ -204,7 +204,7 @@ func join_from(paras: *Vector<string>, start: int64) -> string {
     while i < vec_len(paras) {
         if i > start { sb_push_char(b, 10) }
         sb_push(b, vec_get(paras, i))
-        i = i + 1
+        i++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -237,41 +237,35 @@ export func join_desc(lines: *Vector<string>) -> string {
 // with newlines.
 export func build_example(raw: *Vector<string>) -> string {
     mut minlead: int64 = -1
-    mut i: int64 = 0
-    while i < vec_len(raw) {
-        ln: string = vec_get(raw, i)
+    for ln in raw {
         if str_len(trim(ln)) > 0 {
             w: int64 = str_lead_ws(ln)
             if minlead < 0 || w < minlead { minlead = w }
         }
-        i = i + 1
     }
     if minlead < 0 { minlead = 0 }
     stripped: *Vector<string> = alloc(vec_new())
-    mut j: int64 = 0
-    while j < vec_len(raw) {
-        ln: string = vec_get(raw, j)
+    for ln in raw {
         if str_len(trim(ln)) == 0 {
             vec_push(stripped, "")
         } else {
             vec_push(stripped, trim_end(substring(ln, minlead, str_len(ln))))
         }
-        j = j + 1
     }
     mut a: int64 = 0
     while a < vec_len(stripped) && str_len(vec_get(stripped, a)) == 0 {
-        a = a + 1
+        a++
     }
     mut z: int64 = vec_len(stripped)
     while z > a && str_len(vec_get(stripped, z - 1)) == 0 {
-        z = z - 1
+        z--
     }
     b: *StringBuilder = alloc(sb_new())
     mut k: int64 = a
     while k < z {
         if k > a { sb_push_char(b, 10) }
         sb_push(b, vec_get(stripped, k))
-        k = k + 1
+        k++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)

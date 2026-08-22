@@ -232,14 +232,11 @@ export func lock_lines(c: Ctx) -> *Vector<string> {
 // no such alias.
 export func lock_line_for(c: Ctx, alias: string) -> string {
     lines: *Vector<string> = lock_lines(c)
-    mut i: int64 = 0
-    while i < vec_len(lines) {
-        one: string = vec_get(lines, i)
+    for one in lines {
         w: *Vector<string> = split_ws(one)
         if vec_len(w) >= 2 && str_eq(vec_get(w, 1), alias) {
             return one
         }
-        i = i + 1
     }
     return ""
 }
@@ -251,22 +248,22 @@ export func lock_line_for(c: Ctx, alias: string) -> string {
 export func lock_line_bad(line: string, alias: string, source: string, ref: string) -> string {
     w: *Vector<string> = split_ws(line)
     if vec_len(w) != 5 {
-        return "lock line '" + line + "' has " + int_to_string(vec_len(w)) + " fields, want 5: @lock <alias> <source> <ref> <commit>"
+        return f"lock line '{line}' has {vec_len(w)} fields, want 5: @lock <alias> <source> <ref> <commit>"
     }
     if !str_eq(vec_get(w, 0), "@lock") {
-        return "lock line '" + line + "' does not start with '@lock'"
+        return f"lock line '{line}' does not start with '@lock'"
     }
     if !str_eq(vec_get(w, 1), alias) {
-        return "lock line names alias '" + vec_get(w, 1) + "', want '" + alias + "'"
+        return f"lock line names alias '{vec_get(w, 1)}', want '{alias}'"
     }
     if !str_eq(vec_get(w, 2), source) {
-        return "lock line names source '" + vec_get(w, 2) + "', want '" + source + "'"
+        return f"lock line names source '{vec_get(w, 2)}', want '{source}'"
     }
     if !str_eq(vec_get(w, 3), ref) {
-        return "lock line names ref '" + vec_get(w, 3) + "', want '" + ref + "'"
+        return f"lock line names ref '{vec_get(w, 3)}', want '{ref}'"
     }
     if !is_hex40(vec_get(w, 4)) {
-        return "lock line commit '" + vec_get(w, 4) + "' is not a 40 character git object id"
+        return f"lock line commit '{vec_get(w, 4)}' is not a 40 character git object id"
     }
     return ""
 }
@@ -295,28 +292,28 @@ export func stamp_path(c: Ctx, alias: string) -> string {
 export func stamp_bad(c: Ctx, alias: string, source: string, ref: string, want_commit: string) -> string {
     path: string = stamp_path(c, alias)
     if !exists(path) {
-        return "no clone stamp at '" + path + "'"
+        return f"no clone stamp at '{path}'"
     }
     lines: *Vector<string> = lines_of(path)
     if vec_len(lines) != 1 {
-        return "the stamp '" + path + "' has " + int_to_string(vec_len(lines)) + " lines, want 1: <source> <ref> <commit>"
+        return f"the stamp '{path}' has {vec_len(lines)} lines, want 1: <source> <ref> <commit>"
     }
     one: string = vec_get(lines, 0)
     w: *Vector<string> = split_ws(one)
     if vec_len(w) != 3 {
-        return "the stamp line '" + one + "' has " + int_to_string(vec_len(w)) + " fields, want 3: <source> <ref> <commit>"
+        return f"the stamp line '{one}' has {vec_len(w)} fields, want 3: <source> <ref> <commit>"
     }
     if !str_eq(vec_get(w, 0), source) {
-        return "the stamp names source '" + vec_get(w, 0) + "', want '" + source + "'"
+        return f"the stamp names source '{vec_get(w, 0)}', want '{source}'"
     }
     if !str_eq(vec_get(w, 1), ref) {
-        return "the stamp names ref '" + vec_get(w, 1) + "', want '" + ref + "'"
+        return f"the stamp names ref '{vec_get(w, 1)}', want '{ref}'"
     }
     if !is_hex40(vec_get(w, 2)) {
-        return "the stamp commit '" + vec_get(w, 2) + "' is not a 40 character git object id"
+        return f"the stamp commit '{vec_get(w, 2)}' is not a 40 character git object id"
     }
     if str_len(want_commit) > 0 && !str_eq(vec_get(w, 2), want_commit) {
-        return "the stamp commit '" + vec_get(w, 2) + "' does not match the locked commit '" + want_commit + "'"
+        return f"the stamp commit '{vec_get(w, 2)}' does not match the locked commit '{want_commit}'"
     }
     return ""
 }

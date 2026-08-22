@@ -85,7 +85,7 @@ func is_commit(s: string) -> bool {
     mut i: int64 = 0
     while i < n {
         if !is_hex_byte(s[i]) { return false }
-        i = i + 1
+        i++
     }
     return true
 }
@@ -98,7 +98,7 @@ export func lock_entry_index(l: *Lock, alias: string) -> int64 {
         if str_eq((*e).alias, alias) {
             return i
         }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -107,7 +107,7 @@ func line_end(text: string, n: int64, from: int64) -> int64 {
     mut i: int64 = from
     while i < n {
         if text[i] == 10 { return i }
-        i = i + 1
+        i++
     }
     return n
 }
@@ -197,7 +197,7 @@ export func lock_read(path: string) -> *Lock {
     mut lineno: int64 = 0
     while pos < n {
         stop: int64 = line_end(text, n, pos)
-        lineno = lineno + 1
+        lineno++
         ln: string = substring(text, pos, stop)
         d: DirLine = scan_directive_line(ln)
         if str_len(d.err) > 0 {
@@ -237,7 +237,7 @@ func needs_quotes(v: string) -> bool {
         if c == 12 { return true }
         if c == 13 { return true }
         if c == 34 { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -252,7 +252,7 @@ func unwritable(v: string) -> bool {
         c: int64 = v[i]
         if c == 34 { return true }
         if c < 32 { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -273,9 +273,7 @@ func push_field(b: *StringBuilder, v: string) -> void {
  *  string the caller owns. */
 export func lock_text(l: *Lock) -> string {
     b: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < vec_len((*l).entries) {
-        e: *LockEntry = vec_get((*l).entries, i)
+    for e in (*l).entries {
         sb_push(b, "@lock ")
         push_field(b, (*e).alias)
         sb_push_char(b, 32)
@@ -285,7 +283,6 @@ export func lock_text(l: *Lock) -> string {
         sb_push_char(b, 32)
         push_field(b, (*e).commit)
         sb_push_char(b, 10)
-        i = i + 1
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -298,9 +295,7 @@ export func lock_text(l: *Lock) -> string {
  *  refused before the file is touched, so a failed write never leaves a lock behind
  *  that the reader would disagree with. */
 export func lock_write(path: string, l: *Lock) -> string {
-    mut i: int64 = 0
-    while i < vec_len((*l).entries) {
-        e: *LockEntry = vec_get((*l).entries, i)
+    for e in (*l).entries {
         mut bad: bool = unwritable((*e).alias)
         if unwritable((*e).source) { bad = true }
         if unwritable((*e).ref) { bad = true }
@@ -308,7 +303,6 @@ export func lock_write(path: string, l: *Lock) -> string {
         if bad {
             return quote_msg("cannot write the lock: the entry for ", (*e).alias, " holds a double quote or a control character")
         }
-        i = i + 1
     }
     text: string = lock_text(l)
     werr := write_file(path, text)
@@ -519,22 +513,16 @@ export func verify_project(m: *Manifest, l: *Lock) -> *Vector<string> {
     if str_len(ff) > 0 {
         vec_push(out, ff)
     }
-    mut i: int64 = 0
-    while i < vec_len((*m).requires) {
-        r: *Require = vec_get((*m).requires, i)
+    for r in (*m).requires {
         if !pinned_for(l, r) {
             vec_push(out, quote_msg("", (*r).alias, " is not locked; run dawn get"))
         }
-        i = i + 1
     }
-    mut j: int64 = 0
-    while j < vec_len((*l).entries) {
-        e: *LockEntry = vec_get((*l).entries, j)
+    for e in (*l).entries {
         f: string = stamp_fault(m, e)
         if str_len(f) > 0 {
             vec_push(out, dep_sentence((*e).alias, f))
         }
-        j = j + 1
     }
     return out
 }

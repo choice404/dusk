@@ -22,7 +22,7 @@ func ge_enum(a: *Ast, name: string) -> int64 {
     while i < vec_len(enums) {
         e: EnumNode = vec_get(enums, i)
         if str_eq(ast_name(a, e.name), name) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -35,7 +35,7 @@ func ge_variant(a: *Ast, enum_id: int64, name: string) -> (int64, int64) {
         vid: int64 = vec_get((*a).kids, e.variants_off + i)
         v: VariantNode = vec_get((*a).variants, vid)
         if str_eq(ast_name(a, v.name), name) { return (vid, i) }
-        i = i + 1
+        i++
     }
     return (-1, -1)
 }
@@ -49,11 +49,11 @@ func ge_field_offsets(c: *CTyArena, v: VariantNode) -> *Vector<int64> {
         fid: int64 = vec_get((*a).kids, v.fields_off + i)
         f: FieldNode = vec_get((*a).fields, fid)
         sa: SizeAlign = cty_size_align(c, cty_lower_ast(c, a, f.ty))
-        mut rem: int64 = off % sa.align
+        rem: int64 = off % sa.align
         if rem != 0 { off = off + sa.align - rem }
         vec_push(out, off)
-        off = off + sa.size
-        i = i + 1
+        off += sa.size
+        i++
     }
     return out
 }
@@ -161,7 +161,7 @@ export func gen_enum_ctor(s: *GenFuncState, name: string, variant: string, args_
                 fp: string = ge_field_ptr(s, pp, vec_get(offsets, i))
                 gen_store_slot(s, fty, fv.op, fp)
             }
-            i = i + 1
+            i++
         }
     }
     out: string = gen_load_slot(s, ety, slot)
@@ -206,7 +206,7 @@ func ge_bind_payload(s: *GenFuncState, ename: string, pat: PatternNode, addr: st
             bid: int64 = vec_get((*a).kids, pat.b + i)
             gs_bind(s, gs_copy(ast_name(a, bid)), LocalVal { ty: fty, op: slot })
         }
-        i = i + 1
+        i++
     }
     free(ll)
 }
@@ -234,7 +234,7 @@ func ge_pat_binder_ty(s: *GenFuncState, ename: string, pat: PatternNode, binder:
                 return cty_lower_ast(c, a, f.ty)
             }
         }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -269,7 +269,7 @@ func ge_block_local_ty(s: *GenFuncState, block_id: int64, ename: string, pat_id:
                 return static_expr_ty(s, st.c)
             }
         }
-        i = i + 1
+        i++
     }
     return cty_void(c)
 }
@@ -291,7 +291,7 @@ func ge_chain_push(chain: *Vector<GeArmFrame>, ename: string, pat: int64, body: 
     mut i: int64 = 0
     while i < vec_len(chain) {
         vec_push(nc, vec_get(chain, i))
-        i = i + 1
+        i++
     }
     vec_push(nc, GeArmFrame { ename: ename, pat: pat, body: body })
     return nc
@@ -328,7 +328,7 @@ func ge_chain_binder(s: *GenFuncState, name: string, ename: string, pat_id: int6
         f: GeArmFrame = vec_get(chain, j)
         rr: int64 = ge_frame_binder(s, name, f.ename, f.pat)
         if rr >= 0 { return rr }
-        j = j - 1
+        j--
     }
     return -1
 }
@@ -343,7 +343,7 @@ func ge_chain_local(s: *GenFuncState, name: string, ename: string, pat_id: int64
         f: GeArmFrame = vec_get(chain, j)
         rr: int64 = ge_frame_local(s, name, f.ename, f.pat, f.body)
         if rr >= 0 { return rr }
-        j = j - 1
+        j--
     }
     return -1
 }
@@ -503,7 +503,7 @@ func ge_match_ty(s: *GenFuncState, scrut: int64, off: int64, len: int64, chain: 
                 if t >= 0 { return t }
             }
         }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -574,7 +574,7 @@ func ge_arm_body(s: *GenFuncState, block_id: int64, result_ty: int64, result_slo
                 }
             } else { gen_stmt(s, sid) }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -630,7 +630,7 @@ export func gen_match(s: *GenFuncState, scrut: int64, arms_off: int64, arms_len:
             vid, vt := ge_variant(a, ge_enum(a, n.text), ast_name(a, pat.a))
             if vid < 0 || vt < 0 { default = label }
         }
-        i = i + 1
+        i++
     }
     sw: *StringBuilder = alloc(sb_new())
     sb_push(sw, "switch i")
@@ -658,7 +658,7 @@ export func gen_match(s: *GenFuncState, scrut: int64, arms_off: int64, arms_len:
             sb_push(sw, branch_label(vec_get(labels, j)))
             wrote_case = true
         }
-        j = j + 1
+        j++
     }
     sb_push(sw, " ]")
     st: string = gs_built(sw)
@@ -682,7 +682,7 @@ export func gen_match(s: *GenFuncState, scrut: int64, arms_off: int64, arms_len:
         ge_arm_body(s, arm3.body, result_ty, result_slot)
         gs_scope_pop(s)
         if !(*s).terminated { br((*s).fb, branch_label(end)) }
-        k = k + 1
+        k++
     }
     place_label((*s).fb, end)
     (*s).terminated = false

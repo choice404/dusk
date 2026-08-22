@@ -29,13 +29,13 @@ func absent_commit() -> string {
 // whole family exists to catch.
 func refused(r: Shell, tag: string, needle: string) -> string {
     if !r.infra {
-        return "the harness could not capture an exit code for " + tag
+        return f"the harness could not capture an exit code for {tag}"
     }
     if r.code == 0 {
-        return tag + " succeeded, want a refusal naming '" + needle + "'"
+        return f"{tag} succeeded, want a refusal naming '{needle}'"
     }
     if !str_contains(r.err, needle) {
-        return tag + " exited with code " + int_to_string(r.code) + " but its stderr '" + escape_show(clip(r.err, 400)) + "' carries no '" + needle + "'"
+        return f"{tag} exited with code {r.code} but its stderr '{escape_show(clip(r.err, 400))}' carries no '{needle}'"
     }
     return ""
 }
@@ -43,15 +43,15 @@ func refused(r: Shell, tag: string, needle: string) -> string {
 // The same, for a refusal whose message may name either of two fragments.
 func refused_either(r: Shell, tag: string, first: string, second: string) -> string {
     if !r.infra {
-        return "the harness could not capture an exit code for " + tag
+        return f"the harness could not capture an exit code for {tag}"
     }
     if r.code == 0 {
-        return tag + " succeeded, want a refusal naming '" + first + "' or '" + second + "'"
+        return f"{tag} succeeded, want a refusal naming '{first}' or '{second}'"
     }
     if str_contains(r.err, first) || str_contains(r.err, second) {
         return ""
     }
-    return tag + " exited with code " + int_to_string(r.code) + " but its stderr '" + escape_show(clip(r.err, 400)) + "' carries neither '" + first + "' nor '" + second + "'"
+    return f"{tag} exited with code {r.code} but its stderr '{escape_show(clip(r.err, 400))}' carries neither '{first}' nor '{second}'"
 }
 
 // dawn_update_moves_pin: with the manifest edited to a newer tag, building is
@@ -77,7 +77,7 @@ func update_moves_pin(bin: string) -> string {
     }
     first: string = lock_commit(lock_line_for(c, "dep"))
     if !is_hex40(first) {
-        return "after dawn get the lock pins '" + first + "', which is not a 40 character git object id"
+        return f"after dawn get the lock pins '{first}', which is not a 40 character git object id"
     }
     re: string = dep_revise(c, dep, "dep v2", "v0.2.0")
     if str_len(re) > 0 {
@@ -103,7 +103,7 @@ func update_moves_pin(bin: string) -> string {
     }
     second: string = lock_commit(line)
     if str_eq(second, first) {
-        return "dawn update left the pin on commit '" + first + "', want the commit tag v0.2.0 resolves to"
+        return f"dawn update left the pin on commit '{first}', want the commit tag v0.2.0 resolves to"
     }
     se: string = stamp_bad(c, "dep", dep.source, "v0.2.0", second)
     if str_len(se) > 0 {
@@ -114,7 +114,7 @@ func update_moves_pin(bin: string) -> string {
         return shell_detail("dawn run after dawn update", r)
     }
     if !str_contains(r.out, "dep v2\n") {
-        return "after dawn update the program printed '" + escape_show(r.out) + "', want the line 'dep v2' from the moved pin"
+        return f"after dawn update the program printed '{escape_show(r.out)}', want the line 'dep v2' from the moved pin"
     }
     return ""
 }
@@ -180,7 +180,7 @@ func stale_stamp_refused(bin: string) -> string {
         return be
     }
     if !str_contains(b.err, "dep") {
-        return "the stale clone refusal '" + escape_show(clip(b.err, 400)) + "' does not name the alias 'dep'"
+        return f"the stale clone refusal '{escape_show(clip(b.err, 400))}' does not name the alias 'dep'"
     }
     return ""
 }
@@ -240,16 +240,16 @@ func ir_parity(bin: string) -> string {
     cmp_r: Shell = sh(c, c.work, "cmp -s " + qw(one_ll) + " " + qw(two_ll))
     if cmp_r.code != 0 {
         d: Shell = sh(c, c.work, "diff " + qw(one_ll) + " " + qw(two_ll) + " | head -8")
-        return "the two copies emitted different IR: " + escape_show(clip(d.out, 600))
+        return f"the two copies emitted different IR: {escape_show(clip(d.out, 600))}"
     }
     if !file_has(c, one_ll, "dawn_modules/dep/") {
         return "the emitted IR names no file under 'dawn_modules/dep/', so the required module's fault locations are not spelled relative to the manifest"
     }
     if file_has(c, one_ll, one) {
-        return "the emitted IR carries the absolute path '" + one + "', so it would differ on another machine"
+        return f"the emitted IR carries the absolute path '{one}', so it would differ on another machine"
     }
     if file_has(c, one_ll, two) {
-        return "the emitted IR carries the absolute path '" + two + "'"
+        return f"the emitted IR carries the absolute path '{two}'"
     }
     nofile: Shell = sh(c, one, dusk_cmd(c, "build"))
     if nofile.code != 0 {

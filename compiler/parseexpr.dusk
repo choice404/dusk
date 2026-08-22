@@ -114,7 +114,7 @@ func parse_pipe(p: *Parser) -> int64 {
             p_leave_nesting(p)
             going = false
         } else {
-            links = links + 1
+            links++
             p_bump(p)
             rhs: int64 = parse_bin(p, 0)
             lhs = make_pipe(p, lhs, rhs)
@@ -175,7 +175,7 @@ func parse_bin_inner(p: *Parser, min_bp: int64) -> int64 {
             p_leave_nesting(p)
             going = false
         } else {
-            links = links + 1
+            links++
             rbp: int64 = bin_rbp(op)
             p_bump(p)
             rhs: int64 = parse_bin(p, rbp)
@@ -337,7 +337,7 @@ func parse_postfix(p: *Parser) -> int64 {
             p_leave_nesting(p)
             going = false
         } else {
-            links = links + 1
+            links++
             e = parse_postfix_link(p, e)
         }
     }
@@ -650,9 +650,9 @@ func parse_lambda_expr(p: *Parser) -> int64 {
     params: *Vector<int64> = parse_params(p)
     p_expect(p, k_arrow())
     ret: int64 = parse_type(p)
-    (*p).lambda_depth = (*p).lambda_depth + 1
+    (*p).lambda_depth++
     body: int64 = parse_block(p)
-    (*p).lambda_depth = (*p).lambda_depth - 1
+    (*p).lambda_depth--
     off, len := ast_kids(p_ast(p), params)
     return ast_expr(p_ast(p), xk_lambda(), lo, p_prev_hi(p), off, len, ret, body)
 }
@@ -666,9 +666,9 @@ func collector_mint_ahead(p: *Parser) -> bool {
     while i < end {
         t: Token = vec_get((*p).toks, i)
         if t.kind == k_lt() {
-            depth = depth + 1
+            depth++
         } else if t.kind == k_gt() {
-            depth = depth - 1
+            depth--
             if depth == 0 {
                 if i + 1 < vec_len(toks) {
                     nt: Token = vec_get(toks, i + 1)
@@ -677,7 +677,7 @@ func collector_mint_ahead(p: *Parser) -> bool {
                 return false
             }
         } else if t.kind == k_shr() {
-            depth = depth - 2
+            depth -= 2
             if depth <= 0 {
                 if depth == 0 {
                     if i + 1 < vec_len(toks) {
@@ -690,7 +690,7 @@ func collector_mint_ahead(p: *Parser) -> bool {
         } else if !collector_type_token(t.kind) {
             return false
         }
-        i = i + 1
+        i++
     }
     return false
 }

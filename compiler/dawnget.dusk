@@ -98,11 +98,8 @@ func locked_commit(l: *Lock, w: *DawnWant) -> string {
 /** Appends every require of a manifest to the queue, in the order the file declares
  *  them. origin is the manifest doing the asking, which a clash message names. */
 func push_requires(queue: *Vector<*DawnWant>, m: *Manifest, origin: string, from_root: bool) -> void {
-    mut i: int64 = 0
-    while i < vec_len((*m).requires) {
-        r: *Require = vec_get((*m).requires, i)
+    for r in (*m).requires {
         vec_push(queue, dawn_want_new((*r).alias, (*r).source, (*r).ref, origin, from_root))
-        i = i + 1
     }
 }
 
@@ -126,7 +123,7 @@ func settle(w: *DawnWant, l: *Lock, url: string, scratch: string, force_all: boo
     }
     rr: DawnRef = dawn_git_resolve(scratch, url, (*w).ref)
     if !rr.ok {
-        msg: string = "cannot resolve '" + (*w).ref + "' for '" + (*w).alias + "' at " + url
+        msg: string = f"cannot resolve '{(*w).ref}' for '{(*w).alias}' at {url}"
         dawn_fail(msg)
         free(msg)
         dawn_detail(rr.detail)
@@ -198,7 +195,7 @@ func place(m: *Manifest, w: *DawnWant, commit: string, from_lock: bool, url: str
         if stamped {
             dawn_note("dawn: refreshing ", (*w).alias)
         } else {
-            note: string = (*w).alias + " from " + url
+            note: string = f"{(*w).alias} from {url}"
             dawn_note("dawn: fetching ", note)
             free(note)
         }
@@ -248,7 +245,7 @@ func enqueue_deep(m: *Manifest, w: *DawnWant, queue: *Vector<*DawnWant>) -> int3
 func admit(m: *Manifest, l: *Lock, w: *DawnWant, queue: *Vector<*DawnWant>, deps: *Vector<*DawnDep>, scratch: string, force_all: bool, force_alias: string) -> int32 {
     url: string = source_url((*w).source)
     if str_len(url) == 0 {
-        msg: string = "bad source '" + (*w).source + "' for '" + (*w).alias + "'"
+        msg: string = f"bad source '{(*w).source}' for '{(*w).alias}'"
         code: int32 = dawn_fail(msg)
         free(msg)
         return code
@@ -276,16 +273,13 @@ func write_lock(m: *Manifest, deps: *Vector<*DawnDep>) -> int32 {
     ev: *Vector<*LockEntry> = alloc(vec_new())
     errv: *Vector<string> = alloc(vec_new())
     out: *Lock = alloc(Lock { path: copy_string(lockp), entries: ev, errors: errv })
-    mut i: int64 = 0
-    while i < vec_len(deps) {
-        d: *DawnDep = vec_get(deps, i)
+    for d in deps {
         vec_push(ev, alloc(LockEntry {
             alias: copy_string((*d).alias),
             source: copy_string((*d).source),
             ref: copy_string((*d).ref),
             commit: copy_string((*d).commit),
         }))
-        i = i + 1
     }
     werr: string = lock_write(lockp, out)
     lock_free(out)
@@ -305,7 +299,7 @@ func walk(m: *Manifest, l: *Lock, scratch: string, deps: *Vector<*DawnDep>, forc
     mut qi: int64 = 0
     while qi < vec_len(queue) && code == 0 {
         w: *DawnWant = vec_get(queue, qi)
-        qi = qi + 1
+        qi++
         v: DawnVerdict = dawn_judge(deps, w, (*m).path)
         if v.kind == dawn_admit_clash() {
             code = dawn_fail(v.msg)
@@ -330,7 +324,7 @@ export func dawn_fetch_all(m: *Manifest, force_all: bool, force_alias: string) -
         ready = dawn_mkdir_p(scratch)
     }
     if !ready {
-        code: int32 = dawn_fail_owned("cannot create " + mods)
+        code: int32 = dawn_fail_owned(f"cannot create {mods}")
         free(mods)
         free(scratch)
         return code

@@ -40,7 +40,7 @@ func add_name_kids(a: *Ast, s: *Map<string, int64>, off: int64, len: int64) -> v
     mut i: int64 = 0
     while i < len {
         ren_set_add(s, ast_name(a, vec_get((*a).kids, off + i)))
-        i = i + 1
+        i++
     }
 }
 
@@ -48,7 +48,7 @@ func ren_type_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64
     mut i: int64 = 0
     while i < len {
         ren_ty(r, vec_get((*(*r).ast).kids, off + i), skip)
-        i = i + 1
+        i++
     }
 }
 
@@ -115,7 +115,7 @@ func ren_func_in(r: *Renamer, f: FuncNode, is_method: bool) -> FuncNode {
         pid: int64 = vec_get((*a).kids, f.params_off + i)
         p: ParamNode = ren_param(r, pid, skip)
         ren_add_bound(r, bound, p.name)
-        i = i + 1
+        i++
     }
     ren_ty(r, f.ret, skip)
     ren_block(r, f.body, skip, bound)
@@ -129,7 +129,7 @@ func ren_field_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int6
         fid: int64 = vec_get((*a).kids, off + i)
         fl: FieldNode = vec_get((*a).fields, fid)
         ren_ty(r, fl.ty, skip)
-        i = i + 1
+        i++
     }
 }
 
@@ -144,10 +144,10 @@ func ren_method_sig_list(r: *Renamer, off: int64, len: int64, skip: *Map<string,
             pid: int64 = vec_get((*a).kids, m.params_off + j)
             p: ParamNode = vec_get((*a).params, pid)
             ren_ty(r, p.ty, skip)
-            j = j + 1
+            j++
         }
         ren_ty(r, m.ret, skip)
-        i = i + 1
+        i++
     }
 }
 
@@ -180,7 +180,7 @@ export func ren_item(r: *Renamer, it: ItemNode) -> void {
             vid: int64 = vec_get((*a).kids, e.variants_off + i)
             v: VariantNode = vec_get((*a).variants, vid)
             ren_field_list(r, v.fields_off, v.fields_len, skip2)
-            i = i + 1
+            i++
         }
         vec_set(enums, it.id, e)
     } else if it.kind == ik_interface() {
@@ -204,7 +204,7 @@ export func ren_item(r: *Renamer, it: ItemNode) -> void {
             funcs2: *Vector<FuncNode> = (*a).funcs
             mf: FuncNode = ren_func_in(r, vec_get(funcs2, mid), true)
             vec_set(funcs2, mid, mf)
-            j = j + 1
+            j++
         }
         vec_set(impls, it.id, im)
     } else if it.kind == ik_foreign() {
@@ -224,10 +224,10 @@ export func ren_item(r: *Renamer, it: ItemNode) -> void {
             while q < ff.params_len {
                 pp: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + q))
                 ren_ty(r, pp.ty, skip4)
-                q = q + 1
+                q++
             }
             ren_ty(r, ff.ret, skip4)
-            k = k + 1
+            k++
         }
     }
 }
@@ -239,7 +239,7 @@ func ren_block(r: *Renamer, id: int64, skip: *Map<string, int64>, bound: *Vector
     mut i: int64 = 0
     while i < b.len {
         ren_stmt(r, vec_get((*a).kids, b.off + i), skip, bound)
-        i = i + 1
+        i++
     }
     ren_pop_scope(bound)
 }
@@ -254,7 +254,7 @@ func ren_bind_list_after_value(r: *Renamer, off: int64, len: int64, skip: *Map<s
             ren_ty(r, b.ty, skip)
         }
         ren_add_bound(r, bound, b.name)
-        i = i + 1
+        i++
     }
 }
 
@@ -315,7 +315,7 @@ func bind_pattern(r: *Renamer, id: int64, bound: *Vector<*Map<string, int64>>) -
         mut i: int64 = 0
         while i < p.c {
             ren_add_bound(r, bound, vec_get((*a).kids, p.b + i))
-            i = i + 1
+            i++
         }
     }
 }
@@ -331,7 +331,7 @@ func ren_match_value(r: *Renamer, scrut: int64, off: int64, len: int64, skip: *M
         bind_pattern(r, arm.pat, bound)
         ren_block(r, arm.body, skip, bound)
         ren_pop_scope(bound)
-        i = i + 1
+        i++
     }
 }
 
@@ -340,7 +340,7 @@ func ren_expr_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64
     mut i: int64 = 0
     while i < len {
         ren_expr(r, vec_get((*a).kids, off + i), skip, bound)
-        i = i + 1
+        i++
     }
 }
 
@@ -349,7 +349,7 @@ func ren_field_expr_pairs(r: *Renamer, off: int64, len: int64, skip: *Map<string
     mut i: int64 = 0
     while i < len {
         ren_expr(r, vec_get((*a).kids, off + i + 1), skip, bound)
-        i = i + 2
+        i += 2
     }
 }
 
@@ -362,7 +362,7 @@ func ren_lambda(r: *Renamer, e: ExprNode, skip: *Map<string, int64>, bound: *Vec
         p: ParamNode = vec_get((*a).params, pid)
         ren_ty(r, p.ty, skip)
         ren_add_bound(r, bound, p.name)
-        i = i + 1
+        i++
     }
     ren_ty(r, e.c, skip)
     ren_block(r, e.d, skip, bound)
@@ -385,7 +385,7 @@ func ren_do(r: *Renamer, e: ExprNode, skip: *Map<string, int64>, bound: *Vector<
         if d.name >= 0 {
             ren_add_bound(r, bound, d.name)
         }
-        i = i + 1
+        i++
     }
     ren_pop_scope(bound)
 }
@@ -510,9 +510,7 @@ func add_scoped(rnames: *Map<string, int64>, a: *Ast, name: int64, exported: boo
 export func privatize(a: *Ast, suffix: string, export_suffix: string) -> void {
     rnames: *Map<string, int64> = ren_new_set()
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
             if !f.abi_export {
@@ -528,7 +526,6 @@ export func privatize(a: *Ast, suffix: string, export_suffix: string) -> void {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)
             add_scoped(rnames, a, iface.name, iface.exported, suffix, export_suffix)
         }
-        i = i + 1
     }
     if map_len(rnames) == 0 {
         return
@@ -537,7 +534,7 @@ export func privatize(a: *Ast, suffix: string, export_suffix: string) -> void {
     mut j: int64 = 0
     while j < vec_len(items) {
         ren_item(r, vec_get(items, j))
-        j = j + 1
+        j++
     }
 }
 
@@ -549,7 +546,7 @@ func path_file_name(path: string) -> string {
         if path[i] == 47 {
             last = i
         }
-        i = i + 1
+        i++
     }
     return substring(path, last + 1, n)
 }
@@ -563,7 +560,7 @@ func path_stem(path: string) -> string {
         if name[i] == 46 {
             dot = i
         }
-        i = i + 1
+        i++
     }
     if dot >= 0 {
         return substring(name, 0, dot)
@@ -604,7 +601,7 @@ export func suffix_for(path: string, index: int64) -> string {
         } else {
             sb_push_char(b, 95)
         }
-        i = i + 1
+        i++
     }
     sb_push_char(b, 95)
     sb_push_int(b, index)

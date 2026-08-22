@@ -82,7 +82,7 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
     st: int64 = infer_expr(tc, e.a)
     scrut_esc: EscPair = value_escape(tc, e.a)
     a: *Ast = (*tc).ast
-    (*tc).branch_depth = (*tc).branch_depth + 1
+    (*tc).branch_depth++
     mut subj_own: int64 = own_borrow()
     if !(*tc).types_only { subj_own = match_subject_own(tc, e.a) }
     mut ref_ty: int64 = -1
@@ -136,9 +136,9 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
         }
         if tail_id >= 0 {
             if nest_hint { (*tc).match_ctx = 1 }
-            (*tc).suppress = (*tc).suppress + 1
+            (*tc).suppress++
             at: int64 = infer_expr(tc, tail_id)
-            (*tc).suppress = (*tc).suppress - 1
+            (*tc).suppress--
             if nest_hint { (*tc).match_ctx = 0 }
             if (*tc).types_only {
                 atn: TyNode = ty_get((*tc).ty, at)
@@ -160,9 +160,9 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
             }
         }
         pop_scope(tc)
-        i = i + 1
+        i++
     }
-    (*tc).branch_depth = (*tc).branch_depth - 1
+    (*tc).branch_depth--
     check_match_arm_lambdas(tc, e)
     check_match_scrutinee(tc, st, e.a, e.b, e.c)
     if !(*tc).types_only && (ctx == 1 || any_managed || any_unprovable) {
@@ -197,14 +197,11 @@ func walk_match_expr(tc: *TypeChecker, id: int64, e: ExprNode) -> int64 {
  *  @param disagree_msg the diagnostic a branch that disagrees on ownership earns */
 export func finalize_result_own(tc: *TypeChecker, id: int64, own_vals: *Vector<int64>, copy_faults: *Vector<int64>, own_tails: *Vector<int64>, disagree_msg: string) -> void {
     a: *Ast = (*tc).ast
-    mut i: int64 = 0
-    while i < vec_len(copy_faults) {
-        cf: int64 = vec_get(copy_faults, i)
+    for cf in copy_faults {
         if cf >= 0 {
             ce: ExprNode = vec_get((*a).exprs, cf)
             tc_emit(tc, "cannot copy an owning pointer; bind a `ref` alias or `move` it", ce.lo, ce.hi)
         }
-        i = i + 1
     }
     mut verdict: int64 = -1
     mut mixed: bool = false
@@ -218,7 +215,7 @@ export func finalize_result_own(tc: *TypeChecker, id: int64, own_vals: *Vector<i
             me: ExprNode = vec_get((*a).exprs, vec_get(own_tails, j))
             tc_emit(tc, disagree_msg, me.lo, me.hi)
         }
-        j = j + 1
+        j++
     }
     mut vv: int64 = own_owner()
     if verdict >= 0 { vv = verdict }
@@ -255,7 +252,7 @@ export func check_branch_lit_fits(tc: *TypeChecker, e: ExprNode, ref_ty: int64) 
     while i < branch_count(a, e) {
         tail: int64 = branch_tail_at(a, e, i)
         if tail >= 0 { check_lit_fits_target(tc, tail, ref_ty) }
-        i = i + 1
+        i++
     }
 }
 
@@ -540,7 +537,7 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
         while i < e.c {
             d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + i))
             infer_expr(tc, d.expr)
-            i = i + 1
+            i++
         }
         return ty_unknown((*tc).ty)
     }
@@ -563,7 +560,7 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
             ht: int64 = infer_expr(tc, kid_id)
             kide: ExprNode = vec_get((*a).exprs, kid_id)
             check_printable(tc, ht, kide.lo, kide.hi)
-            fi = fi + 2
+            fi += 2
         }
         return ty_str((*tc).ty)
     }

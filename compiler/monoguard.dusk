@@ -34,7 +34,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
             if !crossable(m, vec_get((*a).kids, n.b + i), ban_future, allow_collector, child) {
                 return false
             }
-            i = i + 1
+            i++
         }
         if map_has(m_gstructs(m), name) {
             gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
@@ -47,7 +47,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
                 if !crossable(m, subst_apply(m, fld.ty, subst), ban_future, allow_collector, child) {
                     return false
                 }
-                fi = fi + 1
+                fi++
             }
             return true
         }
@@ -65,9 +65,9 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
                     if !crossable(m, subst_apply(m, fld2.ty, subst2), ban_future, allow_collector, child) {
                         return false
                     }
-                    vfi = vfi + 1
+                    vfi++
                 }
-                vi = vi + 1
+                vi++
             }
             return true
         }
@@ -88,7 +88,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
             if !crossable(m, vec_get((*a).kids, n.a + ti), ban_future, allow_collector, path) {
                 return false
             }
-            ti = ti + 1
+            ti++
         }
         return true
     }
@@ -101,9 +101,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
 func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_collector: bool, child: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_struct() {
             s: StructNode = vec_get((*a).structs, it.id)
             if str_eq(ast_name(a, s.name), name) {
@@ -113,7 +111,7 @@ func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_
                     if !crossable(m, fld.ty, ban_future, allow_collector, child) {
                         return false
                     }
-                    fi = fi + 1
+                    fi++
                 }
                 return true
             }
@@ -129,9 +127,9 @@ func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_
                         if !crossable(m, fld2.ty, ban_future, allow_collector, child) {
                             return false
                         }
-                        vfi = vfi + 1
+                        vfi++
                     }
-                    vi = vi + 1
+                    vi++
                 }
                 return true
             }
@@ -141,7 +139,6 @@ func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_
                 return false
             }
         }
-        i = i + 1
     }
     return true
 }
@@ -158,7 +155,7 @@ export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<string, int64>) -
         mut i: int64 = 0
         while i < n.c {
             if ptr_reaches_future(m, vec_get((*a).kids, n.b + i), child) { return true }
-            i = i + 1
+            i++
         }
         if map_has(m_gstructs(m), name) {
             gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
@@ -169,7 +166,7 @@ export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<string, int64>) -
             while fi < gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
                 if ptr_reaches_future(m, subst_apply(m, fld.ty, subst), child) { return true }
-                fi = fi + 1
+                fi++
             }
             return false
         }
@@ -185,9 +182,9 @@ export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<string, int64>) -
                 while vfi < va.fields_len {
                     fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
                     if ptr_reaches_future(m, subst_apply(m, fld2.ty, subst2), child) { return true }
-                    vfi = vfi + 1
+                    vfi++
                 }
-                vi = vi + 1
+                vi++
             }
             return false
         }
@@ -200,7 +197,7 @@ export func ptr_reaches_future(m: *Mono, id: int64, path: *Map<string, int64>) -
         mut ti: int64 = 0
         while ti < n.b {
             if ptr_reaches_future(m, vec_get((*a).kids, n.a + ti), path) { return true }
-            ti = ti + 1
+            ti++
         }
         return false
     }
@@ -219,7 +216,7 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>
         mut i: int64 = 0
         while i < n.c {
             if ptr_reaches_collector(m, vec_get((*a).kids, n.b + i), child) { return true }
-            i = i + 1
+            i++
         }
         if map_has(m_gstructs(m), name) {
             gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
@@ -230,7 +227,7 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>
             while fi < gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
                 if ptr_reaches_collector(m, subst_apply(m, fld.ty, subst), child) { return true }
-                fi = fi + 1
+                fi++
             }
             return false
         }
@@ -246,9 +243,9 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>
                 while vfi < va.fields_len {
                     fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
                     if ptr_reaches_collector(m, subst_apply(m, fld2.ty, subst2), child) { return true }
-                    vfi = vfi + 1
+                    vfi++
                 }
-                vi = vi + 1
+                vi++
             }
             return false
         }
@@ -261,7 +258,7 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>
         mut ti: int64 = 0
         while ti < n.b {
             if ptr_reaches_collector(m, vec_get((*a).kids, n.a + ti), path) { return true }
-            ti = ti + 1
+            ti++
         }
         return false
     }
@@ -273,9 +270,7 @@ export func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>
 func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, want_future: bool) -> bool {
     a: *Ast = (*m).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
-        it: ItemNode = vec_get(items, i)
+    for it in items {
         if it.kind == ik_struct() {
             s: StructNode = vec_get((*a).structs, it.id)
             if str_eq(ast_name(a, s.name), name) {
@@ -283,7 +278,7 @@ func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, want
                 while fi < s.fields_len {
                     fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, s.fields_off + fi))
                     if reaches_field(m, fld.ty, child, want_future) { return true }
-                    fi = fi + 1
+                    fi++
                 }
                 return false
             }
@@ -297,14 +292,13 @@ func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, want
                     while vfi < va.fields_len {
                         fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
                         if reaches_field(m, fld2.ty, child, want_future) { return true }
-                        vfi = vfi + 1
+                        vfi++
                     }
-                    vi = vi + 1
+                    vi++
                 }
                 return false
             }
         }
-        i = i + 1
     }
     return false
 }
@@ -335,7 +329,7 @@ export func check_future_spell(m: *Mono, id: int64, lo: int64, hi: int64) -> voi
         mut i: int64 = 0
         while i < n.c {
             check_future_spell(m, vec_get((*a).kids, n.b + i), lo, hi)
-            i = i + 1
+            i++
         }
         return
     }
@@ -347,7 +341,7 @@ export func check_future_spell(m: *Mono, id: int64, lo: int64, hi: int64) -> voi
         mut j: int64 = 0
         while j < n.b {
             check_future_spell(m, vec_get((*a).kids, n.a + j), lo, hi)
-            j = j + 1
+            j++
         }
         return
     }
@@ -355,7 +349,7 @@ export func check_future_spell(m: *Mono, id: int64, lo: int64, hi: int64) -> voi
         mut k: int64 = 0
         while k < n.b {
             check_future_spell(m, vec_get((*a).kids, n.a + k), lo, hi)
-            k = k + 1
+            k++
         }
         check_future_spell(m, n.c, lo, hi)
         return
@@ -416,7 +410,7 @@ export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: 
     while p < lam.b {
         lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, lam.a + p))
         map_put(bound, ast_name(a, lp.name), 1)
-        p = p + 1
+        p++
     }
     collect_block(m, lam.d, used, bound)
     done: *Map<string, int64> = alloc(map_new())
@@ -424,7 +418,7 @@ export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: 
     while i < vec_len(used) {
         c: string = vec_get(used, i)
         if map_has(bound, c) || map_has(done, c) {
-            i = i + 1
+            i++
         } else {
             map_put(done, c, 1)
             if map_has(env, c) {
@@ -439,7 +433,7 @@ export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: 
                     }
                 }
             }
-            i = i + 1
+            i++
         }
     }
 }
@@ -476,7 +470,7 @@ func collect_block(m: *Mono, bid: int64, used: *Vector<string>, bound: *Map<stri
     mut i: int64 = 0
     while i < b.len {
         collect_stmt(m, vec_get((*a).kids, b.off + i), used, bound)
-        i = i + 1
+        i++
     }
 }
 
@@ -489,7 +483,7 @@ func collect_stmt(m: *Mono, sid: int64, used: *Vector<string>, bound: *Map<strin
         while i < s.b {
             bnode: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             map_put(bound, ast_name(a, bnode.name), 1)
-            i = i + 1
+            i++
         }
         return
     }
@@ -547,13 +541,13 @@ func collect_match(m: *Mono, scrut: int64, off: int64, len: int64, used: *Vector
             mut j: int64 = 0
             while j < pat.c {
                 map_put(bound, ast_name(a, vec_get((*a).kids, pat.b + j)), 1)
-                j = j + 1
+                j++
             }
         } else if pat.kind == pk_ident() {
             map_put(bound, ast_name(a, pat.a), 1)
         }
         collect_block(m, arm.body, used, bound)
-        i = i + 1
+        i++
     }
 }
 
@@ -578,7 +572,7 @@ func collect_expr(m: *Mono, eid: int64, used: *Vector<string>, bound: *Map<strin
         mut i: int64 = 0
         while i < e.c {
             collect_expr(m, vec_get((*a).kids, e.b + i), used, bound)
-            i = i + 1
+            i++
         }
         return
     }
@@ -590,7 +584,7 @@ func collect_expr(m: *Mono, eid: int64, used: *Vector<string>, bound: *Map<strin
         mut j: int64 = 0
         while j < e.b {
             collect_expr(m, vec_get((*a).kids, e.a + j), used, bound)
-            j = j + 1
+            j++
         }
         return
     }
@@ -598,7 +592,7 @@ func collect_expr(m: *Mono, eid: int64, used: *Vector<string>, bound: *Map<strin
         mut k: int64 = 0
         while k < e.c {
             collect_expr(m, vec_get((*a).kids, e.b + k + 1), used, bound)
-            k = k + 2
+            k += 2
         }
         return
     }
@@ -607,7 +601,7 @@ func collect_expr(m: *Mono, eid: int64, used: *Vector<string>, bound: *Map<strin
         while p < e.b {
             lp: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
             map_put(bound, ast_name(a, lp.name), 1)
-            p = p + 1
+            p++
         }
         collect_block(m, e.d, used, bound)
         return

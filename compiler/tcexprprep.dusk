@@ -54,7 +54,7 @@ export func foreign_takes_struct(tc: *TypeChecker, name: string) -> bool {
     mut i: int64 = 0
     while i < p.len {
         if ty_is_named_struct(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -79,7 +79,7 @@ export func foreign_takes_callback(tc: *TypeChecker, name: string) -> bool {
     mut i: int64 = 0
     while i < p.len {
         if ty_is_func(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
-        i = i + 1
+        i++
     }
     return false
 }
@@ -139,7 +139,7 @@ export func field_read_ty(tc: *TypeChecker, sname: string, fname: string, lo: in
     while i < st.len {
         f: FieldSig = vec_get((*sigs).fields, st.off + i)
         if str_eq(f.name, fname) { return f.ty }
-        i = i + 1
+        i++
     }
     disp: string = base_type_name(sname)
     tc_emit(tc, no_field_msg(disp, fname), lo, hi)
@@ -255,7 +255,7 @@ func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64
     while i < st.len {
         f: FieldSig = vec_get((*sigs).fields, st.off + i)
         if str_eq(f.name, fname) { return i }
-        i = i + 1
+        i++
     }
     return -1
 }
@@ -291,7 +291,7 @@ export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: in
     while vi < len {
         val_id: int64 = vec_get((*a).kids, off + vi + 1)
         vec_push(vals, infer_expr(tc, val_id))
-        vi = vi + 2
+        vi += 2
     }
     structs: *Map<string, StructSig> = (*tc).structs
     if !map_has(structs, name) { return }
@@ -304,9 +304,9 @@ export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: in
             if str_eq(fname, ast_name(a, vec_get((*a).kids, off + j))) {
                 tc_emit(tc, field_dup_msg(fname, name), lo, hi)
             }
-            j = j + 2
+            j += 2
         }
-        i = i + 2
+        i += 2
     }
     mut k: int64 = 0
     while k < len {
@@ -331,7 +331,7 @@ export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: in
                 reject_collector_iface_box(tc, raw, actual, val.lo, val.hi)
             }
         }
-        k = k + 2
+        k += 2
     }
     mut m: int64 = 0
     while m < st.len {
@@ -340,10 +340,10 @@ export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: in
         mut n: int64 = 0
         while n < len {
             if str_eq(fld2.name, ast_name(a, vec_get((*a).kids, off + n))) { found = true }
-            n = n + 2
+            n += 2
         }
         if !found { tc_emit(tc, missing_field_msg(name, fld2.name), lo, hi) }
-        m = m + 1
+        m++
     }
 }
 
@@ -353,7 +353,7 @@ export func infer_array(tc: *TypeChecker, off: int64, len: int64) -> int64 {
     mut i: int64 = 0
     while i < len {
         elem = infer_expr(tc, vec_get((*a).kids, off + i))
-        i = i + 1
+        i++
     }
     return ty_slice((*tc).ty, elem)
 }
@@ -364,7 +364,7 @@ export func infer_tuple(tc: *TypeChecker, off: int64, len: int64) -> int64 {
     mut i: int64 = 0
     while i < len {
         vec_push(xs, infer_expr(tc, vec_get((*a).kids, off + i)))
-        i = i + 1
+        i++
     }
     return ty_tuple((*tc).ty, xs)
 }
@@ -375,7 +375,7 @@ func infer_args(tc: *TypeChecker, off: int64, len: int64) -> *Vector<int64> {
     mut i: int64 = 0
     while i < len {
         vec_push(out, infer_expr(tc, vec_get((*a).kids, off + i)))
-        i = i + 1
+        i++
     }
     return out
 }
@@ -390,7 +390,7 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
             tc_emit(tc, "a lambda cannot take a using parameter; a lambda body has no ambient allocator, so allocate in the enclosing function or use the default heap", e.lo, e.hi)
         }
         vec_push(ps, tc_type(tc, p.ty))
-        i = i + 1
+        i++
     }
     saved_ret: int64 = (*tc).cur_ret
     saved_raw_ret: int64 = (*tc).cur_raw_ret
@@ -427,12 +427,12 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
         if !(*tc).types_only && is_typaram_ast(tc, p2.ty) {
             declare_own(tc, pname, own_borrow())
         }
-        j = j + 1
+        j++
     }
     mut b: int64 = 0
     while b < vec_len(borrowed) {
         declare_own(tc, vec_get(borrowed, b), own_borrow())
-        b = b + 1
+        b++
     }
     check_block_no_scope(tc, e.d)
     pop_scope(tc)
@@ -472,7 +472,7 @@ export func check_match_arm_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
                 tc_emit(tc, "a match arm cannot yield a lambda; bind the function to a name outside the match", tail.lo, tail.hi)
             }
         }
-        i = i + 1
+        i++
     }
 }
 
@@ -497,7 +497,7 @@ func stmt_diverges(a: *Ast, sid: int64) -> bool {
         while i < s.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
             if !block_diverges(a, arm.body) { return false }
-            i = i + 1
+            i++
         }
         return true
     }
@@ -509,7 +509,7 @@ export func block_diverges(a: *Ast, bid: int64) -> bool {
     mut i: int64 = 0
     while i < b.len {
         if stmt_diverges(a, vec_get((*a).kids, b.off + i)) { return true }
-        i = i + 1
+        i++
     }
     return false
 }
