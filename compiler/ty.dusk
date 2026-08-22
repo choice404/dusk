@@ -75,6 +75,15 @@ export func ty_is_unsigned(t: *TyArena, id: int64) -> bool {
     return n.kind == tyk_int() && n.a == 1
 }
 
+// The kinds ty_canon renders as one constant letter, exactly the list
+// ty_leaf_code answers for. It is deliberately a strict subset: a kind outside
+// every branch of both functions still reaches ty_leaf_code's "!" default
+// through the builder, so an unlisted kind renders the same bytes either way.
+func ty_kind_is_leaf(k: int64) -> bool {
+    if k == tyk_bool() || k == tyk_char() || k == tyk_rune() || k == tyk_str() { return true }
+    return k == tyk_unit() || k == tyk_error() || k == tyk_thread() || k == tyk_unknown()
+}
+
 func ty_leaf_code(k: int64) -> string {
     if k == tyk_bool() { return "B" }
     if k == tyk_char() { return "C" }
@@ -139,7 +148,39 @@ func sb_push_ty_canon(b: *StringBuilder, t: *TyArena, id: int64) -> void {
     }
 }
 
+// The eight integer spellings, so the widths the checker actually builds answer
+// without a builder. An unexpected width answers empty and falls through to the
+// builder, which renders it exactly as before.
+func ty_int_canon(a: int64, w: int64) -> string {
+    if a == 1 {
+        if w == 64 { return "W64" }
+        if w == 32 { return "W32" }
+        if w == 16 { return "W16" }
+        if w == 8 { return "W8" }
+        return ""
+    }
+    if w == 64 { return "I64" }
+    if w == 32 { return "I32" }
+    if w == 16 { return "I16" }
+    if w == 8 { return "I8" }
+    return ""
+}
+
+// The canonical code of a type whose spelling is a constant, or the empty string
+// when the code has to be built. ty_leaf_code never answers empty, so an empty
+// answer is unambiguously "build it".
+func ty_canon_const(n: TyNode) -> string {
+    if n.kind == tyk_int() { return ty_int_canon(n.a, n.w) }
+    if ty_kind_is_leaf(n.kind) { return ty_leaf_code(n.kind) }
+    return ""
+}
+
+// The interning key of a type. Every leaf and every integer width, which is most
+// of what the checker interns, short-circuits to a constant here; only a named or
+// compound type pays for a builder.
 func ty_canon(t: *TyArena, n: TyNode) -> string {
+    fixed: string = ty_canon_const(n)
+    if str_len(fixed) > 0 { return fixed }
     b: *StringBuilder = alloc(sb_new())
     if n.kind == tyk_int() {
         sb_push(b, int_canon_code(n.a))
@@ -186,13 +227,16 @@ func ty_canon(t: *TyArena, n: TyNode) -> string {
     return out
 }
 
-export func ty_intern(t: *TyArena, n: TyNode) -> int64 {
+func ty_intern(t: *TyArena, n: TyNode) -> int64 {
     c: string = ty_canon(t, n)
     kid: int64 = intern_owned((*t).interner, c)
     key: string = intern_get((*t).interner, kid)
     ids: *Map<string, int64> = (*t).ids
-    if map_has(ids, key) {
-        return unwrap_or(map_get(ids, key), -1)
+    // An arena id is an index into nodes and so never negative, so one probe
+    // answers both membership and value: -1 back from unwrap_or is a miss.
+    hit: int64 = unwrap_or(map_get(ids, key), -1)
+    if hit >= 0 {
+        return hit
     }
     nodes: *Vector<TyNode> = (*t).nodes
     id: int64 = vec_len(nodes)

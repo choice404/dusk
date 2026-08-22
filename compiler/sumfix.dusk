@@ -16,7 +16,6 @@
 @import summary
 @import sumflow
 @import sumwalk
-@import sumplace
 @import sumhof
 
 func build_gens(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
@@ -97,10 +96,30 @@ func build_funcs_order(a: *Ast, funcs: *Map<string, int64>, order: *Vector<strin
     }
 }
 
+// The caller list of one callee, created empty on first sight. The names inside
+// are borrows of the interned function names, so a list never owns its elements.
+// The index lives as long as the fixpoint and is left to process exit, the same
+// as the other tables solve_fns builds. The newline-joined string it replaces
+// rebuilt and leaked the whole list on every append, so the index costs one
+// allocation per edge where the old form cost one per edge squared.
+func callers_slot(callers: *Map<string, *Vector<string>>, callee: string) -> *Vector<string> {
+    hit: Maybe<*Vector<string>> = map_get(callers, callee)
+    match hit {
+        Some(list) => { return list }
+        None => {
+            fresh: *Vector<string> = alloc(vec_new())
+            map_put(callers, callee, fresh)
+            return fresh
+        }
+    }
+}
+
 // The direct module-function callees of each summarized function, inverted so a
 // grown callee summary re-enqueues exactly its callers. Duplicate caller entries
-// are harmless: the queued set prevents a double enqueue.
-func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<string, string>) -> void {
+// are harmless: the queued set prevents a double enqueue. Each callee keeps its
+// callers in a vector appended in the same order the newline-joined string this
+// replaces grew in, so the work queue is fed in the identical order.
+func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<string, *Vector<string>>) -> void {
     a: *Ast = (*t).ast
     mfns: *Map<string, int64> = (*t).module_fns
     keys: *Vector<string> = map_keys(funcs)
@@ -111,14 +130,7 @@ func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<stri
         cks: *Vector<string> = map_keys(callees)
         mut j: int64 = 0
         while j < vec_len(cks) {
-            c: string = vec_get(cks, j)
-            b: *StringBuilder = alloc(sb_new())
-            sb_push(b, unwrap_or(map_get(callers, c), ""))
-            sb_push(b, fname)
-            sb_push_char(b, 10)
-            map_put(callers, c, substring(sb_cstr(b), 0, sb_size(b)))
-            sb_free(b)
-            free(b)
+            vec_push(callers_slot(callers, vec_get(cks, j)), fname)
             j++
         }
     }
@@ -129,7 +141,7 @@ func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
     funcs: *Map<string, int64> = alloc(map_new())
     order: *Vector<string> = alloc(vec_new())
     build_funcs_order(a, funcs, order)
-    callers: *Map<string, string> = alloc(map_new())
+    callers: *Map<string, *Vector<string>> = alloc(map_new())
     build_callers(t, funcs, callers)
     queue: *Vector<string> = alloc(vec_new())
     queued: *Map<string, int64> = alloc(map_new())
@@ -164,21 +176,24 @@ func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
     }
 }
 
-func enqueue_callers(callers: *Map<string, string>, name: string, queue: *Vector<string>, queued: *Map<string, int64>) -> void {
-    if !map_has(callers, name) { return }
-    list: string = unwrap_or(map_get(callers, name), "")
-    mut start: int64 = 0
-    mut j: int64 = 0
-    while list[j] != 0 {
-        if list[j] == 10 {
-            c: string = substring(list, start, j)
-            if str_len(c) > 0 && !map_has(queued, c) {
-                map_put(queued, c, 1)
-                vec_push(queue, c)
+// Every caller of name that is not already waiting, in the order the callers were
+// recorded. The empty-name guard is kept from the newline-joined form this
+// replaces, where an unnamed function produced an empty entry that was skipped.
+func enqueue_callers(callers: *Map<string, *Vector<string>>, name: string, queue: *Vector<string>, queued: *Map<string, int64>) -> void {
+    hit: Maybe<*Vector<string>> = map_get(callers, name)
+    match hit {
+        Some(list) => {
+            mut j: int64 = 0
+            while j < vec_len(list) {
+                c: string = vec_get(list, j)
+                if str_len(c) > 0 && !map_has(queued, c) {
+                    map_put(queued, c, 1)
+                    vec_push(queue, c)
+                }
+                j++
             }
-            start = j + 1
         }
-        j++
+        None => { return }
     }
 }
 

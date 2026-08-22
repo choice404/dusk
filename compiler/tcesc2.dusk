@@ -21,6 +21,7 @@
 @import tcesc
 @import summary
 @import sumflow
+@import tcesc3
 
 func esc_none() -> EscPair { return EscPair { slice: false, closure: false } }
 func esc_or(a: EscPair, b: EscPair) -> EscPair { return EscPair { slice: a.slice || b.slice, closure: a.closure || b.closure } }
@@ -124,11 +125,11 @@ export func call_frame_origin(tc: *TypeChecker, e: ExprNode) -> FrameOrigin {
 // The frame-view taint of a higher-order builtin result, with the argument index
 // the diagnostic names, or has=false when the callee is not one (or is shadowed by
 // a local or a module function of the same name).
-export struct TaintRes { has: bool, esc: EscPair, idx: int64 }
+struct TaintRes { has: bool, esc: EscPair, idx: int64 }
 
 func no_taint() -> TaintRes { return TaintRes { has: false, esc: esc_none(), idx: 0 } }
 
-export func higher_order_taint(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> TaintRes {
+func higher_order_taint(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> TaintRes {
     a: *Ast = (*tc).ast
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind != xk_ident() { return no_taint() }
@@ -170,7 +171,7 @@ export func higher_order_taint(tc: *TypeChecker, callee_id: int64, arg_off: int6
 // back through its result: a lambda literal answered by the summary module's
 // per-span table, a named module function by its computed summary, an opaque
 // function value by its declared result type.
-export func mapper_aliases(tc: *TypeChecker, fexpr_id: int64, i: int64) -> bool {
+func mapper_aliases(tc: *TypeChecker, fexpr_id: int64, i: int64) -> bool {
     a: *Ast = (*tc).ast
     f: ExprNode = vec_get((*a).exprs, fexpr_id)
     if f.kind == xk_lambda() {
@@ -201,7 +202,7 @@ func func_ret_viewy(tc: *TypeChecker, fexpr_id: int64) -> bool {
 
 // The store-edge provenance of a returned bare name, if a call stored a frame view
 // into it.
-export func returned_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
+func returned_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
     fp: *Map<string, FlowProv> = (*tc).flow_prov
@@ -216,7 +217,7 @@ export func no_flow_prov() -> FlowProv { return FlowProv { lo: -1, hi: -1, src: 
 
 // The store-edge provenance behind a returned struct literal's pointer or slice
 // field that a call polluted with a frame view.
-export func struct_lit_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
+func struct_lit_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
     if e.kind != xk_struct_lit() { return no_flow_prov() }

@@ -13,7 +13,7 @@ export struct TyList { off: int64, len: int64 }
 export struct FnSig { params: TyList, raw_params: TyList, ret: int64, raw_ret: int64, is_async: bool, owning: bool }
 export struct FieldSig { name: string, ty: int64, raw: int64 }
 export struct StructSig { is_gen: bool, off: int64, len: int64 }
-export struct VariantSig { owner: string, off: int64, len: int64 }
+export struct VariantSig { off: int64, len: int64 }
 export struct EnumSig { off: int64, len: int64 }
 export struct MethodReq { name: string, arity: int64 }
 export struct MethodList { off: int64, len: int64 }
@@ -114,17 +114,17 @@ export func empty_tylist() -> TyList {
     return TyList { off: 0, len: 0 }
 }
 
-export func empty_fnsig(t: *TyArena) -> FnSig {
+func empty_fnsig(t: *TyArena) -> FnSig {
     e: TyList = empty_tylist()
     return FnSig { params: e, raw_params: e, ret: ty_unknown(t), raw_ret: ty_unknown(t), is_async: false, owning: false }
 }
 
-export func empty_struct_sig() -> StructSig {
+func empty_struct_sig() -> StructSig {
     return StructSig { is_gen: false, off: 0, len: 0 }
 }
 
 export func empty_variant_sig() -> VariantSig {
-    return VariantSig { owner: "", off: 0, len: 0 }
+    return VariantSig { off: 0, len: 0 }
 }
 
 func key2(a: string, b: string) -> string {
@@ -294,7 +294,7 @@ func collect_enum(s: *TypeSigs, id: int64) -> void {
             j++
         }
         list: TyList = push_tys((*s).tys, payload)
-        vs: VariantSig = VariantSig { owner: ename, off: list.off, len: list.len }
+        vs: VariantSig = VariantSig { off: list.off, len: list.len }
         vec_push(sigs_vec, vs)
         map_put((*s).variant_payloads, vname, vs)
         map_put((*s).variant_payloads_by_enum, key2(ename, vname), vs)

@@ -25,7 +25,8 @@ func map_take_fault() -> void {
 /** A hash map as parallel slot buffers and an insertion order record. used marks which
  *  slots hold a live entry, keys and vals are the parallel key and value buffers, len is
  *  the live entry count, and cap is the slot count that doubles when the table is half
- *  full. order lists the keys in first insertion order so iteration is deterministic. The
+ *  full and is always a power of two, which is what lets a key fold into a slot with a
+ *  mask. order lists the keys in first insertion order so iteration is deterministic. The
  *  map owns every buffer and the order vector; map_free releases them all. */
 export struct Map<K, V> {
     used: *raw bool,
@@ -58,6 +59,7 @@ export func map_hash(s: string) -> int64 {
  *  map_free(m)
  *  free(m) */
 export func map_new<K, V>() -> Map<K, V> {
+    // A power of two, the invariant map_slot's mask depends on.
     cap: int64 = 8
     u: *raw bool = alloc_bytes(cap * sizeof(bool))
     mut i: int64 = 0
@@ -71,19 +73,18 @@ export func map_new<K, V>() -> Map<K, V> {
     return Map { used: u, keys: k, vals: v, len: 0, cap: cap, order: o }
 }
 
-// The slot a key probes to, folded into range. A negative hash, from overflow,
-// lands back in 0 to cap minus 1.
+// The slot a key probes to, folded into range with a mask. cap is a power of two,
+// eight at map_new and doubled by every grow, so masking off the low bits is the
+// remainder, and a negative hash, from overflow, lands in 0 to cap minus 1 the way
+// the remainder plus cap did. Any future capacity choice keeps that invariant.
 func map_slot<K, V>(m: *Map<K, V>, k: K) -> int64 {
-    mut idx: int64 = hash(k) % (*m).cap
-    if idx < 0 {
-        idx = idx + (*m).cap
-    }
-    return idx
+    return hash(k) & ((*m).cap - 1)
 }
 
-// Doubles the table and reinserts every live entry. The old buffers are freed
-// after the move. len resets to zero and climbs again as the entries reinsert,
-// staying under the new half full threshold so no nested grow fires.
+// Doubles the table and reinserts every live entry, so the slot count stays a
+// power of two. The old buffers are freed after the move. len resets to zero and
+// climbs again as the entries reinsert, staying under the new half full threshold
+// so no nested grow fires.
 func map_grow<K, V>(m: *Map<K, V>) -> void {
     old_used: *raw bool = (*m).used
     old_keys: *raw K = (*m).keys

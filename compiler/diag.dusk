@@ -107,7 +107,7 @@ export func span_diag(lo: int64, hi: int64, msg: string) -> SpanDiagnostic {
 // Renders a diagnostic as `file: line:col: error: message`, returning a fresh heap
 // string the caller owns and frees. This is the header the stage0 compiler prints;
 // the caret block beneath it is not built yet.
-export func diag_render(d: Diagnostic) -> string {
+func diag_render(d: Diagnostic) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, d.file)
     sb_push(b, ": ")
@@ -491,13 +491,13 @@ func render_at(src: string, n: int64, loc: Loc, d: SpanDiagnostic, local: int64)
 
 // Renders a file-local diagnostic by scanning for its line, the form with no line
 // table at hand.
-export func render_local(src: string, n: int64, d: SpanDiagnostic, local: int64) -> string {
+func render_local(src: string, n: int64, d: SpanDiagnostic, local: int64) -> string {
     return render_at(src, n, loc_at(src, n, local), d, local)
 }
 
 // Renders a file-local diagnostic through the file's line table, the form every
 // path that reports more than one diagnostic against a file takes.
-export func render_local_in(src: string, n: int64, t: *LineTable, d: SpanDiagnostic, local: int64) -> string {
+func render_local_in(src: string, n: int64, t: *LineTable, d: SpanDiagnostic, local: int64) -> string {
     return render_at(src, n, loc_in(src, n, local, t), d, local)
 }
 
@@ -514,12 +514,12 @@ func with_path(path: string, local: string) -> string {
     return out
 }
 
-export func render_file_diag(path: string, src: string, n: int64, d: SpanDiagnostic) -> string {
+func render_file_diag(path: string, src: string, n: int64, d: SpanDiagnostic) -> string {
     return with_path(path, render_local(src, n, d, d.lo))
 }
 
 // The same render through the declaring file's line table.
-export func render_file_diag_in(path: string, src: string, n: int64, t: *LineTable, d: SpanDiagnostic) -> string {
+func render_file_diag_in(path: string, src: string, n: int64, t: *LineTable, d: SpanDiagnostic) -> string {
     return with_path(path, render_local_in(src, n, t, d, d.lo))
 }
 

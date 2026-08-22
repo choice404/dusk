@@ -17,7 +17,6 @@
 
 @paradigm procedural
 
-@import std.io
 @import std.string
 @import std.vector
 @import std.os
@@ -64,8 +63,10 @@ func run_binary(bin: string, argv: string[], start: int64) -> int32 {
 
 /** Compiles the manifest root and, when asked, runs what it produced. The artifacts
  *  land beside the manifest rather than beside the working directory, so a build
- *  from a subdirectory of the project writes where the project's own build does. */
-func build_root(m: *Manifest, argv: string[], run_it: bool) -> int32 {
+ *  from a subdirectory of the project writes where the project's own build does.
+ *  release is the compiler's own --release, handed straight through, so a package
+ *  built with it is the same program clang was told to optimize. */
+func build_root(m: *Manifest, argv: string[], run_it: bool, release: bool) -> int32 {
     root: string = manifest_root_file(m)
     if str_len(root) == 0 {
         dawn_manifest_faulted(m)
@@ -73,7 +74,7 @@ func build_root(m: *Manifest, argv: string[], run_it: bool) -> int32 {
     }
     out: string = path_join((*m).dir, "target/dawn-out")
     empty: string[] = []
-    bcode: int32 = build_module_to_pkg(argv[0], root, false, empty, 0, out, true)
+    bcode: int32 = build_module_to_pkg(argv[0], root, false, empty, 0, out, true, release)
     if bcode != 0 {
         free(out)
         free(root)
@@ -104,11 +105,16 @@ func build_root(m: *Manifest, argv: string[], run_it: bool) -> int32 {
 }
 
 /** Builds the package the command was run inside, refusing first if the manifest,
- *  the lock, and the checkouts do not agree. */
+ *  the lock, and the checkouts do not agree. build takes one flag, --release, which
+ *  is the compiler's own and is passed through untouched; run takes none, since
+ *  everything after it belongs to the program being run. */
 export func dawn_cmd_build(argv: string[], run_it: bool) -> int32 {
+    mut release: bool = false
     if !run_it {
-        if argv.len > 2 {
-            return dawn_fail("build takes no arguments; it builds the root package.dawn names")
+        if argv.len == 3 && str_eq(argv[2], "--release") {
+            release = true
+        } else if argv.len > 2 {
+            return dawn_fail("build takes no arguments but --release; it builds the root package.dawn names")
         }
     }
     mpath: string = dawn_manifest_path()
@@ -145,7 +151,7 @@ export func dawn_cmd_build(argv: string[], run_it: bool) -> int32 {
     dawn_free_messages(probs)
     free(probs)
     if code == 0 {
-        code = build_root(m, argv, run_it)
+        code = build_root(m, argv, run_it, release)
     }
     manifest_free(m)
     free(m)

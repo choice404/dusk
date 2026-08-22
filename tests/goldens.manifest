@@ -1182,6 +1182,23 @@ out 5\n
 ok false
 err_has freed or stale pointer
 ---
+test raw_double_free_faults
+mode run_raw
+file examples/doublefree_fault.dusk
+out 5\n
+ok false
+err_has fatal: double free
+---
+test a_collected_root_in_main_survives_a_plain_build
+mode run
+file examples/gcrelease_ok.dusk
+out 720\n9\n
+---
+# Builtin builds examples/gcrelease_ok.dusk with build --release, the -O2 link, runs it, and asserts the same output the plain build gives, so a collected root the optimizer moved inside main's frame is still scanned.
+test a_collected_root_in_main_survives_a_release_build
+mode special
+special release_collector
+---
 test array_index_out_of_bounds_faults
 mode run_raw
 file examples/bounds.dusk
@@ -3323,7 +3340,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.15.0\n
+out dusk 1.15.1\n
 argv version
 code 0
 ---
@@ -6797,6 +6814,16 @@ mode check_fail
 file tests/dawn/urlimport/src/main.dusk
 err_has tests/dawn/urlimport/src/main.dusk: 'example.com/user/repo/mod' is a url import; declare it with @require in package.dawn
 ---
+# The same form with no package.dawn anywhere above the file. Through 1.15.0 it resolved
+# against a machine wide clone cache, and nothing has filled that cache since dawn began
+# fetching into dawn_modules, so the resolution is gone and the file earns the refusal a
+# project already did, by the same sentence rather than a generic unresolved import.
+test a_url_import_outside_a_project_is_refused
+mode check_fail
+file examples/urlimport_noproject_fail.dusk
+err_has examples/urlimport_noproject_fail.dusk: 'example.com/user/repo/mod' is a url import; declare it with @require in package.dawn
+err_absent cannot resolve import
+---
 # std is reserved. A local directory named std that would have answered an import under it
 # is named rather than quietly winning, so what @import std.string means never turns on
 # the shape of the tree around the importing file.
@@ -7358,4 +7385,39 @@ test one_package_exporting_one_name_from_two_files_is_a_duplicate_definition
 mode check_fail
 file tests/dawn/movmov/src/main.dusk
 err_has duplicate definition of 'foo
+---
+# The release build. --release reaches clang and stops there, so what a record can pin
+# about it is that the compiler takes the flag, links with it, and comes out clean; the
+# proof that it changes no emitted byte is the dump differential rather than a golden.
+test build_release_links_the_module_and_the_runtime_at_o2
+mode tool
+argv build --release examples/hello.dusk
+out 
+code 0
+---
+# The two build flags compose in either order. The archive takes the same level for the
+# module object, the runtime objects, and every @csource object inside it.
+test build_release_composes_with_lib
+mode tool
+argv build --lib --release examples/embed_lib.dusk
+out [dusk] archive : target/dusk-out/libembed_lib.a\n[dusk] header  : target/dusk-out/embed_lib.h\n
+code 0
+---
+# run stays at -O0 and forwards everything after the file to the program being run, so a
+# --release written in front of the file is refused by name rather than read as a file.
+test run_takes_no_release_flag
+mode run_raw
+file --release
+args examples/hello.dusk
+out 
+ok false
+err_eq dusk: run takes no --release; build --release <file>, then run target/dusk-out/<stem>\n
+---
+# A mistyped flag is named where it is written, rather than taken for a source file the
+# loader then reports it cannot read.
+test build_refuses_an_unknown_flag
+mode tool
+argv build --relase examples/hello.dusk
+out 
+code 1
 ---

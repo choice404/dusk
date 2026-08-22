@@ -8,7 +8,7 @@
 // The object file name for a C or IR source: its basename with the trailing
 // extension replaced by .o, so runtime/collect.c becomes collect.o and an
 // examples/adapter.c csource becomes adapter.o, both landing in the output dir.
-export func c_object_name(path: string) -> string {
+func c_object_name(path: string) -> string {
     n: int64 = str_len(path)
     mut last: int64 = -1
     mut dot: int64 = -1
@@ -32,10 +32,16 @@ export func c_object_name(path: string) -> string {
 
 // Compiles one source (a .ll or a .c) to an object file, passing -pthread so the
 // runtime's thread and reactor code sees _REENTRANT the same way the executable
-// link does. Returns clang's exit code.
-export func compile_object(src: string, obj: string) -> int64 {
+// link does. opt is the optimization flag the build asked for, empty for the
+// default one, so an archive built with --release holds objects clang optimized and
+// a plain one holds the objects it always held. Returns clang's exit code.
+func compile_object(src: string, obj: string, opt: string) -> int64 {
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "clang -c -pthread")
+    if str_len(opt) > 0 {
+        sb_push_char(cmd, 32)
+        sb_push(cmd, opt)
+    }
     push_arg(cmd, src)
     sb_push(cmd, " -o")
     push_arg(cmd, obj)
@@ -49,7 +55,7 @@ export func compile_object(src: string, obj: string) -> int64 {
 
 // The upper-cased, non-alnum-scrubbed stem for the header include guard, e.g. a
 // stem "my-lib" yields MY_LIB for DUSK_MY_LIB_H.
-export func header_guard_stem(stem: string) -> string {
+func header_guard_stem(stem: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     mut i: int64 = 0
     while stem[i] != 0 {
@@ -73,7 +79,7 @@ export func header_guard_stem(stem: string) -> string {
 // the host would pass it, a file verbatim or a bare name as -lNAME. The archive
 // carries the runtime and any @csource objects, but an external library stays the
 // host's to link, so the header names it.
-export func extra_link_note(links: *Vector<string>) -> string {
+func extra_link_note(links: *Vector<string>) -> string {
     b: *StringBuilder = alloc(sb_new())
     for v in links {
         sb_push_char(b, 32)
@@ -164,7 +170,7 @@ export func archive_name(stem: string) -> string {
 // in the archive ever share a name. Without this a lib source or a @csource named
 // runtime.c would overwrite the runtime's own runtime.o on disk before llvm-ar ran,
 // silently dropping the dusk core from the archive.
-export func prefixed_obj_path(out: string, prefix: string, index: int64, srcpath: string) -> string {
+func prefixed_obj_path(out: string, prefix: string, index: int64, srcpath: string) -> string {
     base: string = c_object_name(srcpath)
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, prefix)
@@ -184,7 +190,7 @@ export func prefixed_obj_path(out: string, prefix: string, index: int64, srcpath
 // the return type and the opening parenthesis. Every prototype has the shape
 // `<type> <name>(...)` with the type a single token, so the name is the run from
 // the first space to the first parenthesis.
-export func export_symbol_name(proto: string) -> string {
+func export_symbol_name(proto: string) -> string {
     n: int64 = str_len(proto)
     mut sp: int64 = -1
     mut lp: int64 = -1
@@ -205,7 +211,7 @@ export func export_symbol_name(proto: string) -> string {
 
 // The single relocatable object the module and its @csource files merge into
 // before localization.
-export func merged_obj_path(out: string) -> string {
+func merged_obj_path(out: string) -> string {
     return path_join(out, "duskmerged.o")
 }
 
@@ -219,7 +225,7 @@ export func merged_obj_path(out: string) -> string {
 // stay external, resolved from the separate runtime objects at the host's own link.
 // A build with no exports still merges but keeps nothing global, which is a library
 // with no entry points. Writes out/duskmerged.o; returns 0 or a tool's exit code.
-export func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, exports: *Vector<string>) -> int64 {
+func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, exports: *Vector<string>) -> int64 {
     merged: string = merged_obj_path(out)
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "ld -r")
@@ -269,19 +275,20 @@ export func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<st
     return run(oline)
 }
 
-// Compiles the emitted IR, the runtime, and every @csource to objects and bundles
-// them into a deterministic static archive with llvm-ar. The module object and the
+// Compiles the emitted IR, the runtime, and every @csource to objects, each at the
+// build's own optimization level, and bundles them into a deterministic static
+// archive with llvm-ar. The module object and the
 // @csource objects merge into one relocatable object whose only global symbols are
 // the exports, so neither a private dusk helper nor a @csource entry can interpose
 // the host's own symbols. @link libraries are not archived: they stay external
 // dependencies the host links, named in the header. Returns 0 on success, non-zero
 // on the first tool failure.
-export func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, exports: *Vector<string>) -> int64 {
+export func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, exports: *Vector<string>, opt: string) -> int64 {
     rt: string = path_join(home, "runtime")
     objs: *Vector<string> = alloc(vec_new())
 
     mod_obj: string = prefixed_obj_path(out, "duskmod_", 0, ll)
-    oc: int64 = compile_object(ll, mod_obj)
+    oc: int64 = compile_object(ll, mod_obj, opt)
     if oc != 0 {
         d: Diagnostic = diag_new(stem, 0, 0, "clang failed to compile the module to an object")
         diag_emit(d)
@@ -293,7 +300,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
     while ci < vec_len(csources) {
         src2: string = vec_get(csources, ci)
         obj2: string = prefixed_obj_path(out, "duskcs_", ci, src2)
-        cc: int64 = compile_object(src2, obj2)
+        cc: int64 = compile_object(src2, obj2, opt)
         if cc != 0 {
             d: Diagnostic = diag_new(src2, 0, 0, "clang failed to compile a @csource file")
             diag_emit(d)
@@ -316,7 +323,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
     while ri < vec_len(rts) {
         src: string = path_join(rt, vec_get(rts, ri))
         obj: string = prefixed_obj_path(out, "duskrt_", ri, src)
-        rc: int64 = compile_object(src, obj)
+        rc: int64 = compile_object(src, obj, opt)
         free(src)
         if rc != 0 {
             d: Diagnostic = diag_new(stem, 0, 0, "clang failed to compile a runtime source")

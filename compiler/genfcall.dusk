@@ -3,8 +3,6 @@
 @paradigm procedural
 @import std.string
 @import std.vector
-@import std.map
-@import std.functional.maybe
 @import ast
 @import cty
 @import cabi
@@ -12,17 +10,8 @@
 @import emitfb
 @import genctx
 @import genstate
-@import genscope
-@import genprint
-@import genptr
-@import genagg
-@import genmeth
-@import genio
 @import genclos
-@import genhof
-@import genthread
-@import gencollect
-@import genawait
+@import genprint
 
 func variadic_promote(s: *GenFuncState, v: Val) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
@@ -180,10 +169,10 @@ export func gen_variadic_foreign_call(s: *GenFuncState, name: string, sig: GenFn
         } else {
             pair: string = fscall_pair_ty(ret_ll0, ret_ll1)
             g0: string = fscall_gep(s, pair, rslot, 0)
-            e0: string = fscall_extract(s, pair, dest, 0)
+            e0: string = gp_extract_part(s, pair, dest, 0)
             fscall_store_al(s, ret_ll0, e0, g0, ret_align)
             g1: string = fscall_gep(s, pair, rslot, 1)
-            e1: string = fscall_extract(s, pair, dest, 1)
+            e1: string = gp_extract_part(s, pair, dest, 1)
             fscall_store_al(s, ret_ll1, e1, g1, ret_align)
             free(pair)
         }
@@ -258,24 +247,6 @@ func fscall_store_al(s: *GenFuncState, ll: string, val: string, ptr: string, ali
     free(b)
     line((*s).fb, t)
     free(t)
-}
-
-func fscall_extract(s: *GenFuncState, struct_ll: string, agg: string, index: int64) -> string {
-    d: string = next_tmp((*s).fb)
-    b: *StringBuilder = alloc(sb_new())
-    sb_push(b, d)
-    sb_push(b, " = extractvalue ")
-    sb_push(b, struct_ll)
-    sb_push_char(b, 32)
-    sb_push(b, agg)
-    sb_push(b, ", ")
-    sb_push_int(b, index)
-    t: string = gs_built(b)
-    sb_free(b)
-    free(b)
-    line((*s).fb, t)
-    free(t)
-    return d
 }
 
 func fscall_arg(ll: string, op: string) -> string {
@@ -448,10 +419,10 @@ export func gen_foreign_struct_call(s: *GenFuncState, name: string, sig: GenFnSi
         } else {
             pair: string = fscall_pair_ty(ret_ll0, ret_ll1)
             g0: string = fscall_gep(s, pair, rslot, 0)
-            e0: string = fscall_extract(s, pair, r, 0)
+            e0: string = gp_extract_part(s, pair, r, 0)
             fscall_store_al(s, ret_ll0, e0, g0, ret_align)
             g1: string = fscall_gep(s, pair, rslot, 1)
-            e1: string = fscall_extract(s, pair, r, 1)
+            e1: string = gp_extract_part(s, pair, r, 1)
             fscall_store_al(s, ret_ll1, e1, g1, ret_align)
             free(pair)
         }

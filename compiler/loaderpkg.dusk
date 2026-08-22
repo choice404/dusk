@@ -14,8 +14,9 @@
  *  so two machines holding one dawn.lock emit the same bytes however differently their
  *  trees are laid out.
  *
- *  A file with no package.dawn above it never reaches any of this: the loader asks
- *  pkg_has_project first and resolves exactly as it did before 1.14.0. */
+ *  A file with no package.dawn above it never reaches any of this: it carries a set
+ *  holding one packageless entry, every alias question answers no, and the import
+ *  resolves against the local tree and the standard library as it did before 1.14.0. */
 
 @paradigm procedural
 
@@ -44,7 +45,7 @@
  *  compile started from the manifest itself, with no file named on the command line:
  *  then there is no spelling a person chose to preserve, and a manifest relative one is
  *  what makes two checkouts of one project emit the same bytes. */
-export struct Pkg {
+struct Pkg {
     alias: string,
     dir: string,
     display: string,
@@ -57,13 +58,12 @@ export struct Pkg {
     rooted: bool,
 }
 
-/** Every package one load touches, with the lookup from alias to index. has_project
- *  is false when no package.dawn governs the root file, and then nothing here is
- *  consulted at all. */
+/** Every package one load touches, with the lookup from alias to index. A root file
+ *  with no package.dawn above it still gets a set, holding the one packageless entry
+ *  the root itself is, and no alias to look up. */
 export struct PkgSet {
     pkgs: *Vector<*Pkg>,
     by_alias: *Map<string, int64>,
-    has_project: bool,
 }
 
 /** The file a command with no file argument compiles, and the name it builds under.
@@ -304,7 +304,7 @@ export func pkgset_discover(root_path: string, from_manifest: bool, errors: *Vec
     free(sd)
     if str_len(mpath) == 0 {
         vec_push(pkgs, new_pkg("", "", "", false, alloc(empty_manifest()), alloc(empty_lock()), "", true, false))
-        return alloc(PkgSet { pkgs: pkgs, by_alias: by_alias, has_project: false })
+        return alloc(PkgSet { pkgs: pkgs, by_alias: by_alias })
     }
     m: *Manifest = manifest_read(mpath)
     free(mpath)
@@ -319,12 +319,7 @@ export func pkgset_discover(root_path: string, from_manifest: bool, errors: *Vec
     push_faults(errors, lown, lown, (*l).errors)
     check_project(m, l, mown, errors)
     vec_push(pkgs, new_pkg("", copy_string((*m).dir), "", true, m, l, "", true, from_manifest))
-    return alloc(PkgSet { pkgs: pkgs, by_alias: by_alias, has_project: true })
-}
-
-/** Whether a package.dawn governs this load at all. */
-export func pkg_has_project(ps: *PkgSet) -> bool {
-    return (*ps).has_project
+    return alloc(PkgSet { pkgs: pkgs, by_alias: by_alias })
 }
 
 /** Whether seg names a dependency the package at idx declared. The alias set is the
@@ -612,7 +607,7 @@ export func pkg_dir(ps: *PkgSet, idx: int64) -> string {
 /** The spelling a file inside a checked out dependency is reported under, manifest
  *  relative so it reads the same on every machine. A fresh heap string the caller owns,
  *  and one a diagnostic borrows must outlive the load. */
-export func pkg_file_display(alias: string, name: string) -> string {
+func pkg_file_display(alias: string, name: string) -> string {
     base: string = path_join(dawn_modules_dir(), alias)
     out: string = path_join(base, name)
     free(base)
@@ -629,8 +624,9 @@ export func pkg_manifest_display(ps: *PkgSet, idx: int64) -> string {
     return pkg_file_display((*p).alias, "package.dawn")
 }
 
-/** The fault an import naming a quoted git path earns inside a project. The old cache
- *  path still answers outside one for this release. */
+/** The fault an import naming a quoted git path earns. Through 1.15.0 the form still
+ *  resolved outside a project, against a machine wide clone cache; since 1.15.1 there is
+ *  no cache to reach and the form is refused wherever it is written. */
 export func pkg_url_import_fault(importer: string, imp: string) -> LoadDiag {
     return load_diag_plain(importer, quote_msg("", imp, " is a url import; declare it with @require in package.dawn"))
 }

@@ -106,9 +106,12 @@ the two async collector goldens run TSan clean rather than surfacing the read.
 - `gcstress`, two hundred async tasks each holding a collector across a timer,
   with collections interleaved through the read back.
 
-Build these with `-O0`, not the `-O1` the recipe above uses. The conservative
-root scan brackets the stack between a collection point and the anchor, and the
-native driver passes no optimization flag for exactly this reason, so a collector
-golden must match it or the scan may miss a spilled root. Add `runtime/collect.c`
-and `runtime/reactor_epoll.c` to the link line. Twenty iterations of each were
-clean, expected stdout and exit code 0 every time, no `WARNING: ThreadSanitizer`.
+Since 1.15.1 these build at either level. The conservative root scan
+brackets the anchor thread's real stack base and spills the callee saved
+registers into the region it walks, so a root the optimizer kept in a
+register is still read and a collector golden no longer has to match the
+driver's optimization level. The note it replaces required `-O0` here, back
+when the scan leaned on the frame layout an unoptimized build guaranteed.
+Add `runtime/collect.c` and `runtime/reactor_epoll.c` to the link line.
+Twenty iterations of each were clean, expected stdout and exit code 0 every
+time, no `WARNING: ThreadSanitizer`.

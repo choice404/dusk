@@ -11,19 +11,17 @@
 
 @paradigm procedural
 
-@import std.io
 @import std.string
 @import std.vector
 @import std.os
 @import home
-@import source
 @import diag
-@import emit
 @import emitfb
 @import cli
 @import genfn
 @import driverlink
 @import driverlib
+@import driverrt
 
 /** The output stem for a source path: its basename with the extension dropped, the
  *  name the driver gives the emitted binary under target/dusk-out. Falls back to
@@ -77,7 +75,10 @@ export func run_demo(prog: string) -> int32 {
 
     header_code: int64 = run("printf '[dusk] emitted IR : target/dusk-out/demo.ll\\n[dusk] linked bin : target/dusk-out/demo\\n[dusk] running ->\\n\\n'")
     if header_code != 0 { return 1 }
-    code: int64 = link_and_run(home, ll, bin)
+    rt_inputs: *Vector<string> = runtime_inputs(home, out, "")
+    code: int64 = link_and_run(ll, bin, rt_inputs)
+    free_runtime_inputs(rt_inputs)
+    free(rt_inputs)
 
     println("")
     tail: *StringBuilder = alloc(sb_new())
@@ -93,17 +94,18 @@ export func run_demo(prog: string) -> int32 {
 
 /** Builds a source file through the shared IR spine, writes target/dusk-out, and
  *  links the runtime. The run flag controls whether the linked binary is executed.
- *  This is the compiler's own entry; it pins the output to out_dir(), the stage0
- *  parallel target/dusk-out. */
-export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, from_manifest: bool) -> int32 {
-    return build_module_to_pkg(prog, path, run_it, argv, arg_start, out_dir(), from_manifest)
+ *  release asks clang to optimize the module, the runtime, and every @csource at -O2;
+ *  without it all three compile at clang's own default. This is the compiler's own
+ *  entry; it pins the output to out_dir(), the stage0 parallel target/dusk-out. */
+export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, from_manifest: bool, release: bool) -> int32 {
+    return build_module_to_pkg(prog, path, run_it, argv, arg_start, out_dir(), from_manifest, release)
 }
 
 /** The same build, told whether the path came from a package.dawn rather than from the
  *  command line. A build from a manifest registers the project's own files under a
  *  manifest relative spelling, so two checkouts of one project emit identical bytes;
  *  a build of a named file keeps that file's spelling. */
-export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string, from_manifest: bool) -> int32 {
+export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string, from_manifest: bool, release: bool) -> int32 {
     ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest)
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
@@ -127,7 +129,13 @@ export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: 
     }
     if !check_ir_written(ll) { return 1 }
     home: string = dusk_home(prog)
-    code: int64 = link_only(home, ll, bin, ir.links, ir.csources)
+    // The runtime is resolved before the link line is written: one cached object per
+    // runtime source when the cache is usable, the sources themselves when it is not.
+    opt: string = opt_flag(release)
+    rt_inputs: *Vector<string> = runtime_inputs(home, out, opt)
+    code: int64 = link_only(ll, bin, rt_inputs, ir.links, ir.csources, opt)
+    free_runtime_inputs(rt_inputs)
+    free(rt_inputs)
     if code != 0 { return 1 }
     if run_it {
         // The child's exit code passes through untouched; a signal death or
@@ -153,15 +161,15 @@ export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: 
  *  generates stem.h from the export prototypes. The module may omit main, since
  *  monomorphization roots every export and each export survives to the archive. A
  *  build with no exports still produces an archive, empty of dusk entry points. */
-export func build_lib(prog: string, path: string) -> int32 {
-    return build_lib_named(prog, path, stem_of(path), false)
+export func build_lib(prog: string, path: string, release: bool) -> int32 {
+    return build_lib_named(prog, path, stem_of(path), false, release)
 }
 
 /** The same archive under a name of the caller's choosing. build_lib takes the source
  *  file's own stem; a build that came from a manifest passes @package instead, so a
  *  project's library carries the package's name rather than the name of whatever file
  *  its @root happened to be. */
-export func build_lib_named(prog: string, path: string, stem: string, from_manifest: bool) -> int32 {
+export func build_lib_named(prog: string, path: string, stem: string, from_manifest: bool, release: bool) -> int32 {
     out: string = out_dir()
     ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest)
     if !ir.ok {
@@ -184,7 +192,7 @@ export func build_lib_named(prog: string, path: string, stem: string, from_manif
     }
     if !check_ir_written(ll) { return 1 }
     home: string = dusk_home(prog)
-    code: int64 = archive_lib(home, ll, stem, out, ir.csources, ir.exports)
+    code: int64 = archive_lib(home, ll, stem, out, ir.csources, ir.exports, opt_flag(release))
     if code != 0 { return 1 }
     if !write_lib_header(out, stem, ir.exports, ir.links) { return 1 }
 

@@ -339,40 +339,68 @@ export func sb_new() -> StringBuilder {
     return StringBuilder { data: d, len: 0, cap: 8 }
 }
 
+// Grows the buffer until it holds need bytes and their NUL, doubling from the
+// current capacity the way a byte at a time push does, so a builder reaches the
+// same capacity whichever push filled it. The live bytes move to the new buffer
+// and the old one is freed. Only a push that would not fit calls this.
+func sb_grow(s: *StringBuilder, need: int64) -> void {
+    mut nc: int64 = (*s).cap * 2
+    if nc < 8 {
+        nc = 8
+    }
+    while nc < need + 1 {
+        nc = nc * 2
+    }
+    nd: *raw char = alloc_bytes(nc)
+    old: *raw char = (*s).data
+    n: int64 = (*s).len
+    mut i: int64 = 0
+    while i < n {
+        nd[i] = old[i]
+        i++
+    }
+    free(old)
+    (*s).data = nd
+    (*s).cap = nc
+}
+
 /** Appends one character to s, growing the buffer when the character and its NUL would not
  *  fit. The NUL terminator is rewritten after every push, so s stays a valid string view.
  *  @param s the builder to append to, borrowed and grown in place
  *  @param c the character byte to append */
 export func sb_push_char(s: *StringBuilder, c: char) -> void {
     if (*s).len + 1 >= (*s).cap {
-        mut nc: int64 = (*s).cap * 2
-        if nc < 8 {
-            nc = 8
-        }
-        nd: *raw char = alloc_bytes(nc)
-        mut i: int64 = 0
-        while i < (*s).len {
-            nd[i] = (*s).data[i]
-            i++
-        }
-        free((*s).data)
-        (*s).data = nd
-        (*s).cap = nc
+        sb_grow(s, (*s).len + 1)
     }
-    (*s).data[(*s).len] = c
-    (*s).len++
-    (*s).data[(*s).len] = 0
+    n: int64 = (*s).len
+    d: *raw char = (*s).data
+    d[n] = c
+    d[n + 1] = 0
+    (*s).len = n + 1
 }
 
-/** Appends every byte of t to s, up to but not including t's NUL. t is borrowed.
+/** Appends every byte of t to s, up to but not including t's NUL. t is measured once and
+ *  the buffer grows once, so appending a string costs one copy rather than a grow test per
+ *  byte, and the NUL lands after the last byte instead of after every byte. t is borrowed.
  *  @param s the builder to append to, borrowed and grown in place
  *  @param t the string to append */
 export func sb_push(s: *StringBuilder, t: string) -> void {
+    n: int64 = str_len(t)
+    if n == 0 {
+        return
+    }
+    base: int64 = (*s).len
+    if base + n + 1 > (*s).cap {
+        sb_grow(s, base + n)
+    }
+    d: *raw char = (*s).data
     mut i: int64 = 0
-    while t[i] != 0 {
-        sb_push_char(s, t[i])
+    while i < n {
+        d[base + i] = t[i]
         i++
     }
+    d[base + n] = 0
+    (*s).len = base + n
 }
 
 /** Appends the base ten text of n straight into s, with no intermediate string. The value

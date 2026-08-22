@@ -1,0 +1,56 @@
+@paradigm procedural
+@import std.memory.collector
+
+// Collected roots held in main's own frame survive a collection at every
+// optimization level, including the one `build --release` links at.
+//
+// The collector's stack scan runs from the collection point up to the main
+// thread's stack base. Reading that base out of a slot in main's frame does not
+// work: where a one byte slot lands inside a frame is the optimizer's choice,
+// and at -O2 clang packs it under every other local main holds, which would
+// leave a scan bounded by it stopping below main's own roots. This program puts
+// eight collected values in main's frame, buries them under enough garbage to
+// force real collections, and reads every one of them back afterward, so a base
+// that stops short sweeps a live block and the read faults with a stale pointer
+// instead of printing. The counts the collector reports are deliberately not
+// printed: how much a conservative scan retains legitimately differs between two
+// optimization levels, while the values a live root reaches never do.
+struct Cell {
+    v: int64,
+}
+
+// Mints and drops collected values whose only reference dies with the loop, so
+// each call leaves a heap of garbage a collection has to walk past.
+func churn(n: int64) -> int64 {
+    mut i: int64 = 0
+    mut s: int64 = 0
+    while i < n {
+        g := collector<Cell>(Cell { v: i })
+        s = s + (*g).v
+        i++
+    }
+    return s
+}
+
+func main() -> int32 {
+    a := collector<Cell>(Cell { v: 1 })
+    b := collector<Cell>(Cell { v: 2 })
+    c := collector<Cell>(Cell { v: 3 })
+    d := collector<Cell>(Cell { v: 4 })
+    e := collector<Cell>(Cell { v: 5 })
+    f := collector<Cell>(Cell { v: 6 })
+    g := collector<Cell>(Cell { v: 7 })
+    h := collector<Cell>(Cell { v: 8 })
+    mut round: int64 = 0
+    mut kept: int64 = 0
+    while round < 20 {
+        churn(2000)
+        gc_collect()
+        kept = kept + (*a).v + (*b).v + (*c).v + (*d).v + (*e).v + (*f).v + (*g).v + (*h).v
+        round++
+    }
+    println(kept)
+    gc_collect()
+    println((*a).v + (*h).v)
+    return 0
+}

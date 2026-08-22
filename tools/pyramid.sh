@@ -91,6 +91,28 @@ first_diff_line() {
     fi
 }
 
+# Whether a compiler understands `build --release`, which arrived in 1.15.1. The
+# toolchain builds itself with the flag wherever the builder is new enough and
+# plainly wherever it is not, since a seed from an older release would refuse an
+# argument it has never heard of. The version is read out of the binary itself
+# rather than assumed from the tree it came from.
+supports_release() {
+    local bin=$1
+    local line major minor patch
+    line=$("$bin" version 2>/dev/null) || return 1
+    line=${line##* }
+    IFS=. read -r major minor patch <<<"$line"
+    [[ "$major" =~ ^[0-9]+$ ]] || return 1
+    [[ "$minor" =~ ^[0-9]+$ ]] || return 1
+    [[ "$patch" =~ ^[0-9]+$ ]] || patch=0
+    if [[ "$major" -gt 1 ]]; then return 0; fi
+    if [[ "$major" -lt 1 ]]; then return 1; fi
+    if [[ "$minor" -gt 15 ]]; then return 0; fi
+    if [[ "$minor" -lt 15 ]]; then return 1; fi
+    if [[ "$patch" -ge 1 ]]; then return 0; fi
+    return 1
+}
+
 build_compiler_stage() {
     local builder=$1
     local output_bin=$2
@@ -99,19 +121,32 @@ build_compiler_stage() {
     local stem
     local emitted_bin
     local emitted_ll
+    local release_flag=""
 
     stem=$(stem_of "$compiler_root")
     emitted_bin="$repo_root/target/dusk-out/$stem"
     emitted_ll="$repo_root/target/dusk-out/$stem.ll"
 
-    echo "$label"
+    # A stage builds the next one optimized whenever the builder takes the flag.
+    # A seed older than 1.15.1 does not, so the first stage off an old seed is a
+    # plain build and every stage after it is a release build. Only the emitted
+    # IR is compared across stages, and the flag reaches clang rather than the
+    # compiler, so the ladder's collapse and fixpoint checks are untouched by it;
+    # the binary sha is what moves, once, where the optimization starts.
+    if supports_release "$builder"; then
+        release_flag="--release"
+        echo "$label (--release)"
+    else
+        echo "$label"
+    fi
     # Every self build runs caged: 24GB address space, a CPU ceiling, lowest
     # priority, an outer wall clock timeout.
+    # shellcheck disable=SC2086
     if ! DUSK_HOME="$repo_root" timeout 600 bash -c '
         ulimit -v 25165824
         ulimit -t 900
-        exec nice -n 19 "$0" build "$1"
-    ' "$builder" "$compiler_root"; then
+        exec nice -n 19 "$0" build "$@"
+    ' "$builder" $release_flag "$compiler_root"; then
         fail "$label failed while building $compiler_root"
     fi
 
@@ -241,7 +276,12 @@ fi
 # design: the self build class inside the suite peaks around eleven
 # gigabytes, and running several at once can exhaust the machine.
 echo "build the test runner with the seed compiler"
-if ! DUSK_HOME="$repo_root" "$stage0" build tests/runner/testrun.dusk; then
+runner_release_flag=""
+if supports_release "$stage0"; then
+    runner_release_flag="--release"
+fi
+# shellcheck disable=SC2086
+if ! DUSK_HOME="$repo_root" "$stage0" build $runner_release_flag tests/runner/testrun.dusk; then
     fail "seed compiler failed to build the test runner"
 fi
 testrun="$repo_root/target/dusk-out/testrun"
@@ -251,12 +291,17 @@ testrun="$repo_root/target/dusk-out/testrun"
 build_dawn_with() {
     local builder=$1
     local dest=$2
+    local release_flag=""
     rm -f "$repo_root/target/dusk-out/dawn"
+    if supports_release "$builder"; then
+        release_flag="--release"
+    fi
+    # shellcheck disable=SC2086
     if ! DUSK_HOME="$repo_root" timeout 600 bash -c '
         ulimit -v 25165824
         ulimit -t 900
-        exec nice -n 19 "$0" build "$1"
-    ' "$builder" "$repo_root/compiler/dawn.dusk"; then
+        exec nice -n 19 "$0" build "$@"
+    ' "$builder" $release_flag "$repo_root/compiler/dawn.dusk"; then
         fail "$(basename "$builder") failed to build the package tool"
     fi
     [[ -x "$repo_root/target/dusk-out/dawn" ]] || fail "$(basename "$builder") produced no package tool"
@@ -341,7 +386,10 @@ echo "determinism check: $stable_examples examples byte stable across two stage1
 build_compiler_stage "$stage2" "$stage3" "$stage3_ll" "stage 3: stage2 builds the dusk compiler source"
 print_stage_sha256 "stage3" "$stage3" "$stage3_ll"
 
-# The fixpoint check compares two consecutive self builds of the same source.
+# The fixpoint check compares two consecutive self builds of the same source. It
+# compares the emitted IR rather than the binaries, which is what lets a stage be
+# built at a different optimization level than the stage before it without saying
+# anything about whether the compiler converged.
 if ! cmp -s "$stage2_ll" "$stage3_ll"; then
     echo "pyramid: stage2 and stage3 compiler LLVM IR differ" >&2
     echo "first diff: $(first_diff_line "$stage2_ll" "$stage3_ll" "stage2 compiler IR" "stage3 compiler IR")" >&2

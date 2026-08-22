@@ -1,0 +1,15 @@
+@paradigm procedural
+
+// A double free on the raw layer. A managed pointer carries a generation, so a
+// second free of one is caught by the generation check at the free itself and
+// reports a stale pointer; examples/doublefree.dusk is that case. A raw payload
+// carries no generation, so nothing checks it on the way in and the allocator
+// itself is the only guard: the block's header records that it is already
+// parked, and parking it twice would let one address be handed out twice.
+func main() -> int32 {
+    p: *raw int64 = alloc_bytes(8)
+    println(5)
+    free(p)
+    free(p)
+    return 0
+}

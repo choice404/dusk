@@ -1,0 +1,404 @@
+/** driverrt: the runtime objects a link consumes, and the cache that keeps them.
+ *
+ *  The C runtime is the same set of sources for every program dusk builds, so
+ *  compiling them again at every link is work whose only possible result is the
+ *  bytes it produced the time before. Each source is compiled once into the build's
+ *  own output directory, under a name carrying a key over everything the object can
+ *  depend on: the contents of the source it came from, the contents of every runtime
+ *  header the sources include, the clang that compiles them, and the optimization
+ *  level it compiles at. An object is reused only by a link that would have compiled
+ *  it identically, so an edited runtime source, an upgraded toolchain, and the step
+ *  between a plain build and a release build each miss the key and compile rather
+ *  than link against something stale. The headers are read out of the runtime
+ *  directory rather than listed here, so a header added later joins the key without
+ *  anyone remembering to add it.
+ *
+ *  A cache that cannot be built is never a build failure. Every step that can fail,
+ *  reading a source, asking clang its version, compiling an object, falls back to
+ *  handing the link the runtime sources themselves, which is what every link did
+ *  before this cache existed. The program that comes out is the same either way,
+ *  since the same clang compiles the same sources with the same flags.
+ *
+ *  Two builds sharing one output directory are safe. Each writes its object to a
+ *  temporary named for its own shell's pid and renames it onto the cache name, and a
+ *  rename within a directory is atomic, so a reader sees a whole object or no object
+ *  at all and a build killed partway leaves the cache as it found it. Two builds
+ *  racing under one key write identical bytes, so whichever rename lands last leaves
+ *  the file the other one would have left.
+ *
+ *  There is no eviction and no expiry. A key that changes leaves the old objects
+ *  where they are, and since every one of them lives under the output directory,
+ *  removing that directory removes the cache with it. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.os
+@import std.process
+@import home
+@import source
+@import driverlink
+
+foreign "C" {
+    func cool_dir_open(path: *raw char, out_handle: *raw int64) -> int64
+    func cool_dir_next(handle: int64, buf: *raw char, cap: int64) -> int64
+    func cool_dir_close(handle: int64) -> int64
+}
+
+/** The stem of a runtime source, its name with the trailing extension dropped, so
+ *  reactor_epoll.c yields reactor_epoll. Every runtime source is a bare file name
+ *  with no directory part, and the stem is what makes a cached object readable to a
+ *  person looking at the output directory.
+ *  @param name the bare source file name
+ *  @return the name up to its last dot as a fresh heap string the caller owns */
+func source_stem(name: string) -> string {
+    n: int64 = str_len(name)
+    mut end: int64 = n
+    mut i: int64 = 0
+    while i < n {
+        if name[i] == 46 {
+            end = i
+        }
+        i++
+    }
+    return substring(name, 0, end)
+}
+
+/** Releases every path a vector of runtime inputs holds and the vector's storage, the
+ *  sb_free contract dawn's own message vectors follow: each element is taken back out
+ *  so the owner is the one freeing it, and the Vector allocation itself is the
+ *  caller's, so a heap vector is released with free_runtime_inputs(v) followed by
+ *  free(v). */
+export func free_runtime_inputs(v: *Vector<string>) -> void {
+    while vec_len(v) > 0 {
+        s: string = vec_take(v, vec_len(v) - 1)
+        free(s)
+    }
+    vec_free(v)
+}
+
+/** Appends one file to the key material: its name, its byte length, and its bytes,
+ *  each closed by a newline, so a file that changed length and a file that changed
+ *  content are both a different key and neither can be run together with the file
+ *  beside it. A file that cannot be read reports false, which stands the whole cache
+ *  down rather than keying on material the build does not have.
+ *  @param b the builder collecting the key material
+ *  @param path the file to read
+ *  @param name the name the key records the file under
+ *  @return whether the file was read */
+func push_key_file(b: *StringBuilder, path: string, name: string) -> bool {
+    s, e := source_load(path)
+    if e.exists() {
+        return false
+    }
+    sb_push(b, name)
+    sb_push_char(b, 10)
+    sb_push_int(b, s.len)
+    sb_push_char(b, 10)
+    text: string = substring(s.text, 0, s.len)
+    sb_push(b, text)
+    free(text)
+    sb_push_char(b, 10)
+    source_free(s)
+    return true
+}
+
+/** Every header in the runtime directory, sorted by name. These are the files the
+ *  runtime sources include, so their contents decide what an object holds just as
+ *  much as the source's own do. The directory is walked rather than a list kept here
+ *  so a header added to the runtime later joins the key on its own. The sort makes
+ *  the material deterministic, since a directory hands its entries back in whatever
+ *  order the filesystem keeps them.
+ *  @param rt the runtime directory to walk
+ *  @return the header names, owned by the vector, paired with whether the directory
+ *  could be read at all */
+func header_names(rt: string) -> (*Vector<string>, bool) {
+    out: *Vector<string> = alloc(vec_new())
+    pathbuf: *raw char = cbuf(rt)
+    handle: *raw int64 = alloc_bytes(sizeof(int64))
+    rc: int64 = cool_dir_open(pathbuf, handle)
+    free(pathbuf)
+    if rc != 0 {
+        free(handle)
+        return (out, false)
+    }
+    h: int64 = handle[0]
+    free(handle)
+    mut more: bool = true
+    while more {
+        buf: *raw char = alloc_bytes(1024)
+        n: int64 = cool_dir_next(h, buf, 1024)
+        if n < 0 {
+            free(buf)
+            more = false
+        } else {
+            name: string = cstr(buf)
+            if str_has_suffix(name, ".h") {
+                vec_push(out, name)
+            } else {
+                free(buf)
+            }
+        }
+    }
+    cool_dir_close(h)
+    vec_sort(out, str_cmp)
+    return (out, true)
+}
+
+/** The first line of clang's own version banner, the fact that says whether the
+ *  clang about to link is the clang that wrote the objects on disk. An empty answer,
+ *  a clang that could not be run among them, stands the cache down rather than
+ *  keying on nothing and reusing an object some other toolchain compiled.
+ *  @return the banner's first line as a fresh heap string, or the empty string when
+ *  clang could not be asked */
+func clang_version_line() -> string {
+    text, code, e := run_capture("clang --version 2>/dev/null")
+    // A capture that never opened reports -1 with the shared empty constant for its
+    // output, which is not heap owned and must not be freed.
+    if code < 0 {
+        return ""
+    }
+    if e.exists() || code != 0 {
+        free(text)
+        return ""
+    }
+    n: int64 = str_len(text)
+    mut end: int64 = n
+    mut i: int64 = 0
+    while i < n {
+        if text[i] == 10 {
+            end = i
+            i = n
+        } else {
+            i++
+        }
+    }
+    out: string = substring(text, 0, end)
+    free(text)
+    return out
+}
+
+/** The key material every object in one link shares: the clang that compiles it, the
+ *  optimization level it compiles at, and every runtime header. A source's own bytes
+ *  are appended to this per object, so a header edit misses every key while a source
+ *  edit misses exactly its own.
+ *  @param rt the runtime directory
+ *  @param clangver the clang version banner line
+ *  @param opt the optimization flag, empty for the default build
+ *  @return the shared material as a fresh heap string paired with whether every
+ *  header was read; a false answer owns nothing */
+func cache_prefix(rt: string, clangver: string, opt: string) -> (string, bool) {
+    heads, opened := header_names(rt)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "dusk runtime cache 1\nclang=")
+    sb_push(b, clangver)
+    sb_push(b, "\nopt=")
+    sb_push(b, opt)
+    sb_push_char(b, 10)
+    mut ok: bool = opened
+    for name in heads {
+        p: string = path_join(rt, name)
+        if !push_key_file(b, p, name) {
+            ok = false
+        }
+        free(p)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free_runtime_inputs(heads)
+    free(heads)
+    if !ok {
+        free(out)
+        return ("", false)
+    }
+    return (out, true)
+}
+
+/** The sixteen hex digits of the key's word. The whole 64 bit hash rides the name
+ *  rather than a slice of it, since two sources sharing a name here would link an
+ *  object neither of them produced.
+ *  @param material the key material to reduce
+ *  @return the sixteen digits as a fresh heap string the caller owns */
+func key_digits(material: string) -> string {
+    hex: string = int_to_hex16(hash(material))
+    out: string = substring(hex, 2, 18)
+    free(hex)
+    return out
+}
+
+/** The name a cached object lives under, the source's stem and then its key, in the
+ *  build's own output directory. A plain build and a release build of one tree
+ *  differ in the key, so the two keep their objects side by side and neither
+ *  invalidates the other. */
+func cache_object_path(out: string, stem: string, key: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "runtime-")
+    sb_push(b, stem)
+    sb_push_char(b, 45)
+    sb_push(b, key)
+    sb_push(b, ".o")
+    name: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    p: string = path_join(out, name)
+    free(name)
+    return p
+}
+
+/** The shell expression for the temporary an object is compiled to: the output
+ *  directory quoted as one word, then a name carrying the shell's own pid. Two
+ *  builds racing in one directory therefore compile to two different temporaries and
+ *  neither can read the other's half written file. */
+func temp_object_expr(out: string) -> string {
+    q: string = quote(out)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, q)
+    sb_push(b, "/.dusk-rt-$$.o")
+    line: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(q)
+    return line
+}
+
+/** Compiles one runtime source into the cache. The object is written to the
+ *  temporary and renamed onto its cache name, so the name appears only once the
+ *  whole object is behind it; the temporary is removed whether the compile worked or
+ *  not, and the shell reports the compile's own exit code rather than the cleanup's.
+ *  -pthread rides along because the link line carries it, and a runtime source
+ *  compiled without it would see a different _REENTRANT than the link intends.
+ *  @return whether the object is now in place */
+func compile_cached(src: string, obj: string, out: string, opt: string) -> bool {
+    tmp: string = temp_object_expr(out)
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "clang")
+    if str_len(opt) > 0 {
+        sb_push_char(cmd, 32)
+        sb_push(cmd, opt)
+    }
+    sb_push(cmd, " -pthread -c")
+    push_arg(cmd, src)
+    sb_push(cmd, " -o ")
+    sb_push(cmd, tmp)
+    sb_push(cmd, " && mv -f ")
+    sb_push(cmd, tmp)
+    q: string = quote(obj)
+    sb_push_char(cmd, 32)
+    sb_push(cmd, q)
+    free(q)
+    sb_push(cmd, "; rc=$?; rm -f ")
+    sb_push(cmd, tmp)
+    sb_push(cmd, "; exit $rc")
+    free(tmp)
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    sb_free(cmd)
+    free(cmd)
+    code: int64 = run(line)
+    free(line)
+    return code == 0
+}
+
+/** The cache's answer for one runtime source: the object's path, already on disk or
+ *  compiled here, paired with whether there is one at all. A false answer owns
+ *  nothing and stands the whole cache down for this link.
+ *  @param prefix the key material shared by every object in this link
+ *  @param out the build's output directory, where the cache lives
+ *  @param rt the runtime directory the source sits in
+ *  @param name the bare source file name
+ *  @param opt the optimization flag, empty for the default build */
+func cached_object(prefix: string, out: string, rt: string, name: string, opt: string) -> (string, bool) {
+    src: string = path_join(rt, name)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, prefix)
+    read: bool = push_key_file(b, src, name)
+    material: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    if !read {
+        free(material)
+        free(src)
+        return ("", false)
+    }
+    key: string = key_digits(material)
+    free(material)
+    stem: string = source_stem(name)
+    obj: string = cache_object_path(out, stem, key)
+    free(stem)
+    free(key)
+    mut have: bool = source_is_file(obj)
+    if !have {
+        have = compile_cached(src, obj, out, opt)
+    }
+    free(src)
+    if !have {
+        free(obj)
+        return ("", false)
+    }
+    return (obj, true)
+}
+
+/** Every runtime source's cached object, or nothing when any one of them could not
+ *  be cached. The whole set stands or falls together, since a link that took some
+ *  objects and some sources would compile a runtime source twice over.
+ *  @return the object paths, owned by the vector, paired with whether the set is
+ *  complete */
+func cached_objects(rt: string, out: string, names: *Vector<string>, opt: string) -> (*Vector<string>, bool) {
+    objs: *Vector<string> = alloc(vec_new())
+    ver: string = clang_version_line()
+    if str_len(ver) == 0 {
+        return (objs, false)
+    }
+    prefix, keyed := cache_prefix(rt, ver, opt)
+    free(ver)
+    if !keyed {
+        return (objs, false)
+    }
+    mut ok: bool = true
+    for name in names {
+        if ok {
+            obj, got := cached_object(prefix, out, rt, name, opt)
+            if got {
+                vec_push(objs, obj)
+            } else {
+                ok = false
+            }
+        }
+    }
+    free(prefix)
+    return (objs, ok)
+}
+
+/** The runtime inputs a link hands clang: one cached object per runtime source when
+ *  the cache is usable, and the runtime sources themselves when it is not. The
+ *  caller pushes whatever comes back onto the clang line as plain arguments, so the
+ *  two cases differ only in what clang is asked to do with them, compile and link or
+ *  link alone. Every string in the answer is the vector's own and is released with
+ *  free_runtime_inputs.
+ *  @param home the toolchain home, whose runtime directory holds the sources
+ *  @param out the build's output directory, where the cache lives
+ *  @param opt the optimization flag the link carries, empty for the default build */
+export func runtime_inputs(home: string, out: string, opt: string) -> *Vector<string> {
+    rt: string = path_join(home, "runtime")
+    names: *Vector<string> = runtime_sources()
+    objs, cached := cached_objects(rt, out, names, opt)
+    if cached {
+        // The names are the program's own constants, so only the vector holding them
+        // is released here.
+        vec_free(names)
+        free(names)
+        free(rt)
+        return objs
+    }
+    free_runtime_inputs(objs)
+    free(objs)
+    srcs: *Vector<string> = alloc(vec_new())
+    for name in names {
+        vec_push(srcs, path_join(rt, name))
+    }
+    vec_free(names)
+    free(names)
+    free(rt)
+    return srcs
+}

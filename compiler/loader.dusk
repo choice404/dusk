@@ -9,7 +9,6 @@
 @import std.string
 @import std.vector
 @import std.map
-@import std.os
 @import std.functional.maybe
 @import source
 @import lex
@@ -21,11 +20,9 @@
 @import privatize
 @import loadfold
 @import loadns
-@import pathnorm
 @import manifest
 @import loaderpkg
 @import paradigm
-@import prescan
 @import loadcopy
 @import loadrename
 @import loadscope
@@ -135,40 +132,6 @@ func with_dusk_ext(rel: string) -> string {
     return out
 }
 
-func dir_of(path: string) -> string {
-    n: int64 = str_len(path)
-    mut last: int64 = -1
-    mut i: int64 = 0
-    while i < n {
-        if path[i] == 47 {
-            last = i
-        }
-        i++
-    }
-    if last < 0 {
-        // Rust's Path::parent of a bare filename is the empty path, and the
-        // join then yields the name alone, so the resolved sibling path (and
-        // the fault location built from it) matches stage0 byte for byte.
-        return substring(path, 0, 0)
-    }
-    // Collapse the run of separators before the final component, so a path with a
-    // doubled slash yields the same clean parent Rust's Path::parent returns; the
-    // resolved import path then matches stage0 byte for byte. dusk's && is eager,
-    // so the index guard and the character read step through a flag rather than
-    // one condition, keeping the read off path[-1] at end == 0.
-    mut end: int64 = last
-    mut stripping: bool = end > 0
-    while stripping {
-        if path[end - 1] == 47 {
-            end--
-            stripping = end > 0
-        } else {
-            stripping = false
-        }
-    }
-    return substring(path, 0, end)
-}
-
 func last_slash(s: string) -> int64 {
     mut last: int64 = -1
     mut i: int64 = 0
@@ -179,21 +142,6 @@ func last_slash(s: string) -> int64 {
         i++
     }
     return last
-}
-
-/** The package cache root dawn clones git imports into and the loader resolves a
- *  slash-bearing import against. Exported so the dawn root, a second entry point
- *  that imports this file, reaches it by its bare name: privatize renames every
- *  unexported item per file, so an unexported helper is invisible across roots. */
-export func dawn_cache() -> string {
-    dc: string = env("DAWN_CACHE")
-    if str_len(dc) > 0 {
-        return dc
-    }
-    h: string = env("HOME")
-    d: string = path_join(h, ".dawn")
-    out: string = path_join(d, "cache")
-    return out
 }
 
 func canon(path: string) -> string {
@@ -281,18 +229,20 @@ func resolve_dep(imp: string, alias: string, ps: *PkgSet, pkg: int64, importer: 
 }
 
 // Resolves one import against the directory of the file that wrote it. The order is
-// deliberate: the quoted git form, then the two reserved first segments, then a
-// dependency alias the importing package declared, and only then the local tree and the
-// standard library. A reserved segment and an alias are answered before the tree is
-// read, so what an import means follows from the manifest rather than from the shape of
-// the directory the importing file happens to sit in.
+// deliberate: the quoted git form is refused first, then the two reserved first segments,
+// then a dependency alias the importing package declared, and only then the local tree
+// and the standard library. A reserved segment and an alias are answered before the tree
+// is read, so what an import means follows from the manifest rather than from the shape
+// of the directory the importing file happens to sit in.
 func resolve(imp: string, base: string, stdlib: string, ps: *PkgSet, pkg: int64, importer: string, errors: *Vector<LoadDiag>) -> Resolved {
     if has_slash(imp) {
-        if pkg_has_project(ps) {
-            vec_push(errors, pkg_url_import_fault(importer, imp))
-            return resolved_reported()
-        }
-        return in_pkg(resolve_in_one(imp, dawn_cache()), 0)
+        // An import carrying a path named a git repository before 1.14.0 and resolved
+        // against a machine wide clone cache with no reference and no lock behind it.
+        // The manifest is where a dependency is written down now, so the form is refused
+        // wherever it is written, inside a project and outside one alike, rather than
+        // answering out of a cache nothing fills.
+        vec_push(errors, pkg_url_import_fault(importer, imp))
+        return resolved_reported()
     }
     seg: string = pkg_first_segment(imp)
     rel: string = dotted_to_rel(imp)
@@ -607,7 +557,6 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
     alias_line: *Map<string, int64> = new_set()
     movings: *Map<string, *Map<string, int64>> = alloc(map_new())
     fixeds: *Map<string, *Map<string, int64>> = alloc(map_new())
-    meta_at: *Map<string, int64> = new_set()
     mut base: int64 = 0
 
     // The project governing this compile: the package.dawn found by walking up from
@@ -636,7 +585,6 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
     // far as scoping goes, so it renames nothing and every name it exports stays bare.
     pkg_check_exports(export_file, export_pkg, load_exported_names(root.ast), root_disp, 0, errors)
     vec_push(metas, file_meta(root_disp, "", "", false, require_aliases(ps, 0, alias_file, alias_line), new_set(), new_set(), 0, vec_len((*root.ast).items), 0, vec_len((*root.ast).exprs), 0, vec_len((*root.ast).types)))
-    map_put(meta_at, canon(root_path), 0)
 
     work: *Vector<WorkItem> = alloc(vec_new())
     push_work(work, ast_import_strings(root.ast), dir_of(root_path), root_disp, 0, 0)
@@ -654,13 +602,10 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
                     vec_push(errors, cannot_resolve(w.importer, imp))
                 }
             } else {
-                mut has_mod_ns: bool = false
-                mut mod_ns: string = ""
-                if !has_slash(imp) {
-                    mod_ns = load_module_namespace(imp, r.has_leaf)
-                    load_add_namespace(namespaces, mod_ns)
-                    has_mod_ns = true
-                }
+                // An import carrying a path never resolves, so every import that
+                // reaches here names a module and contributes that namespace.
+                mod_ns: string = load_module_namespace(imp, r.has_leaf)
+                load_add_namespace(namespaces, mod_ns)
 
                 // The physical path is what the load dedups on, so one file reached
                 // two ways is read once however it was spelled; the display path is
@@ -700,7 +645,6 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
                         load_append_items(root.ast, parsed.ast)
                         none_mv: *Map<string, int64> = new_set()
                         none_fx: *Map<string, int64> = new_set()
-                        map_put(meta_at, cfile, idx)
                         vec_push(metas, file_meta(disp, esuf, suffix, r.from_std, require_aliases(ps, r.pkg, alias_file, alias_line), unwrap_or(map_get(movings, cfile), none_mv), unwrap_or(map_get(fixeds, cfile), none_fx), items_lo, vec_len((*root.ast).items), exprs_lo, vec_len((*root.ast).exprs), types_lo, vec_len((*root.ast).types)))
                     }
                 }
@@ -710,14 +654,12 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
                 // scope of every file that named it.
                 empty_mv: *Map<string, int64> = new_set()
                 empty_fx: *Map<string, int64> = new_set()
-                file_meta_import(vec_get(metas, w.file_idx), import_res(mod_ns, has_mod_ns, pkg_alias(ps, r.pkg), r.has_leaf, r.leaf, unwrap_or(map_get(movings, cfile), empty_mv), unwrap_or(map_get(fixeds, cfile), empty_fx), unwrap_or(map_get(meta_at, cfile), -1)))
+                file_meta_import(vec_get(metas, w.file_idx), import_res(mod_ns, pkg_alias(ps, r.pkg), r.has_leaf, r.leaf, unwrap_or(map_get(movings, cfile), empty_mv), unwrap_or(map_get(fixeds, cfile), empty_fx)))
 
-                if has_mod_ns {
-                    if map_has(exports, cfile) {
-                        empty: *Map<string, int64> = new_set()
-                        ex2: *Map<string, int64> = unwrap_or(map_get(exports, cfile), empty)
-                        load_extend_ns_exports(ns_exports, mod_ns, ex2)
-                    }
+                if map_has(exports, cfile) {
+                    empty: *Map<string, int64> = new_set()
+                    ex2: *Map<string, int64> = unwrap_or(map_get(exports, cfile), empty)
+                    load_extend_ns_exports(ns_exports, mod_ns, ex2)
                 }
                 if r.has_leaf {
                     if map_has(exports, cfile) {

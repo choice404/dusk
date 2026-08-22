@@ -4,9 +4,10 @@
    cannot provide. The playground runs only `check` and `build` (IR emit, no
    link), so every function here is either never reached on that path (the
    process and shell layer) or a safe generational-only degradation (the
-   collected heap, which the compiler never uses and whose collect.c cannot
-   compile for wasm because setjmp needs the not-yet-shipped exception-handling
-   proposal). The compiler only emits IR for wasm; the wasi link that consumes
+   collected heap, which the compiler never uses and whose collect.c is native
+   only: its root scan needs the thread's real stack bounds and a register spill
+   into the scanned frame, neither of which wasm's separate value stack gives
+   it). The compiler only emits IR for wasm; the wasi link that consumes
    this file happens outside it, with collect.c left out of that link's source
    list. The whole body is fenced to the wasm target, so a native link that
    sweeps the runtime directory with a glob, the bootstrap and the packaging

@@ -6,7 +6,6 @@
 
 @paradigm procedural
 
-@import std.io
 @import std.string
 @import version
 @import loaderpkg
@@ -39,6 +38,7 @@ func usage() -> void {
     printerr("  ir <file>     lower the mono-expanded module to LLVM IR")
     printerr("  ir --target=wasm32 <file>  cross-emit the LLVM IR for wasm32-wasip1")
     printerr("  build <file>  lower, link, and write target/dusk-out")
+    printerr("  build --release <file>  the same build at -O2, slower to link and faster to run")
     printerr("  build --lib <file>  archive the module and its runtime into libstem.a + stem.h")
     printerr("  run <file>    build and run, forwarding trailing args")
     printerr("  esc <file>    dump native escape summaries")
@@ -72,6 +72,17 @@ func no_project(pr: ProjectRoot) -> int32 {
     return 1
 }
 
+// Builds the project the working directory sits under: the @root of the package.dawn
+// found by walking up from it. This is `dusk build` with no file named, with or
+// without the flags build takes.
+func project_build(prog: string, argv: string[], release: bool) -> int32 {
+    pr: ProjectRoot = project_root()
+    if !pr.ok {
+        return no_project(pr)
+    }
+    return build_module(prog, pr.path, false, argv, 3, true, release)
+}
+
 // Runs build, run, or check over the project the working directory sits in. Every
 // other command is asked about one file, so it still says so.
 func run_project_cmd(cmd: string, argv: string[]) -> int32 {
@@ -91,22 +102,97 @@ func run_project_cmd(cmd: string, argv: string[]) -> int32 {
         return cmd_ir(pr.path, argv[0], default_target(), true)
     }
     if str_eq(cmd, "run") {
-        return build_module(argv[0], pr.path, true, argv, 3, true)
+        return build_module(argv[0], pr.path, true, argv, 3, true, false)
     }
-    return build_module(argv[0], pr.path, false, argv, 3, true)
+    return build_module(argv[0], pr.path, false, argv, 3, true, false)
 }
 
 // `dusk build --lib` with no file archives the project: the manifest's @root is the
 // module and @package is the stem, so the library carries the package's own name.
-func project_lib(prog: string) -> int32 {
+func project_lib(prog: string, release: bool) -> int32 {
     pr: ProjectRoot = project_root()
     if !pr.ok {
         return no_project(pr)
     }
     if str_len(pr.stem) > 0 {
-        return build_lib_named(prog, pr.path, pr.stem, true)
+        return build_lib_named(prog, pr.path, pr.stem, true, release)
     }
-    return build_lib_named(prog, pr.path, stem_of(pr.path), true)
+    return build_lib_named(prog, pr.path, stem_of(pr.path), true, release)
+}
+
+// What `build` was asked for, read off the words after the command. --release links
+// the module and the runtime at -O2 and --lib writes an archive instead of an
+// executable, in either order and either one alone; the first word that is neither is
+// the file, and with no file at all the build is the project's. A word that opens
+// with two dashes and names neither flag is held here rather than taken for a file
+// name, since a mistyped flag is a mistake worth naming.
+struct BuildArgs {
+    release: bool,
+    lib: bool,
+    file: string,
+    has_file: bool,
+    bad: string,
+    has_bad: bool,
+}
+
+// Whether a command line word is written as a flag rather than as a path.
+func is_flag_word(a: string) -> bool {
+    if str_len(a) < 2 {
+        return false
+    }
+    if a[0] != 45 {
+        return false
+    }
+    return a[1] == 45
+}
+
+func parse_build_args(argv: string[]) -> BuildArgs {
+    mut release: bool = false
+    mut lib: bool = false
+    mut file: string = ""
+    mut has_file: bool = false
+    mut bad: string = ""
+    mut has_bad: bool = false
+    mut i: int64 = 2
+    while i < argv.len {
+        a: string = argv[i]
+        if str_eq(a, "--release") {
+            release = true
+        } else if str_eq(a, "--lib") {
+            lib = true
+        } else if is_flag_word(a) {
+            if !has_bad {
+                bad = a
+                has_bad = true
+            }
+        } else if !has_file {
+            file = a
+            has_file = true
+        }
+        i++
+    }
+    return BuildArgs { release: release, lib: lib, file: file, has_file: has_file, bad: bad, has_bad: has_bad }
+}
+
+// Dispatches `build` on the flags it was given: an archive or an executable, of a
+// named file or of the project the working directory sits under.
+func run_build_cmd(argv: string[]) -> int32 {
+    b: BuildArgs = parse_build_args(argv)
+    if b.has_bad {
+        printerr(f"dusk: unknown build flag '{b.bad}'; build takes --release and --lib")
+        usage()
+        return 1
+    }
+    if b.lib {
+        if b.has_file {
+            return build_lib(argv[0], b.file, b.release)
+        }
+        return project_lib(argv[0], b.release)
+    }
+    if !b.has_file {
+        return project_build(argv[0], argv, b.release)
+    }
+    return build_module(argv[0], b.file, false, argv, 3, false, b.release)
 }
 
 // Dispatches a command that takes a source file argument, reporting a usage error
@@ -150,18 +236,17 @@ func run_file_cmd(cmd: string, argv: string[]) -> int32 {
         return cmd_ir(path, argv[0], default_target(), false)
     }
     if str_eq(cmd, "build") {
-        if argv.len >= 4 && str_eq(argv[2], "--lib") {
-            return build_lib(argv[0], argv[3])
-        }
-        // `build --lib` with nothing after it archives the project rather than a file
-        // that happens to be spelled like the flag.
-        if str_eq(path, "--lib") {
-            return project_lib(argv[0])
-        }
-        return build_module(argv[0], path, false, argv, 3, false)
+        return run_build_cmd(argv)
     }
     if str_eq(cmd, "run") {
-        return build_module(argv[0], path, true, argv, 3, false)
+        // run builds at -O0 and forwards everything after the file to the program, so
+        // --release in front of the file is a build flag on a command that does not
+        // take one rather than a file named for it.
+        if str_eq(path, "--release") {
+            printerr("dusk: run takes no --release; build --release <file>, then run target/dusk-out/<stem>")
+            return 1
+        }
+        return build_module(argv[0], path, true, argv, 3, false, false)
     }
     if str_eq(cmd, "esc") {
         return cmd_esc(path, argv[0])

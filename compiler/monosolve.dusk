@@ -13,7 +13,6 @@
 @import std.vector
 @import std.map
 @import std.functional.maybe
-@import intern
 @import ast
 @import monoemit
 
@@ -65,7 +64,7 @@ export func subst_apply(m: *Mono, id: int64, subst: *Map<string, int64>) -> int6
     return mt_infer(a)
 }
 
-export func contains_infer(a: *Ast, id: int64) -> bool {
+func contains_infer(a: *Ast, id: int64) -> bool {
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_infer() { return true }
     if n.kind == tk_named() {
@@ -99,7 +98,7 @@ export func contains_infer(a: *Ast, id: int64) -> bool {
     return false
 }
 
-export func mentions(a: *Ast, id: int64, names: *Map<string, int64>) -> bool {
+func mentions(a: *Ast, id: int64, names: *Map<string, int64>) -> bool {
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_named() {
         if n.c == 0 { return map_has(names, ast_name(a, n.a)) }
@@ -133,7 +132,7 @@ export func mentions(a: *Ast, id: int64, names: *Map<string, int64>) -> bool {
     return false
 }
 
-export func unify(m: *Mono, pat: int64, concrete: int64, params: *Map<string, int64>, out: *Map<string, int64>) -> void {
+func unify(m: *Mono, pat: int64, concrete: int64, params: *Map<string, int64>, out: *Map<string, int64>) -> void {
     a: *Ast = (*m).ast
     pn: TypeNode = vec_get((*a).types, pat)
     if pn.kind == tk_named() {
@@ -192,7 +191,7 @@ export func unify(m: *Mono, pat: int64, concrete: int64, params: *Map<string, in
 
 // Resolves each declared type parameter from the inference; a parameter no site
 // pinned defaults to int64 and its name is recorded so the caller can report it.
-export func solve(m: *Mono, off: int64, len: int64, inf: *Map<string, int64>) -> ArgResult {
+func solve(m: *Mono, off: int64, len: int64, inf: *Map<string, int64>) -> ArgResult {
     a: *Ast = (*m).ast
     targs: *Vector<int64> = alloc(vec_new())
     missing: *Vector<string> = alloc(vec_new())
@@ -212,7 +211,7 @@ export func solve(m: *Mono, off: int64, len: int64, inf: *Map<string, int64>) ->
 
 // Re-marks each still-missing position with the Infer poison, leaving pinned
 // positions untouched, for static_ty's speculative ctor and struct-literal reads.
-export func speculative(m: *Mono, off: int64, len: int64, targs: *Vector<int64>, missing: *Vector<string>) -> *Vector<int64> {
+func speculative(m: *Mono, off: int64, len: int64, targs: *Vector<int64>, missing: *Vector<string>) -> *Vector<int64> {
     a: *Ast = (*m).ast
     out: *Vector<int64> = alloc(vec_new())
     mut i: int64 = 0
@@ -228,7 +227,7 @@ export func speculative(m: *Mono, off: int64, len: int64, targs: *Vector<int64>,
     return out
 }
 
-export func str_in_vec(v: *Vector<string>, s: string) -> bool {
+func str_in_vec(v: *Vector<string>, s: string) -> bool {
     for entry in v {
         if str_eq(entry, s) { return true }
     }
@@ -266,7 +265,7 @@ export func map_clone_i64(src: *Map<string, int64>) -> *Map<string, int64> {
     return out
 }
 
-export func union_subst(base: *Map<string, int64>, over: *Map<string, int64>) -> *Map<string, int64> {
+func union_subst(base: *Map<string, int64>, over: *Map<string, int64>) -> *Map<string, int64> {
     out: *Map<string, int64> = map_clone_i64(base)
     ks: *Vector<string> = map_keys(over)
     for k in ks {
@@ -295,7 +294,7 @@ export func is_lambda(a: *Ast, exprid: int64) -> bool {
 
 // The single `return E` a desugar continuation is; -1 if the lambda body is any
 // other shape.
-export func lambda_single_return(a: *Ast, exprid: int64) -> int64 {
+func lambda_single_return(a: *Ast, exprid: int64) -> int64 {
     e: ExprNode = vec_get((*a).exprs, exprid)
     body: BlockNode = vec_get((*a).blocks, e.d)
     if body.len != 1 { return -1 }
@@ -688,7 +687,7 @@ export func await_element_ty(m: *Mono, opid: int64, subst: *Map<string, int64>, 
     return t
 }
 
-export func builtin_ret(m: *Mono, name: string) -> int64 {
+func builtin_ret(m: *Mono, name: string) -> int64 {
     a: *Ast = (*m).ast
     if str_eq(name, "read_file") || str_eq(name, "read_line") || str_eq(name, "read_all") {
         return mono_pair(a, mt_named0(a, "string"))

@@ -12,6 +12,7 @@
 @import genplace
 @import genptr
 @import genclos
+@import generr
 
 func gm_key(a: string, b: string) -> string {
     out: *StringBuilder = alloc(sb_new())
@@ -39,28 +40,6 @@ func gm_unresolved(s: *GenFuncState, ty: string, method: string) -> Val {
     return Val { ty: cty_int(genctx_ctys((*s).ctx), 64), op: gs_copy("0") }
 }
 
-func gm_error_string(s: *GenFuncState, ev: Val) -> Val {
-    c: *CTyArena = genctx_ctys((*s).ctx)
-    empty: string = emit_cstring((*s).module, "")
-    isnull: string = next_tmp((*s).fb)
-    op2((*s).fb, isnull, "icmp eq", "ptr", ev.op, "null")
-    out: string = next_tmp((*s).fb)
-    b: *StringBuilder = alloc(sb_new())
-    sb_push(b, out)
- sb_push(b, " = select i1 ")
- sb_push(b, isnull)
- sb_push(b, ", ptr ")
- sb_push(b, empty)
- sb_push(b, ", ptr ")
- sb_push(b, ev.op)
-    text: string = gs_built(b)
- sb_free(b)
- free(b)
- line((*s).fb, text)
- free(text)
-    return Val { ty: cty_rawptr(c, cty_char(c)), op: out }
-}
-
 func gm_error(s: *GenFuncState, ev: Val, method: string, args_off: int64, args_len: int64) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
     if str_eq(method, "exists") {
@@ -68,7 +47,7 @@ func gm_error(s: *GenFuncState, ev: Val, method: string, args_off: int64, args_l
  op2((*s).fb, d, "icmp ne", "ptr", ev.op, "null")
         return Val { ty: cty_bool(c), op: d }
     }
-    if str_eq(method, "toString") { return gm_error_string(s, ev) }
+    if str_eq(method, "toString") { return gen_error_string(s, ev) }
     if str_eq(method, "ignore") { return Val { ty: cty_void(c), op: gs_copy("") } }
     if str_eq(method, "check") {
         if args_len > 0 {

@@ -65,16 +65,50 @@ esac
 
 echo "bootstrap: seed version: $("$seed" version)"
 
+# Whether a compiler understands `build --release`, which arrived in 1.15.1. The
+# toolchain builds itself with the flag wherever the builder is new enough and
+# plainly wherever it is not, since a seed from an older release would refuse an
+# argument it has never heard of. The version is read out of the binary itself
+# rather than assumed from the tree it came from.
+supports_release() {
+    local bin=$1
+    local line major minor patch
+    line=$("$bin" version 2>/dev/null) || return 1
+    line=${line##* }
+    IFS=. read -r major minor patch <<<"$line"
+    [[ "$major" =~ ^[0-9]+$ ]] || return 1
+    [[ "$minor" =~ ^[0-9]+$ ]] || return 1
+    [[ "$patch" =~ ^[0-9]+$ ]] || patch=0
+    if [[ "$major" -gt 1 ]]; then return 0; fi
+    if [[ "$major" -lt 1 ]]; then return 1; fi
+    if [[ "$minor" -gt 15 ]]; then return 0; fi
+    if [[ "$minor" -lt 15 ]]; then return 1; fi
+    if [[ "$patch" -ge 1 ]]; then return 0; fi
+    return 1
+}
+
+# The compiler this stands up is built optimized whenever the seed can be asked
+# for it, since it is the compiler the machine will use from here.
+release_flag=""
+if supports_release "$seed"; then
+    release_flag="--release"
+fi
+
 # The self build runs caged: 24GB address space, a CPU ceiling, lowest
 # priority, an outer wall clock timeout. The source path is passed absolute
 # because fault location strings embed the path as spelled, and the stage
 # ladder builds absolute; a relative spelling here would emit different IR.
-echo "bootstrap: seed builds the compiler source"
+if [[ -n "$release_flag" ]]; then
+    echo "bootstrap: seed builds the compiler source at -O2"
+else
+    echo "bootstrap: seed builds the compiler source"
+fi
+# shellcheck disable=SC2086
 DUSK_HOME="$repo_root" timeout 600 bash -c '
     ulimit -v 25165824
     ulimit -t 900
-    exec nice -n 19 "$0" build "$1"
-' "$seed" "$repo_root/compiler/dusk.dusk" || { echo "bootstrap: FAIL: the seed cannot build compiler/dusk.dusk" >&2; exit 1; }
+    exec nice -n 19 "$0" build "$@"
+' "$seed" $release_flag "$repo_root/compiler/dusk.dusk" || { echo "bootstrap: FAIL: the seed cannot build compiler/dusk.dusk" >&2; exit 1; }
 
 echo "bootstrap: done. the compiler is at target/dusk-out/dusk"
 echo

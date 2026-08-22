@@ -14,10 +14,8 @@
 @import tcstmt
 @import tciface
 @import tcifaceforeign
-@import resolveexpr
 @import tcown
 @import summary
-@import sumfix
 
 func frame_store_msg(j: int64) -> string {
     b: *StringBuilder = alloc(sb_new())
@@ -94,7 +92,7 @@ func reject_unknown_param_type(tc: *TypeChecker, tyid: int64, lo: int64, hi: int
     }
 }
 
-export func check_main_sig(tc: *TypeChecker, f: FuncNode) -> void {
+func check_main_sig(tc: *TypeChecker, f: FuncNode) -> void {
     if f.is_async {
         tc_emit(tc, "main cannot be async; call an async func with async_run instead", f.lo, f.hi)
         return
@@ -254,7 +252,7 @@ func check_export_sig(tc: *TypeChecker, f: FuncNode) -> void {
     }
 }
 
-export func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
+func check_func(tc: *TypeChecker, f: FuncNode, self_ty: string) -> void {
     (*tc).resolvable_fn_binds = sum_resolvable_fn_binds((*tc).sum_tables, f.body)
     set_cur_generics(tc, f.generics_off, f.generics_len)
     // cur_ret drives the return-type compat and, being unfixed, the by-value
@@ -353,7 +351,7 @@ export func block_returns(a: *Ast, bid: int64) -> bool {
     return false
 }
 
-export func tc_run(tc: *TypeChecker) -> void {
+func tc_run(tc: *TypeChecker) -> void {
     check_duplicate_impls(tc)
     a: *Ast = (*tc).ast
     items: *Vector<ItemNode> = (*a).items
@@ -407,11 +405,6 @@ export func typeck_run_with_info(a: *Ast, info: EscapeInfo) -> *TypeChecker {
     }
     tc_run(tc)
     return tc
-}
-
-export func typeck_check_with_info(a: *Ast, info: EscapeInfo) -> *Vector<SpanDiagnostic> {
-    tc: *TypeChecker = typeck_run_with_info(a, info)
-    return (*tc).errors
 }
 
 // The ground double pass: types, widths, arguments, and exhaustiveness only, over

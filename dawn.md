@@ -12,7 +12,7 @@ dawn get                      # resolve every requirement, clone it, write dawn.
 dawn add <alias> <src> <ref>  # add a requirement to the manifest, then fetch it
 dawn update [alias]           # re-resolve one requirement, or all of them
 dawn tree                     # print the dependency graph the lock describes
-dawn build                    # build the manifest's root with dusk
+dawn build [--release]        # build the manifest's root with dusk
 dawn run [args...]            # build it and run it, forwarding the args
 dawn version                  # print the tool version
 dawn help                     # the same usage, also --help and -h
@@ -84,13 +84,16 @@ Build and run.
 
 ```sh
 dawn build
+dawn build --release
 dawn run input.json --verbose
 ```
 
 Both take the root from the manifest's `@root`, so neither takes a file argument, and running either outside a project is `no package.dawn found from /tmp/x upward; run dawn init`. A build prints its artifact the way the compiler does, `[dawn] target/dawn-out/app`. `run` forwards its trailing arguments to the program's `argv`. Both are thin: they check the lock and the checkouts, then hand the root to the dusk compiler, which is the same pipeline `dusk build` and `dusk run` walk. Once a project is fetched you can skip dawn entirely and call `dusk build` yourself, since the compiler reads the manifest, the lock, and `dawn_modules/` on its own.
 
+Since 1.15.1 `dawn build --release` hands the compiler its `--release` flag, which compiles the IR, the dusk runtime, and every `@csource` at `-O2` instead of the `-O0` a plain build takes. The flag is the compiler's and dawn passes it through unchanged, so a package built this way is the same program built by a `clang` that was told to optimize it, and nothing about resolving, locking, or checking out moves. The plain `dawn build` is what it always was, which is the build you want while you are working. `dawn run` takes no flag of its own, since every word after it belongs to the program, so an optimized run is `dawn build --release` and then the binary it names.
+
 ```sh
-dawn version    # dawn 1.14.1
+dawn version    # dawn 1.15.1
 ```
 
 Dawn's version is the toolchain's version. `dusk version` and `dawn version` print the same number from this release forward, since the two tools are built from one tree and a mismatch would mean nothing good.
@@ -232,7 +235,11 @@ One more property falls out of the layout. A dependency's files register under a
 
 ## The old cache import
 
-Before 1.14.0 a dependency was named at the import itself, `@import "github.com/user/repo/module"`, resolved from a global clone cache with no reference and no lock. The compiler still resolves that form outside a project this release, unchanged, but nothing fills the cache any more: dawn fetches into `dawn_modules` now, so the form reaches only a cache placed by hand or left behind by an earlier release. Inside a project holding a `package.dawn` it is an error, `'example.com/user/repo/mod' is a url import; declare it with @require in package.dawn`, since the manifest is where a dependency and its reference are written down. It is removed in 1.15.0. Moving is two steps: write a `@require` for the repository with the tag you want, and spell the import through the alias.
+Before 1.14.0 a dependency was named at the import itself, `@import "github.com/user/repo/module"`, resolved from a global clone cache with no reference and no lock behind it. 1.14.0 refused the form inside a project and left it resolving outside one for a release, 1.15.0 carried it one release further since that release changed nothing at all, and 1.15.1 removes it. An import whose value carries a `/` is refused wherever it is written, in a project and outside one alike, `'example.com/user/repo/mod' is a url import; declare it with @require in package.dawn`, and the compiler no longer looks in a cache root for an import of any shape.
+
+The cache the old form read is not the mirror cache above, which stays exactly as it is. `DAWN_CACHE` names one root and two different things once used it: dawn's bare mirrors, a fetch time optimization that never decides what an import means, and the old import resolution, which did. Only the second is gone.
+
+Moving is two steps: write a `@require` for the repository with the tag you want, and spell the import through the alias.
 
 ## The tradeoffs
 

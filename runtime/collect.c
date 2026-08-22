@@ -1,9 +1,10 @@
 /* Conservative mark and sweep collected heap. A second managed region beside
-   the generational heap: a collected block carries the same 16 byte header as a
-   generational one, [i64 size][i64 gen][payload], so the generational
-   dereference check reads a collected block's generation word exactly as it
-   reads a generational block's, and the two layers stay byte compatible. What
-   differs is reclamation. A generational block is retired by an explicit free
+   the generational heap: a collected block carries a two word header,
+   [i64 size][i64 gen][payload], whose generation sits in the word right before
+   the payload, the one position the generational layer also puts it in, so the
+   generational dereference check reads a collected block's generation exactly
+   as it reads a generational block's, and the two layers stay byte compatible.
+   What differs is reclamation. A generational block is retired by an explicit free
    that bumps its generation and parks it; a collected block is reclaimed only
    by a collection, which conservatively scans the roots, marks what is
    reachable, and sweeps the rest.
@@ -31,7 +32,6 @@
    The channel ban must be a type ban, rejecting a channel whose element is a
    collected type, since a same thread channel evades any liveness argument. */
 #include <pthread.h>
-#include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,17 +117,73 @@ static void gc_off_thread(void) {
     abort();
 }
 
-/* Records the main thread stack high water, once. Emitted main calls this as
-   its first instruction, so the first call names the top of the outermost frame
-   on the true main thread, and the scan runs from a collection point up to it.
+/* The main thread's true stack base, the highest address any frame on it can
+   reach. The anchor cannot be taken from the address emitted main hands in: that
+   is a one byte alloca in main's own frame, and where a slot lands inside a
+   frame is the optimizer's choice. At -O0 it sits at the top and reads as a high
+   water; at -O2 clang packs it at the bottom, `lea 0x7(%rsp)`, under every other
+   local main holds, so a scan bounded by it stops below main's own roots and
+   sweeps blocks that are still live. Only the platform knows where the stack
+   really begins, so ask it, and keep the handed in address as the answer of last
+   resort on a platform that will not say.
+
+   Two ways to ask. The calling thread's own attributes name its mapped stack
+   region, and the high end of that region is the base; this one is asked first
+   because it answers for whichever thread is asking rather than for the process.
+   __libc_stack_end, the stack pointer the process entered with, is the fallback
+   for a C library that will not answer the first way, and it is a weak reference
+   so a library without it reads as absent rather than failing to link.
+
+   Either answer is only taken when it sits above the address main handed in and
+   within a span no real stack base is outside of. A bound below main's frame
+   would be worse than the one it replaces, and a bound implausibly far above it
+   is not this stack at all, so both are refused and the handed in address stands.
+   The anchor is taken at main's entry, so a true base is a few hundred bytes to a
+   few kilobytes above it and the span is generous by many orders. */
+#define GC_STACK_SPAN ((size_t)1 << 30)
+
+extern int pthread_getattr_np(pthread_t th, pthread_attr_t *attr);
+extern void *__libc_stack_end __attribute__((weak));
+
+static int gc_base_plausible(char *base, char *given) {
+    return base >= given && (size_t)(base - given) <= GC_STACK_SPAN;
+}
+
+static char *gc_stack_base(char *given) {
+    pthread_attr_t at;
+    if (pthread_getattr_np(pthread_self(), &at) == 0) {
+        void *lo = NULL;
+        size_t len = 0;
+        int ok = pthread_attr_getstack(&at, &lo, &len) == 0;
+        pthread_attr_destroy(&at);
+        if (ok && lo != NULL && len > 0) {
+            char *e = (char *)lo + len;
+            if (e > (char *)lo && gc_base_plausible(e, given)) {
+                return e;
+            }
+        }
+    }
+    if (&__libc_stack_end != NULL && __libc_stack_end != NULL) {
+        char *e = (char *)__libc_stack_end;
+        if (gc_base_plausible(e, given)) {
+            return e;
+        }
+    }
+    return given;
+}
+
+/* Records the main thread stack base, once. Emitted main calls this as its first
+   instruction, so the first call runs on the true main thread, from the outermost
+   frame, before any collected block exists; what it contributes is the thread
+   identity and the timing, and the base itself is resolved from the platform.
    The anchor is set once: main is an ordinary dusk function, so it can recurse
    or be spawned, and a later call from an inner frame or another thread would
-   lower the high water and drop the outer frame out of every scan, sweeping a
-   live block. A second call is a no op. */
+   move the base and drop the outer frames out of every scan, sweeping a live
+   block. A second call is a no op. */
 void cool_gc_anchor(void *p) {
     pthread_mutex_lock(&gc_lock);
     if (!gc_anchored) {
-        gc_anchor_sp = (char *)p;
+        gc_anchor_sp = gc_stack_base((char *)p);
         gc_anchor_thread = pthread_self();
         gc_anchored = 1;
     }
@@ -302,15 +358,20 @@ static void gc_collect_locked(void) {
     qsort(gc_sorted, (size_t)gc_sorted_n, sizeof(int64_t), gc_cmp_idx);
     gc_work_n = 0;
 
-    /* Root set. A register spill through setjmp catches a root held only in a
-       callee saved register; the stack scan from a collection point up to the
-       anchor catches roots on the stack; the generational registry snapshot
-       and the registered regions catch roots on the managed and substrate
-       heaps. Marks push the worklist for the transitive close. */
-    jmp_buf env;
-    memset(&env, 0, sizeof(env));
-    (void)setjmp(env);
-    gc_scan_range((char *)&env, (char *)&env + sizeof(env));
+    /* Root set. The register spill catches a root held only in a callee saved
+       register; the stack scan from a collection point up to the base catches
+       roots on the stack; the generational registry snapshot and the registered
+       regions catch roots on the managed and substrate heaps. Marks push the
+       worklist for the transitive close.
+
+       The spill is __builtin_unwind_init, which makes this function's prologue
+       save every callee saved register into its own frame, inside the range the
+       stack scan is about to cover. A jmp_buf will not do the job: glibc mangles
+       the frame and stack pointers it stores, so a root living in one of those
+       registers is xored past recognition and the scan walks over it. The
+       builtin stores the registers plainly, and it stores rbp, which setjmp
+       never gives back. */
+    __builtin_unwind_init();
 
     char sp_marker;
     char *sp = &sp_marker;

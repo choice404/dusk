@@ -26,11 +26,15 @@ func str_copy(s: string) -> string {
     return substring(s, 0, str_len(s))
 }
 
+// An id is an index into vals and so is never negative, which lets one probe
+// answer both questions a lookup asks: a -1 back from unwrap_or is a miss and
+// anything else is the hit. Every lookup below reads the table once.
 export func intern_id(i: *Interner, s: string) -> int64 {
     ids: *Map<string, int64> = (*i).ids
     vals: *Vector<string> = (*i).vals
-    if map_has(ids, s) {
-        return unwrap_or(map_get(ids, s), -1)
+    hit: int64 = unwrap_or(map_get(ids, s), -1)
+    if hit >= 0 {
+        return hit
     }
     owned: string = str_copy(s)
     id: int64 = vec_len(vals)
@@ -42,8 +46,9 @@ export func intern_id(i: *Interner, s: string) -> int64 {
 export func intern_owned(i: *Interner, s: string) -> int64 {
     ids: *Map<string, int64> = (*i).ids
     vals: *Vector<string> = (*i).vals
-    if map_has(ids, s) {
-        return unwrap_or(map_get(ids, s), -1)
+    hit: int64 = unwrap_or(map_get(ids, s), -1)
+    if hit >= 0 {
+        return hit
     }
     id: int64 = vec_len(vals)
     vec_push(vals, s)

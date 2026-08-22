@@ -17,7 +17,6 @@
 @import std.string
 @import std.vector
 @import std.map
-@import std.os
 @import std.functional.maybe
 @import ast
 @import diag
@@ -32,24 +31,19 @@ func new_text_map() -> *Map<string, string> {
 }
 
 /** One import a file resolved, kept for the questions asked after the load: which package
- *  scope a qualified call through this prefix folds into, which bare names this import
- *  puts in the importing file's scope, and which file it reached, so the standard library
- *  the project itself reaches can be told from the standard library a dependency pulled in
- *  for its own use. mod_ns is the module path the import named, absent for the quoted git
- *  form which names no module. suffix is the package scope of the file it resolved to,
+ *  scope a qualified call through this prefix folds into, and which bare names this import
+ *  puts in the importing file's scope. mod_ns is the module path the import named, which
+ *  every import that resolves has. suffix is the package scope of the file it resolved to,
  *  empty for the project and the standard library. moving is that file's exports the
  *  rename moved and fixed the ones it could not; a leaf import contributes only the one
- *  symbol it named. target is the index of the resolved file's record, or -1 when the file
- *  never registered. */
+ *  symbol it named. */
 export struct ImportRes {
     mod_ns: string,
-    has_mod_ns: bool,
     suffix: string,
     has_leaf: bool,
     leaf: string,
     moving: *Map<string, int64>,
     fixed: *Map<string, int64>,
-    target: int64,
 }
 
 /** One file in the merged module. The item range is where its declarations landed, which
@@ -79,8 +73,8 @@ export struct FileMeta {
 
 
 /** One resolved import, recorded against the file that wrote it. */
-export func import_res(mod_ns: string, has_mod_ns: bool, suffix: string, has_leaf: bool, leaf: string, moving: *Map<string, int64>, fixed: *Map<string, int64>, target: int64) -> ImportRes {
-    return ImportRes { mod_ns: mod_ns, has_mod_ns: has_mod_ns, suffix: suffix, has_leaf: has_leaf, leaf: leaf, moving: moving, fixed: fixed, target: target }
+export func import_res(mod_ns: string, suffix: string, has_leaf: bool, leaf: string, moving: *Map<string, int64>, fixed: *Map<string, int64>) -> ImportRes {
+    return ImportRes { mod_ns: mod_ns, suffix: suffix, has_leaf: has_leaf, leaf: leaf, moving: moving, fixed: fixed }
 }
 
 /** One registered file's record, with its arena ranges already taken. The import list

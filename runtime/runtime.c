@@ -74,8 +74,14 @@ void cool_eprint_bytes(const char *p, int64_t n) {
 
 /* Content equality for the string == and != operators. A null operand reads
    as empty, matching the printers, so the empty error message compares equal
-   to "" instead of crashing. */
+   to "" instead of crashing. One address is equal to itself without reading a
+   byte, and two nulls are the one pair that already answered equal through the
+   empty reading, so the pointer test changes no answer and skips the walk on
+   the interned and self compared cases the compiler asks about most. */
 int64_t cool_str_eq(const char *a, const char *b) {
+    if (a == b) {
+        return 1;
+    }
     const char *x = a ? a : "";
     const char *y = b ? b : "";
     return strcmp(x, y) == 0 ? 1 : 0;
@@ -440,35 +446,228 @@ int64_t cool_debug_double_frees(void) {
     return n;
 }
 
-/* Generational heap for managed pointers. Each managed allocation carries a 16
-   byte header in front of the data, holding the payload size and a generation,
-   with the generation in the word right before the data so a check is a single
-   load at p minus 8. free bumps the generation and parks the block on a size
-   matched free list. A later allocation of the same size reuses the block with
-   its now advanced generation, so a stale reference still holding the old
-   generation mismatches and faults at its next dereference. The generation
-   never resets for a block, which is what keeps reuse sound. */
-#define COOL_GEN_HDR 16
-#define COOL_GEN_FREE_MAX 4096
-static void *cool_gen_free_ptr[COOL_GEN_FREE_MAX];
-static int64_t cool_gen_free_sz[COOL_GEN_FREE_MAX];
-static int cool_gen_free_n = 0;
+/* Generational heap for managed pointers. Each managed allocation carries a
+   header in front of the data holding the payload size and a generation, with
+   the generation in the word right before the data so a check is a single load
+   at p minus 8. free bumps the generation and parks the block on a size matched
+   free list. A later allocation of the same size reuses the block with its now
+   advanced generation, so a stale reference still holding the old generation
+   mismatches and faults at its next dereference. The generation never resets
+   for a block, which is what keeps reuse sound.
 
-/* Live block registry. One entry per currently handed out generational payload,
+   The header is two words, [i64 size][i64 gen], and stays two words. The
+   collected heap in collect.c mints blocks with the same shape so one
+   dereference check reads either layer, emitted IR reaches the generation at
+   payload minus eight, and the payload keeps the sixteen byte alignment malloc
+   itself hands back. Everything the allocator learned to do faster below sits
+   beside the header, never inside it. */
+#define COOL_GEN_HDR 16
+
+/* The size word carries one reserved bit. It is set while the block is parked
+   on a free list and cleared when a later allocation hands the block back out,
+   so a free of an already parked block is one load and one test rather than a
+   walk of the list. A payload size is bounded below the bit, which puts the
+   ceiling four exabytes past anything malloc can answer. */
+#define COOL_GEN_FREED_TAG ((int64_t)1 << 62)
+#define COOL_GEN_SIZE_MAX ((int64_t)1 << 62)
+
+/* Header word addresses from a payload, so the offsets are written once. */
+#define COOL_GEN_SIZE_WORD(p) ((int64_t *)((char *)(p) - COOL_GEN_HDR))
+#define COOL_GEN_GEN_WORD(p) ((int64_t *)((char *)(p) - 8))
+
+/* Size matched free lists. A parked block is found by its exact payload size,
+   the same match the linear list made, but through a table rather than a scan:
+   sizes up to COOL_GEN_BIN_MAX index a direct array, larger sizes hash into an
+   open addressed table of the same head slots. Both park and unpark are a
+   handful of loads.
+
+   The list nodes live in their own arrays, never in the parked payload. A use
+   after free that writes through a stale pointer therefore cannot corrupt the
+   allocator; it only scribbles on a block whose generation already faults the
+   next managed dereference, which is the property the previous static array
+   had and the one worth keeping. Node index zero is the empty list, so the
+   zeroed bin table starts out empty with no initialization pass. */
+#define COOL_GEN_BIN_MAX 4096
+static int64_t cool_gen_bin[COOL_GEN_BIN_MAX + 1];
+
+typedef struct {
+    int64_t size;
+    int64_t head;
+} cool_gen_big_bin;
+
+static cool_gen_big_bin *cool_gen_big = NULL;
+static int64_t cool_gen_big_cap = 0;
+static int64_t cool_gen_big_n = 0;
+
+static void **cool_fl_ptr = NULL;
+static int64_t *cool_fl_next = NULL;
+static int64_t cool_fl_cap = 0;
+static int64_t cool_fl_n = 1;
+static int64_t cool_fl_recycle = 0;
+
+/* Hands back a node index, recycled if one is free and fresh otherwise, or zero
+   when the arrays cannot grow. Zero is not a failure the caller must escalate:
+   a block that cannot be parked is simply dropped, which is what the old fixed
+   list did past its cap, and dropping is sound because the block is already
+   generation bumped and off the registry. Held with the heap lock. */
+static int64_t cool_fl_node_locked(void) {
+    if (cool_fl_recycle != 0) {
+        int64_t n = cool_fl_recycle;
+        cool_fl_recycle = cool_fl_next[n];
+        return n;
+    }
+    if (cool_fl_n >= cool_fl_cap) {
+        int64_t ncap = cool_fl_cap ? cool_fl_cap * 2 : 1024;
+        void **np = realloc(cool_fl_ptr, (size_t)ncap * sizeof(void *));
+        if (!np) {
+            return 0;
+        }
+        cool_fl_ptr = np;
+        int64_t *nn = realloc(cool_fl_next, (size_t)ncap * sizeof(int64_t));
+        if (!nn) {
+            /* The pointer array grew and the next array did not. Leaving the cap
+               where it was keeps the two in step at the smaller size, so the
+               slack is wasted rather than read out of bounds. */
+            return 0;
+        }
+        cool_fl_next = nn;
+        cool_fl_cap = ncap;
+    }
+    return cool_fl_n++;
+}
+
+/* Locates the head slot for a large size in the open addressed table, growing
+   it when it passes half full. An entry is never removed, so a size class that
+   empties keeps its slot with an empty head and costs one probe. Returns NULL
+   when the size has no slot and none can be made. Held with the heap lock. */
+static int64_t *cool_gen_big_slot_locked(int64_t size, int create) {
+    if (cool_gen_big_cap == 0) {
+        if (!create) {
+            return NULL;
+        }
+        int64_t ncap = 256;
+        cool_gen_big_bin *nb = calloc((size_t)ncap, sizeof(cool_gen_big_bin));
+        if (!nb) {
+            return NULL;
+        }
+        cool_gen_big = nb;
+        cool_gen_big_cap = ncap;
+        cool_gen_big_n = 0;
+    }
+    for (;;) {
+        uint64_t h = (uint64_t)size * 0x9E3779B97F4A7C15ull;
+        h ^= h >> 29;
+        int64_t mask = cool_gen_big_cap - 1;
+        int64_t i = (int64_t)(h & (uint64_t)mask);
+        for (;;) {
+            if (cool_gen_big[i].size == size) {
+                return &cool_gen_big[i].head;
+            }
+            if (cool_gen_big[i].size == 0) {
+                break;
+            }
+            i = (i + 1) & mask;
+        }
+        if (!create) {
+            return NULL;
+        }
+        if ((cool_gen_big_n + 1) * 2 <= cool_gen_big_cap) {
+            cool_gen_big[i].size = size;
+            cool_gen_big[i].head = 0;
+            cool_gen_big_n++;
+            return &cool_gen_big[i].head;
+        }
+        int64_t ncap = cool_gen_big_cap * 2;
+        cool_gen_big_bin *nb = calloc((size_t)ncap, sizeof(cool_gen_big_bin));
+        if (!nb) {
+            return NULL;
+        }
+        for (int64_t k = 0; k < cool_gen_big_cap; k++) {
+            if (cool_gen_big[k].size == 0) {
+                continue;
+            }
+            uint64_t g = (uint64_t)cool_gen_big[k].size * 0x9E3779B97F4A7C15ull;
+            g ^= g >> 29;
+            int64_t j = (int64_t)(g & (uint64_t)(ncap - 1));
+            while (nb[j].size != 0) {
+                j = (j + 1) & (ncap - 1);
+            }
+            nb[j] = cool_gen_big[k];
+        }
+        free(cool_gen_big);
+        cool_gen_big = nb;
+        cool_gen_big_cap = ncap;
+        /* Retry the probe against the grown table. */
+    }
+}
+
+/* The head slot for an exact payload size, or NULL when there is none. A size
+   outside the representable range belongs to no class: it can only come from a
+   corrupt or foreign header, and refusing it here keeps a bad size out of the
+   bin index rather than letting it address the table. Held with the heap lock. */
+static int64_t *cool_gen_bin_slot_locked(int64_t size, int create) {
+    if (size < 0 || size >= COOL_GEN_SIZE_MAX) {
+        return NULL;
+    }
+    if (size <= COOL_GEN_BIN_MAX) {
+        return &cool_gen_bin[size];
+    }
+    return cool_gen_big_slot_locked(size, create);
+}
+
+/* Parks a retired block on its size class. Held with the heap lock. */
+static void cool_gen_park_locked(void *p, int64_t size) {
+    int64_t *head = cool_gen_bin_slot_locked(size, 1);
+    if (!head) {
+        return;
+    }
+    int64_t node = cool_fl_node_locked();
+    if (node == 0) {
+        return;
+    }
+    cool_fl_ptr[node] = p;
+    cool_fl_next[node] = *head;
+    *head = node;
+}
+
+/* Pops a parked block of exactly this payload size, or NULL when the class is
+   empty. Held with the heap lock. */
+static void *cool_gen_unpark_locked(int64_t size) {
+    int64_t *head = cool_gen_bin_slot_locked(size, 0);
+    if (!head || *head == 0) {
+        return NULL;
+    }
+    int64_t node = *head;
+    void *p = cool_fl_ptr[node];
+    *head = cool_fl_next[node];
+    cool_fl_next[node] = cool_fl_recycle;
+    cool_fl_recycle = node;
+    return p;
+}
+
+/* Block registry. One entry per generational block the heap has ever minted,
    with its payload size, so the collector can scan every live generational
-   block as a root region. Every alloc inserts and every free removes, both
-   under the heap lock, keeping exactly one entry per payload. The collector
-   copies a snapshot under the lock and scans it released, so a block another
-   thread frees mid scan is still mapped, parked not returned, and reads only
-   over retain. */
+   block as a root region.
+
+   The table is append only. A block's address never goes back to libc, and
+   reuse is size matched exactly, so a block's address and size are fixed for
+   the life of the process and one entry describes it forever. Which entries are
+   live is not stored twice: the parked bit in each block's own size word already
+   says it, and the snapshot reads that bit. So a mint appends, a reuse touches
+   nothing, and a free touches nothing, where the dense table this replaced
+   walked itself on every free looking for the entry to swap out.
+
+   The collector copies a snapshot under the lock, keeping only the live
+   entries, and scans it released, so a block another thread frees mid scan is
+   still mapped, parked not returned, and reads only over retain. */
 static void **cool_reg_ptr = NULL;
 static int64_t *cool_reg_size = NULL;
 static int64_t cool_reg_n = 0;
 static int64_t cool_reg_cap = 0;
 
-/* Inserts a payload with the heap lock held. Growth failure is out of memory,
-   fatal, since dropping an entry would under root the collector and free a
-   still reachable block. */
+/* Appends a freshly minted payload with the heap lock held. Growth failure is
+   out of memory, fatal, since dropping an entry would under root the collector
+   and free a still reachable block. */
 static void cool_reg_add_locked(void *p, int64_t size) {
     if (cool_reg_n == cool_reg_cap) {
         int64_t ncap = cool_reg_cap ? cool_reg_cap * 2 : 128;
@@ -486,20 +685,6 @@ static void cool_reg_add_locked(void *p, int64_t size) {
     cool_reg_ptr[cool_reg_n] = p;
     cool_reg_size[cool_reg_n] = size;
     cool_reg_n++;
-}
-
-/* Removes a payload with the heap lock held, scanning from the end so a last in
-   first out free, the common defer pattern, resolves in one step. A swap remove
-   keeps the table dense. A payload not present is a no op. */
-static void cool_reg_remove_locked(void *p) {
-    for (int64_t i = cool_reg_n - 1; i >= 0; i--) {
-        if (cool_reg_ptr[i] == p) {
-            cool_reg_n--;
-            cool_reg_ptr[i] = cool_reg_ptr[cool_reg_n];
-            cool_reg_size[i] = cool_reg_size[cool_reg_n];
-            return;
-        }
-    }
 }
 
 /* Copies the live registry for the collector. Allocates both arrays, which the
@@ -521,26 +706,41 @@ int64_t cool_gen_registry_snapshot(void ***ptrs, int64_t **sizes) {
         fputs("fatal: out of memory\n", stderr);
         abort();
     }
-    memcpy(pp, cool_reg_ptr, (size_t)n * sizeof(void *));
-    memcpy(ss, cool_reg_size, (size_t)n * sizeof(int64_t));
+    // A parked block is not a root: its payload is whatever the program left
+    // there before the free, and scanning it would mint references out of dead
+    // bytes. The parked bit is set and cleared under this same lock, so the
+    // live set the copy names is the live set at the moment of the copy.
+    int64_t m = 0;
+    for (int64_t i = 0; i < n; i++) {
+        void *p = cool_reg_ptr[i];
+        if (*COOL_GEN_SIZE_WORD(p) & COOL_GEN_FREED_TAG) {
+            continue;
+        }
+        pp[m] = p;
+        ss[m] = cool_reg_size[i];
+        m++;
+    }
     pthread_mutex_unlock(&cool_heap_lock);
     *ptrs = pp;
     *sizes = ss;
-    return n;
+    return m;
 }
 
 void *cool_gen_alloc(int64_t size) {
+    /* A size the header cannot carry beside its reserved bit is answered the way
+       a failed malloc is, since no such allocation could succeed anyway. */
+    if (size < 0 || size >= COOL_GEN_SIZE_MAX) {
+        return NULL;
+    }
     pthread_mutex_lock(&cool_heap_lock);
-    for (int i = 0; i < cool_gen_free_n; i++) {
-        if (cool_gen_free_sz[i] == size) {
-            void *p = cool_gen_free_ptr[i];
-            cool_gen_free_n--;
-            cool_gen_free_ptr[i] = cool_gen_free_ptr[cool_gen_free_n];
-            cool_gen_free_sz[i] = cool_gen_free_sz[cool_gen_free_n];
-            cool_reg_add_locked(p, size);
-            pthread_mutex_unlock(&cool_heap_lock);
-            return p;
-        }
+    void *p = cool_gen_unpark_locked(size);
+    if (p) {
+        /* Rewriting the size clears the parked bit, so the block is live again
+           and a free of it is a first free rather than a double. The size itself
+           is unchanged: the class matched it exactly. */
+        *COOL_GEN_SIZE_WORD(p) = size;
+        pthread_mutex_unlock(&cool_heap_lock);
+        return p;
     }
     pthread_mutex_unlock(&cool_heap_lock);
     char *base = malloc(COOL_GEN_HDR + (size_t)size);
@@ -550,35 +750,36 @@ void *cool_gen_alloc(int64_t size) {
     int64_t *hdr = (int64_t *)base;
     hdr[0] = size;
     __atomic_store_n(&hdr[1], 1, __ATOMIC_SEQ_CST);
-    void *p = base + COOL_GEN_HDR;
+    void *q = base + COOL_GEN_HDR;
     pthread_mutex_lock(&cool_heap_lock);
-    cool_reg_add_locked(p, size);
+    cool_reg_add_locked(q, size);
     pthread_mutex_unlock(&cool_heap_lock);
-    return p;
+    return q;
 }
 
 /* The retire path with the heap lock already held. */
 static void cool_gen_free_locked(void *p) {
-    // Double free guard: a block already parked on the free list must not be
-    // parked again, or a later allocation could hand the same address out twice.
-    for (int i = 0; i < cool_gen_free_n; i++) {
-        if (cool_gen_free_ptr[i] == p) {
-            fflush(stdout);
-            fputs("fatal: double free\n", stderr);
-            abort();
-        }
+    // Double free guard: a block already parked must not be parked again, or a
+    // later allocation could hand the same address out twice. The parked bit in
+    // the size word answers that in one load, and it answers for every parked
+    // block rather than for the prefix a fixed list could hold, so a second free
+    // is caught where the old walk could run past it. A managed pointer reaches
+    // its own generation check first and faults there; what arrives here is the
+    // untracked layer, a raw payload or a generation zero pointer, whose second
+    // free this is the only guard for.
+    int64_t *hdr = COOL_GEN_SIZE_WORD(p);
+    int64_t size = *hdr;
+    if (size & COOL_GEN_FREED_TAG) {
+        fflush(stdout);
+        fputs("fatal: double free\n", stderr);
+        abort();
     }
     // The generation bump is atomic because the dereference check reads the
     // word without the heap lock, from any thread.
-    int64_t *gen = (int64_t *)((char *)p - 8);
+    int64_t *gen = COOL_GEN_GEN_WORD(p);
     __atomic_fetch_add(gen, 1, __ATOMIC_SEQ_CST);
-    int64_t *size = (int64_t *)((char *)p - COOL_GEN_HDR);
-    cool_reg_remove_locked(p);
-    if (cool_gen_free_n < COOL_GEN_FREE_MAX) {
-        cool_gen_free_ptr[cool_gen_free_n] = p;
-        cool_gen_free_sz[cool_gen_free_n] = *size;
-        cool_gen_free_n++;
-    }
+    *hdr = size | COOL_GEN_FREED_TAG;
+    cool_gen_park_locked(p, size);
 }
 
 void cool_gen_free(void *p) {
@@ -618,7 +819,7 @@ int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n) {
         return 1;
     }
     pthread_mutex_lock(&cool_heap_lock);
-    int64_t *g = (int64_t *)((char *)p - 8);
+    int64_t *g = COOL_GEN_GEN_WORD(p);
     if (gen != 0 && __atomic_load_n(g, __ATOMIC_SEQ_CST) != gen) {
         pthread_mutex_unlock(&cool_heap_lock);
         cool_gen_fault();

@@ -11,14 +11,9 @@
 @import tysigs
 @import tcstate
 @import tcscope
-@import tcbin
 @import tcfit
-@import tccall
 @import tciface
-@import tcmatch
 @import tcown
-@import tcesc
-@import tcesc2
 @import tcexpr
 
 export func ident_variant_value_msg(en: string, name: string) -> string {
@@ -97,7 +92,7 @@ func field_dup_msg(fname: string, sname: string) -> string {
     return out
 }
 
-export func no_field_msg(sname: string, fname: string) -> string {
+func no_field_msg(sname: string, fname: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push_char(b, 39)
     sb_push(b, sname)
@@ -270,20 +265,6 @@ func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
     return f.ty
 }
 
-func base_named_field_ty(tc: *TypeChecker, base_ty: int64, fname: string) -> int64 {
-    n: TyNode = ty_get((*tc).ty, base_ty)
-    if n.kind == tyk_named() {
-        return struct_field_ty(tc, ty_name((*tc).ty, base_ty), fname)
-    }
-    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
-        inner: TyNode = ty_get((*tc).ty, n.a)
-        if inner.kind == tyk_named() {
-            return struct_field_ty(tc, ty_name((*tc).ty, n.a), fname)
-        }
-    }
-    return ty_unknown((*tc).ty)
-}
-
 export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: int64, lo: int64, hi: int64) -> void {
     a: *Ast = (*tc).ast
     vals: *Vector<int64> = alloc(vec_new())
@@ -367,17 +348,6 @@ export func infer_tuple(tc: *TypeChecker, off: int64, len: int64) -> int64 {
         i++
     }
     return ty_tuple((*tc).ty, xs)
-}
-
-func infer_args(tc: *TypeChecker, off: int64, len: int64) -> *Vector<int64> {
-    out: *Vector<int64> = alloc(vec_new())
-    a: *Ast = (*tc).ast
-    mut i: int64 = 0
-    while i < len {
-        vec_push(out, infer_expr(tc, vec_get((*a).kids, off + i)))
-        i++
-    }
-    return out
 }
 
 export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *Vector<string>) -> int64 {

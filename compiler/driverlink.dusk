@@ -71,12 +71,15 @@ export func push_arg(cmd: *StringBuilder, arg: string) -> void {
     free(q)
 }
 
-// Appends a runtime source file under rt as a quoted argument. rt is the runtime
-// directory, name a bare file within it; the joined path is freed after the push.
-export func push_source(cmd: *StringBuilder, rt: string, name: string) -> void {
-    full: string = path_join(rt, name)
-    push_arg(cmd, full)
-    free(full)
+// The optimization flag a link and a runtime compile carry: -O2 for a release
+// build, and nothing at all for the default one. The default answer is the empty
+// string rather than an explicit -O0 so the command line a plain build writes is
+// exactly the line it has always written; clang's own default is -O0 either way.
+export func opt_flag(release: bool) -> string {
+    if release {
+        return "-O2"
+    }
+    return ""
 }
 
 // Whether a @link value names a file to hand clang verbatim rather than a library
@@ -105,7 +108,7 @@ export func link_is_file(v: string) -> bool {
 // Appends one @link value: a file value is passed verbatim as a quoted path, a
 // bare library name is passed as a quoted -lNAME flag. Both survive the shell as
 // one word, matching the runtime source quoting convention.
-export func push_link(cmd: *StringBuilder, val: string) -> void {
+func push_link(cmd: *StringBuilder, val: string) -> void {
     if link_is_file(val) {
         push_arg(cmd, val)
         return
@@ -135,21 +138,25 @@ export func runtime_sources() -> *Vector<string> {
     return v
 }
 
-// Links the IR at ll against the C runtime under home, writing the executable to
-// bin, then runs it and returns its exit code. The clang line mirrors the stage0
-// linker: every runtime source, -pthread for toolchains where pthreads is not yet
-// in libc, and -lm for the math intrinsics. No optimization flag rides along, the
-// same as stage0. A clang failure reports a diagnostic and returns its code.
-export func link_only(home: string, ll: string, bin: string, links: *Vector<string>, csources: *Vector<string>) -> int64 {
-    rt: string = path_join(home, "runtime")
+// Links the IR at ll against the C runtime, writing the executable to bin, then
+// runs it and returns its exit code. The clang line mirrors the stage0 linker:
+// every runtime input, -pthread for toolchains where pthreads is not yet in libc,
+// and -lm for the math intrinsics. rt_inputs is what the runtime contributes, one
+// cached object per source or the sources themselves, resolved by the caller;
+// either way clang is handed the same runtime. opt is the optimization flag, empty
+// for the default build, and it applies to the module, the runtime, and every
+// @csource on the line at once. A clang failure reports a diagnostic and returns
+// its code.
+export func link_only(ll: string, bin: string, rt_inputs: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, opt: string) -> int64 {
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "clang")
+    if str_len(opt) > 0 {
+        sb_push_char(cmd, 32)
+        sb_push(cmd, opt)
+    }
     push_arg(cmd, ll)
-    rts: *Vector<string> = runtime_sources()
-    mut ri: int64 = 0
-    while ri < vec_len(rts) {
-        push_source(cmd, rt, vec_get(rts, ri))
-        ri++
+    for one in rt_inputs {
+        push_arg(cmd, one)
     }
     // A @csource file compiles alongside the runtime, resolved at load time
     // against its declaring file; a @link value follows as either a file or a
@@ -169,7 +176,6 @@ export func link_only(home: string, ll: string, bin: string, links: *Vector<stri
     line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
     sb_free(cmd)
     free(cmd)
-    free(rt)
 
     code: int64 = run(line)
     free(line)
@@ -199,10 +205,10 @@ export func run_linked(bin: string, argv: string[], start: int64) -> int64 {
     return ec
 }
 
-export func link_and_run(home: string, ll: string, bin: string) -> int64 {
+export func link_and_run(ll: string, bin: string, rt_inputs: *Vector<string>) -> int64 {
     no_links: *Vector<string> = alloc(vec_new())
     no_csources: *Vector<string> = alloc(vec_new())
-    code: int64 = link_only(home, ll, bin, no_links, no_csources)
+    code: int64 = link_only(ll, bin, rt_inputs, no_links, no_csources, "")
     if code != 0 { return code }
     empty: string[] = []
     return run_linked(bin, empty, 0)

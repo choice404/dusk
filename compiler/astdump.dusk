@@ -8,6 +8,7 @@
 @import ast
 @import astdump2
 @import astdump_item
+@import astdumpty
 
 func ind(out: *StringBuilder, n: int64) -> void {
     mut i: int64 = 0
@@ -51,207 +52,6 @@ func render_string_list(out: *StringBuilder, a: *Ast, ids: *Vector<int64>, level
     while i < vec_len(ids) {
         ind(out, level + 1)
         push_string(out, ast_name(a, vec_get(ids, i)))
-        sb_push(out, ",\n")
-        i++
-    }
-    ind(out, level)
-    sb_push_char(out, 93)
-}
-
-func render_kid_string_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
-    if len == 0 {
-        sb_push(out, "[]")
-        return
-    }
-    sb_push(out, "[\n")
-    mut i: int64 = 0
-    while i < len {
-        ind(out, level + 1)
-        push_string(out, ast_name(a, vec_get((*a).kids, off + i)))
-        sb_push(out, ",\n")
-        i++
-    }
-    ind(out, level)
-    sb_push_char(out, 93)
-}
-
-func render_type_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
-    if len == 0 {
-        sb_push(out, "[]")
-        return
-    }
-    sb_push(out, "[\n")
-    mut i: int64 = 0
-    while i < len {
-        ind(out, level + 1)
-        render_type(out, a, vec_get((*a).kids, off + i), level + 1)
-        sb_push(out, ",\n")
-        i++
-    }
-    ind(out, level)
-    sb_push_char(out, 93)
-}
-
-func render_type(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
-    t: TypeNode = vec_get((*a).types, id)
-    if t.kind == tk_unit() {
-        sb_push(out, "Unit")
-        return
-    }
-    if t.kind == tk_infer() {
-        sb_push(out, "Infer")
-        return
-    }
-    if t.kind == tk_named() {
-        sb_push(out, "Named(\n")
-        ind(out, level + 1)
-        push_string(out, ast_name(a, t.a))
-        sb_push(out, ",\n")
-        ind(out, level + 1)
-        render_type_list(out, a, t.b, t.c, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level)
-        sb_push_char(out, 41)
-        return
-    }
-    if t.kind == tk_ptr() {
-        sb_push(out, "Ptr(\n")
-        ind(out, level + 1)
-        render_type(out, a, t.a, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level)
-        sb_push_char(out, 41)
-        return
-    }
-    if t.kind == tk_rawptr() {
-        sb_push(out, "RawPtr(\n")
-        ind(out, level + 1)
-        render_type(out, a, t.a, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level)
-        sb_push_char(out, 41)
-        return
-    }
-    if t.kind == tk_slice() {
-        sb_push(out, "Slice(\n")
-        ind(out, level + 1)
-        render_type(out, a, t.a, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level)
-        sb_push_char(out, 41)
-        return
-    }
-    if t.kind == tk_array() {
-        sb_push(out, "Array(\n")
-        ind(out, level + 1)
-        render_type(out, a, t.a, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level + 1)
-        sb_push_int(out, t.b)
-        sb_push(out, ",\n")
-        ind(out, level)
-        sb_push_char(out, 41)
-        return
-    }
-    if t.kind == tk_tuple() {
-        sb_push(out, "Tuple(\n")
-        ind(out, level + 1)
-        render_type_list(out, a, t.a, t.b, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level)
-        sb_push_char(out, 41)
-        return
-    }
-    if t.kind == tk_func() {
-        sb_push(out, "Func(\n")
-        ind(out, level + 1)
-        render_type_list(out, a, t.a, t.b, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level + 1)
-        render_type(out, a, t.c, level + 1)
-        sb_push(out, ",\n")
-        ind(out, level)
-        sb_push_char(out, 41)
-        return
-    }
-    sb_push(out, "Collector(\n")
-    ind(out, level + 1)
-    render_type(out, a, t.a, level + 1)
-    sb_push(out, ",\n")
-    ind(out, level)
-    sb_push_char(out, 41)
-}
-
-func render_param(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
-    p: ParamNode = vec_get((*a).params, id)
-    sb_push(out, "Param {\n")
-    ind(out, level + 1)
-    sb_push(out, "using: ")
-    push_bool(out, p.is_using)
-    sb_push(out, ",\n")
-    ind(out, level + 1)
-    sb_push(out, "name: ")
-    push_string(out, ast_name(a, p.name))
-    sb_push(out, ",\n")
-    ind(out, level + 1)
-    sb_push(out, "ty: ")
-    render_type(out, a, p.ty, level + 1)
-    sb_push(out, ",\n")
-    ind(out, level)
-    sb_push_char(out, 125)
-}
-
-func render_param_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
-    if len == 0 {
-        sb_push(out, "[]")
-        return
-    }
-    sb_push(out, "[\n")
-    mut i: int64 = 0
-    while i < len {
-        ind(out, level + 1)
-        render_param(out, a, vec_get((*a).kids, off + i), level + 1)
-        sb_push(out, ",\n")
-        i++
-    }
-    ind(out, level)
-    sb_push_char(out, 93)
-}
-
-func render_bind(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void {
-    b: BindNode = vec_get((*a).binds, id)
-    sb_push(out, "Bind {\n")
-    ind(out, level + 1)
-    sb_push(out, "name: ")
-    push_string(out, ast_name(a, b.name))
-    sb_push(out, ",\n")
-    ind(out, level + 1)
-    sb_push(out, "ty: ")
-    if b.ty < 0 {
-        sb_push(out, "None")
-    } else {
-        sb_push(out, "Some(\n")
-        ind(out, level + 2)
-        render_type(out, a, b.ty, level + 2)
-        sb_push(out, ",\n")
-        ind(out, level + 1)
-        sb_push_char(out, 41)
-    }
-    sb_push(out, ",\n")
-    ind(out, level)
-    sb_push_char(out, 125)
-}
-
-func render_bind_list(out: *StringBuilder, a: *Ast, off: int64, len: int64, level: int64) -> void {
-    if len == 0 {
-        sb_push(out, "[]")
-        return
-    }
-    sb_push(out, "[\n")
-    mut i: int64 = 0
-    while i < len {
-        ind(out, level + 1)
-        render_bind(out, a, vec_get((*a).kids, off + i), level + 1)
         sb_push(out, ",\n")
         i++
     }
@@ -515,7 +315,7 @@ func render_func(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void 
     sb_push(out, ",\n")
     ind(out, level + 1)
     sb_push(out, "generics: ")
-    render_kid_string_list(out, a, f.generics_off, f.generics_len, level + 1)
+    render_name_kids(out, a, f.generics_off, f.generics_len, level + 1)
     sb_push(out, ",\n")
     ind(out, level + 1)
     sb_push(out, "params: ")
@@ -531,28 +331,6 @@ func render_func(out: *StringBuilder, a: *Ast, id: int64, level: int64) -> void 
     sb_push(out, ",\n")
     ind(out, level)
     sb_push_char(out, 125)
-}
-
-func render_items(out: *StringBuilder, a: *Ast, level: int64) -> void {
-    items: *Vector<ItemNode> = (*a).items
-    if vec_len(items) == 0 {
-        sb_push(out, "[]")
-        return
-    }
-    sb_push(out, "[\n")
-    for it in items {
-        ind(out, level + 1)
-        if it.kind == ik_func() {
-            sb_push(out, "Func(\n")
-            ind(out, level + 2)
-            render_func(out, a, it.id, level + 2)
-            sb_push(out, ",\n")
-            ind(out, level + 1)
-            sb_push(out, "),\n")
-        }
-    }
-    ind(out, level)
-    sb_push_char(out, 93)
 }
 
 func render_monads(out: *StringBuilder, a: *Ast, level: int64) -> void {

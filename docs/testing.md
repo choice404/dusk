@@ -47,6 +47,16 @@ testrun <manifest> [--filter substr] [--timeout secs] [--bin path] [--limit-kb n
   guard against a runaway compile. It is off by default; set it deliberately,
   since a real compile and link can want a lot of memory.
 
+Every record that builds a program links against the dusk runtime, and since
+1.15.1 those runtime objects are cached under the build's output directory
+instead of being recompiled at every link, so the first build of a run pays for
+the runtime once and the rest of the run reuses it. The cache is keyed by the
+runtime's own text, the `clang` version, and the optimization level, so nothing
+carries across a toolchain change, and a cache that cannot be read or written
+falls back to compiling the source rather than failing the record. Removing
+`target/` removes it, which is what a run that means to measure a cold build
+does first.
+
 The runner prints the selected count first, then one line per failure to stderr,
 then a tally to stdout:
 
@@ -164,6 +174,19 @@ single run line. The special's name selects its handler.
   hello program from inside the prefix with `DUSK_HOME` unset, so the only way the
   compiler finds its assets is the walk from its own executable up to the share
   directory. This mirrors the Rust golden of the same name.
+- `embed_c_lib` builds `examples/embed_lib.dusk` with `build --lib`, links
+  `examples/embed_host.c` against the archive with clang, runs it, and reads its
+  output, so the whole embedding path is proved end to end. `embed_c_fault` does
+  the same with `examples/embed_fault_lib.dusk` and drives each faulting export
+  from C, so a dusk fault crossing the export boundary is a clean abort.
+- `release_collector` builds `examples/gcrelease_ok.dusk` with `build --release`,
+  the `-O2` link, runs it, and asserts the same output the plain build gives. The
+  plain build of the same example is an ordinary `run` record beside it, so the
+  pair covers both link modes. It is the one check in the suite that can see a
+  collected root the optimizer moved: the collector scans the main thread stack up
+  to the stack base, and a base read out of a slot in main's own frame is right at
+  `-O0` and wrong at `-O2`, where the slot can land under every other local main
+  holds and the scan stops below the roots it was meant to cover.
 - The `dawn_*` family drives the dawn package tool against a project, a directory
   holding a `package.dawn` manifest. Each of these builds its own git fixture
   repositories and its own consuming project under `target/testrun/dawn_<name>/`,
@@ -255,7 +278,7 @@ identical and both must pass, so a reworded line or a comparison that drifted
 shows up as a difference rather than as a suite that still says green.
 
 ```sh
-tools/runner-differential.sh v1.14.1 /path/to/v1.14.1/dusk target/dusk-out/dusk
+tools/runner-differential.sh v1.15.0 /path/to/v1.15.0/dusk target/dusk-out/dusk
 ```
 
 ## The dump differential
@@ -285,7 +308,7 @@ fixture's root under `tests/dawn/`, every standard library module,
 to run a narrower set while chasing one difference.
 
 ```sh
-tools/dump-differential.sh /path/to/v1.14.1/dusk target/dusk-out/dusk
+tools/dump-differential.sh /path/to/v1.15.0/dusk target/dusk-out/dusk
 ```
 
 The script prints a `DIFF <file> [<command>]` line and the first lines of the
