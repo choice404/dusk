@@ -1,0 +1,808 @@
+/** std.fmt: the verb formatter. A format string carries directives, %v, %s, %d, %q, %x,
+ *  %.2f and the rest, and each one renders the next argument in the slice handed beside
+ *  it. dusk has no variadics for a dusk function, no type switch, and a monomorphized
+ *  body cannot branch on the type it was stamped for, so the type travels with the value:
+ *  every argument is an Arg built by arg_int, arg_uint, arg_float, arg_str, arg_bool,
+ *  arg_char, or arg_error, and format walks the slice matching the variant a directive
+ *  reached.
+ *
+ *  format renders into a fresh heap string the caller frees, format_into appends to a
+ *  StringBuilder, writef writes the rendering to a Writer as one write, print_fmt writes
+ *  it to standard output, and errorf wraps it in an error. Every argument is borrowed and
+ *  nothing here frees one.
+ *
+ *  A directive never fails and none of these calls has an error channel for the format
+ *  itself: a missing argument, a verb the type does not take, an unknown verb, a bare
+ *  trailing percent, and arguments left over all render a marker into the output,
+ *  %!d(MISSING) and its family, the Go convention. A bad call shows up in what the
+ *  program printed rather than as a runtime condition a caller has to resolve, which is
+ *  right for a mistake in a literal.
+ *
+ *  Floats go through std.fmtfloat, whose exact digit generation reproduces what C writes,
+ *  so %v and a %g with no precision are byte for byte what println writes for the same
+ *  value, and %r is the shortest form that reads back as the same double. */
+
+@paradigm procedural
+
+@import std.string
+@import std.unicode
+@import std.io
+@import std.fmtfloat
+
+/** An argument to a format call, carrying its own type so a directive can tell what it
+ *  reached. Build one with its constructor rather than naming a variant; a value of a
+ *  narrower width casts first, arg_int(int64(n)), and a struct with a Display impl
+ *  arrives as arg_str(p.toString()). */
+export enum Arg {
+    Int(n: int64),
+    Uint(n: uint64),
+    Float(x: float64),
+    Str(s: string),
+    Bool(b: bool),
+    Char(c: char),
+}
+
+// The ceiling on a width and on a precision. A directive asking for more than this is
+// clamped to it, which bounds both the padding a format string can ask for and the digit
+// count a cutoff float conversion generates. std.fmtfloat carries the same ceiling.
+func width_cap() -> int64 {
+    return 4096
+}
+
+// The digit character for a value in 0..15, lowercase unless upper asks otherwise.
+func digit_char(r: int64, upper: bool) -> char {
+    if r < 10 {
+        return char(48 + r)
+    }
+    if upper {
+        return char(55 + r)
+    }
+    return char(87 + r)
+}
+
+// The magnitude of a signed value as an unsigned one. The negation runs as 0 - (n + 1)
+// and takes the last step in the unsigned width, so the most negative int64, whose
+// magnitude no int64 holds, comes out as 2**63 rather than overflowing back to itself.
+func int_magnitude(n: int64) -> uint64 {
+    if n < 0 {
+        return uint64(0 - (n + 1)) + 1u64
+    }
+    return uint64(n)
+}
+
+// The minimum digit count a directive asks for: the precision when it carries one, and
+// one otherwise. A precision of zero on a value of zero asks for no digits at all, the C
+// rule, so %.0d of 0 renders nothing.
+func min_digits(hp: bool, prec: int64) -> int64 {
+    if hp {
+        return prec
+    }
+    return 1
+}
+
+// The precision a float conversion runs at: the directive's when it carries one, and six
+// otherwise, which is C's default and so what println already prints.
+func float_prec(hp: bool, prec: int64) -> int64 {
+    if hp {
+        return prec
+    }
+    return 6
+}
+
+// Appends v in the given base, padded on the left with zeros to at least mind digits.
+// Digits are generated least significant first into a scratch buffer and pushed back to
+// front, and a zero value with a minimum of zero appends nothing.
+func push_base(body: *StringBuilder, v: uint64, base: uint64, upper: bool, mind: int64) -> void {
+    // 64 digits is base two at the top of the range; the minimum digit count rides on
+    // top of that and is itself capped at width_cap().
+    d: *raw char = alloc_bytes(mind + 72)
+    mut n: int64 = 0
+    mut x: uint64 = v
+    while x > 0 {
+        r: int64 = int64(x % base)
+        x = x / base
+        d[n] = digit_char(r, upper)
+        n++
+    }
+    while n < mind {
+        d[n] = 48
+        n++
+    }
+    mut i: int64 = n - 1
+    while i >= 0 {
+        sb_push_char(body, d[i])
+        i--
+    }
+    free(d)
+}
+
+// Appends every byte src holds, by its own count rather than up to a NUL, so a rendering
+// that contains a NUL byte still arrives whole.
+func push_sb(dst: *StringBuilder, src: *StringBuilder) -> void {
+    s: string = sb_cstr(src)
+    n: int64 = sb_size(src)
+    for i in 0..n {
+        sb_push_char(dst, s[i])
+    }
+}
+
+// Appends the sign, the base prefix, and the body, padded to width. A left justified
+// directive pads on the right with spaces; a zero padded one pads between the prefix and
+// the body with zeros, which is what keeps the sign and the 0x in front; everything else
+// pads on the left with spaces. A sign of zero means the directive writes none.
+func push_padded(out: *StringBuilder, sign: char, prefix: string, body: *StringBuilder, width: int64, minus: bool, zero: bool) -> void {
+    mut head: int64 = str_len(prefix)
+    if sign != 0 {
+        head++
+    }
+    total: int64 = head + sb_size(body)
+    mut pad: int64 = 0
+    if width > total {
+        pad = width - total
+    }
+    if pad > 0 && !minus && !zero {
+        for i in 0..pad {
+            sb_push_char(out, 32)
+        }
+    }
+    if sign != 0 {
+        sb_push_char(out, sign)
+    }
+    sb_push(out, prefix)
+    if pad > 0 && !minus && zero {
+        for i in 0..pad {
+            sb_push_char(out, 48)
+        }
+    }
+    push_sb(out, body)
+    if pad > 0 && minus {
+        for i in 0..pad {
+            sb_push_char(out, 32)
+        }
+    }
+}
+
+// The alternate form's base prefix for the hex, octal, and binary verbs.
+func base_prefix(verb: char) -> string {
+    if verb == 120 {
+        return "0x"
+    }
+    if verb == 88 {
+        return "0X"
+    }
+    if verb == 111 {
+        return "0o"
+    }
+    return "0b"
+}
+
+// One byte inside a %q rendering. The backslash, the double quote, and the three named
+// control bytes take their named escapes, every other byte below 0x20 and the byte 0x7F
+// takes \xNN in lowercase hex, and every byte at 0x80 and above passes through so UTF-8
+// text stays readable between the quotes. The char form escapes the single quote instead
+// of the double quote, so '"' and "'" both print bare inside their own delimiters.
+func push_quoted_byte(body: *StringBuilder, u: int64, single: bool) -> void {
+    if u == 92 {
+        sb_push_char(body, 92)
+        sb_push_char(body, 92)
+        return
+    }
+    if u == 34 && !single {
+        sb_push_char(body, 92)
+        sb_push_char(body, 34)
+        return
+    }
+    if u == 39 && single {
+        sb_push_char(body, 92)
+        sb_push_char(body, 39)
+        return
+    }
+    if u == 10 {
+        sb_push_char(body, 92)
+        sb_push_char(body, 110)
+        return
+    }
+    if u == 9 {
+        sb_push_char(body, 92)
+        sb_push_char(body, 116)
+        return
+    }
+    if u == 13 {
+        sb_push_char(body, 92)
+        sb_push_char(body, 114)
+        return
+    }
+    if u < 32 || u == 127 {
+        sb_push_char(body, 92)
+        sb_push_char(body, 120)
+        sb_push_char(body, digit_char((u >> 4) & 15, false))
+        sb_push_char(body, digit_char(u & 15, false))
+        return
+    }
+    sb_push_char(body, char(u))
+}
+
+// s between double quotes with every byte escaped by the %q table.
+func push_quoted_string(body: *StringBuilder, s: string) -> void {
+    n: int64 = str_len(s)
+    sb_push_char(body, 34)
+    for i in 0..n {
+        u: int64 = s[i]
+        push_quoted_byte(body, u, false)
+    }
+    sb_push_char(body, 34)
+}
+
+// One byte between single quotes, escaped by the %q table with the single quote added.
+func push_quoted_char(body: *StringBuilder, c: char) -> void {
+    u: int64 = c
+    sb_push_char(body, 39)
+    push_quoted_byte(body, u, true)
+    sb_push_char(body, 39)
+}
+
+// Every byte of s as two hex digits, which is what %x over a string writes.
+func push_hex_bytes(body: *StringBuilder, s: string, upper: bool) -> void {
+    n: int64 = str_len(s)
+    for i in 0..n {
+        u: int64 = s[i]
+        sb_push_char(body, digit_char((u >> 4) & 15, upper))
+        sb_push_char(body, digit_char(u & 15, upper))
+    }
+}
+
+// Appends the text std.fmtfloat wrote without the minus it carries, and reports whether
+// that minus was there and whether what is left starts with a digit. A value that is not
+// finite spells inf or nan, which takes the sign flags but never zero padding, so the
+// second bit is what the caller reads to decide that.
+func push_float_text(body: *StringBuilder, s: string) -> (bool, bool) {
+    n: int64 = str_len(s)
+    mut from: int64 = 0
+    mut neg: bool = false
+    if n > 0 && s[0] == 45 {
+        neg = true
+        from = 1
+    }
+    mut finite: bool = false
+    if from < n {
+        u: int64 = s[from]
+        finite = u >= 48 && u <= 57
+    }
+    for i in from..n {
+        sb_push_char(body, s[i])
+    }
+    return (neg, finite)
+}
+
+// true and false, the bytes both %t and %v write for a bool.
+func push_bool(body: *StringBuilder, v: bool) -> void {
+    if v {
+        sb_push(body, "true")
+        return
+    }
+    sb_push(body, "false")
+}
+
+// The type name a marker prints for an argument.
+func type_name(a: Arg) -> string {
+    match a {
+        Int(n) => {
+            return "int64"
+        },
+        Uint(n) => {
+            return "uint64"
+        },
+        Float(x) => {
+            return "float64"
+        },
+        Str(s) => {
+            return "string"
+        },
+        Bool(b) => {
+            return "bool"
+        },
+        Char(c) => {
+            return "char"
+        },
+    }
+}
+
+// The plain %v rendering of an argument, with its own sign and no flags, width, or
+// precision. A marker prints a value through this, and so does %s before truncation.
+func push_plain(body: *StringBuilder, a: Arg) -> void {
+    match a {
+        Int(n) => {
+            if n < 0 {
+                sb_push_char(body, 45)
+            }
+            push_base(body, int_magnitude(n), 10, false, 1)
+        },
+        Uint(n) => {
+            push_base(body, n, 10, false, 1)
+        },
+        Float(x) => {
+            s: string = float_general(x, 6, false, false)
+            sb_push(body, s)
+            free(s)
+        },
+        Str(s) => {
+            sb_push(body, s)
+        },
+        Bool(b) => {
+            push_bool(body, b)
+        },
+        Char(c) => {
+            sb_push_char(body, c)
+        },
+    }
+}
+
+// The marker a directive writes when the verb does not take the type it reached, and the
+// one an unknown verb writes: the verb, the type name, and the plain rendering, as in
+// %!d(string=hello). A marker takes no width and no precision, so it arrives exactly.
+func push_marker(out: *StringBuilder, verb: char, a: Arg) -> void {
+    sb_push(out, "%!")
+    sb_push_char(out, verb)
+    sb_push_char(out, 40)
+    sb_push(out, type_name(a))
+    sb_push_char(out, 61)
+    push_plain(out, a)
+    sb_push_char(out, 41)
+}
+
+// One directive over one argument. The body is built into a scratch builder without its
+// sign, the sign and the base prefix are decided beside it, and push_padded lays the
+// three out inside the width. A verb the type does not take leaves ok false and the
+// marker goes out instead.
+func render_arg(out: *StringBuilder, a: Arg, verb: char, minus: bool, plus: bool, space: bool, zero: bool, alt: bool, width: int64, hp: bool, prec: int64) -> void {
+    body: *StringBuilder = alloc(sb_new())
+    mut neg: bool = false
+    mut numeric: bool = false
+    mut zeroable: bool = false
+    mut prefix: string = ""
+    mut ok: bool = true
+    if verb == 115 {
+        // %s: the plain bytes of any argument, truncated to the precision. The sign and
+        // zero flags belong to the numeric verbs, so this one only ever pads with spaces.
+        tmp: *StringBuilder = alloc(sb_new())
+        push_plain(tmp, a)
+        mut lim: int64 = sb_size(tmp)
+        if hp && prec < lim {
+            lim = prec
+        }
+        ts: string = sb_cstr(tmp)
+        for i in 0..lim {
+            sb_push_char(body, ts[i])
+        }
+        sb_free(tmp)
+        free(tmp)
+    } else if verb == 113 {
+        // %q: quoted and escaped text, which only a string and a char carry.
+        match a {
+            Int(n) => {
+                ok = false
+            },
+            Uint(n) => {
+                ok = false
+            },
+            Float(x) => {
+                ok = false
+            },
+            Str(s) => {
+                push_quoted_string(body, s)
+            },
+            Bool(b) => {
+                ok = false
+            },
+            Char(c) => {
+                push_quoted_char(body, c)
+            },
+        }
+    } else {
+        match a {
+            Int(n) => {
+                if verb == 118 || verb == 114 || verb == 100 {
+                    neg = n < 0
+                    push_base(body, int_magnitude(n), 10, false, min_digits(hp, prec))
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 120 || verb == 88 {
+                    neg = n < 0
+                    push_base(body, int_magnitude(n), 16, verb == 88, min_digits(hp, prec))
+                    if alt {
+                        prefix = base_prefix(verb)
+                    }
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 111 || verb == 98 {
+                    neg = n < 0
+                    mut base: uint64 = 8
+                    if verb == 98 {
+                        base = 2
+                    }
+                    push_base(body, int_magnitude(n), base, false, min_digits(hp, prec))
+                    if alt {
+                        prefix = base_prefix(verb)
+                    }
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 99 {
+                    if n < 0 || n > 1114111 {
+                        sb_push_rune(body, rune(65533))
+                    } else {
+                        sb_push_rune(body, rune(n))
+                    }
+                } else {
+                    ok = false
+                }
+            },
+            Uint(n) => {
+                if verb == 118 || verb == 114 || verb == 100 {
+                    push_base(body, n, 10, false, min_digits(hp, prec))
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 120 || verb == 88 {
+                    push_base(body, n, 16, verb == 88, min_digits(hp, prec))
+                    if alt {
+                        prefix = base_prefix(verb)
+                    }
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 111 || verb == 98 {
+                    mut base: uint64 = 8
+                    if verb == 98 {
+                        base = 2
+                    }
+                    push_base(body, n, base, false, min_digits(hp, prec))
+                    if alt {
+                        prefix = base_prefix(verb)
+                    }
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 99 {
+                    if n > 1114111u64 {
+                        sb_push_rune(body, rune(65533))
+                    } else {
+                        sb_push_rune(body, rune(n))
+                    }
+                } else {
+                    ok = false
+                }
+            },
+            Float(x) => {
+                mut txt: string = ""
+                if verb == 118 || verb == 103 {
+                    txt = float_general(x, float_prec(hp, prec), false, alt)
+                } else if verb == 71 {
+                    txt = float_general(x, float_prec(hp, prec), true, alt)
+                } else if verb == 114 {
+                    txt = float_to_string(x)
+                } else if verb == 102 {
+                    txt = float_fixed(x, float_prec(hp, prec), alt)
+                } else if verb == 101 {
+                    txt = float_exp(x, float_prec(hp, prec), false, alt)
+                } else if verb == 69 {
+                    txt = float_exp(x, float_prec(hp, prec), true, alt)
+                } else {
+                    ok = false
+                }
+                if ok {
+                    n, fin := push_float_text(body, txt)
+                    neg = n
+                    numeric = true
+                    zeroable = fin
+                    free(txt)
+                }
+            },
+            Str(s) => {
+                if verb == 118 || verb == 114 {
+                    sb_push(body, s)
+                } else if verb == 120 || verb == 88 {
+                    push_hex_bytes(body, s, verb == 88)
+                    if alt {
+                        prefix = base_prefix(verb)
+                    }
+                    zeroable = true
+                } else {
+                    ok = false
+                }
+            },
+            Bool(b) => {
+                if verb == 118 || verb == 114 || verb == 116 {
+                    push_bool(body, b)
+                } else {
+                    ok = false
+                }
+            },
+            Char(c) => {
+                if verb == 118 || verb == 114 || verb == 99 {
+                    sb_push_char(body, c)
+                } else if verb == 100 {
+                    u: int64 = c
+                    push_base(body, uint64(u), 10, false, min_digits(hp, prec))
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 120 || verb == 88 {
+                    u: int64 = c
+                    push_base(body, uint64(u), 16, verb == 88, min_digits(hp, prec))
+                    if alt {
+                        prefix = base_prefix(verb)
+                    }
+                    numeric = true
+                    zeroable = !hp
+                } else if verb == 111 || verb == 98 {
+                    u: int64 = c
+                    mut base: uint64 = 8
+                    if verb == 98 {
+                        base = 2
+                    }
+                    push_base(body, uint64(u), base, false, min_digits(hp, prec))
+                    if alt {
+                        prefix = base_prefix(verb)
+                    }
+                    numeric = true
+                    zeroable = !hp
+                } else {
+                    ok = false
+                }
+            },
+        }
+    }
+    if ok {
+        mut sign: char = 0
+        if neg {
+            sign = 45
+        } else if numeric && plus {
+            sign = 43
+        } else if numeric && space {
+            sign = 32
+        }
+        push_padded(out, sign, prefix, body, width, minus, zero && !minus && zeroable)
+    } else {
+        push_marker(out, verb, a)
+    }
+    sb_free(body)
+    free(body)
+}
+
+/** An int64 argument.
+ *  @param n the value
+ *  @return the Arg carrying it */
+export func arg_int(n: int64) -> Arg {
+    return Arg.Int(n)
+}
+
+/** A uint64 argument, which %v and %d render as unsigned decimal rather than wrapping
+ *  through a signed reading.
+ *  @param n the value
+ *  @return the Arg carrying it */
+export func arg_uint(n: uint64) -> Arg {
+    return Arg.Uint(n)
+}
+
+/** A float64 argument.
+ *  @param x the value
+ *  @return the Arg carrying it */
+export func arg_float(x: float64) -> Arg {
+    return Arg.Float(x)
+}
+
+/** A string argument. The string is borrowed for the format call and never freed here.
+ *  @param s the text, borrowed
+ *  @return the Arg carrying it */
+export func arg_str(s: string) -> Arg {
+    return Arg.Str(s)
+}
+
+/** A bool argument.
+ *  @param b the value
+ *  @return the Arg carrying it */
+export func arg_bool(b: bool) -> Arg {
+    return Arg.Bool(b)
+}
+
+/** A char argument, one byte. A scalar above the ASCII range is an int64 argument under
+ *  %c, which encodes it as UTF-8.
+ *  @param c the byte
+ *  @return the Arg carrying it */
+export func arg_char(c: char) -> Arg {
+    return Arg.Char(c)
+}
+
+/** An error as a string argument, its message read through toString, so an empty error
+ *  formats as the empty string. The message is borrowed from the error, which still owns
+ *  it.
+ *  @param e the error to render
+ *  @return the Arg carrying its message */
+export func arg_error(e: error) -> Arg {
+    return Arg.Str(e.toString())
+}
+
+/** Appends the rendering of f with args to b. This is the core every other entry point
+ *  runs through, and the one to reach for when the output is already being built: it
+ *  allocates nothing beyond b's own growth and the scratch a single directive needs.
+ *
+ *  Every byte outside a directive copies through. A directive is a percent, then any of
+ *  the flags - + space 0 and #, then an optional width, then an optional point and
+ *  precision, then the verb. %% writes one percent and consumes no argument. Arguments
+ *  are consumed left to right, one per directive, and anything the format cannot use
+ *  renders a marker rather than failing.
+ *  @param b the builder to append to, borrowed and grown in place
+ *  @param f the format string, borrowed
+ *  @param args the arguments, borrowed
+ *  @example
+ *  b: *StringBuilder = alloc(sb_new())
+ *  format_into(b, "%s is %d\n", [arg_str("count"), arg_int(7)])
+ *  print(sb_cstr(b)) */
+export func format_into(b: *StringBuilder, f: string, args: Arg[]) -> void {
+    n: int64 = str_len(f)
+    mut i: int64 = 0
+    mut ai: int64 = 0
+    while i < n {
+        c: char = f[i]
+        if c != 37 {
+            sb_push_char(b, c)
+            i++
+            continue
+        }
+        i++
+        mut minus: bool = false
+        mut plus: bool = false
+        mut space: bool = false
+        mut zero: bool = false
+        mut alt: bool = false
+        mut flagging: bool = true
+        while flagging && i < n {
+            fc: int64 = f[i]
+            if fc == 45 {
+                minus = true
+                i++
+            } else if fc == 43 {
+                plus = true
+                i++
+            } else if fc == 32 {
+                space = true
+                i++
+            } else if fc == 48 {
+                zero = true
+                i++
+            } else if fc == 35 {
+                alt = true
+                i++
+            } else {
+                flagging = false
+            }
+        }
+        mut width: int64 = 0
+        mut scanning: bool = true
+        while scanning && i < n {
+            d: int64 = f[i]
+            if d < 48 || d > 57 {
+                scanning = false
+            } else {
+                if width <= width_cap() {
+                    width = width * 10 + d - 48
+                }
+                i++
+            }
+        }
+        if width > width_cap() {
+            width = width_cap()
+        }
+        mut hp: bool = false
+        mut prec: int64 = 0
+        if i < n && f[i] == 46 {
+            hp = true
+            i++
+            mut pscan: bool = true
+            while pscan && i < n {
+                d: int64 = f[i]
+                if d < 48 || d > 57 {
+                    pscan = false
+                } else {
+                    if prec <= width_cap() {
+                        prec = prec * 10 + d - 48
+                    }
+                    i++
+                }
+            }
+            if prec > width_cap() {
+                prec = width_cap()
+            }
+        }
+        if i >= n {
+            sb_push(b, "%!(NOVERB)")
+            break
+        }
+        verb: char = f[i]
+        i++
+        if verb == 37 {
+            sb_push_char(b, 37)
+            continue
+        }
+        if ai >= args.len {
+            sb_push(b, "%!")
+            sb_push_char(b, verb)
+            sb_push(b, "(MISSING)")
+            continue
+        }
+        a: Arg = args[ai]
+        ai++
+        render_arg(b, a, verb, minus, plus, space, zero, alt, width, hp, prec)
+    }
+    if ai < args.len {
+        sb_push(b, "%!(EXTRA ")
+        for j in ai..args.len {
+            if j > ai {
+                sb_push(b, ", ")
+            }
+            aj: Arg = args[j]
+            sb_push(b, type_name(aj))
+            sb_push_char(b, 61)
+            push_plain(b, aj)
+        }
+        sb_push_char(b, 41)
+    }
+}
+
+/** The rendering of f with args as a fresh heap string.
+ *  @param f the format string, borrowed
+ *  @param args the arguments, borrowed
+ *  @return the rendered text as a fresh heap string the caller owns and frees
+ *  @example
+ *  s: string = format("%s scored %.1f%%", [arg_str("ada"), arg_float(99.25)])
+ *  println(s)
+ *  free(s) */
+export func format(f: string, args: Arg[]) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    format_into(b, f, args)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Renders f with args and writes the whole of it to w as one write, so a formatted line
+ *  never splits around another thread's write to the same descriptor. A NUL byte in the
+ *  rendering ends what is written, the same rule write_string follows.
+ *  @param w the writer to write to
+ *  @param f the format string, borrowed
+ *  @param args the arguments, borrowed
+ *  @return an empty error on success, or the write failure
+ *  @example
+ *  e := writef(stderr_writer(), "%s: %d failed\n", [arg_str(name), arg_int(count)])
+ *  e.ignore() */
+export func writef(w: Writer, f: string, args: Arg[]) -> error {
+    b: *StringBuilder = alloc(sb_new())
+    format_into(b, f, args)
+    e := write_string(w, sb_cstr(b))
+    sb_free(b)
+    free(b)
+    if e.exists() {
+        return e
+    }
+    return error {}
+}
+
+/** Renders f with args to standard output, discarding the write error the way print_line
+ *  does. There is no newline of its own, so the format string carries one.
+ *  @param f the format string, borrowed
+ *  @param args the arguments, borrowed
+ *  @example
+ *  print_fmt("%-8s %6.2f\n", [arg_str(name), arg_float(total)]) */
+export func print_fmt(f: string, args: Arg[]) -> void {
+    e := writef(stdout_writer(), f, args)
+    e.ignore()
+}
+
+/** An error whose message is the rendering of f with args. The message is a fresh heap
+ *  string the error owns for as long as the error is alive, the convention every
+ *  error { message: errstr(code) } in std.fs already follows.
+ *  @param f the format string, borrowed
+ *  @param args the arguments, borrowed
+ *  @return an error carrying the rendered message
+ *  @example
+ *  return errorf("port %d is out of range", [arg_int(port)]) */
+export func errorf(f: string, args: Arg[]) -> error {
+    return error { message: format(f, args) }
+}

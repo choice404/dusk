@@ -1,0 +1,25 @@
+// A BufReader is released in two steps, bufreader_free for the buffer and free for the
+// block, and after the second one the reader is gone. Reading a line through it anyway is
+// a use after free that the generational check names and aborts on, rather than handing
+// back whatever bytes happen to sit there.
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+
+func main() -> int32 {
+    c: *StringReader = alloc(string_reader_new("a\nb\n"))
+    b: *BufReader = bufreader_new(string_reader(c), 16)
+    line, ok := bufreader_read_line(b)
+    if ok {
+        free(line)
+    }
+    bufreader_free(b)
+    free(b)
+    stale, ok2 := bufreader_read_line(b)
+    if ok2 {
+        free(stale)
+    }
+    free(c)
+    return 0
+}

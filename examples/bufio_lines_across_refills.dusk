@@ -1,0 +1,28 @@
+// A BufReader hands back one line at a time, without the newline that ended it. An empty
+// line between two newlines is a line of its own, and the last line of a stream that does
+// not end in a newline comes back like any other, so the flag rather than the text is what
+// says the stream is done.
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+
+func main() -> int32 {
+    c: *StringReader = alloc(string_reader_new("a\nbb\n\nccc"))
+    b: *BufReader = bufreader_new(string_reader(c), 16)
+    mut going: bool = true
+    while going {
+        line, ok := bufreader_read_line(b)
+        if ok == false {
+            going = false
+        } else {
+            println(line)
+            free(line)
+        }
+    }
+    println("end")
+    bufreader_free(b)
+    free(b)
+    free(c)
+    return 0
+}

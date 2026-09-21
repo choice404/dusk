@@ -1,0 +1,22 @@
+// A carriage return before the newline is part of the line and stays in it, so a stream
+// with Windows line endings hands back a line one byte longer than its text and a program
+// that cares strips the return itself.
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+@import std.string
+
+func main() -> int32 {
+    c: *StringReader = alloc(string_reader_new("x\r\n"))
+    b: *BufReader = bufreader_new(string_reader(c), 16)
+    line, ok := bufreader_read_line(b)
+    if ok {
+        println(str_len(line))
+        free(line)
+    }
+    bufreader_free(b)
+    free(b)
+    free(c)
+    return 0
+}

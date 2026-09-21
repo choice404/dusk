@@ -1,0 +1,105 @@
+// std.fmtfloat's fixed precision layouts against the C library, byte for byte.
+// float_exp, float_fixed, and float_general are meant to be the C conversions e, f,
+// g, E, and G rather than something close to them, which is what lets std.fmt's %v
+// reproduce what println writes and lets a program print a float without linking a
+// C formatter. The core is exact, so the comparison demands equality rather than
+// closeness: every corpus value, every precision from 0 through 17, every one of the
+// five conversions.
+//
+// The corpus is 2000 bit patterns from a fixed seed plus every power of two the
+// format holds, normal and subnormal, which is where the rounding boundaries and
+// the longest expansions live. A %f of a large value runs past three hundred digits
+// and is compared in full.
+//
+// The oracle is examples/fmt_oracle.c, a snprintf wrapper bound through @csource
+// into this program alone; nothing in the runtime or the standard library links it.
+
+@paradigm procedural
+
+@import std.string
+@import std.fmtfloat
+
+@csource "fmt_oracle.c"
+
+foreign "C" {
+    func cool_f64_from_bits(bits: int64) -> float64
+    func fmt_oracle(x: float64, kind: int64, prec: int64, out: *raw char, cap: int64) -> int64
+}
+
+// The C library's own rendering of x, as a fresh heap string. kind is 0 for %e, 1
+// for %f, 2 for %g, 3 for %E, and 4 for %G.
+func oracle(x: float64, kind: int64, prec: int64) -> string {
+    buf: *raw char = alloc_bytes(8192)
+    n: int64 = fmt_oracle(x, kind, prec, buf, 8192)
+    if n < 0 {
+        free(buf)
+        return "oracle overflow"
+    }
+    out: string = substring(cstr(buf), 0, n)
+    free(buf)
+    return out
+}
+
+// std.fmtfloat's own rendering under the same conversion and precision.
+func ours(x: float64, kind: int64, prec: int64) -> string {
+    if kind == 0 {
+        return float_exp(x, prec, false, false)
+    }
+    if kind == 1 {
+        return float_fixed(x, prec, false)
+    }
+    if kind == 2 {
+        return float_general(x, prec, false, false)
+    }
+    if kind == 3 {
+        return float_exp(x, prec, true, false)
+    }
+    return float_general(x, prec, true, false)
+}
+
+// The count of disagreements over one value across every conversion and precision.
+func compare(bits: int64) -> int64 {
+    x: float64 = cool_f64_from_bits(bits)
+    mut bad: int64 = 0
+    for kind in 0..5 {
+        for prec in 0..18 {
+            c: string = oracle(x, kind, prec)
+            m: string = ours(x, kind, prec)
+            if !str_eq(c, m) {
+                println("DIFF {} kind {} prec {} c {} ours {}", int_to_hex16(bits), kind, prec, c, m)
+                bad++
+            }
+            free(c)
+            free(m)
+        }
+    }
+    return bad
+}
+
+func main() -> int64 {
+    mut st: uint64 = 7046029254386353131
+    mut ran: int64 = 0
+    mut bad: int64 = 0
+    while ran < 2000 {
+        st = st * 6364136223846793005u64 + 1442695040888963407u64
+        bits: int64 = int64(st)
+        if ((st >> 52) & 2047) != 2047 {
+            bad = bad + compare(bits)
+            ran++
+        }
+    }
+    for p in 1..2047 {
+        bad = bad + compare(p << 52)
+        ran++
+    }
+    for q in 0..52 {
+        bad = bad + compare(1 << q)
+        ran++
+    }
+    if bad == 0 && ran == 4098 {
+        println("ok")
+    } else {
+        println("ran {} failed {}", ran, bad)
+    }
+    return 0
+}

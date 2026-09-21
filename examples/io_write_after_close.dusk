@@ -1,0 +1,21 @@
+// After writer_close every copy of that Writer is stale. A write through one is an error
+// value the caller handles, never a fault.
+@paradigm procedural
+
+@import std.io
+@import std.async.io
+
+func main() -> int32 {
+    p, pe := pipe_new()
+    pe.ignore()
+    w: Writer = fd_writer(p.w)
+    ce := writer_close(w)
+    ce.ignore()
+    e := write_line(w, "x")
+    if e.exists() {
+        println("error")
+    }
+    re := fd_close(p.r)
+    re.ignore()
+    return 0
+}

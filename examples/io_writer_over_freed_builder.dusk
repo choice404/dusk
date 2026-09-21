@@ -1,0 +1,16 @@
+// A Writer borrows the builder behind it. Building one over a builder already freed is a
+// use after free the checker refuses.
+@paradigm procedural
+
+@import std.io
+@import std.string
+
+func main() -> int32 {
+    b: *StringBuilder = alloc(sb_new())
+    sb_free(b)
+    free(b)
+    w: Writer = sb_writer(b)
+    e := write_string(w, "x")
+    e.ignore()
+    return 0
+}

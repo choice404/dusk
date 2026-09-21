@@ -1,0 +1,30 @@
+// A line longer than the buffer grows through a builder across as many refills as it takes
+// and has no length cap, so ten thousand bytes through a sixteen byte buffer is one line.
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+@import std.string
+
+func main() -> int32 {
+    sb: *StringBuilder = alloc(sb_new())
+    for i in 0..10000 {
+        sb_push_char(sb, 120)
+    }
+    sb_push_char(sb, 10)
+    text: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 16)
+    line, ok := bufreader_read_line(b)
+    if ok {
+        println(str_len(line))
+        free(line)
+    }
+    bufreader_free(b)
+    free(b)
+    free(c)
+    free(text)
+    sb_free(sb)
+    free(sb)
+    return 0
+}

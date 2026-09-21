@@ -1,0 +1,131 @@
+// The other half of the shortest claim. fmtfloat_roundtrip proves that what
+// std.fmtfloat prints reads back as the value it was given; this proves that
+// nothing shorter would, which is what makes the word shortest mean something.
+//
+// For each corpus value the significant digits of float_to_string are counted, and
+// the C library is asked for the same value at one digit fewer through the %e
+// conversion. strtod is correctly rounded, so if that shorter rendering read back
+// as the value then our answer carried a digit it did not need. A value whose
+// shortest form is a single digit has no shorter rendering to ask about and is
+// counted as proved.
+//
+// The oracle is examples/fmt_oracle.c, a snprintf wrapper bound through @csource
+// and compiled into this program alone. Nothing in the runtime or the standard
+// library links it: the point of the printer is that dusk formats a float without
+// the C library, so the C library appears only as the thing the result is judged
+// against.
+
+@paradigm procedural
+
+@import std.string
+@import std.fmtfloat
+
+@csource "fmt_oracle.c"
+
+foreign "C" {
+    func cool_f64_from_bits(bits: int64) -> float64
+    func fmt_oracle(x: float64, kind: int64, prec: int64, out: *raw char, cap: int64) -> int64
+}
+
+// The C library's own rendering of x, as a fresh heap string. kind is 0 for %e, 1
+// for %f, and 2 for %g, and prec is the precision the conversion carries.
+func oracle(x: float64, kind: int64, prec: int64) -> string {
+    buf: *raw char = alloc_bytes(8192)
+    n: int64 = fmt_oracle(x, kind, prec, buf, 8192)
+    if n < 0 {
+        free(buf)
+        return "oracle overflow"
+    }
+    out: string = substring(cstr(buf), 0, n)
+    free(buf)
+    return out
+}
+
+// The count of significant digits in a shortest rendering: the run from its first
+// nonzero digit to its last, with the exponent tail and the padding zeros of an
+// integer form left out, since neither is a digit the generator produced.
+func significant(s: string) -> int64 {
+    n: int64 = str_len(s)
+    mut stop: int64 = n
+    ei: int64 = str_find(s, "e")
+    if ei >= 0 {
+        stop = ei
+    }
+    mut lo: int64 = -1
+    mut hi: int64 = -1
+    for i in 0..stop {
+        c: char = s[i]
+        if c >= 49 && c <= 57 {
+            if lo < 0 {
+                lo = i
+            }
+            hi = i
+        }
+    }
+    if lo < 0 {
+        return 0
+    }
+    mut count: int64 = 0
+    end: int64 = hi + 1
+    for i in lo..end {
+        c: char = s[i]
+        if c >= 48 && c <= 57 {
+            count++
+        }
+    }
+    return count
+}
+
+// Whether no shorter decimal reads back as the double with these bits.
+func minimal(bits: int64) -> bool {
+    x: float64 = cool_f64_from_bits(bits)
+    s: string = float_to_string(x)
+    nd: int64 = significant(s)
+    mut got: bool = true
+    if nd > 1 {
+        shorter: string = oracle(x, 0, nd - 2)
+        back, e := parse_float(shorter)
+        e.ignore()
+        if cool_f64_bits(back) == bits {
+            println("NOTSHORTEST {} ours {} shorter {}", int_to_hex16(bits), s, shorter)
+            got = false
+        }
+        free(shorter)
+    }
+    free(s)
+    return got
+}
+
+func main() -> int64 {
+    mut st: uint64 = 2545341989
+    mut ran: int64 = 0
+    mut bad: int64 = 0
+    while ran < 4000 {
+        st = st * 6364136223846793005u64 + 1442695040888963407u64
+        bits: int64 = int64(st)
+        if ((st >> 52) & 2047) != 2047 {
+            if !minimal(bits) {
+                bad++
+            }
+            ran++
+        }
+    }
+    for p in 1..2047 {
+        if !minimal(p << 52) {
+            bad++
+        }
+        ran++
+    }
+    for q in 0..52 {
+        if !minimal(1 << q) {
+            bad++
+        }
+        ran++
+    }
+    if bad == 0 && ran == 6098 {
+        println("ok")
+    } else {
+        println("ran {} failed {}", ran, bad)
+    }
+    return 0
+}

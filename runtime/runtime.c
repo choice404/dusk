@@ -1275,6 +1275,120 @@ int64_t cool_f64_bits(double x) {
     return bits;
 }
 
+/* The inverse of cool_f64_bits: the double whose IEEE bits are the given
+   integer, through memcpy. The float printer's test corpus builds its hard
+   cases from bits, since a float literal has no exponent form. */
+double cool_f64_from_bits(int64_t bits) {
+    double x;
+    memcpy(&x, &bits, sizeof(x));
+    return x;
+}
+
+/* The std.io descriptor shims. Descriptor 1 goes through the C stdout stream
+   and descriptor 2 flushes stdout and then writes the C stderr stream, so a
+   Writer over either interleaves with println and printerr in program order;
+   every other descriptor is a plain write(2) loop. Both paths retry EINTR and
+   keep going after a short write until every byte is out, returning the count
+   written; a count short of n means the OS failed with errno set (EAGAIN on a
+   nonblocking descriptor, EPIPE on a closed pipe since SIGPIPE is ignored
+   process wide, EBADF, ENOSPC). A write(2) that returns 0 for a positive count
+   would spin, so it is reported as EIO. */
+#include <unistd.h>
+int64_t cool_io_write(int64_t fd, const void *buf, int64_t n) {
+    if (n <= 0) {
+        return 0;
+    }
+    if (fd == 1 || fd == 2) {
+        FILE *stream = stdout;
+        if (fd == 2) {
+            fflush(stdout);
+            stream = stderr;
+        }
+        const char *sp = (const char *)buf;
+        size_t got = 0;
+        for (;;) {
+            errno = 0;
+            got += fwrite(sp + got, 1, (size_t)n - got, stream);
+            if (got >= (size_t)n) {
+                break;
+            }
+            if (errno == EINTR) {
+                clearerr(stream);
+                continue;
+            }
+            if (errno == 0) {
+                errno = EIO;
+            }
+            break;
+        }
+        return (int64_t)got;
+    }
+    const char *p = (const char *)buf;
+    int64_t done = 0;
+    while (done < n) {
+        ssize_t w = write((int)fd, p + done, (size_t)(n - done));
+        if (w < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return done;
+        }
+        if (w == 0) {
+            errno = EIO;
+            return done;
+        }
+        done += (int64_t)w;
+    }
+    return done;
+}
+
+/* One read(2) on fd, retried on EINTR: the count read, 0 at end of stream, or
+   -1 with errno set (EAGAIN included). Descriptor 0 is read directly, not
+   through the C stdin buffer, so a program picks either this path or the
+   read_line builtin for its whole run. */
+int64_t cool_io_read(int64_t fd, void *buf, int64_t cap) {
+    if (cap <= 0) {
+        return 0;
+    }
+    for (;;) {
+        ssize_t r = read((int)fd, buf, (size_t)cap);
+        if (r < 0 && errno == EINTR) {
+            continue;
+        }
+        return (int64_t)r;
+    }
+}
+
+/* Flush the C stream behind descriptor 1 or 2; every other descriptor is
+   unbuffered here and flushes as a no op. 0, or -1 with errno set. */
+int64_t cool_io_flush(int64_t fd) {
+    FILE *stream = NULL;
+    if (fd == 1) {
+        stream = stdout;
+    } else if (fd == 2) {
+        stream = stderr;
+    } else {
+        return 0;
+    }
+    while (fflush(stream) != 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+        clearerr(stream);
+    }
+    return 0;
+}
+
+/* close(2); an EINTR return counts as closed, the Linux rule cool_fd_close in
+   reactor.c follows. 0, or -1 with errno set. The dusk side never passes 0, 1,
+   or 2. */
+int64_t cool_io_close(int64_t fd) {
+    if (close((int)fd) < 0 && errno != EINTR) {
+        return -1;
+    }
+    return 0;
+}
+
 /* The bit pattern a float32 constant rounds to, returned as the double that
    equals that float, reinterpreted as a signed 64 bit integer. The host compiler
    lowers every float constant, float32 and float64 alike, as the f64 bits of the

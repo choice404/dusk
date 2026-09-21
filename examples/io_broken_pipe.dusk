@@ -1,0 +1,21 @@
+// The runtime ignores SIGPIPE process wide, so writing to a pipe whose read end is closed
+// is an error value rather than a signal that kills the program.
+@paradigm procedural
+
+@import std.io
+@import std.async.io
+
+func main() -> int32 {
+    p, pe := pipe_new()
+    pe.ignore()
+    re := fd_close(p.r)
+    re.ignore()
+    w: Writer = fd_writer(p.w)
+    e := write_line(w, "x")
+    if e.exists() {
+        println("error")
+    }
+    ce := writer_close(w)
+    ce.ignore()
+    return 0
+}

@@ -377,7 +377,23 @@ export func sb_push(s: *StringBuilder, t: string) -> void {
     }
     base: int64 = (*s).len
     if base + n + 1 > (*s).cap {
+        // t may be a view of this builder's own buffer (sb_cstr(s) pushed back into s),
+        // and the grow frees that buffer, so the bytes are copied out before it runs. A
+        // grow happens a logarithmic number of times, so the extra copy costs nothing
+        // measurable and every caller is safe from the alias.
+        tmp: *raw char = alloc_bytes(n)
+        for i in 0..n {
+            tmp[i] = t[i]
+        }
         sb_grow(s, base + n)
+        d0: *raw char = (*s).data
+        for i in 0..n {
+            d0[base + i] = tmp[i]
+        }
+        free(tmp)
+        d0[base + n] = 0
+        (*s).len = base + n
+        return
     }
     d: *raw char = (*s).data
     for i in 0..n {

@@ -1,0 +1,53 @@
+// The anchor table of std.fmtfloat's shortest layout: one line per value naming
+// it and printing float_to_string of it, so the expected column lives in the
+// manifest record and a wrong digit shows up as the line it moved on. Every
+// expectation is derived by hand from the %r rule, decimal notation while the
+// exponent stays in [-4, 21) and an exponent form outside it, with no trailing
+// zeros and no point on an integer value.
+//
+// A float literal carries no exponent form, so a value is either spelled out in
+// full decimal or built from its IEEE bits through cool_f64_from_bits. The bit
+// built cases are the ones a full decimal would run to hundreds of digits for, and
+// the two smallest and two largest magnitudes the format holds.
+
+@paradigm procedural
+
+@import std.string
+@import std.fmtfloat
+
+foreign "C" {
+    func cool_f64_from_bits(bits: int64) -> float64
+}
+
+func show(label: string, x: float64) -> void {
+    s: string = float_to_string(x)
+    println("{} {}", label, s)
+    free(s)
+}
+
+func main() -> int64 {
+    show("one_tenth", 0.1)
+    show("one", 1.0)
+    show("hundred", 100.0)
+    show("ten_thousandth", 0.0001)
+    show("hundred_thousandth", 0.00001)
+    show("ten_to_21", 1000000000000000000000.0)
+    show("ten_to_20", 100000000000000000000.0)
+    show("one_third", 1.0 / 3.0)
+    show("two_and_a_half", 2.5)
+    show("negative_zero", -0.0)
+    show("zero", 0.0)
+    show("two_to_53_plus_one", 9007199254740993.0)
+    show("min_subnormal", cool_f64_from_bits(1))
+    show("near_min_subnormal", cool_f64_from_bits(1))
+    show("max_double", cool_f64_from_bits(9218868437227405311))
+    show("min_normal", cool_f64_from_bits(4503599627370496))
+    show("two_to_minus_25", 0.0000000298023223876953125)
+    show("ten_to_23", cool_f64_from_bits(4950912855330343670))
+    show("nine_nines_e22", 99999999999999990000000.0)
+    show("eight_point_41_e21", 8410000000000000000000.0)
+    show("one_point_five_e300", cool_f64_from_bits(9097811302482466869))
+    show("big_int_double", 123456789012345680.0)
+    show("negative_one_seventh", 0.0 - (1.0 / 7.0))
+    return 0
+}

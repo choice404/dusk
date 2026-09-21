@@ -1,0 +1,336 @@
+/** std.fmtbig: the small fixed capacity unsigned bignum std.fmtfloat's float printer
+ *  runs on. 48 limbs of 32 bits each, every limb parked in a uint64 slot so a limb
+ *  product plus a carry stays inside 64 bits with no wrap, low limb first. It is exact
+ *  integer arithmetic and nothing else: no signs, no division beyond one decimal digit
+ *  at a time, and no allocation past the one buffer a Big owns.
+ *
+ *  Two invariants hold on every Big at every operation boundary, and each operation
+ *  restores both before it returns.
+ *
+ *  I1, zeros above. Every slot at an index at or above the live count n holds zero.
+ *  This is what lets big_add read the shorter operand's limbs past its own count with
+ *  no bound test in the loop.
+ *
+ *  I2, normalized count. Limb n - 1 is nonzero unless n is zero, which is how zero is
+ *  spelled. This is what lets big_cmp settle two different lengths without touching a
+ *  limb. big_norm restores it.
+ *
+ *  The preconditions, which the operations do not check and the caller owes them:
+ *
+ *  - big_set_pow2(e): e / 32 below the capacity. The largest the printer asks for is
+ *    two raised to 1075, which is limb 33.
+ *  - big_sub(a, b): a at least b. A limb difference that goes negative wraps and fills
+ *    every bit above 32, so the borrow is bit 32 of the wrapped word, and a b larger
+ *    than a would run that borrow off the top and leave garbage.
+ *  - big_mul_small(a, m): m below 2**32.
+ *  - big_mul_pow10(a, k): k at or above zero.
+ *  - big_shl(a, bits): bits at or above zero, and n + bits / 32 + 1 within the
+ *    capacity.
+ *  - big_div_digit(r, s, tmp): s nonzero and shifted so its top limb carries bit 31,
+ *    which big_top_shift measures, and r below ten times s. The quotient estimate is
+ *    corrected by compare and subtract either way, so the shift governs how many
+ *    correction passes it takes and never whether the answer is right.
+ *
+ *  A Big is released in two steps, big_drop then free, the same shape std.string's
+ *  StringBuilder follows, since a function cannot free a pointer it only borrows.
+ *
+ *  Only the operations std.fmtfloat calls are exported. The limb radix, the capacity,
+ *  the count normalizer, and the small power of ten table stay inside this file, since
+ *  an exported name links bare and every bare name an export adds is one more symbol
+ *  a program linking this module cannot use for itself. */
+
+@paradigm procedural
+
+// The limb radix is 2**32: a limb holds 32 bits inside a 64 bit slot, so a limb
+// product plus a carry is at most 2**64 - 2**33 + 2**32 and never wraps.
+func limb_mask() -> uint64 { return 4294967295 }
+
+// The limb capacity. The widest intermediate the algorithm builds is r * 10 with
+// r below 10 * s, s below 2**1076 before the divide normalization shift and below
+// 2**1107 after it, so 48 limbs of 32 bits leave more than a dozen limbs spare.
+func big_cap() -> int64 { return 48 }
+
+// A bignum: cap limbs of 32 bits each in uint64 slots, low limb first, with n the
+// count of live limbs. Every slot at or above n holds zero, and limb n - 1 is
+// nonzero unless n is zero, which is how zero is spelled.
+export struct Big {
+    limbs: *raw uint64,
+    n: int64,
+}
+
+// A fresh zero valued bignum the caller owns. Release it with big_drop followed by
+// free, the two step release std.string's StringBuilder follows, since a function
+// cannot free a pointer it only borrows.
+export func big_new() -> *Big {
+    cap: int64 = big_cap()
+    d: *raw uint64 = alloc_bytes(cap * sizeof(uint64))
+    for i in 0..cap {
+        d[i] = 0
+    }
+    return alloc(Big { limbs: d, n: 0 })
+}
+
+// Frees a's limb buffer and nothing else; the caller frees the block itself.
+export func big_drop(a: *Big) -> void {
+    free((*a).limbs)
+}
+
+// Lowers a's live count to the index after its highest nonzero limb. The slots it
+// drops already hold zero, so the zeros above invariant survives.
+func big_norm(a: *Big) -> void {
+    d: *raw uint64 = (*a).limbs
+    mut n: int64 = (*a).n
+    while n > 0 && d[n - 1] == 0 {
+        n--
+    }
+    (*a).n = n
+}
+
+// Sets a to zero, clearing every live limb so the zeros above invariant holds.
+export func big_zero(a: *Big) -> void {
+    d: *raw uint64 = (*a).limbs
+    n: int64 = (*a).n
+    for i in 0..n {
+        d[i] = 0
+    }
+    (*a).n = 0
+}
+
+// Sets a to the 64 bit value v, which spans the two low limbs.
+export func big_set_u64(a: *Big, v: uint64) -> void {
+    big_zero(a)
+    d: *raw uint64 = (*a).limbs
+    d[0] = v & limb_mask()
+    d[1] = v >> 32
+    (*a).n = 2
+    big_norm(a)
+}
+
+// Sets a to two raised to e, for an e the capacity holds.
+export func big_set_pow2(a: *Big, e: int64) -> void {
+    big_zero(a)
+    d: *raw uint64 = (*a).limbs
+    li: int64 = e / 32
+    bi: int64 = e % 32
+    d[li] = 1u64 << uint64(bi)
+    (*a).n = li + 1
+}
+
+// Copies src over dst.
+export func big_copy(dst: *Big, src: *Big) -> void {
+    big_zero(dst)
+    sd: *raw uint64 = (*src).limbs
+    dd: *raw uint64 = (*dst).limbs
+    n: int64 = (*src).n
+    for i in 0..n {
+        dd[i] = sd[i]
+    }
+    (*dst).n = n
+}
+
+// Orders a against b: -1 when a is smaller, 0 when equal, 1 when larger. The live
+// counts are normalized, so a different count settles it without touching a limb.
+export func big_cmp(a: *Big, b: *Big) -> int64 {
+    an: int64 = (*a).n
+    bn: int64 = (*b).n
+    if an != bn {
+        if an < bn {
+            return -1
+        }
+        return 1
+    }
+    ad: *raw uint64 = (*a).limbs
+    bd: *raw uint64 = (*b).limbs
+    mut i: int64 = an - 1
+    while i >= 0 {
+        if ad[i] != bd[i] {
+            if ad[i] < bd[i] {
+                return -1
+            }
+            return 1
+        }
+        i--
+    }
+    return 0
+}
+
+// a = a + b. Reading a limb above the live count is safe and reads zero, which is
+// the zeros above invariant earning its keep: no per limb bound test is needed.
+export func big_add(a: *Big, b: *Big) -> void {
+    ad: *raw uint64 = (*a).limbs
+    bd: *raw uint64 = (*b).limbs
+    mut n: int64 = (*a).n
+    if (*b).n > n {
+        n = (*b).n
+    }
+    mut carry: uint64 = 0
+    for i in 0..n {
+        t: uint64 = ad[i] + bd[i] + carry
+        ad[i] = t & limb_mask()
+        carry = t >> 32
+    }
+    mut m: int64 = n
+    if carry != 0 {
+        ad[n] = carry
+        m = n + 1
+    }
+    (*a).n = m
+    big_norm(a)
+}
+
+// a = a - b, for a at least b. A limb difference that goes negative wraps, and the
+// wrap fills every bit above 32, so the borrow is bit 32 of the wrapped word.
+export func big_sub(a: *Big, b: *Big) -> void {
+    ad: *raw uint64 = (*a).limbs
+    bd: *raw uint64 = (*b).limbs
+    n: int64 = (*a).n
+    mut borrow: uint64 = 0
+    for i in 0..n {
+        t: uint64 = ad[i] - bd[i] - borrow
+        ad[i] = t & limb_mask()
+        borrow = (t >> 32) & 1
+    }
+    big_norm(a)
+}
+
+// a = a * m, for an m below 2**32. The limb product plus the carry is at most
+// (2**32 - 1)**2 + 2**32 - 1, which is under 2**64, so nothing wraps.
+export func big_mul_small(a: *Big, m: uint64) -> void {
+    d: *raw uint64 = (*a).limbs
+    n: int64 = (*a).n
+    mut carry: uint64 = 0
+    for i in 0..n {
+        t: uint64 = d[i] * m + carry
+        d[i] = t & limb_mask()
+        carry = t >> 32
+    }
+    mut k: int64 = n
+    while carry != 0 {
+        d[k] = carry & limb_mask()
+        carry = carry >> 32
+        k++
+    }
+    (*a).n = k
+    big_norm(a)
+}
+
+// a = a * 10.
+export func big_mul10(a: *Big) -> void {
+    big_mul_small(a, 10)
+}
+
+// Ten raised to i, for i from 0 through 9. Every one of them fits 32 bits, which is
+// what lets big_mul_pow10 climb in steps of a billion through big_mul_small.
+func pow10_u64(i: int64) -> uint64 {
+    mut v: uint64 = 1
+    for j in 0..i {
+        v = v * 10
+    }
+    return v
+}
+
+// a = a * 10**k, for k at or above zero, in steps of 10**9.
+export func big_mul_pow10(a: *Big, k: int64) -> void {
+    mut rem: int64 = k
+    while rem >= 9 {
+        big_mul_small(a, 1000000000)
+        rem = rem - 9
+    }
+    if rem > 0 {
+        big_mul_small(a, pow10_u64(rem))
+    }
+}
+
+// a = a * 2**bits, for bits at or above zero. The limbs move from the top down, so
+// a source limb is always read before the write that would overwrite it.
+export func big_shl(a: *Big, bits: int64) -> void {
+    if bits == 0 || (*a).n == 0 {
+        return
+    }
+    d: *raw uint64 = (*a).limbs
+    n: int64 = (*a).n
+    ls: int64 = bits / 32
+    bs: int64 = bits % 32
+    newn: int64 = n + ls + 1
+    mut i: int64 = newn - 1
+    while i >= 0 {
+        mut v: uint64 = 0
+        hi: int64 = i - ls
+        if hi >= 0 && hi < n {
+            v = (d[hi] << uint64(bs)) & limb_mask()
+        }
+        lo: int64 = hi - 1
+        if bs > 0 && lo >= 0 && lo < n {
+            v = v | (d[lo] >> uint64(32 - bs))
+        }
+        d[i] = v
+        i--
+    }
+    (*a).n = newn
+    big_norm(a)
+}
+
+// The count of bits in v, zero for zero.
+export func u64_bitlen(v: uint64) -> int64 {
+    mut n: int64 = 0
+    mut x: uint64 = v
+    while x != 0 {
+        n++
+        x = x >> 1
+    }
+    return n
+}
+
+// How far a must shift left for its top limb to carry bit 31, the shift
+// big_div_digit wants under its divisor. Zero for a zero, and never above 31.
+export func big_top_shift(a: *Big) -> int64 {
+    n: int64 = (*a).n
+    if n == 0 {
+        return 0
+    }
+    d: *raw uint64 = (*a).limbs
+    mut top: uint64 = d[n - 1]
+    mut sh: int64 = 0
+    while top < 2147483648 {
+        top = top << 1
+        sh++
+    }
+    return sh
+}
+
+/* One digit of the quotient: returns floor(r / s) and leaves r holding r mod s,
+   for an r below ten times s. The quotient is estimated from the top limb of s and
+   the matching two limb window of r, then corrected by compare and subtract until
+   it is exact, so the estimate governs speed and never correctness. bd_normalize
+   has already shifted s so its top limb carries bit 31, which holds the estimate
+   within one of the answer and so the correction loops to at most one pass. tmp is
+   scratch the caller owns. */
+export func big_div_digit(r: *Big, s: *Big, tmp: *Big) -> int64 {
+    ns: int64 = (*s).n
+    if ns == 0 || (*r).n < ns {
+        return 0
+    }
+    rd: *raw uint64 = (*r).limbs
+    sd: *raw uint64 = (*s).limbs
+    mut rv: uint64 = rd[ns - 1]
+    if (*r).n > ns {
+        rv = rv + (rd[ns] << 32)
+    }
+    sv: uint64 = sd[ns - 1]
+    mut q: int64 = int64(rv / sv)
+    if q > 9 {
+        q = 9
+    }
+    big_copy(tmp, s)
+    big_mul_small(tmp, uint64(q))
+    while q > 0 && big_cmp(tmp, r) > 0 {
+        q = q - 1
+        big_sub(tmp, s)
+    }
+    big_sub(r, tmp)
+    while big_cmp(r, s) >= 0 {
+        big_sub(r, s)
+        q = q + 1
+    }
+    return q
+}

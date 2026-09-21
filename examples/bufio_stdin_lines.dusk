@@ -1,0 +1,27 @@
+// A BufReader over stdin_reader reads descriptor 0 directly, so it never mixes with the
+// read_line builtin's C stdin buffer. This program picks the descriptor path for its whole
+// run and counts the lines it read.
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+
+func main() -> int32 {
+    b: *BufReader = bufreader_new(stdin_reader(), 64)
+    mut count: int64 = 0
+    mut going: bool = true
+    while going {
+        line, ok := bufreader_read_line(b)
+        if ok == false {
+            going = false
+        } else {
+            println(line)
+            free(line)
+            count = count + 1
+        }
+    }
+    println(count)
+    bufreader_free(b)
+    free(b)
+    return 0
+}

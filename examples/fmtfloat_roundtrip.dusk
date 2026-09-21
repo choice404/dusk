@@ -1,0 +1,119 @@
+// The acceptance test of std.fmtfloat's shortest printer: every value it prints
+// must read back as exactly the value it was given. A wrong digit anywhere in the
+// bignum passes dusk check and corrupts silently, so the proof is a corpus, not an
+// inspection.
+//
+// The corpus is 20000 bit patterns from a linear congruential generator seeded at a
+// fixed value, so the run is the same on every machine, plus the fixed cases a
+// random sweep reaches rarely or never: every normal power of two from 2**-1022 to
+// 2**1023, every subnormal power from 2**-1074 to 2**-1023, and the anchors, the two
+// ends of the format and the classic hard cases. A pattern whose exponent field is
+// all ones is not a number to round trip and is skipped rather than counted.
+//
+// Each value is formatted with float_to_string, parsed back with parse_float, which
+// is glibc strtod and so correctly rounded, and compared by its IEEE bits, which
+// makes the comparison exact rather than approximate.
+
+@paradigm procedural
+
+@import std.string
+@import std.fmtfloat
+
+foreign "C" {
+    func cool_f64_from_bits(bits: int64) -> float64
+}
+
+// Whether the shortest text of the double with these bits reads back as it.
+func trips(bits: int64) -> bool {
+    x: float64 = cool_f64_from_bits(bits)
+    s: string = float_to_string(x)
+    back, e := parse_float(s)
+    e.ignore()
+    got: bool = cool_f64_bits(back) == bits
+    if !got {
+        println("BAD {} printed {}", int_to_hex16(bits), s)
+    }
+    free(s)
+    return got
+}
+
+func main() -> int64 {
+    mut st: uint64 = 88172645463325252
+    mut ok: int64 = 0
+    mut bad: int64 = 0
+    while ok + bad < 20000 {
+        st = st * 6364136223846793005u64 + 1442695040888963407u64
+        bits: int64 = int64(st)
+        if ((st >> 52) & 2047) != 2047 {
+            if trips(bits) {
+                ok++
+            } else {
+                bad++
+            }
+        }
+    }
+    println("ok {}", ok)
+
+    mut fok: int64 = 0
+    mut fbad: int64 = 0
+    for p in 1..2047 {
+        if trips(p << 52) {
+            fok++
+        } else {
+            fbad++
+        }
+    }
+    for q in 0..52 {
+        if trips(1 << q) {
+            fok++
+        } else {
+            fbad++
+        }
+    }
+    xs: float64[] = [
+        0.1,
+        1.0,
+        100.0,
+        0.0001,
+        0.00001,
+        1000000000000000000000.0,
+        100000000000000000000.0,
+        1.0 / 3.0,
+        2.5,
+        -0.0,
+        0.0,
+        9007199254740993.0,
+        0.0000000298023223876953125,
+        99999999999999990000000.0,
+        8410000000000000000000.0,
+        123456789012345680.0,
+        0.0 - (1.0 / 7.0)
+    ]
+    for i in 0..xs.len {
+        if trips(cool_f64_bits(xs[i])) {
+            fok++
+        } else {
+            fbad++
+        }
+    }
+    bits_cases: int64[] = [
+        1,
+        9218868437227405311,
+        4503599627370496,
+        4950912855330343670,
+        9097811302482466869
+    ]
+    for i in 0..bits_cases.len {
+        if trips(bits_cases[i]) {
+            fok++
+        } else {
+            fbad++
+        }
+    }
+    if fbad == 0 && fok == 2120 {
+        println("ok fixed")
+    } else {
+        println("fixed ran {} failed {}", fok, fbad)
+    }
+    return 0
+}

@@ -1,0 +1,682 @@
+/** std.fmtfloat: the float printer, Burger and Dybvig's free format digit generation over
+ *  a small fixed capacity bignum, written in dusk with no C formatting behind it. One exact
+ *  core serves two stopping rules. The shortest rule emits the fewest digits that parse back
+ *  to the same double, which float_to_string lays out in the %r form. The
+ *  cutoff rule emits a digit count the caller asks for and rounds the tail the way C rounds
+ *  it, ties to even on the exact binary value, which float_fixed, float_exp, and
+ *  float_general lay out as %f, %e, and %g. Because the core is exact rather than an
+ *  approximation with a correction table, float_general(x, 6, false, false) reproduces what
+ *  println writes for a float byte for byte, and the goldens demand exactly that against
+ *  glibc rather than closeness.
+ *
+ *  The exact arithmetic underneath is std.fmtbig, a 48 limb bignum of 32 bit limbs in
+ *  uint64 slots, which carries its own invariants and preconditions. The widest value this
+ *  algorithm builds out of it is near 2**1113, about 36 limbs, so the capacity keeps a
+ *  dozen limbs spare.
+ *
+ *  Every entry point returns a fresh heap string the caller owns and frees, carries the
+ *  value's own sign and nothing else, and spells a non finite value the way glibc does, inf,
+ *  -inf, nan, and -nan, uppercased for the E and G conversions. Flags, width, and the plus
+ *  and space signs belong to std.fmt, which lays them around these strings. */
+
+@paradigm procedural
+
+@import std.string
+@import std.fmtbig
+
+foreign "C" {
+    func cool_f64_bits(x: float64) -> int64
+}
+// Whether the value sits at or above the upper end of its rounding interval:
+// r + m+ above s, or equal to it when the significand is even, since the parser
+// rounds a tie to the even significand and so takes the boundary itself. The cutoff
+// mode has no interval and reads the test as r at or above s, which is m+ of zero
+// with the boundary included.
+func bd_high(r: *Big, mp: *Big, s: *Big, tmp: *Big, even: bool, shortest: bool) -> bool {
+    big_copy(tmp, r)
+    if shortest {
+        big_add(tmp, mp)
+    }
+    c: int64 = big_cmp(tmp, s)
+    if c > 0 {
+        return true
+    }
+    if c == 0 {
+        if shortest {
+            return even
+        }
+        return true
+    }
+    return false
+}
+
+// Burger and Dybvig's Table 1: the exact rational r / s equal to the value, with
+// m+ and m- the distances to the upper and lower boundaries of its rounding
+// interval. A significand at the bottom of a binade has half the gap below it that
+// it has above, which is the f equal to 2**52 case, and a subnormal has no binade
+// below it so it keeps the symmetric interval.
+func bd_setup(r: *Big, s: *Big, mp: *Big, mm: *Big, f: uint64, e: int64) -> void {
+    pow52: uint64 = 4503599627370496
+    big_set_u64(r, f)
+    if e >= 0 {
+        if f != pow52 {
+            big_shl(r, e + 1)
+            big_set_u64(s, 2)
+            big_set_pow2(mp, e)
+            big_set_pow2(mm, e)
+        } else {
+            big_shl(r, e + 2)
+            big_set_u64(s, 4)
+            big_set_pow2(mp, e + 1)
+            big_set_pow2(mm, e)
+        }
+    } else {
+        if e == -1074 || f != pow52 {
+            big_shl(r, 1)
+            big_set_pow2(s, 1 - e)
+            big_set_u64(mp, 1)
+            big_set_u64(mm, 1)
+        } else {
+            big_shl(r, 2)
+            big_set_pow2(s, 2 - e)
+            big_set_u64(mp, 2)
+            big_set_u64(mm, 1)
+        }
+    }
+}
+
+/* Scales r, s, m+, and m- so that r / s lands in [1, 10) and returns the decimal
+   exponent k, leaving the value equal to 0.<digits> * 10**k.
+
+   l is the floor of the base two logarithm of the value, so the first estimate is
+   k = floor(l * 1233 / 4096), an arithmetic shift that floors for a negative l.
+   1233 / 4096 falls short of log10(2) by 4.6e-6, and the whole range has |l| at
+   most 1074, so the estimate is never above the true k and is at most two below it.
+   The first fixup is the paper's own, repairing an estimate one below, and the
+   guard loop after it repairs the remaining case, at most two turns. Both repairs
+   raise k, which is why an estimate that can only be low is the one to build on. */
+func bd_scale(r: *Big, s: *Big, mp: *Big, mm: *Big, t1: *Big, t2: *Big, l: int64, even: bool, shortest: bool) -> int64 {
+    mut k: int64 = (l * 1233) >> 12
+    if k >= 0 {
+        big_mul_pow10(s, k)
+    } else {
+        big_mul_pow10(r, 0 - k)
+        if shortest {
+            big_mul_pow10(mp, 0 - k)
+            big_mul_pow10(mm, 0 - k)
+        }
+    }
+    if bd_high(r, mp, s, t1, even, shortest) {
+        k = k + 1
+    } else {
+        big_mul10(r)
+        if shortest {
+            big_mul10(mp)
+            big_mul10(mm)
+        }
+    }
+    big_copy(t2, s)
+    big_mul10(t2)
+    while bd_high(r, mp, t2, t1, even, shortest) {
+        big_mul10(s)
+        k = k + 1
+        big_copy(t2, s)
+        big_mul10(t2)
+    }
+    return k
+}
+
+// Shifts r, s, m+, and m- left together until the top limb of s carries bit 31.
+// Every test the generator makes compares two of these four, and the quotient of
+// two of them is unchanged by a common factor, so the shift is invisible to the
+// result and buys big_div_digit an estimate that is within one of the answer.
+func bd_normalize(r: *Big, s: *Big, mp: *Big, mm: *Big, shortest: bool) -> void {
+    sh: int64 = big_top_shift(s)
+    if sh > 0 {
+        big_shl(r, sh)
+        big_shl(s, sh)
+        if shortest {
+            big_shl(mp, sh)
+            big_shl(mm, sh)
+        }
+    }
+}
+
+/* The shortest digit string that reads back as the value, written into dig as one
+   digit value per slot. Returns the digit count and the decimal exponent k, the
+   value being 0.<digits> * 10**k.
+
+   Each turn takes the next digit and then asks two questions of the remainder: is
+   it already low enough that stopping here still lands inside the rounding
+   interval, and is what is left over high enough that stopping and rounding up
+   lands inside it. Neither means keep going. One means stop with that digit or the
+   next one up. Both means the interval covers both candidates, and the closer of
+   the two wins, with the exact tie going up, the paper's own choice and the one the
+   anchors pin. */
+func gen_shortest_digits(dig: *raw int64, f: uint64, e: int64) -> (int64, int64) {
+    r: *Big = big_new()
+    s: *Big = big_new()
+    mp: *Big = big_new()
+    mm: *Big = big_new()
+    t1: *Big = big_new()
+    t2: *Big = big_new()
+    bd_setup(r, s, mp, mm, f, e)
+    even: bool = (f & 1) == 0
+    l: int64 = e + u64_bitlen(f) - 1
+    k: int64 = bd_scale(r, s, mp, mm, t1, t2, l, even, true)
+    bd_normalize(r, s, mp, mm, true)
+    mut nd: int64 = 0
+    mut done: bool = false
+    while !done {
+        d: int64 = big_div_digit(r, s, t1)
+        cl: int64 = big_cmp(r, mm)
+        low: bool = cl < 0 || (cl == 0 && even)
+        hi: bool = bd_high(r, mp, s, t1, even, true)
+        if low || hi {
+            mut v: int64 = d
+            if hi && !low {
+                v = d + 1
+            }
+            if hi && low {
+                // Both candidates land inside the rounding interval and both are
+                // the same length, so the closer one wins and an exact tie rounds
+                // the last digit to even. That is the rule the cutoff path already
+                // takes, and the rule every other shortest printer takes, so a
+                // value like two raised to -25 prints the same digits here as it
+                // does in JavaScript, Go, and Python. The paper rounds such a tie
+                // up instead, which parts company on about one value in five
+                // thousand and would leave the two paths of this one file
+                // disagreeing about the same boundary.
+                big_copy(t1, r)
+                big_mul_small(t1, 2)
+                c2: int64 = big_cmp(t1, s)
+                if c2 > 0 {
+                    v = d + 1
+                }
+                if c2 == 0 && (d % 2) == 1 {
+                    v = d + 1
+                }
+            }
+            dig[nd] = v
+            nd++
+            done = true
+        } else {
+            dig[nd] = d
+            nd++
+            big_mul10(r)
+            big_mul10(mp)
+            big_mul10(mm)
+        }
+    }
+    big_drop(r)
+    free(r)
+    big_drop(s)
+    free(s)
+    big_drop(mp)
+    free(mp)
+    big_drop(mm)
+    free(mm)
+    big_drop(t1)
+    free(t1)
+    big_drop(t2)
+    free(t2)
+    return (nd, k)
+}
+
+/* Exactly the digits a fixed precision conversion asks for, written into dig as one
+   digit value per slot, with the tail rounded the way C rounds it. Returns the digit
+   count and the decimal exponent k.
+
+   kind selects how the count follows from the precision: 0 is %e and takes prec + 1
+   significant digits, 1 is %f and takes k + prec, and 2 is %g and takes prec. A
+   count below zero means the value sits under half of the last place asked for and
+   the answer is a plain zero. A count of exactly zero means the value sits in the
+   decade just under that place and rounds up to a single one there when the
+   remainder passes half, with the exact half staying at the even digit zero. Above
+   that the digits come out one at a time and the remainder decides the last one:
+   over half rounds up, under half keeps, and the exact half rounds the last digit
+   to even, which is what makes %.0f of 0.5 print 0 and of 1.5 print 2. */
+func gen_cutoff_digits(dig: *raw int64, f: uint64, e: int64, kind: int64, prec: int64) -> (int64, int64) {
+    r: *Big = big_new()
+    s: *Big = big_new()
+    mp: *Big = big_new()
+    mm: *Big = big_new()
+    t1: *Big = big_new()
+    t2: *Big = big_new()
+    bd_setup(r, s, mp, mm, f, e)
+    big_zero(mp)
+    big_zero(mm)
+    l: int64 = e + u64_bitlen(f) - 1
+    k: int64 = bd_scale(r, s, mp, mm, t1, t2, l, false, false)
+    bd_normalize(r, s, mp, mm, false)
+    mut n: int64 = prec + 1
+    if kind == 1 {
+        n = k + prec
+    }
+    if kind == 2 {
+        n = prec
+    }
+    mut nd: int64 = 1
+    mut kk: int64 = 1
+    if n <= 0 {
+        dig[0] = 0
+        if n == 0 {
+            big_copy(t1, s)
+            big_mul_small(t1, 5)
+            if big_cmp(r, t1) > 0 {
+                dig[0] = 1
+                kk = k + 1
+            }
+        }
+    } else {
+        for i in 0..n {
+            dig[i] = big_div_digit(r, s, t1)
+            big_mul10(r)
+        }
+        nd = n
+        kk = k
+        big_copy(t1, s)
+        big_mul_small(t1, 5)
+        c: int64 = big_cmp(r, t1)
+        mut up: bool = c > 0
+        if c == 0 {
+            up = (dig[n - 1] % 2) == 1
+        }
+        if up {
+            mut i: int64 = n - 1
+            mut carry: bool = true
+            while carry && i >= 0 {
+                dig[i] = dig[i] + 1
+                if dig[i] == 10 {
+                    dig[i] = 0
+                    i--
+                } else {
+                    carry = false
+                }
+            }
+            if carry {
+                dig[0] = 1
+                for j in 1..n {
+                    dig[j] = 0
+                }
+                kk = k + 1
+            }
+        }
+    }
+    big_drop(r)
+    free(r)
+    big_drop(s)
+    free(s)
+    big_drop(mp)
+    free(mp)
+    big_drop(mm)
+    free(mm)
+    big_drop(t1)
+    free(t1)
+    big_drop(t2)
+    free(t2)
+    return (nd, kk)
+}
+
+// Appends the exponent tail of an e or E conversion: the letter, a sign that is
+// always written, and the exponent in at least two digits.
+func push_exp(b: *StringBuilder, x: int64, upper: bool) -> void {
+    if upper {
+        sb_push_char(b, 69)
+    } else {
+        sb_push_char(b, 101)
+    }
+    mut ax: int64 = x
+    if x < 0 {
+        sb_push_char(b, 45)
+        ax = 0 - x
+    } else {
+        sb_push_char(b, 43)
+    }
+    if ax < 10 {
+        sb_push_char(b, 48)
+    }
+    sb_push_int(b, ax)
+}
+
+// The digit at position i of the value 0.<dig> * 10**k, zero outside the generated
+// run, so a layout reads a position it never generated without a bounds test of its
+// own.
+func dig_at(dig: *raw int64, nd: int64, i: int64) -> int64 {
+    if i < 0 || i >= nd {
+        return 0
+    }
+    return dig[i]
+}
+
+// The %f layout: the point sits at k, so the integer part is the first k digits
+// padded with zeros when the value runs past them, a value below one writes a bare
+// zero there, and the fraction reads prec positions on from k.
+func layout_fixed(b: *StringBuilder, dig: *raw int64, nd: int64, k: int64, prec: int64, point: bool) -> void {
+    if k <= 0 {
+        sb_push_char(b, 48)
+    } else {
+        for i in 0..k {
+            sb_push_char(b, 48 + dig_at(dig, nd, i))
+        }
+    }
+    if prec > 0 || point {
+        sb_push_char(b, 46)
+        for i in 0..prec {
+            sb_push_char(b, 48 + dig_at(dig, nd, k + i))
+        }
+    }
+}
+
+// The %e layout: one digit, the point and prec more, then the exponent k - 1. point
+// writes the point even at precision 0, the C alternate form.
+func layout_exp(b: *StringBuilder, dig: *raw int64, nd: int64, k: int64, prec: int64, upper: bool, point: bool) -> void {
+    sb_push_char(b, 48 + dig_at(dig, nd, 0))
+    if prec > 0 || point {
+        sb_push_char(b, 46)
+        for i in 0..prec {
+            sb_push_char(b, 48 + dig_at(dig, nd, i + 1))
+        }
+    }
+    push_exp(b, k - 1, upper)
+}
+
+// The %g layout, C99 7.19.6.1 paragraph 8: with P significant digits generated and
+// X the exponent they carry, an X below -4 or at P or above takes the e layout at
+// precision P - 1 and everything else takes the f layout at precision P - 1 - X.
+// Unless the alternate form is asked for, the trailing zeros and a bare trailing
+// point come off, which the layouts do here by shortening the precision to the last
+// nonzero digit rather than by trimming text afterwards.
+func layout_general(b: *StringBuilder, dig: *raw int64, nd: int64, k: int64, prec: int64, upper: bool, alt: bool) -> void {
+    mut p: int64 = prec
+    if p == 0 {
+        p = 1
+    }
+    mut live: int64 = nd
+    while live > 0 && dig[live - 1] == 0 {
+        live--
+    }
+    x: int64 = k - 1
+    if x < -4 || x >= p {
+        mut pe: int64 = p - 1
+        if !alt {
+            pe = live - 1
+            if pe < 0 {
+                pe = 0
+            }
+        }
+        layout_exp(b, dig, nd, k, pe, upper, alt)
+    } else {
+        mut pf: int64 = p - 1 - x
+        if !alt {
+            pf = live - k
+            if pf < 0 {
+                pf = 0
+            }
+        }
+        layout_fixed(b, dig, nd, k, pf, alt)
+    }
+}
+
+// The %r layout: decimal notation while the exponent stays in the range a reader
+// expects to see written out, and an exponent form outside it. The threshold of 21
+// is the JavaScript and Go convention, which keeps an integer valued double up to
+// about 2**70 printing as its digits.
+func layout_shortest(b: *StringBuilder, dig: *raw int64, nd: int64, k: int64) -> void {
+    x: int64 = k - 1
+    if x >= -4 && x < 21 {
+        if k <= 0 {
+            sb_push(b, "0.")
+            zeros: int64 = 0 - k
+            for i in 0..zeros {
+                sb_push_char(b, 48)
+            }
+            for i in 0..nd {
+                sb_push_char(b, 48 + dig[i])
+            }
+        } else {
+            for i in 0..k {
+                sb_push_char(b, 48 + dig_at(dig, nd, i))
+            }
+            if nd > k {
+                sb_push_char(b, 46)
+                for i in k..nd {
+                    sb_push_char(b, 48 + dig[i])
+                }
+            }
+        }
+    } else {
+        sb_push_char(b, 48 + dig_at(dig, nd, 0))
+        if nd > 1 {
+            sb_push_char(b, 46)
+            for i in 1..nd {
+                sb_push_char(b, 48 + dig[i])
+            }
+        }
+        push_exp(b, x, false)
+    }
+}
+
+// Appends the glibc spelling of a value that is not finite and answers whether it
+// was one: inf or nan, uppercased for an E or G conversion, with a leading minus
+// whenever the sign bit is set, so a negative NaN prints -nan the way println does.
+func push_nonfinite(b: *StringBuilder, bits: int64, upper: bool) -> bool {
+    ub: uint64 = uint64(bits)
+    if ((ub >> 52) & 2047) != 2047 {
+        return false
+    }
+    if (ub >> 63) != 0 {
+        sb_push_char(b, 45)
+    }
+    if (ub & 4503599627370495) == 0 {
+        if upper {
+            sb_push(b, "INF")
+        } else {
+            sb_push(b, "inf")
+        }
+    } else {
+        if upper {
+            sb_push(b, "NAN")
+        } else {
+            sb_push(b, "nan")
+        }
+    }
+    return true
+}
+
+// Appends the minus sign of a negative value, including negative zero, and answers
+// whether the value is a zero, which every layout spells as the single digit zero
+// at exponent one so the C rule that reads a zero's exponent as zero holds.
+func push_sign(b: *StringBuilder, bits: int64) -> bool {
+    ub: uint64 = uint64(bits)
+    if (ub >> 63) != 0 {
+        sb_push_char(b, 45)
+    }
+    return (ub & 9223372036854775807) == 0
+}
+
+// The significand and the two exponent of a finite nonzero value: a normal carries
+// the implicit bit and a bias of 1075, and a subnormal is the stored fraction at
+// the fixed exponent -1074.
+func f64_parts(bits: int64) -> (uint64, int64) {
+    ub: uint64 = uint64(bits)
+    biased: int64 = int64((ub >> 52) & 2047)
+    frac: uint64 = ub & 4503599627370495
+    if biased == 0 {
+        return (frac, -1074)
+    }
+    return (frac | 4503599627370496, biased - 1075)
+}
+
+// The finished bytes of b as a fresh heap string, releasing b's buffer. The caller
+// frees the block itself, which a borrowed pointer cannot do for it.
+func sb_finish(b: *StringBuilder) -> string {
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    return out
+}
+
+// The precision cap. A conversion asking for more digits than this is clamped, the
+// same ceiling std.fmt's width carries, which bounds the digit buffer and the work
+// a pathological directive can ask for.
+func prec_cap() -> int64 { return 4096 }
+
+// prec brought inside [0, prec_cap()].
+func clamp_prec(prec: int64) -> int64 {
+    if prec < 0 {
+        return 0
+    }
+    if prec > prec_cap() {
+        return prec_cap()
+    }
+    return prec
+}
+
+// The shortest decimal that reads back as exactly x, laid out the %r way. This is
+// the body behind float_to_string, which is the name the module exports and the name
+// std.fmt renders %r through.
+func float_shortest(x: float64) -> string {
+    bits: int64 = cool_f64_bits(x)
+    b: *StringBuilder = alloc(sb_new())
+    if !push_nonfinite(b, bits, false) {
+        // A double needs at most 17 significant digits, which is the theory. The
+        // capacity is sized off the loop's own termination bound instead: m- starts
+        // at one or more and grows tenfold each turn while r stays under s, and s
+        // never passes 2**1113, so the loop cannot run past 335 turns even if the
+        // digit rule were wrong. A generous buffer turns a bug into a wrong number
+        // rather than a smashed heap.
+        dig: *raw int64 = alloc_bytes(400 * sizeof(int64))
+        dig[0] = 0
+        if push_sign(b, bits) {
+            layout_shortest(b, dig, 1, 1)
+        } else {
+            f, e := f64_parts(bits)
+            nd, k := gen_shortest_digits(dig, f, e)
+            layout_shortest(b, dig, nd, k)
+        }
+        free(dig)
+    }
+    out: string = sb_finish(b)
+    free(b)
+    return out
+}
+
+/** The shortest decimal that reads back as exactly x, in the %r layout: decimal
+ *  notation while the exponent stays inside the range a reader expects written out
+ *  and an exponent form outside it, so 100.0 is 100, 0.0001 is 0.0001, 0.00001 is
+ *  1e-05, and the largest double is 1.7976931348623157e+308. The sign is the value's
+ *  own, so negative zero prints -0, and a value that is not finite prints inf, -inf,
+ *  nan, or -nan the way glibc spells it. An exact tie between two equally short
+ *  candidates rounds the last digit to even, so this agrees digit for digit with
+ *  every other shortest printer. It is what std.fmt's %r verb renders.
+ *  @param x the value to print
+ *  @return the shortest round trip text as a fresh heap string the caller owns and
+ *  frees
+ *  @example
+ *  s: string = float_to_string(0.1)   // "0.1", not 0.10000000000000001
+ *  free(s) */
+export func float_to_string(x: float64) -> string {
+    return float_shortest(x)
+}
+
+/** x in the C %f layout at the given precision: every digit before the point and
+ *  exactly prec after it, with the tail rounded half to even on the exact binary
+ *  value the way C rounds it, so %.0f of 0.5 is 0 and of 1.5 is 2. A precision below
+ *  zero reads as zero and one above 4096 is clamped there. The sign is the value's
+ *  own, so negative zero at precision 3 is -0.000, and a value that is not finite
+ *  prints inf, -inf, nan, or -nan.
+ *  @param x the value to print
+ *  @param prec the digit count after the point
+ *  @param alt whether to write the point even when no digit follows it, the C alternate form
+ *  @return the text as a fresh heap string the caller owns and frees */
+export func float_fixed(x: float64, prec: int64, alt: bool) -> string {
+    bits: int64 = cool_f64_bits(x)
+    p: int64 = clamp_prec(prec)
+    b: *StringBuilder = alloc(sb_new())
+    if !push_nonfinite(b, bits, false) {
+        // The integer part of a finite double is at most 309 digits, so the count
+        // k + prec the f conversion generates never reaches this capacity.
+        dig: *raw int64 = alloc_bytes((p + 320) * sizeof(int64))
+        dig[0] = 0
+        if push_sign(b, bits) {
+            layout_fixed(b, dig, 1, 1, p, alt)
+        } else {
+            f, e := f64_parts(bits)
+            nd, k := gen_cutoff_digits(dig, f, e, 1, p)
+            layout_fixed(b, dig, nd, k, p, alt)
+        }
+        free(dig)
+    }
+    out: string = sb_finish(b)
+    free(b)
+    return out
+}
+
+/** x in the C %e layout at the given precision: one digit, the point, prec more, and
+ *  an exponent of at least two digits carrying its sign. upper writes E and spells a
+ *  value that is not finite INF or NAN, the uppercase conversion's own spelling. A
+ *  precision below zero reads as zero and one above 4096 is clamped there.
+ *  @param x the value to print
+ *  @param prec the digit count after the point
+ *  @param upper whether this is the E conversion rather than the e conversion
+ *  @param alt whether to write the point even when no digit follows it, the C alternate form
+ *  @return the text as a fresh heap string the caller owns and frees */
+export func float_exp(x: float64, prec: int64, upper: bool, alt: bool) -> string {
+    bits: int64 = cool_f64_bits(x)
+    p: int64 = clamp_prec(prec)
+    b: *StringBuilder = alloc(sb_new())
+    if !push_nonfinite(b, bits, upper) {
+        dig: *raw int64 = alloc_bytes((p + 8) * sizeof(int64))
+        dig[0] = 0
+        if push_sign(b, bits) {
+            layout_exp(b, dig, 1, 1, p, upper, alt)
+        } else {
+            f, e := f64_parts(bits)
+            nd, k := gen_cutoff_digits(dig, f, e, 0, p)
+            layout_exp(b, dig, nd, k, p, upper, alt)
+        }
+        free(dig)
+    }
+    out: string = sb_finish(b)
+    free(b)
+    return out
+}
+
+/** x in the C %g layout at the given precision, the rule println already prints a
+ *  float by: prec significant digits, laid out as %e when their exponent falls below
+ *  -4 or reaches the precision and as %f otherwise, with the trailing zeros and a
+ *  bare trailing point removed unless alt asks for the alternate form. A precision of
+ *  zero reads as one, the C rule, a precision below zero reads as zero and so also as
+ *  one, and one above 4096 is clamped there. upper writes E and spells a value that
+ *  is not finite INF or NAN.
+ *  @param x the value to print
+ *  @param prec the significant digit count, zero reading as one
+ *  @param upper whether this is the G conversion rather than the g conversion
+ *  @param alt whether the alternate form keeps the trailing zeros and the point
+ *  @return the text as a fresh heap string the caller owns and frees
+ *  @example
+ *  s: string = float_general(x, 6, false, false)   // what println writes for x
+ *  free(s) */
+export func float_general(x: float64, prec: int64, upper: bool, alt: bool) -> string {
+    bits: int64 = cool_f64_bits(x)
+    mut p: int64 = clamp_prec(prec)
+    if p == 0 {
+        p = 1
+    }
+    b: *StringBuilder = alloc(sb_new())
+    if !push_nonfinite(b, bits, upper) {
+        dig: *raw int64 = alloc_bytes((p + 8) * sizeof(int64))
+        dig[0] = 0
+        if push_sign(b, bits) {
+            layout_general(b, dig, 1, 1, p, upper, alt)
+        } else {
+            f, e := f64_parts(bits)
+            nd, k := gen_cutoff_digits(dig, f, e, 2, p)
+            layout_general(b, dig, nd, k, p, upper, alt)
+        }
+        free(dig)
+    }
+    out: string = sb_finish(b)
+    free(b)
+    return out
+}

@@ -1,0 +1,31 @@
+// A read failure ends the stream the way end of input does, so bufreader_read_line reports
+// false either way, and bufreader_err is what tells the two apart. The descriptor here is
+// closed before the first read, so the first refill fails.
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+@import std.async.io
+
+func main() -> int32 {
+    p, pe := pipe_new()
+    pe.ignore()
+    we := fd_close(p.w)
+    we.ignore()
+    re := fd_close(p.r)
+    re.ignore()
+
+    b: *BufReader = bufreader_new(fd_reader(p.r), 64)
+    line, ok := bufreader_read_line(b)
+    if ok {
+        free(line)
+    }
+    e := bufreader_err(b)
+    if ok == false && e.exists() {
+        println("error")
+    }
+    e.ignore()
+    bufreader_free(b)
+    free(b)
+    return 0
+}

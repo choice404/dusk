@@ -1,0 +1,262 @@
+/** std.bufio: a buffered reader over any std.io Reader. A BufReader holds a copy of the
+ *  Reader it was built over and a byte buffer of its own, so a program reads a stream one
+ *  line or one byte at a time without paying for a read(2) per byte, and a line arrives as
+ *  a fresh heap string rather than as an offset into a buffer that is about to be refilled.
+ *
+ *  A BufReader owns its buffer and nothing else. The descriptor or the cursor behind the
+ *  Reader stays the caller's: bufreader_free releases the buffer, free releases the block,
+ *  and closing the stream is a separate reader_close. Build one with bufreader_new over
+ *  stdin_reader, fd_reader, or string_reader, read through it with one of the three read
+ *  functions, and never mix those with a read_buf on the same underlying Reader, since the
+ *  bytes already in the buffer are invisible to one and gone from the other.
+ *
+ *  A BufReader is not itself a Reader in 1.17.0. A buffered variant inside std.io's enum
+ *  would put the drain logic inside std.io and the buffer inside this file, a cycle between
+ *  the two, so a program that wants io_copy from a buffered source pumps bufreader_read in
+ *  a loop instead; the example under bufreader_read shows that loop.
+ *
+ *  Reads block, the rule std.io's Reader carries. A descriptor set non blocking reports a
+ *  would block error, which lands in the BufReader as the error that ended the stream and
+ *  comes back out of bufreader_err; reach for std.async.io for a non blocking stream. */
+
+@paradigm procedural
+
+@import std.io
+@import std.string
+
+// libc's own copy, declared here so this file stands on its own rather than on a
+// declaration inside std.io. A *void parameter cannot be indexed on the dusk side, so
+// bytes headed into a caller's buffer are staged in a raw scratch buffer and copied
+// across in one call.
+foreign "C" {
+    func memcpy(dst: *void, src: *void, n: int64) -> *void
+}
+
+/** A buffered reader over a Reader. r is the copy of the source this reads through, buf is
+ *  the cap byte staging buffer this owns, lo is the offset the next buffered byte sits at
+ *  and hi the offset one past the last one, so lo equal to hi means the buffer is empty.
+ *  done is set once the source reported end of stream or failed, and err_msg carries that
+ *  failure's text, empty when the stream simply ran out. Build one with bufreader_new
+ *  rather than naming the fields, and read the failure back with bufreader_err. */
+export struct BufReader {
+    r: Reader,
+    buf: *raw char,
+    cap: int64,
+    lo: int64,
+    hi: int64,
+    done: bool,
+    err_msg: string,
+}
+
+/** A buffered reader over r with a cap byte buffer. A cap below 16 reads as 16, so a
+ *  careless 0 or 1 still gets a buffer worth refilling. The Reader is copied in by value,
+ *  which leaves the descriptor or the cursor behind it the caller's to close and to free.
+ *  @param r the source to read through, copied in
+ *  @param cap the buffer size in bytes, raised to 16 when it is smaller
+ *  @return a fresh heap BufReader the caller releases with bufreader_free and then free
+ *  @example
+ *  b: *BufReader = bufreader_new(stdin_reader(), 4096)
+ *  while true {
+ *      line, ok := bufreader_read_line(b)
+ *      if ok == false {
+ *          break
+ *      }
+ *      println(line)
+ *      free(line)
+ *  }
+ *  bufreader_free(b)
+ *  free(b) */
+export func bufreader_new(r: Reader, cap: int64) -> *BufReader {
+    mut n: int64 = cap
+    if n < 16 {
+        n = 16
+    }
+    d: *raw char = alloc_bytes(n)
+    return alloc(BufReader { r: r, buf: d, cap: n, lo: 0, hi: 0, done: false, err_msg: "" })
+}
+
+// Makes at least one buffered byte available, refilling from the source when the buffer
+// has run dry. Returns false at end of stream and after a read failure, which is recorded
+// once in done and err_msg and reported from there ever after rather than by reading the
+// source again. Every read function here goes through this and nowhere else.
+func bufreader_fill(b: *BufReader) -> bool {
+    if (*b).lo < (*b).hi {
+        return true
+    }
+    if (*b).done {
+        return false
+    }
+    (*b).lo = 0
+    (*b).hi = 0
+    got, e := read_buf((*b).r, (*b).buf, (*b).cap)
+    if e.exists() {
+        (*b).done = true
+        (*b).err_msg = e.toString()
+        return false
+    }
+    if got == 0 {
+        (*b).done = true
+        return false
+    }
+    (*b).hi = got
+    return true
+}
+
+/** Reads up to cap bytes into buf, serving what is already buffered before it asks the
+ *  source for anything. A call that finds bytes in the buffer returns them and stops there,
+ *  so a short count is ordinary and not end of stream; only a count of 0 with an empty
+ *  error is. A call that finds the buffer empty issues one read straight into buf, which
+ *  keeps a large read from paying a copy through the buffer. buf is the caller's and must
+ *  hold at least cap bytes.
+ *  @param b the reader to read from, borrowed and advanced in place
+ *  @param buf the destination buffer the caller owns, at least cap bytes
+ *  @param cap the maximum number of bytes to read
+ *  @return the count read paired with an error; a count of 0 with an empty error is end of
+ *  stream, and a stream that failed returns 0 with that failure every call after
+ *  @example
+ *  scratch: *raw char = alloc_bytes(8192)
+ *  mut total: int64 = 0
+ *  mut going: bool = true
+ *  while going {
+ *      got, e := bufreader_read(b, scratch, 8192)
+ *      if e.exists() || got == 0 {
+ *          going = false
+ *      } else {
+ *          wrote, we := write_buf(dst, scratch, got)
+ *          we.ignore()
+ *          total = total + wrote
+ *      }
+ *  }
+ *  free(scratch) */
+export func bufreader_read(b: *BufReader, buf: *void, cap: int64) -> (int64, error) {
+    if cap <= 0 {
+        return (0, error {})
+    }
+    lo: int64 = (*b).lo
+    hi: int64 = (*b).hi
+    if lo < hi {
+        avail: int64 = hi - lo
+        mut k: int64 = cap
+        if avail < k {
+            k = avail
+        }
+        tmp: *raw char = alloc_bytes(k + 1)
+        d: *raw char = (*b).buf
+        for i in 0..k {
+            tmp[i] = d[lo + i]
+        }
+        tmp[k] = 0
+        memcpy(buf, tmp, k)
+        free(tmp)
+        (*b).lo = lo + k
+        return (k, error {})
+    }
+    if (*b).done {
+        return (0, bufreader_err(b))
+    }
+    got, e := read_buf((*b).r, buf, cap)
+    if e.exists() {
+        (*b).done = true
+        (*b).err_msg = e.toString()
+        return (0, e)
+    }
+    if got == 0 {
+        (*b).done = true
+    }
+    return (got, error {})
+}
+
+/** The next line, without the newline that ended it, as a fresh heap string paired with
+ *  true. A carriage return before the newline is part of the line and kept, so a file with
+ *  Windows line endings hands back a line ending in \r and a program that cares strips it.
+ *  The last line of a stream that does not end in a newline is returned like any other, and
+ *  so is a line a read failure cut short: the bytes already read come back with true, the
+ *  next call answers the empty string and false, and bufreader_err then says whether the
+ *  stream ended or failed, so a caller checks it once after the loop. The empty string of a
+ *  false result is a literal, so free only the string of a true one. A line longer than the buffer grows
+ *  through a builder across as many refills as it takes, with no cap on its length.
+ *  @param b the reader to read from, borrowed and advanced in place
+ *  @return the line as a fresh heap string the caller frees, paired with true; the empty
+ *  string and false once there is no line left */
+export func bufreader_read_line(b: *BufReader) -> (string, bool) {
+    sb: *StringBuilder = alloc(sb_new())
+    mut ended: bool = false
+    mut going: bool = true
+    while going {
+        if bufreader_fill(b) == false {
+            going = false
+        } else {
+            lo: int64 = (*b).lo
+            hi: int64 = (*b).hi
+            d: *raw char = (*b).buf
+            mut idx: int64 = lo
+            mut found: bool = false
+            while idx < hi {
+                if d[idx] == 10 {
+                    found = true
+                    break
+                }
+                idx = idx + 1
+            }
+            for k in lo..idx {
+                sb_push_char(sb, d[k])
+            }
+            if found {
+                (*b).lo = idx + 1
+                ended = true
+                going = false
+            } else {
+                (*b).lo = hi
+            }
+        }
+    }
+    size: int64 = sb_size(sb)
+    if ended == false && size == 0 {
+        sb_free(sb)
+        free(sb)
+        return ("", false)
+    }
+    out: string = substring(sb_cstr(sb), 0, size)
+    sb_free(sb)
+    free(sb)
+    return (out, true)
+}
+
+/** The next byte paired with true, or 0 and false at end of stream and after a read
+ *  failure, which bufreader_err then reports. A 0 byte in the data is a real byte and comes
+ *  back with true, so the flag is the end of stream test and the value never is.
+ *  @param b the reader to read from, borrowed and advanced in place
+ *  @return the byte paired with true, or 0 and false once there is nothing left */
+export func bufreader_read_byte(b: *BufReader) -> (char, bool) {
+    if bufreader_fill(b) == false {
+        return (0, false)
+    }
+    lo: int64 = (*b).lo
+    d: *raw char = (*b).buf
+    c: char = d[lo]
+    (*b).lo = lo + 1
+    return (c, true)
+}
+
+/** The read failure that ended the stream, or an empty error when the stream simply ran
+ *  out or is still going. A read function that returns false or a count of 0 says only that
+ *  there is nothing more to read; this says why. The message is the one the source reported
+ *  and lives as long as that error does, so it is neither copied nor freed here.
+ *  @param b the reader to ask, borrowed
+ *  @return the failure that ended the stream, or an empty error */
+export func bufreader_err(b: *BufReader) -> error {
+    msg: string = (*b).err_msg
+    if str_len(msg) == 0 {
+        return error {}
+    }
+    return error { message: msg }
+}
+
+/** Frees the buffer and nothing else, the convention sb_free and multi_free already follow:
+ *  free the BufReader block itself with free once this returns. The Reader is a value this
+ *  neither closes nor frees, so the descriptor behind it is still open and the string behind
+ *  a cursor is still the caller's.
+ *  @param b the reader whose buffer to release, borrowed */
+export func bufreader_free(b: *BufReader) -> void {
+    free((*b).buf)
+}

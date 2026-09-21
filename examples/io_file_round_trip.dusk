@@ -1,0 +1,34 @@
+// A descriptor from open_file reaches a Writer through fd_writer with an int64 cast, and
+// the same file reaches a Reader through fd_reader. std.io never imports std.fs: the
+// bridge between them is the descriptor number and nothing else.
+@paradigm procedural
+
+@import std.io
+@import std.fs
+
+func main() -> int32 {
+    path: string = "/tmp/dusk_io_round_trip.tmp"
+    fd, oe := open_file(path, o_wronly() | o_creat() | o_trunc(), mode_0644())
+    oe.ignore()
+    w: Writer = fd_writer(int64(fd))
+    e1 := write_line(w, "one")
+    e1.ignore()
+    e2 := write_line(w, "two")
+    e2.ignore()
+    e3 := write_line(w, "three")
+    e3.ignore()
+    ce := writer_close(w)
+    ce.ignore()
+
+    rfd, re := open_file(path, o_rdonly(), mode_0644())
+    re.ignore()
+    text, te := read_to_end(fd_reader(int64(rfd)))
+    te.ignore()
+    print(text)
+    free(text)
+    rce := reader_close(fd_reader(int64(rfd)))
+    rce.ignore()
+    ue := remove_file(path)
+    ue.ignore()
+    return 0
+}

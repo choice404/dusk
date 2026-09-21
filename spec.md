@@ -1948,7 +1948,9 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax a
 
 | Module                 | Description                                                     |
 | ---------------------- | --------------------------------------------------------------- |
-| std.io                 | print, println, printerr, file I/O                              |
+| std.io                 | Writer and Reader over stdout, stderr, stdin, descriptors, builders, strings, and sets of writers; the console helpers |
+| std.bufio              | buffered line, byte, and read access over any std.io Reader     |
+| std.fmt                | verb formatter over an Arg enum: format, writef, errorf, and the shortest round trip float printer |
 | std.logging            | level gated logging to stderr, Debug through Error               |
 | std.memory.allocator   | the Allocator interface and the two allocators implementing it  |
 | std.memory.arena       | arena allocator                                                 |
@@ -2171,6 +2173,6 @@ interface Display {
 }
 ```
 
-An integer prints in decimal by its own signedness: a signed width prints signed decimal and an unsigned width prints unsigned decimal, so a `uint64` at the top of its range prints `18446744073709551615` rather than `-1`. `print`, `println`, `printerr`, a `{}` format hole, and an interpolation hole all share the one rendering, so `println("{}", v)` and `f"{v}"` write the same bytes for the same unsigned value the way they already do for a signed one.
+An integer prints in decimal by its own signedness: a signed width prints signed decimal and an unsigned width prints unsigned decimal, so a `uint64` at the top of its range prints `18446744073709551615` rather than `-1`. `print`, `println`, `printerr`, a `{}` format hole, and an interpolation hole all share the one rendering, so `println("{}", v)` and `f"{v}"` write the same bytes for the same unsigned value the way they already do for a signed one. `std.fmt`'s `%v` verb reproduces this same rendering byte for byte, so `format("%v", [arg_float(x)])` and `f"{x}"` never disagree over the same value.
 
 Passing a struct with no `Display` impl to a print builtin is a compile error, as is printing an enum, a tuple, or a pointer. Print never emits silence for a value it cannot render. A slice is not printable, with one exception: a `char[]`, like a `char[N]` and a `char` themselves, prints its bytes as text rather than being rejected; see [Strings](#strings) for the rule and the exact bytes each of the three writes.

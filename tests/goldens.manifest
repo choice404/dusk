@@ -3495,7 +3495,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.16.1\n
+out dusk 1.17.0\n
 argv version
 code 0
 ---
@@ -7580,4 +7580,283 @@ mode tool
 argv build --relase examples/hello.dusk
 out 
 code 1
+---
+# The 1.17.0 std.io stream layer: a Writer is stdout, stderr, a descriptor, a builder, a
+# set of writers, or nothing, and a Reader is stdin, a descriptor, or a string in memory.
+# A Writer over descriptor 1 shares the C stdout stream with println, so the two land in
+# program order rather than one buffer flushing past the other.
+test io_stdout_interleaves_with_println
+mode run
+file examples/io_stdout_interleaves.dusk
+out a\nb\nc\n
+---
+# A write to the stderr writer flushes stdout first, the rule printerr follows, so the two
+# streams never reorder against each other.
+test io_stderr_writer_flushes_stdout_first
+mode run_raw
+file examples/io_stderr_flushes_stdout.dusk
+out a\n
+ok true
+err_eq b\n
+---
+test io_sb_writer_appends
+mode run
+file examples/io_sb_writer_appends.dusk
+out hello world\n\n
+---
+test io_multi_writer_fans_out
+mode run
+file examples/io_multi_fans_out.dusk
+out x\nx\n
+---
+# The failing part is first, so the builder behind the second part stays empty.
+test io_multi_writer_stops_at_first_error
+mode run
+file examples/io_multi_first_error.dusk
+out error\n0\n
+---
+# A descriptor from open_file reaches a Writer and a Reader through the descriptor number
+# alone, which is why std.io needs no import edge to std.fs.
+test io_file_round_trip
+mode run
+file examples/io_file_round_trip.dusk
+out one\ntwo\nthree\n
+---
+# Eleven bytes through a four byte buffer: 4, 4, 3, then 0 with no error, end of stream.
+test io_read_buf_reports_end_of_stream
+mode run
+file examples/io_read_buf_end_of_stream.dusk
+out 4\n4\n3\n0\n
+---
+test io_copy_string_reader_to_builder
+mode run
+file examples/io_copy_reader_to_builder.dusk
+out 11\nabcdefghijk\n
+---
+# writer_close flushes descriptor 0, 1, and 2 and leaves them open, so a write after one
+# still lands.
+test io_close_of_stdout_is_a_flush
+mode run
+file examples/io_close_of_stdout_is_a_flush.dusk
+out after\n
+---
+test io_write_after_close_is_an_error
+mode run
+file examples/io_write_after_close.dusk
+out error\n
+---
+# SIGPIPE is ignored process wide, so a write to a pipe whose read end is closed is an
+# error value rather than a signal that kills the program.
+test io_broken_pipe_is_an_error
+mode run
+file examples/io_broken_pipe.dusk
+out error\n
+---
+# stdin_reader reads descriptor 0 directly, not through the C stdin buffer.
+test io_stdin_reader_reads_the_input
+mode run
+file examples/io_stdin_reader.dusk
+stdin a\nb\n
+out a\nb\n
+---
+test io_unhandled_write_error_is_rejected
+mode check_fail
+file examples/io_unhandled_write_error.dusk
+err_has this expression's error result is ignored; bind it and handle the error with exists, check, or ignore
+---
+# A Writer borrows the builder behind it and frees nothing, so a builder freed underneath
+# one is caught by the generational check at the next write: a named fault, never a silent
+# corruption.
+test io_writer_over_a_freed_builder_faults
+mode run_raw
+file examples/io_writer_over_freed_builder.dusk
+out 
+ok false
+err_has use of a freed or stale pointer
+---
+# std.fmtfloat, the float printer. The shortest form of a set of anchor values, each
+# expectation derived by hand from the %r rule: decimal notation while the exponent
+# stays inside [-4, 21) and an exponent form outside it, no trailing zeros, and no
+# point on an integer value. A float literal has no exponent form, so a value is
+# either spelled out in full decimal or built from its IEEE bits.
+test fmtfloat_anchors_print_the_shortest_form
+mode run
+file examples/fmtfloat_anchors.dusk
+out one_tenth 0.1\none 1\nhundred 100\nten_thousandth 0.0001\nhundred_thousandth 1e-05\nten_to_21 1e+21\nten_to_20 100000000000000000000\none_third 0.3333333333333333\ntwo_and_a_half 2.5\nnegative_zero -0\nzero 0\ntwo_to_53_plus_one 9007199254740992\nmin_subnormal 5e-324\nnear_min_subnormal 5e-324\nmax_double 1.7976931348623157e+308\nmin_normal 2.2250738585072014e-308\ntwo_to_minus_25 2.9802322387695312e-08\nten_to_23 1e+23\nnine_nines_e22 1e+23\neight_point_41_e21 8.41e+21\none_point_five_e300 1.5e+300\nbig_int_double 123456789012345680\nnegative_one_seventh -0.14285714285714285\n
+---
+# Every value the shortest printer prints must read back as exactly that value. 20000
+# bit patterns from a fixed seed, every normal and subnormal power of two, and the
+# anchors, each formatted, parsed back through strtod, and compared by its bits.
+test fmtfloat_round_trips_the_corpus
+mode run
+file examples/fmtfloat_roundtrip.dusk
+out ok 20000\nok fixed\n
+---
+# The other half of shortest: for each value the C library is asked for the same
+# number at one digit fewer, and that shorter rendering must fail to read back.
+test fmtfloat_shortest_against_the_oracle
+mode run
+file examples/fmtfloat_shortest.dusk
+out ok\n
+---
+# The fixed precision layouts against the C library byte for byte, every corpus
+# value under e, f, g, E, and G at every precision from 0 through 17. This is what
+# lets std.fmt's %v reproduce what println writes.
+test fmtfloat_matches_c_at_every_precision
+mode run
+file examples/fmtfloat_cparity.dusk
+out ok\n
+---
+# The values that carry no digits, under every layout: glibc's own spelling of inf
+# and nan in both cases and both signs, and a zero of each sign whose exponent reads
+# as zero the way C reads it.
+test fmtfloat_specials
+mode run
+file examples/fmtfloat_special.dusk
+out inf r=inf v=inf G=INF #g=inf e=inf E=INF f=inf f0=inf\nneg_inf r=-inf v=-inf G=-INF #g=-inf e=-inf E=-INF f=-inf f0=-inf\nnan r=nan v=nan G=NAN #g=nan e=nan E=NAN f=nan f0=nan\nneg_nan r=-nan v=-nan G=-NAN #g=-nan e=-nan E=-NAN f=-nan f0=-nan\nzero r=0 v=0 G=0 #g=0.00000 e=0.00e+00 E=0.00E+00 f=0.00 f0=0\nneg_zero r=-0 v=-0 G=-0 #g=-0.00000 e=-0.00e+00 E=-0.00E+00 f=-0.00 f0=-0\n
+---
+# The 1.17.0 std.bufio buffered reader: one line or one byte at a time over any std.io
+# Reader, with each line a fresh heap string rather than an offset into a buffer about to
+# be refilled. An empty line between two newlines is a line of its own, and the last line
+# of a stream that does not end in a newline comes back like any other.
+test bufio_reads_lines_across_refills
+mode run
+file examples/bufio_lines_across_refills.dusk
+out a\nbb\n\nccc\nend\n
+---
+# A carriage return before the newline belongs to the line and stays in it, so a stream
+# with Windows line endings hands back a line one byte longer than its text.
+test bufio_keeps_a_carriage_return
+mode run
+file examples/bufio_keeps_a_carriage_return.dusk
+out 2\n
+---
+# Ten thousand bytes through a sixteen byte buffer. A line longer than the buffer grows
+# through a builder across as many refills as it takes, with no cap on its length.
+test bufio_reads_a_line_longer_than_its_buffer
+mode run
+file examples/bufio_long_line.dusk
+out 10000\n
+---
+# The cursor is drained by the first refill, so the ten bytes left after the first line
+# could only have come out of the buffer; the call after that finds the buffer empty,
+# reads the exhausted source once, and reports end of stream.
+test bufio_read_serves_buffered_bytes_first
+mode run
+file examples/bufio_read_serves_buffered_first.dusk
+out one\n10\ntwo\nthree\n0\n
+---
+# A BufReader over stdin_reader reads descriptor 0 directly, never through the C stdin
+# buffer the read_line builtin uses, so this program picks one of the two paths for its
+# whole run.
+test bufio_reads_stdin_lines
+mode run
+file examples/bufio_stdin_lines.dusk
+stdin alpha\nbeta\ngamma\n
+out alpha\nbeta\ngamma\n3\n
+---
+# A read failure ends the stream the way end of input does, so a line read reports false
+# either way and bufreader_err is what tells the two apart.
+test bufio_reports_the_read_error
+mode run
+file examples/bufio_reports_read_error.dusk
+out error\n
+---
+# A BufReader is released in two steps, the buffer and then the block, and reading a line
+# through one after the second step is a use after free: the generational check names it
+# and aborts rather than handing back whatever bytes happen to sit there.
+test bufio_line_after_free_faults
+mode run_raw
+file examples/bufio_line_after_free.dusk
+out 
+ok false
+err_has use of a freed or stale pointer
+---
+# std.fmt, the verb formatter. The integer verbs with every flag that lays a number
+# out, once for a positive value and once for its negative: a hex, octal, or binary
+# rendering of a negative value is a minus and the magnitude rather than the two's
+# complement word C writes, and a precision is a minimum digit count.
+test fmt_integer_verbs
+mode run
+file examples/fmt_integer_verbs.dusk
+out 42|   42|42   |00042|+42| 42|2a|2A|0x2a|52|101010|042\n-42|  -42|-42  |-0042|-42|-42|-2a|-2A|-0x2a|-52|-101010|-042\n
+---
+# An unsigned value keeps its signedness through the verbs: the top of the uint64
+# range prints as itself rather than as the -1 a signed reading would give.
+test fmt_unsigned_top
+mode run
+file examples/fmt_unsigned_top.dusk
+out 18446744073709551615 ffffffffffffffff 18446744073709551615\n
+---
+# A width and a precision count bytes, not scalars, so a six byte string holding one
+# two byte scalar pads to ten with four spaces and truncates at three bytes. The %q
+# line carries the escapes doubled, since the manifest reads a backslash escaped too.
+test fmt_string_verbs
+mode run
+file examples/fmt_string_verbs.dusk
+out héllo|    héllo|héllo    |hé\n"héllo \\"w\\"\\n"\n
+---
+# A char is one byte under %v and %c, its code under %d, and single quoted under %q;
+# a scalar that needs more than one byte arrives as an int64 under %c.
+test fmt_char_and_bool
+mode run
+file examples/fmt_char_and_bool.dusk
+out A 'A' 65 true false λ\n
+---
+# The float verbs at C's default precision of six, with the flags laying the result
+# out. %v is the general conversion at that precision and so is what println writes,
+# and %r is the shortest form that reads back as the same double.
+test fmt_float_verbs
+mode run
+file examples/fmt_float_verbs.dusk
+out 3.141590|3.14|3.141590e+00|3.141590E+00|3.14159|3.14159|3.14159|3.14159|   3.142|3.142   |0003.142|+3.1|3.14159\n1234567.000000|1234567.00|1.234567e+06|1.234567E+06|1.23457e+06|1.23457E+06|1.23457e+06|1234567|1234567.000|1234567.000|1234567.000|+1234567.0|1.23457e+06\n
+---
+# The five markers, in the order the plan names them. A format call has no error
+# channel, so every one of these renders into the output and the program exits clean.
+test fmt_markers_never_fault
+mode run
+file examples/fmt_markers.dusk
+out %!d(MISSING)\n%!d(string=hello)\n%!z(int64=5)\nend%!(NOVERB)\n1%!(EXTRA int64=5, string=x)\n
+---
+test fmt_writef_and_errorf
+mode run
+file examples/fmt_writef_errorf.dusk
+out count=7 rate=0.12\nbad token at 12\n
+---
+# %v renders exactly what a println format hole renders, so the two lines agree.
+test fmt_print_fmt_matches_println
+mode run
+file examples/fmt_print_fmt_parity.dusk
+out -3 18446744073709551615 1.23457e+06 true\n-3 18446744073709551615 1.23457e+06 true\n
+---
+test fmt_empty_args
+mode run
+file examples/fmt_empty_args.dusk
+out plain %\n
+---
+# An argument reaches a format call as an Arg and never as a bare value, so a raw
+# integer in the slice is refused at check rather than rendering a marker at run time.
+test fmt_wrong_arg_type_is_rejected
+mode check_fail
+file examples/fmt_wrong_arg_type.dusk
+err_has argument 2 has the wrong type
+---
+test fmt_unhandled_writef_error_is_rejected
+mode check_fail
+file examples/fmt_unhandled_writef_error.dusk
+err_has this expression's error result is ignored; bind it and handle the error with exists, check, or ignore
+---
+# The parity acceptance test: 20000 bit patterns from a fixed seed, every power of
+# two the format holds, the classic hard cases, the values that carry no digits, and
+# the integer extremes, each compared between %v and an interpolation hole in the
+# same process. No C oracle takes part; the old printer is the oracle.
+test fmt_println_float_parity
+mode run
+file examples/fmt_println_float_parity.dusk
+out ok\n
+---
+test fmt_alternate_form_and_c_range
+mode run
+file examples/fmt_alt_and_c_edges.dusk
+out 3.|3.e+00|1.|123456.|1.E+08\n[�|�|�|A]\n[�|�]\n
 ---

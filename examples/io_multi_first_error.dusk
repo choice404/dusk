@@ -1,0 +1,31 @@
+// A fan out stops at the first part that fails, so a part added after the failing one
+// sees nothing of that write. The first part here is a descriptor already closed.
+@paradigm procedural
+
+@import std.io
+@import std.string
+@import std.async.io
+
+func main() -> int32 {
+    p, pe := pipe_new()
+    pe.ignore()
+    we := fd_close(p.w)
+    we.ignore()
+    re := fd_close(p.r)
+    re.ignore()
+
+    b: *StringBuilder = alloc(sb_new())
+    m: *MultiWriter = alloc(multi_new())
+    multi_add(m, fd_writer(p.w))
+    multi_add(m, sb_writer(b))
+    e := write_line(multi_writer(m), "x")
+    if e.exists() {
+        println("error")
+    }
+    println(sb_size(b))
+    multi_free(m)
+    free(m)
+    sb_free(b)
+    free(b)
+    return 0
+}

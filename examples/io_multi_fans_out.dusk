@@ -1,0 +1,22 @@
+// A multi writer fans one write out to every part in insertion order. The line reaches
+// the builder and stdout, and the discard part keeps nothing.
+@paradigm procedural
+
+@import std.io
+@import std.string
+
+func main() -> int32 {
+    b: *StringBuilder = alloc(sb_new())
+    m: *MultiWriter = alloc(multi_new())
+    multi_add(m, sb_writer(b))
+    multi_add(m, stdout_writer())
+    multi_add(m, discard_writer())
+    e := write_line(multi_writer(m), "x")
+    e.ignore()
+    print(sb_cstr(b))
+    multi_free(m)
+    free(m)
+    sb_free(b)
+    free(b)
+    return 0
+}

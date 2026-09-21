@@ -11,7 +11,9 @@ Imported names are flat. After `@import std.io` you call `print_int` and `print_
 
 ## std.io
 
-Console output over the `print` and `println` builtins, plus typed line input that reads a line and parses it.
+Console output over the `print` and `println` builtins, the `Writer` and `Reader` stream layer added in 1.17.0, and typed line input that reads a line and parses it.
+
+### Console output
 
 `print` and `println` are builtins, available everywhere without an import. `print` writes a value with no newline and `println` appends one, each handling a string, an integer of any width, signed or unsigned, a float, a bool, or a char. An unsigned value writes unsigned decimal, so a `uint64` at the top of its range prints `18446744073709551615` rather than `-1`, and a `{}` hole and an f-string hole render it the same bytes. Build a line piece by piece with `print`, then close it with `println`.
 
@@ -29,6 +31,131 @@ println("I am {} and I am {}", name, age)
 print("no newline {}", 7)
 println("{{braces}} and a hole {}", 99)   // {braces} and a hole 99
 ```
+
+### Writers
+
+Added in 1.17.0. A `Writer` is one value standing for a sink: standard output, standard error, any descriptor, a `StringBuilder`, a set of writers, or nothing at all. It is an enum, so it returns from a function, sits in a struct field or a `*Vector<Writer>`, crosses into an `async func`, and is captured by a `spawn`, the way any other value does.
+
+```text
+enum Writer {
+    Fd(fd: int64),
+    Str(b: *StringBuilder),
+    Many(m: *MultiWriter),
+    Discard,
+}
+
+struct MultiWriter {
+    parts: *Vector<Writer>,
+}
+```
+
+Build one through a constructor rather than naming a variant, and dispatch through the functions rather than matching a `Writer` yourself. A `match` on one compiles today, but the variant set belongs to `std.io` and a later release may add a sink to it, which would break that match and nothing else.
+
+| Function                                                     | Description                                                     |
+| ------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `stdout_writer() -> Writer`                                  | Descriptor 1, through the C stdout stream, so writes land in order with `println`. |
+| `stderr_writer() -> Writer`                                  | Descriptor 2; each write flushes stdout first, the `printerr` rule. |
+| `fd_writer(fd: int64) -> Writer`                             | Any descriptor, a file from `open_file` cast with `int64(fd)`, or a socket. |
+| `sb_writer(b: *StringBuilder) -> Writer`                     | Appends into a builder the caller owns and frees.                |
+| `discard_writer() -> Writer`                                 | Accepts every write, keeps nothing, never fails.                 |
+| `multi_new() -> MultiWriter`                                 | An empty set of writers; build it with `alloc(multi_new())`.     |
+| `multi_add(m: *MultiWriter, w: Writer) -> void`              | Appends a copy of `w`; a writer added twice receives every write twice. |
+| `multi_writer(m: *MultiWriter) -> Writer`                    | Fans a write out to `m`'s parts in insertion order, stopping at the first error. |
+| `multi_free(m: *MultiWriter) -> void`                        | Frees the part list; `free(m)` releases the block itself.        |
+| `write_buf(w: Writer, buf: *void, n: int64) -> (int64, error)` | Writes all `n` bytes from `buf`; the count is `n` when the error is empty. |
+| `write_string(w: Writer, s: string) -> error`                | Writes `s` up to its NUL; `s` is borrowed.                       |
+| `write_line(w: Writer, s: string) -> error`                  | `s` and a newline, staged into one buffer and issued as one write. |
+| `write_char(w: Writer, c: char) -> error`                    | One byte.                                                         |
+| `flush(w: Writer) -> error`                                  | Flushes the C stream behind descriptor 1 or 2; every other writer is unbuffered already. |
+| `writer_close(w: Writer) -> error`                           | Closes a descriptor above 2; 0, 1, and 2 are flushed and left open. |
+
+```text
+@import std.io
+@import std.string
+
+b: *StringBuilder = alloc(sb_new())
+m: *MultiWriter = alloc(multi_new())
+multi_add(m, stdout_writer())
+multi_add(m, sb_writer(b))
+
+e := write_line(multi_writer(m), "written once, kept twice")
+e.ignore()
+
+multi_free(m)
+free(m)
+sb_free(b)
+free(b)
+```
+
+A descriptor is the whole bridge to `std.fs`, which `std.io` does not import: open the file there, wrap the descriptor here.
+
+```text
+fd, oe := open_file("/tmp/notes.txt", o_wronly() | o_creat() | o_trunc(), mode_0644())
+oe.ignore()
+w: Writer = fd_writer(int64(fd))
+we := write_line(w, "one")
+we.ignore()
+ce := writer_close(w)
+ce.ignore()
+```
+
+### Readers
+
+A `Reader` is the same shape on the way in: standard input, any descriptor, or a cursor over a string already in memory.
+
+```text
+enum Reader {
+    Fd(fd: int64),
+    Str(c: *StringReader),
+}
+
+struct StringReader {
+    s: string,
+    pos: int64,
+    n: int64,
+}
+```
+
+| Function                                                     | Description                                                     |
+| ------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `stdin_reader() -> Reader`                                   | Descriptor 0, read directly rather than through the C stdin buffer. |
+| `fd_reader(fd: int64) -> Reader`                             | Any descriptor.                                                   |
+| `string_reader_new(s: string) -> StringReader`               | A cursor at offset 0 over `s`, measured once; build it with `alloc(string_reader_new(s))`. |
+| `string_reader(c: *StringReader) -> Reader`                  | Reads through the cursor, advancing it.                          |
+| `read_buf(r: Reader, buf: *void, cap: int64) -> (int64, error)` | Reads up to `cap` bytes; a count of 0 with an empty error is end of stream. |
+| `read_to_end(r: Reader) -> (string, error)`                  | Reads to end of stream into a fresh heap string the caller frees. |
+| `reader_close(r: Reader) -> error`                           | Closes a descriptor above 2.                                     |
+| `io_copy(dst: Writer, src: Reader) -> (int64, error)`        | Pumps `src` into `dst` through an 8192 byte scratch until end of stream. |
+
+```text
+@import std.io
+
+c: *StringReader = alloc(string_reader_new("one\ntwo\n"))
+text, e := read_to_end(string_reader(c))
+e.ignore()
+print(text)
+free(text)
+free(c)
+```
+
+`read_buf` reports a short count at the end of the data and then a count of 0 with an empty error, which is end of stream; a failure is a count of 0 with the error set. A NUL byte inside the data ends the string `read_to_end` hands back early, even though every byte read was copied in, since a string is a NUL terminated view; read through `read_buf` when the data is not text.
+
+### Ownership and lifetimes
+
+- A `Writer` is a value. Copy it freely; every copy names the same stream. It never owns heap memory: `sb_writer` borrows a `StringBuilder` the caller frees, `multi_writer` borrows a `MultiWriter` the caller releases with `multi_free` and then `free`, and an `Fd` writer holds the descriptor number and nothing else. A `MultiWriter` must not contain itself, directly or through another set: nothing checks for the cycle and a write through one recurses until the stack runs out.
+- `writer_close` closes a descriptor above 2, and after it every copy of that `Writer` is stale: a later write returns an error, it never faults, unless a later open has reused the descriptor number, in which case the bytes land in that stream; close once and drop every copy. `stdout_writer()` and `stderr_writer()` are flushed and left open, never closed; close descriptor 1 through `std.fs` if you really mean it.
+- Who closes a descriptor: whoever opened it. A descriptor from `open_file` wrapped with `fd_writer(int64(fd))` may be closed with either `writer_close` or `close_file`, once.
+- A `Reader` is a value under the same rules. `string_reader` borrows the `StringReader` cursor, which borrows the string; free the cursor with `free`, then the string if you own it. `reader_close` closes a descriptor above 2 and does nothing else, and a `Reader` over a file neither frees nor closes it when it goes out of scope, since there is no drop.
+- `read_to_end` returns a fresh heap string you free.
+- Partial writes: `write_buf` loops until every byte is written or the OS fails, and reports the count written before the failure beside the error; `write_string`, `write_line`, and `write_char` hide the count and return the error alone. `EINTR` is retried inside the runtime and never surfaces.
+- A `Writer` over descriptor 1 shares the C stdout stream with `println`, so the two interleave in program order; a `Writer` over any other descriptor writes straight to the kernel and `flush` on it does nothing.
+- The stdin mixing rule: `stdin_reader()` reads descriptor 0 directly, while the `read_line` and `read_all` builtins and `read_int` and `read_float` read through the C `stdin` buffer. Bytes the C buffer has already pulled in are invisible to `stdin_reader`, so a program picks one of the two for its whole run.
+- Blocking only: every `Reader` here blocks. A descriptor set non blocking with `fd_nonblock` returns a `would block` error from `read_buf`; use `std.async.io` for a non blocking stream.
+- Threads: a `Writer` and a `Reader` cross a `spawn` as plain values, the pointer inside `Str` and `Many` becoming a borrow. Two threads writing one descriptor each issue one `write(2)` and interleave at that granularity, and a `StringBuilder` or a `MultiWriter` shared across threads is a data race like any other shared heap block.
+
+### Console helpers
+
+The four functions this module started as. They still go through the `print` and `read_line` builtins and are unchanged; reach for a `Writer` or a `Reader` for anything else.
 
 | Function                            | Description                                  |
 | ----------------------------------- | -------------------------------------------- |
@@ -100,6 +227,212 @@ while true {
     print_line(line)
 }
 ```
+
+Both builtins read through the C `stdin` buffer, and `stdin_reader()` reads descriptor 0 directly, so the two paths do not mix: pick one for the whole run. See the stdin mixing rule above.
+
+## std.bufio
+
+A buffered reader over any `std.io` `Reader`, so a program reads a stream one line or one byte at a time without paying for a `read(2)` per byte. A line arrives as a fresh heap string rather than as an offset into a buffer that is about to be refilled. Added in 1.17.0.
+
+```text
+struct BufReader {
+    r: Reader,
+    buf: *raw char,
+    cap: int64,
+    lo: int64,
+    hi: int64,
+    done: bool,
+    err_msg: string,
+}
+```
+
+| Function                                                        | Description                                                  |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `bufreader_new(r: Reader, cap: int64) -> *BufReader`            | A heap reader over `r` with a `cap` byte buffer; a `cap` below 16 reads as 16. |
+| `bufreader_read(b: *BufReader, buf: *void, cap: int64) -> (int64, error)` | Serves buffered bytes first, then one read straight into `buf`. |
+| `bufreader_read_line(b: *BufReader) -> (string, bool)`          | The next line without its newline, paired with `true`; the empty string and `false` once there is none. |
+| `bufreader_read_byte(b: *BufReader) -> (char, bool)`            | The next byte paired with `true`, or 0 and `false` at the end.  |
+| `bufreader_err(b: *BufReader) -> error`                         | The read failure that ended the stream, or an empty error.      |
+| `bufreader_free(b: *BufReader) -> void`                         | Frees the buffer; `free(b)` releases the block itself.          |
+
+```text
+@import std.io
+@import std.bufio
+
+b: *BufReader = bufreader_new(stdin_reader(), 4096)
+while true {
+    line, ok := bufreader_read_line(b)
+    if ok == false {
+        break
+    }
+    println(line)
+    free(line)
+}
+e := bufreader_err(b)
+e.ignore()
+bufreader_free(b)
+free(b)
+```
+
+A line keeps a carriage return that sits before its newline, so a stream with Windows line endings hands back a line ending in `\r` and a program that cares strips it. The last line of a stream that does not end in a newline is returned like any other, and an empty line between two newlines is a line of its own, so the flag rather than the text is what says the stream is done. A line longer than the buffer grows through a builder across as many refills as it takes, with no cap on its length.
+
+`bufreader_read_line` and `bufreader_read_byte` both report `false` once the stream has ended or a read has failed, and `bufreader_err` is what tells the two apart: it is the empty error when the stream simply ran out and the failure itself when a read refused. A line a failure cut short comes back first, with `true`, so no byte already read is lost; the call after it is the one that answers `false`.
+
+```text
+line, ok := bufreader_read_line(b)
+if ok {
+    println(line)
+    free(line)
+} else {
+    e := bufreader_err(b)
+    if e.exists() {
+        printerr(e.toString())
+    }
+    e.ignore()
+}
+```
+
+A `BufReader` is not itself a `Reader` in 1.17.0. A buffered variant inside `std.io`'s enum would put the drain logic in `std.io` and the buffer in `std.bufio`, a cycle between the two files, so a program that wants `io_copy` from a buffered source pumps `bufreader_read` in a loop instead.
+
+```text
+scratch: *raw char = alloc_bytes(8192)
+mut total: int64 = 0
+mut going: bool = true
+while going {
+    got, e := bufreader_read(b, scratch, 8192)
+    if e.exists() || got == 0 {
+        going = false
+    } else {
+        wrote, we := write_buf(dst, scratch, got)
+        we.ignore()
+        total = total + wrote
+    }
+}
+free(scratch)
+```
+
+### Ownership and lifetimes
+
+- A `BufReader` owns its buffer and the copy of the `Reader` it was built over, not the descriptor or the cursor behind that `Reader`. `bufreader_free` releases the buffer, `free` releases the block, and closing the stream is a separate `reader_close`.
+- A line from `bufreader_read_line` is a fresh heap string you free. The empty string that comes back with `false` is a literal, so free the string of a `true` result and leave the other alone.
+- The message `bufreader_err` carries belongs to the error the source reported and lives as long as that error does, so it is neither copied into the reader nor freed with it.
+- Do not mix a `BufReader` with a `read_buf` on the same underlying `Reader`. Bytes already in the buffer are invisible to one and gone from the other, which is the same rule the C `stdin` buffer and `stdin_reader()` follow.
+- Reads block, the rule `std.io`'s `Reader` carries. A descriptor set non blocking with `fd_nonblock` lands a `would block` error in the reader, which ends the stream and comes back out of `bufreader_err`; use `std.async.io` for a non blocking stream.
+
+## std.fmt
+
+The verb formatter, added in 1.17.0. A format string carries directives, `%v`, `%s`, `%d`, `%q`, `%x`, `%.2f` and the rest, and each one renders the next argument beside it. dusk has no variadics for a dusk function and no way to ask a monomorphized body what type it was stamped for, so the type travels with the value: every argument is an `Arg`, and a format call takes a slice of them.
+
+```text
+enum Arg {
+    Int(n: int64),
+    Uint(n: uint64),
+    Float(x: float64),
+    Str(s: string),
+    Bool(b: bool),
+    Char(c: char),
+}
+```
+
+| Function                                                     | Description                                             |
+| ------------------------------------------------------------ | -------------------------------------------------------- |
+| `arg_int(n: int64) -> Arg`                                   | A signed integer argument; a narrower width casts first, `arg_int(int64(n))`. |
+| `arg_uint(n: uint64) -> Arg`                                 | An unsigned integer argument, rendered unsigned by `%v` and `%d`. |
+| `arg_float(x: float64) -> Arg`                               | A float argument.                                       |
+| `arg_str(s: string) -> Arg`                                  | A string argument, borrowed for the call.               |
+| `arg_bool(b: bool) -> Arg`                                   | A bool argument.                                        |
+| `arg_char(c: char) -> Arg`                                   | A char argument, one byte.                              |
+| `arg_error(e: error) -> Arg`                                 | An error as its message, an empty error as the empty string. |
+| `format(f: string, args: Arg[]) -> string`                   | The rendering as a fresh heap string the caller frees.  |
+| `format_into(b: *StringBuilder, f: string, args: Arg[]) -> void` | Appends the rendering to a builder, the core the rest runs through. |
+| `writef(w: Writer, f: string, args: Arg[]) -> error`         | Renders and writes the whole of it to a `Writer` as one write. |
+| `print_fmt(f: string, args: Arg[]) -> void`                  | Renders to standard output, discarding the write error the way `print_line` does. |
+| `errorf(f: string, args: Arg[]) -> error`                    | An error whose message is the rendering.                |
+| `float_to_string(x: float64) -> string`                      | The shortest decimal that reads back as `x`, the `%r` layout, as a fresh heap string. |
+
+```text
+@paradigm procedural
+@import std.fmt
+
+print_fmt("%-8s %6.2f\n", [arg_str("total"), arg_float(12.5)])   // total     12.50
+
+s: string = format("%s scored %d%%", [arg_str("ada"), arg_int(99)])
+println(s)                                                       // ada scored 99%
+free(s)
+```
+
+### Directives
+
+A directive is a `%`, then any of the flags, then an optional width, then an optional point and precision, then the verb. Every byte outside a directive copies through, `%%` writes one `%` and consumes no argument, and arguments are consumed left to right, one per directive.
+
+```text
+directive := '%' flag* width? ('.' precision)? verb
+flag      := '-' | '+' | ' ' | '0' | '#'
+width     := digit+
+precision := digit*
+verb      := 'v' | 'r' | 's' | 'q' | 'd' | 'x' | 'X' | 'o' | 'b' | 'c' | 't'
+           | 'f' | 'e' | 'E' | 'g' | 'G' | '%'
+```
+
+| Verb        | Int              | Uint             | Float               | Str                   | Bool           | Char         |
+| ----------- | ---------------- | ---------------- | ------------------- | --------------------- | -------------- | ------------ |
+| `%v`        | decimal          | unsigned decimal | what `println` writes | the bytes           | `true`/`false` | the byte     |
+| `%r`        | as `%v`          | as `%v`          | shortest round trip | as `%v`               | as `%v`        | as `%v`      |
+| `%s`        | as `%v`          | as `%v`          | as `%v`             | the bytes, precision truncates | as `%v` | as `%v` |
+| `%d`        | decimal          | unsigned decimal | marker              | marker                | marker         | the code     |
+| `%x` `%X`   | `-` then hex magnitude | hex        | marker              | hex of each byte      | marker         | hex of the code |
+| `%o` `%b`   | `-` then magnitude | octal, binary  | marker              | marker                | marker         | the code     |
+| `%c`        | UTF-8 of the scalar | UTF-8 of the scalar | marker         | marker                | marker         | the byte     |
+| `%q`        | marker           | marker           | marker              | double quoted, escaped | marker        | single quoted, escaped |
+| `%t`        | marker           | marker           | marker              | marker                | `true`/`false` | marker       |
+| `%f` `%e` `%E` `%g` `%G` | marker | marker      | the C conversions   | marker                | marker         | marker       |
+
+`-` left justifies inside the width, padding on the right with spaces. `0` pads a numeric verb with zeros after the sign and after a `#` prefix; it is ignored with `-`, on a non numeric verb, on `inf` and `nan`, and on an integer verb carrying a precision, which is what C does. `+` writes a `+` before a non negative number and ` ` writes a space there, `+` winning when both are given. `#` writes `0x`, `0X`, `0o`, or `0b` before `%x`, `%X`, `%o`, and `%b`, and keeps `%g`'s trailing zeros and its point.
+
+A width and a precision count bytes, not scalars, so padding a string of non ASCII text lines up by byte count; a scalar aware pad waits for a `std.string` pad family. Both are capped at 4096. Precision on `%s` truncates to that many bytes, on `%d`, `%x`, `%o`, and `%b` it is the minimum digit count, on `%f`, `%e`, and `%g` it is the C meaning, and on `%v` over a float it selects `%g` at that precision. A float verb with no precision runs at six, C's own default.
+
+`%x` and `%o` and `%b` over a negative integer write a `-` and the magnitude rather than the two's complement word C writes, so `%x` of -42 is `-2a`, and the magnitude of the most negative `int64` is taken in the unsigned width so it does not overflow back to itself.
+
+`%q` wraps a string in double quotes and a char in single quotes. In both, `\` becomes `\\`, a newline `\n`, a tab `\t`, a carriage return `\r`, every other byte below 0x20 and the byte 0x7F becomes `\xNN` in lowercase hex, and every byte at 0x80 and above passes through so UTF-8 stays readable. Each form escapes its own delimiter and leaves the other bare: a string writes `"` as `\"` and `'` as is, a char writes `'` as `\'` and `"` as is.
+
+`inf`, `-inf`, `nan`, and `-nan` render under every float verb, glibc's own spelling and the one `println` already writes. A width applies to them, the `0` flag does not, and `+` and ` ` write their sign the way C does.
+
+### Markers
+
+A directive never fails and a format call has no error channel, so a mistake in the literal renders a marker into the output and the program keeps running. A wrong call shows up in what it printed, which is the right place for a mistake in a literal, and never as a fault or a condition the caller has to resolve.
+
+| Mistake                         | Marker                        |
+| ------------------------------- | ----------------------------- |
+| no argument left for a directive | `%!d(MISSING)`               |
+| a verb the type does not take   | `%!d(string=hello)`           |
+| a verb nothing defines          | `%!z(int64=5)`                |
+| a `%` at the end of the format  | `%!(NOVERB)`                  |
+| arguments left over             | `%!(EXTRA int64=5, string=x)` |
+
+A marker prints the verb, the argument's type name, and its `%v` rendering, and takes no width and no precision, so it arrives exactly as written above. The extra marker goes out once, at the end.
+
+### Floats and println parity
+
+`println`, `printerr`, a `{}` hole, and an f string hole all render a float through the C general conversion at precision 6. `%v` and a `%g` with no precision reproduce that byte for byte, through `std.fmtfloat`'s exact digit generation rather than through the C library, so `format("%v", [arg_float(x)])` and `f"{x}"` never disagree over the same value. The shortest form that reads back as the same double is the separate verb `%r`, and `float_to_string` is the same rendering under a name a program reaches for directly.
+
+```text
+x: float64 = 0.1
+a: string = format("%v %r", [arg_float(x), arg_float(x)])
+println(a)              // 0.1 0.1
+free(a)
+
+y: float64 = 1.0 / 3.0
+b: string = format("%v %r", [arg_float(y), arg_float(y)])
+println(b)              // 0.333333 0.3333333333333333
+free(b)
+```
+
+### Ownership
+
+Every argument is borrowed and nothing here frees one, so an `Arg.Str` never takes the string it carries. `format` returns a fresh heap string the caller frees, `format_into` allocates nothing beyond the builder's own growth, and `errorf`'s message is a heap string the error owns for as long as the error is alive, the convention every `error { message: errstr(code) }` in `std.fs` already follows. `writef` writes up to the first NUL in the rendering, the rule `write_string` follows, so a `%c` of the byte 0 ends what is written.
+Two edges worth knowing. A `%c` of the scalar 0 writes a NUL byte, and since a string ends at its first NUL, `format` measures the result up to it while `format_into` keeps every byte in the builder; `writef` stops there too, the rule its own entry states. And `%#g` follows the C standard where glibc does not: when rounding carries into a new power of ten, `%#.2g` of 99.5 prints `1.0e+02` here (C99 and Python agree) where glibc prints `1.e+02`; without `#` the two never differ, and the parity goldens cover every other flag.
+
+`std.fmtfloat` and `std.fmtbig` are the two files under the formatter: the first is the float printer (`float_to_string` and the fixed, exponent, and general layouts), the second is the exact integer arithmetic it runs on, 48 limbs of 32 bits. Both reach a program through `@import std.fmt`; neither is a module to import on its own.
 
 ## std.logging
 

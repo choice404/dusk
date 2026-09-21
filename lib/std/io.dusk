@@ -1,9 +1,601 @@
-/** std.io: simple console output over the print builtins, plus typed line input
- *  that reads a whole line through the read_line builtin and parses it. Output goes
- *  to stdout, input comes from stdin, and the two parsing readers turn a failed read
- *  or a malformed line into an error value the caller handles rather than a fault. */
+/** std.io: the stream layer. A Writer stands for stdout, stderr, a file descriptor, a
+ *  StringBuilder, a set of writers, or nothing at all, and a Reader stands for stdin, a
+ *  descriptor, or a string held in memory. Both are plain enum values, so a Writer returns
+ *  from a function, sits in a struct field or a vector, crosses into an async func, and is
+ *  captured by a spawn, the way any other value is. Neither owns heap memory: the caller
+ *  owns the StringBuilder, the MultiWriter, and the StringReader a writer or a reader was
+ *  built over, and whoever opened a descriptor closes it.
+ *
+ *  Descriptor 1 and descriptor 2 go through the C stdout and stderr streams, so a Writer
+ *  over either lands in order with println and printerr, and a write to descriptor 2
+ *  flushes stdout first the way printerr does. Every other descriptor is a write(2) loop
+ *  that retries EINTR and keeps going after a short write until every byte is out. Reads
+ *  block: a descriptor set non blocking reports a would block error rather than spinning,
+ *  and std.async.io is the non blocking surface.
+ *
+ *  Dispatch through the functions rather than matching a Writer or a Reader yourself. A
+ *  match compiles today, but the variant set belongs to this module and a later release
+ *  may add a sink to it, which would break that match and nothing else.
+ *
+ *  print_int, print_line, read_int, and read_float are the console helpers this module
+ *  started as. They still go through the print and read_line builtins, they are unchanged,
+ *  and read_int reads the same C stdin buffer read_line does; reach for a Writer or a
+ *  Reader for anything else. */
+
+@paradigm procedural
 
 @import std.string
+@import std.os
+
+// The descriptor shims in the C runtime. cool_io_write writes every byte or reports how
+// far it got with errno set, cool_io_read is one read(2) retried on EINTR, cool_io_flush
+// flushes the C stream behind descriptor 1 or 2, and cool_io_close is close(2) with an
+// EINTR return counted as closed. memcpy is libc's own: a *void parameter cannot be
+// indexed on the dusk side, since the reverse binding of *void to *raw T is refused, so a
+// copy into or out of a caller's buffer goes through it.
+foreign "C" {
+    func cool_io_write(fd: int64, buf: *void, n: int64) -> int64
+    func cool_io_read(fd: int64, buf: *void, cap: int64) -> int64
+    func cool_io_flush(fd: int64) -> int64
+    func cool_io_close(fd: int64) -> int64
+    func memcpy(dst: *void, src: *void, n: int64) -> *void
+}
+
+/** A sink for bytes. Fd carries a descriptor number and nothing else, Str appends into a
+ *  StringBuilder the caller owns, Many fans a write out to a set of writers, and Discard
+ *  accepts everything and keeps none of it. Build one with stdout_writer, stderr_writer,
+ *  fd_writer, sb_writer, multi_writer, or discard_writer rather than naming a variant, and
+ *  dispatch through the write functions rather than matching: a later release may add a
+ *  variant here. */
+export enum Writer {
+    Fd(fd: int64),
+    Str(b: *StringBuilder),
+    Many(m: *MultiWriter),
+    Discard,
+}
+
+/** A source of bytes. Fd carries a descriptor number, Str walks a StringReader cursor over
+ *  a string already in memory. Build one with stdin_reader, fd_reader, or string_reader,
+ *  and read through read_buf, read_to_end, and io_copy rather than matching. */
+export enum Reader {
+    Fd(fd: int64),
+    Str(c: *StringReader),
+}
+
+/** A set of writers a single write fans out to, in insertion order. The caller builds one
+ *  with alloc(multi_new()), adds parts with multi_add, wraps it with multi_writer, and
+ *  releases it with multi_free; the parts themselves are values this never closes. */
+export struct MultiWriter {
+    parts: *Vector<Writer>,
+}
+
+/** A read cursor over a string already in memory. s is the text, borrowed for the cursor's
+ *  life, pos is the byte offset reading resumes at, and n is the length measured once when
+ *  the cursor was built. Build one with alloc(string_reader_new(s)) and free it with free
+ *  once the reads are done. */
+export struct StringReader {
+    s: string,
+    pos: int64,
+    n: int64,
+}
+
+// EAGAIN, the errno a non blocking descriptor sets when a read would have had to wait.
+// EWOULDBLOCK is the same value on Linux, so one test covers both.
+func io_eagain() -> int64 {
+    return 11
+}
+
+/** A Writer over standard output. Bytes go through the C stdout stream, so they land in
+ *  order with println and print rather than racing them.
+ *  @return a Writer over descriptor 1 */
+export func stdout_writer() -> Writer {
+    return Writer.Fd(1)
+}
+
+/** A Writer over standard error. Every write flushes stdout first, the rule printerr
+ *  follows, so the two streams never reorder against each other.
+ *  @return a Writer over descriptor 2 */
+export func stderr_writer() -> Writer {
+    return Writer.Fd(2)
+}
+
+/** A Writer over any descriptor, a file from open_file or a connected socket. Cast an
+ *  int32 descriptor with int64(fd). Writes to a descriptor other than 1 or 2 go straight
+ *  to write(2) with no buffering in front of them.
+ *  @param fd the descriptor to write to
+ *  @return a Writer over fd */
+export func fd_writer(fd: int64) -> Writer {
+    return Writer.Fd(fd)
+}
+
+/** A Writer that appends into a StringBuilder. The builder is borrowed, not owned: the
+ *  caller frees it with sb_free and free once the writer is done with.
+ *  @param b the builder to append into, borrowed for the writer's life
+ *  @return a Writer over b */
+export func sb_writer(b: *StringBuilder) -> Writer {
+    return Writer.Str(b)
+}
+
+/** A Writer that accepts every write, keeps nothing, and never fails.
+ *  @return the discarding Writer */
+export func discard_writer() -> Writer {
+    return Writer.Discard
+}
+
+/** An empty set of writers. Build it on the heap with alloc(multi_new()), since multi_add
+ *  and multi_writer both take a pointer to it.
+ *  @return an empty MultiWriter
+ *  @example
+ *  m: *MultiWriter = alloc(multi_new())
+ *  multi_add(m, stdout_writer())
+ *  multi_add(m, sb_writer(b))
+ *  e := write_line(multi_writer(m), "logged twice")
+ *  e.ignore()
+ *  multi_free(m)
+ *  free(m) */
+export func multi_new() -> MultiWriter {
+    parts: *Vector<Writer> = alloc(vec_new())
+    return MultiWriter { parts: parts }
+}
+
+/** Appends a copy of w to the set. A writer added twice receives every write twice, which
+ *  is a legal thing to want and never deduplicated here. A set must not contain itself,
+ *  directly or through another set: nothing checks for the cycle and a write through one
+ *  recurses until the stack runs out.
+ *  @param m the set to append to, borrowed and grown in place
+ *  @param w the writer to add, copied in */
+export func multi_add(m: *MultiWriter, w: Writer) -> void {
+    vec_push((*m).parts, w)
+}
+
+/** A Writer over the whole set. A write goes to each part in insertion order and stops at
+ *  the first error, so a part added after a failing one sees nothing of that write.
+ *  @param m the set to wrap, borrowed for the writer's life
+ *  @return a Writer that fans out to m's parts */
+export func multi_writer(m: *MultiWriter) -> Writer {
+    return Writer.Many(m)
+}
+
+/** Frees the part list and nothing else, the convention vec_free and sb_free already
+ *  follow: free the MultiWriter block itself with free once this returns. The parts are
+ *  values, neither closed nor freed here, so a descriptor behind one is still open.
+ *  @param m the set whose part list to release, borrowed */
+export func multi_free(m: *MultiWriter) -> void {
+    vec_free((*m).parts)
+    free((*m).parts)
+}
+
+/** Writes all n bytes from buf to w. A descriptor write loops over short writes and
+ *  retries EINTR inside the runtime, so a partial result means the OS refused rather than
+ *  that there is more to try. buf is borrowed and must hold at least n bytes.
+ *  @param w the writer to write to
+ *  @param buf the source buffer, borrowed, at least n bytes
+ *  @param n the number of bytes to write
+ *  @return the count written paired with an error; the count is n when the error is empty,
+ *  and the bytes written before the failure otherwise */
+export func write_buf(w: Writer, buf: *void, n: int64) -> (int64, error) {
+    if n <= 0 {
+        return (0, error {})
+    }
+    match w {
+        Fd(fd) => {
+            wrote: int64 = cool_io_write(fd, buf, n)
+            code: int64 = os_errno()
+            if wrote < n {
+                return (wrote, error { message: errstr(code) })
+            }
+            return (wrote, error {})
+        },
+        Str(b) => {
+            // The bytes arrive as *void, which cannot be indexed, so they land in a raw
+            // scratch buffer first and are pushed from there.
+            tmp: *raw char = alloc_bytes(n + 1)
+            memcpy(tmp, buf, n)
+            for i in 0..n {
+                sb_push_char(b, tmp[i])
+            }
+            free(tmp)
+            return (n, error {})
+        },
+        Many(m) => {
+            parts: *Vector<Writer> = (*m).parts
+            count: int64 = vec_len(parts)
+            for i in 0..count {
+                wrote, e := write_buf(vec_get(parts, i), buf, n)
+                if e.exists() {
+                    return (wrote, e)
+                }
+            }
+            return (n, error {})
+        },
+        Discard => {
+            return (n, error {})
+        },
+    }
+}
+
+/** Writes s to w, every byte up to but not including its NUL. s is borrowed.
+ *  @param w the writer to write to
+ *  @param s the text to write, borrowed
+ *  @return an empty error on success, or the OS failure */
+export func write_string(w: Writer, s: string) -> error {
+    n: int64 = str_len(s)
+    match w {
+        Fd(fd) => {
+            if n == 0 {
+                return error {}
+            }
+            cb: *raw char = cbuf(s)
+            wrote: int64 = cool_io_write(fd, cb, n)
+            code: int64 = os_errno()
+            free(cb)
+            if wrote < n {
+                return error { message: errstr(code) }
+            }
+            return error {}
+        },
+        Str(b) => {
+            sb_push(b, s)
+            return error {}
+        },
+        Many(m) => {
+            parts: *Vector<Writer> = (*m).parts
+            count: int64 = vec_len(parts)
+            for i in 0..count {
+                e := write_string(vec_get(parts, i), s)
+                if e.exists() {
+                    return e
+                }
+            }
+            return error {}
+        },
+        Discard => {
+            return error {}
+        },
+    }
+}
+
+/** Writes s and then a newline. The two are staged into one buffer and handed to the OS
+ *  together, which keeps a short line whole under most interleavings but is not a promise:
+ *  a write above the pipe buffer size, or one the OS cuts short, goes out in pieces like any
+ *  other. s is borrowed.
+ *  @param w the writer to write to
+ *  @param s the line of text, borrowed, with no trailing newline of its own
+ *  @return an empty error on success, or the OS failure */
+export func write_line(w: Writer, s: string) -> error {
+    match w {
+        Fd(fd) => {
+            n: int64 = str_len(s)
+            buf: *raw char = alloc_bytes(n + 2)
+            for i in 0..n {
+                buf[i] = s[i]
+            }
+            buf[n] = 10
+            buf[n + 1] = 0
+            wrote: int64 = cool_io_write(fd, buf, n + 1)
+            code: int64 = os_errno()
+            free(buf)
+            if wrote < n + 1 {
+                return error { message: errstr(code) }
+            }
+            return error {}
+        },
+        Str(b) => {
+            sb_push(b, s)
+            sb_push_char(b, 10)
+            return error {}
+        },
+        Many(m) => {
+            parts: *Vector<Writer> = (*m).parts
+            count: int64 = vec_len(parts)
+            for i in 0..count {
+                e := write_line(vec_get(parts, i), s)
+                if e.exists() {
+                    return e
+                }
+            }
+            return error {}
+        },
+        Discard => {
+            return error {}
+        },
+    }
+}
+
+/** Writes one byte.
+ *  @param w the writer to write to
+ *  @param c the byte to write
+ *  @return an empty error on success, or the OS failure */
+export func write_char(w: Writer, c: char) -> error {
+    match w {
+        Fd(fd) => {
+            buf: *raw char = alloc_bytes(2)
+            buf[0] = c
+            buf[1] = 0
+            wrote: int64 = cool_io_write(fd, buf, 1)
+            code: int64 = os_errno()
+            free(buf)
+            if wrote < 1 {
+                return error { message: errstr(code) }
+            }
+            return error {}
+        },
+        Str(b) => {
+            sb_push_char(b, c)
+            return error {}
+        },
+        Many(m) => {
+            parts: *Vector<Writer> = (*m).parts
+            count: int64 = vec_len(parts)
+            for i in 0..count {
+                e := write_char(vec_get(parts, i), c)
+                if e.exists() {
+                    return e
+                }
+            }
+            return error {}
+        },
+        Discard => {
+            return error {}
+        },
+    }
+}
+
+/** Flushes what the writer has buffered. Descriptor 1 and descriptor 2 flush their C
+ *  stream; every other writer is unbuffered already, so this reports success and does
+ *  nothing. A set of writers flushes each part in insertion order.
+ *  @param w the writer to flush
+ *  @return an empty error on success, or the OS failure */
+export func flush(w: Writer) -> error {
+    match w {
+        Fd(fd) => {
+            rc: int64 = cool_io_flush(fd)
+            code: int64 = os_errno()
+            if rc != 0 {
+                return error { message: errstr(code) }
+            }
+            return error {}
+        },
+        Str(b) => {
+            return error {}
+        },
+        Many(m) => {
+            parts: *Vector<Writer> = (*m).parts
+            count: int64 = vec_len(parts)
+            for i in 0..count {
+                e := flush(vec_get(parts, i))
+                if e.exists() {
+                    return e
+                }
+            }
+            return error {}
+        },
+        Discard => {
+            return error {}
+        },
+    }
+}
+
+/** Closes the descriptor behind w when it is above 2. Descriptor 0, 1, and 2 are flushed
+ *  and left open, so closing a stdout writer is a flush; close a standard stream through
+ *  std.fs if that is really what you mean. A Str, Many, or Discard writer holds no
+ *  descriptor and this does nothing to it. After a close every copy of that Writer is
+ *  stale: a later write through one returns an error rather than faulting, unless a later
+ *  open has reused the descriptor number, in which case the bytes land in that stream, so
+ *  close once and drop every copy.
+ *  @param w the writer to close
+ *  @return an empty error on success, or the OS failure */
+export func writer_close(w: Writer) -> error {
+    match w {
+        Fd(fd) => {
+            if fd <= 2 {
+                rc: int64 = cool_io_flush(fd)
+                code: int64 = os_errno()
+                if rc != 0 {
+                    return error { message: errstr(code) }
+                }
+                return error {}
+            }
+            rc: int64 = cool_io_close(fd)
+            code: int64 = os_errno()
+            if rc != 0 {
+                return error { message: errstr(code) }
+            }
+            return error {}
+        },
+        Str(b) => {
+            return error {}
+        },
+        Many(m) => {
+            return error {}
+        },
+        Discard => {
+            return error {}
+        },
+    }
+}
+
+/** A Reader over standard input. It reads descriptor 0 through read(2) directly, not
+ *  through the C stdin buffer the read_line and read_all builtins use, so a program picks
+ *  one of the two paths for its whole run: bytes the C buffer has already pulled in are
+ *  invisible here.
+ *  @return a Reader over descriptor 0 */
+export func stdin_reader() -> Reader {
+    return Reader.Fd(0)
+}
+
+/** A Reader over any descriptor, a file from open_file or a connected socket. Cast an
+ *  int32 descriptor with int64(fd).
+ *  @param fd the descriptor to read from
+ *  @return a Reader over fd */
+export func fd_reader(fd: int64) -> Reader {
+    return Reader.Fd(fd)
+}
+
+/** A read cursor over s, positioned at offset 0, with s measured once here. s is borrowed
+ *  and must outlive the cursor. Build the cursor on the heap with
+ *  alloc(string_reader_new(s)), since string_reader takes a pointer to it.
+ *  @param s the text to read, borrowed for the cursor's life
+ *  @return a cursor at the start of s
+ *  @example
+ *  c: *StringReader = alloc(string_reader_new("a\nb\n"))
+ *  text, e := read_to_end(string_reader(c))
+ *  e.ignore()
+ *  print(text)
+ *  free(text)
+ *  free(c) */
+export func string_reader_new(s: string) -> StringReader {
+    return StringReader { s: s, pos: 0, n: str_len(s) }
+}
+
+/** A Reader over a cursor. Reads advance the cursor, so two Readers over the same cursor
+ *  share one position; free the cursor with free once the reads are done.
+ *  @param c the cursor to read through, borrowed for the reader's life
+ *  @return a Reader over c */
+export func string_reader(c: *StringReader) -> Reader {
+    return Reader.Str(c)
+}
+
+/** Reads up to cap bytes from r into buf. buf is a staged raw buffer the caller owns and
+ *  must size to at least cap bytes; a shorter buffer is an out of bounds write. EINTR is
+ *  retried inside the runtime and never surfaces. A descriptor set non blocking reports
+ *  the error "would block" rather than spinning.
+ *  @param r the reader to read from
+ *  @param buf the destination buffer the caller owns, at least cap bytes
+ *  @param cap the maximum number of bytes to read
+ *  @return the count read paired with an error; a count of 0 with an empty error is end of
+ *  stream, and a failure returns 0 with the error set */
+export func read_buf(r: Reader, buf: *void, cap: int64) -> (int64, error) {
+    if cap <= 0 {
+        return (0, error {})
+    }
+    match r {
+        Fd(fd) => {
+            got: int64 = cool_io_read(fd, buf, cap)
+            code: int64 = os_errno()
+            if got < 0 {
+                if code == io_eagain() {
+                    return (0, error { message: "would block" })
+                }
+                return (0, error { message: errstr(code) })
+            }
+            return (got, error {})
+        },
+        Str(c) => {
+            base: int64 = (*c).pos
+            avail: int64 = (*c).n - base
+            if avail <= 0 {
+                return (0, error {})
+            }
+            mut k: int64 = cap
+            if avail < k {
+                k = avail
+            }
+            // buf is *void and cannot be indexed, so the bytes are staged in a raw
+            // scratch buffer and copied across in one memcpy.
+            tmp: *raw char = alloc_bytes(k + 1)
+            src: string = (*c).s
+            for i in 0..k {
+                tmp[i] = src[base + i]
+            }
+            tmp[k] = 0
+            memcpy(buf, tmp, k)
+            free(tmp)
+            (*c).pos = base + k
+            return (k, error {})
+        },
+    }
+}
+
+/** Reads r to end of stream into one fresh heap string. A NUL byte in the data ends the
+ *  string view early even though every byte read was copied in, since a string is a NUL
+ *  terminated view; read through read_buf when the data is not text.
+ *  @param r the reader to drain
+ *  @return the bytes as a fresh heap string the caller owns and frees, paired with an
+ *  error; on a read failure the string holds what was read before the failure */
+export func read_to_end(r: Reader) -> (string, error) {
+    cap: int64 = 8192
+    buf: *raw char = alloc_bytes(cap)
+    b: *StringBuilder = alloc(sb_new())
+    mut fail: error = error {}
+    mut going: bool = true
+    while going {
+        got, e := read_buf(r, buf, cap)
+        if e.exists() {
+            fail = e
+            going = false
+        } else {
+            if got == 0 {
+                going = false
+            } else {
+                for i in 0..got {
+                    sb_push_char(b, buf[i])
+                }
+            }
+        }
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    free(buf)
+    return (out, fail)
+}
+
+/** Closes the descriptor behind r when it is above 2, the rule writer_close follows, so
+ *  the standard streams are left alone. A Str reader holds no descriptor and this does
+ *  nothing to it. The string behind a cursor, and the cursor itself, are the caller's to
+ *  free; there is no drop.
+ *  @param r the reader to close
+ *  @return an empty error on success, or the OS failure */
+export func reader_close(r: Reader) -> error {
+    match r {
+        Fd(fd) => {
+            if fd <= 2 {
+                return error {}
+            }
+            rc: int64 = cool_io_close(fd)
+            code: int64 = os_errno()
+            if rc != 0 {
+                return error { message: errstr(code) }
+            }
+            return error {}
+        },
+        Str(c) => {
+            return error {}
+        },
+    }
+}
+
+/** Pumps src into dst through an 8192 byte scratch buffer until end of stream.
+ *  @param dst the writer to copy into
+ *  @param src the reader to drain
+ *  @return the number of bytes written paired with an error; the error is the first
+ *  failure from either side, and the count is what reached dst before it */
+export func io_copy(dst: Writer, src: Reader) -> (int64, error) {
+    cap: int64 = 8192
+    buf: *raw char = alloc_bytes(cap)
+    mut total: int64 = 0
+    mut fail: error = error {}
+    mut going: bool = true
+    while going {
+        got, re := read_buf(src, buf, cap)
+        if re.exists() {
+            fail = re
+            going = false
+        } else if got == 0 {
+            going = false
+        } else {
+            wrote, we := write_buf(dst, buf, got)
+            total = total + wrote
+            if we.exists() {
+                fail = we
+                going = false
+            }
+        }
+    }
+    free(buf)
+    return (total, fail)
+}
 
 /** Prints n on its own line to stdout, in base ten with a trailing newline.
  *  @param n the integer to print */

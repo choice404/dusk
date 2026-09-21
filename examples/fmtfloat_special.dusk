@@ -1,0 +1,51 @@
+// The values that carry no digits, under every layout std.fmtfloat offers: the two
+// infinities, a NaN of each sign, and a zero of each sign. The spelling is glibc's
+// own, inf and nan lowercased for the e, f, and g conversions and uppercased for E
+// and G, with the sign bit written whenever it is set, so a negative NaN prints
+// -nan exactly as println already prints it.
+//
+// A zero carries its sign through every layout and reads its exponent as zero, the
+// C rule, so %.2e of zero is 0.00e+00 rather than a value with no exponent at all
+// and %g of zero strips to a bare 0.
+//
+// A float literal cannot spell an infinity or a NaN, so each is built from its IEEE
+// bits.
+
+@paradigm procedural
+
+@import std.string
+@import std.fmtfloat
+
+foreign "C" {
+    func cool_f64_from_bits(bits: int64) -> float64
+}
+
+func row(label: string, x: float64) -> void {
+    r: string = float_to_string(x)
+    v: string = float_general(x, 6, false, false)
+    gu: string = float_general(x, 6, true, false)
+    ga: string = float_general(x, 6, false, true)
+    e2: string = float_exp(x, 2, false, false)
+    eu: string = float_exp(x, 2, true, false)
+    f2: string = float_fixed(x, 2, false)
+    f0: string = float_fixed(x, 0, false)
+    println("{} r={} v={} G={} #g={} e={} E={} f={} f0={}", label, r, v, gu, ga, e2, eu, f2, f0)
+    free(r)
+    free(v)
+    free(gu)
+    free(ga)
+    free(e2)
+    free(eu)
+    free(f2)
+    free(f0)
+}
+
+func main() -> int64 {
+    row("inf", cool_f64_from_bits(9218868437227405312))
+    row("neg_inf", cool_f64_from_bits(-4503599627370496))
+    row("nan", cool_f64_from_bits(9221120237041090560))
+    row("neg_nan", cool_f64_from_bits(-2251799813685248))
+    row("zero", 0.0)
+    row("neg_zero", -0.0)
+    return 0
+}

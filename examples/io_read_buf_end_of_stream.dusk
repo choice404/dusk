@@ -1,0 +1,23 @@
+// read_buf reports a short count at the end of the data and then a count of zero with no
+// error, which is end of stream. Eleven bytes through a four byte buffer is 4, 4, 3, 0.
+@paradigm procedural
+
+@import std.io
+
+func main() -> int32 {
+    c: *StringReader = alloc(string_reader_new("abcdefghijk"))
+    r: Reader = string_reader(c)
+    buf: *raw char = alloc_bytes(4)
+    mut going: bool = true
+    while going {
+        n, e := read_buf(r, buf, 4)
+        e.ignore()
+        println(n)
+        if n == 0 {
+            going = false
+        }
+    }
+    free(buf)
+    free(c)
+    return 0
+}

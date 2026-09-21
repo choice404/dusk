@@ -1,0 +1,33 @@
+// bufreader_read serves what the buffer already holds before it asks the source for
+// anything. The cursor here is drained by the first refill, so the ten bytes left over
+// after the first line could only have come out of the buffer, and the call after that
+// finds the buffer empty, reads the exhausted source once, and reports end of stream.
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+@import std.string
+
+func main() -> int32 {
+    c: *StringReader = alloc(string_reader_new("one\ntwo\nthree\n"))
+    b: *BufReader = bufreader_new(string_reader(c), 16)
+    line, ok := bufreader_read_line(b)
+    if ok {
+        println(line)
+        free(line)
+    }
+    dst: *raw char = alloc_bytes(101)
+    got, e := bufreader_read(b, dst, 100)
+    e.ignore()
+    dst[got] = 0
+    println(got)
+    print(cstr(dst))
+    rest, re := bufreader_read(b, dst, 100)
+    re.ignore()
+    println(rest)
+    free(dst)
+    bufreader_free(b)
+    free(b)
+    free(c)
+    return 0
+}

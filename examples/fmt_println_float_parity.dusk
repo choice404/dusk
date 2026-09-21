@@ -1,0 +1,157 @@
+// The parity acceptance test: %v renders exactly what println already writes, for every
+// value, with no C library on the std.fmt side of the comparison. An f string hole and a
+// println hole share one rendering path through the runtime, so comparing format("%v",
+// ...) against f"{x}" in the same process compares the new printer against the old one
+// directly rather than against a table someone typed.
+//
+// The corpus is the same one the round trip golden uses: 20000 bit patterns from a linear
+// congruential generator seeded at a fixed value, so the run is identical on every
+// machine, plus the values a random sweep reaches rarely, the two ends of the format, the
+// classic hard cases, and the values that carry no digits at all. The integer extremes go
+// through the same comparison, since %v claims the same parity for a signed and an
+// unsigned width.
+
+@paradigm procedural
+
+@import std.string
+@import std.fmt
+
+foreign "C" {
+    func cool_f64_from_bits(bits: int64) -> float64
+}
+
+// Whether %v of this double writes the bytes an interpolation hole writes for it.
+func same_float(x: float64) -> bool {
+    a: string = format("%v", [arg_float(x)])
+    b: string = f"{x}"
+    got: bool = str_eq(a, b)
+    if !got {
+        println("BAD fmt {} println {}", a, b)
+    }
+    free(a)
+    free(b)
+    return got
+}
+
+func main() -> int64 {
+    mut st: uint64 = 88172645463325252
+    mut ok: int64 = 0
+    mut bad: int64 = 0
+    while ok + bad < 20000 {
+        st = st * 6364136223846793005u64 + 1442695040888963407u64
+        bits: int64 = int64(st)
+        if same_float(cool_f64_from_bits(bits)) {
+            ok++
+        } else {
+            bad++
+        }
+    }
+
+    xs: float64[] = [
+        0.1,
+        1.0,
+        100.0,
+        0.0001,
+        0.00001,
+        1000000000000000000000.0,
+        100000000000000000000.0,
+        1.0 / 3.0,
+        2.5,
+        -0.0,
+        0.0,
+        9007199254740993.0,
+        0.0000000298023223876953125,
+        99999999999999990000000.0,
+        8410000000000000000000.0,
+        123456789012345680.0,
+        0.0 - (1.0 / 7.0)
+    ]
+    for i in 0..xs.len {
+        if same_float(xs[i]) {
+            ok++
+        } else {
+            bad++
+        }
+    }
+    // The smallest subnormal, an infinity of each sign, a nan of each sign, the largest
+    // finite double, and the smallest normal, each built from its bits since a float
+    // literal carries no exponent form.
+    bits_cases: int64[] = [
+        1,
+        9218868437227405312,
+        0 - 4503599627370496,
+        9221120237041090560,
+        0 - 2251799813685248,
+        9218868437227405311,
+        4503599627370496
+    ]
+    for i in 0..bits_cases.len {
+        if same_float(cool_f64_from_bits(bits_cases[i])) {
+            ok++
+        } else {
+            bad++
+        }
+    }
+
+    // Every power of two the format holds, normal and subnormal, through both printers.
+    for p in 1..2047 {
+        if same_float(cool_f64_from_bits(p << 52)) {
+            ok++
+        } else {
+            bad++
+        }
+    }
+    for q in 0..52 {
+        if same_float(cool_f64_from_bits(1 << q)) {
+            ok++
+        } else {
+            bad++
+        }
+    }
+
+    // The integer extremes: %v claims the same parity for a signed and an unsigned width.
+    ns: int64[] = [
+        0,
+        1,
+        0 - 1,
+        9223372036854775807,
+        0 - 9223372036854775807 - 1
+    ]
+    for i in 0..ns.len {
+        a: string = format("%v", [arg_int(ns[i])])
+        b: string = f"{ns[i]}"
+        if str_eq(a, b) {
+            ok++
+        } else {
+            bad++
+            println("BAD int fmt {} println {}", a, b)
+        }
+        free(a)
+        free(b)
+    }
+    us: uint64[] = [
+        0,
+        1,
+        9223372036854775808u64,
+        18446744073709551615u64
+    ]
+    for i in 0..us.len {
+        a: string = format("%v", [arg_uint(us[i])])
+        b: string = f"{us[i]}"
+        if str_eq(a, b) {
+            ok++
+        } else {
+            bad++
+            println("BAD uint fmt {} println {}", a, b)
+        }
+        free(a)
+        free(b)
+    }
+
+    if bad == 0 && ok == 22131 {
+        println("ok")
+    } else {
+        println("compared {} disagreed {}", ok, bad)
+    }
+    return 0
+}
