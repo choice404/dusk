@@ -235,8 +235,7 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
             en: EnumNode = vec_get((*a).enums, it.id)
             map_put(enum_idx, ast_name(a, en.name), it.id)
             ename: string = ast_name(a, en.name)
-            mut k: int64 = 0
-            while k < en.variants_len {
+            for k in 0..en.variants_len {
                 vid: int64 = vec_get((*a).kids, en.variants_off + k)
                 v: VariantNode = vec_get((*a).variants, vid)
                 if v.fields_len > 0 {
@@ -244,7 +243,6 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
                     map_put(variant_idx, vname, vid)
                     map_put(variant_by_enum, sum_variant_key(ename, vname), vid)
                 }
-                k++
             }
         } else if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
@@ -264,10 +262,8 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
 
 func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
     g: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
-        i++
     }
     return g
 }
@@ -287,11 +283,9 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
     if n.kind == tk_slice() || n.kind == tk_func() { return true }
     if n.kind == tk_array() { return is_view_rec(t, n.a, gens, seen) }
     if n.kind == tk_tuple() {
-        mut i: int64 = 0
-        while i < n.b {
+        for i in 0..n.b {
             elem: int64 = vec_get(kids, n.a + i)
             if is_view_rec(t, elem, gens, seen) { return true }
-            i++
         }
         return false
     }
@@ -311,12 +305,10 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
             map_put(seen, name, 1)
             st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, name), 0))
             sgen: *Map<string, int64> = gens_of(a, st.generics_off, st.generics_len)
-            mut j: int64 = 0
-            while j < st.fields_len {
+            for j in 0..st.fields_len {
                 fid: int64 = vec_get(kids, st.fields_off + j)
                 fld: FieldNode = vec_get((*a).fields, fid)
                 if is_view_rec(t, fld.ty, sgen, seen) { return true }
-                j++
             }
             return false
         }
@@ -325,18 +317,14 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
             map_put(seen, name, 1)
             en: EnumNode = vec_get((*a).enums, unwrap_or(map_get(eidx, name), 0))
             egen: *Map<string, int64> = gens_of(a, en.generics_off, en.generics_len)
-            mut k: int64 = 0
-            while k < en.variants_len {
+            for k in 0..en.variants_len {
                 vid: int64 = vec_get(kids, en.variants_off + k)
                 vr: VariantNode = vec_get((*a).variants, vid)
-                mut q: int64 = 0
-                while q < vr.fields_len {
+                for q in 0..vr.fields_len {
                     f2id: int64 = vec_get(kids, vr.fields_off + q)
                     fld2: FieldNode = vec_get((*a).fields, f2id)
                     if is_view_rec(t, fld2.ty, egen, seen) { return true }
-                    q++
                 }
-                k++
             }
             return false
         }
@@ -364,50 +352,40 @@ func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<string, int64>) -> bool 
     if n.kind == tk_rawptr() { return false }
     if n.kind == tk_slice() || n.kind == tk_array() { return reaches_rec(t, n.a, seen) }
     if n.kind == tk_tuple() {
-        mut i: int64 = 0
-        while i < n.b {
+        for i in 0..n.b {
             elem: int64 = vec_get(kids, n.a + i)
             if reaches_rec(t, elem, seen) { return true }
-            i++
         }
         return false
     }
     if n.kind == tk_named() {
         sidx: *Map<string, int64> = (*t).struct_idx
         eidx: *Map<string, int64> = (*t).enum_idx
-        mut c: int64 = 0
-        while c < n.c {
+        for c in 0..n.c {
             arg: int64 = vec_get(kids, n.b + c)
             if reaches_rec(t, arg, seen) { return true }
-            c++
         }
         name: string = ast_name(a, n.a)
         if map_has(seen, name) { return false }
         map_put(seen, name, 1)
         if map_has(sidx, name) {
             st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, name), 0))
-            mut j: int64 = 0
-            while j < st.fields_len {
+            for j in 0..st.fields_len {
                 fid: int64 = vec_get(kids, st.fields_off + j)
                 fld: FieldNode = vec_get((*a).fields, fid)
                 if reaches_rec(t, fld.ty, seen) { return true }
-                j++
             }
         }
         if map_has(eidx, name) {
             en: EnumNode = vec_get((*a).enums, unwrap_or(map_get(eidx, name), 0))
-            mut k: int64 = 0
-            while k < en.variants_len {
+            for k in 0..en.variants_len {
                 vid: int64 = vec_get(kids, en.variants_off + k)
                 vr: VariantNode = vec_get((*a).variants, vid)
-                mut q: int64 = 0
-                while q < vr.fields_len {
+                for q in 0..vr.fields_len {
                     f2id: int64 = vec_get(kids, vr.fields_off + q)
                     fld2: FieldNode = vec_get((*a).fields, f2id)
                     if reaches_rec(t, fld2.ty, seen) { return true }
-                    q++
                 }
-                k++
             }
         }
         return false

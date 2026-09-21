@@ -56,15 +56,13 @@ func export_prototype(c: *CTyArena, a: *Ast, f: FuncNode) -> string {
     if f.params_len == 0 {
         sb_push(b, "void")
     } else {
-        mut i: int64 = 0
-        while i < f.params_len {
+        for i in 0..f.params_len {
             if i > 0 { sb_push(b, ", ") }
             p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
             pty: int64 = cty_lower_ast(c, a, p.ty)
             sb_push(b, c_header_type(c, pty))
             sb_push(b, " a")
             sb_push_int(b, i)
-            i++
         }
     }
     sb_push(b, ");")
@@ -143,11 +141,9 @@ func declare_prelude(m: *EmitModule) -> void {
 
 func joined_faults(errs: *Vector<string>) -> string {
     b: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < vec_len(errs) {
+    for i in 0..vec_len(errs) {
         if i > 0 { sb_push_char(b, 10) }
         sb_push(b, vec_get(errs, i))
-        i++
     }
     out: string = gen_built(b)
     sb_free(b)
@@ -164,15 +160,13 @@ func emit_ground_types(m: *EmitModule, ctx: *GenCtx) -> void {
             s: StructNode = vec_get((*a).structs, it.id)
             b: *StringBuilder = alloc(sb_new())
             sb_push(b, "{ ")
-            mut j: int64 = 0
-            while j < s.fields_len {
+            for j in 0..s.fields_len {
                 if j > 0 { sb_push(b, ", ") }
                 fid: int64 = vec_get((*a).kids, s.fields_off + j)
                 f: FieldNode = vec_get((*a).fields, fid)
                 ll: string = cty_ll(c, cty_lower_ast(c, a, f.ty))
                 sb_push(b, ll)
                 free(ll)
-                j++
             }
             sb_push(b, " }")
             body: string = gen_built(b)
@@ -213,17 +207,14 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                 tname: string = ast_name(a, im.ty)
                 interfaces: *Vector<InterfaceNode> = (*a).interfaces
                 mut iid: int64 = -1
-                mut ii: int64 = 0
-                while ii < vec_len(interfaces) {
+                for ii in 0..vec_len(interfaces) {
                     cand: InterfaceNode = vec_get(interfaces, ii)
                     if str_eq(ast_name(a, cand.name), iname) { iid = ii }
-                    ii++
                 }
                 if iid >= 0 {
                     iface: InterfaceNode = vec_get(interfaces, iid)
                     slots: *StringBuilder = alloc(sb_new())
-                    mut mi: int64 = 0
-                    while mi < iface.methods_len {
+                    for mi in 0..iface.methods_len {
                         ms: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + mi))
                         mname: string = ast_name(a, ms.name)
                         tb: *StringBuilder = alloc(sb_new())
@@ -247,8 +238,7 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                         sb_push_char(fb, 32)
                         sb_push(fb, thunk)
                         sb_push(fb, "(ptr %d")
-                        mut pi: int64 = 0
-                        while pi < ms.params_len {
+                        for pi in 0..ms.params_len {
                             pid: int64 = vec_get((*a).kids, ms.params_off + pi)
                             p: ParamNode = vec_get((*a).params, pid)
                             pll: string = cty_ll(c, cty_lower_ast(c, a, p.ty))
@@ -257,7 +247,6 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                             sb_push(fb, " %a")
                             sb_push_int(fb, pi)
                             free(pll)
-                            pi++
                         }
                         sb_push(fb, ") {\nentry:\n")
                         if !str_eq(retll, "void") { sb_push(fb, "  %r = ") } else { sb_push(fb, "  ") }
@@ -268,8 +257,7 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                         sb_push_char(fb, 46)
                         sb_push(fb, mname)
                         sb_push(fb, "(ptr %d")
-                        mut ai: int64 = 0
-                        while ai < ms.params_len {
+                        for ai in 0..ms.params_len {
                             pid2: int64 = vec_get((*a).kids, ms.params_off + ai)
                             p2: ParamNode = vec_get((*a).params, pid2)
                             all: string = cty_ll(c, cty_lower_ast(c, a, p2.ty))
@@ -278,7 +266,6 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                             sb_push(fb, " %a")
                             sb_push_int(fb, ai)
                             free(all)
-                            ai++
                         }
                         sb_push(fb, ")\n  ret ")
                         sb_push(fb, retll)
@@ -291,7 +278,6 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                         free(ftext)
                         free(retll)
                         free(thunk)
-                        mi++
                     }
                     slottext: string = gen_built(slots)
                     sb_free(slots)
@@ -407,12 +393,10 @@ func foreign_declare(m: *EmitModule, ctx: *GenCtx, ff: ForeignFuncNode) -> void 
     sb_push(b, " @")
     sb_push(b, ast_name(a, ff.name))
     sb_push_char(b, 40)
-    mut k: int64 = 0
-    while k < vec_len(parts) {
+    for k in 0..vec_len(parts) {
         if k > 0 { sb_push(b, ", ") }
         pp: string = vec_get(parts, k)
         sb_push(b, pp)
-        k++
     }
     if ff.variadic {
         if vec_len(parts) > 0 { sb_push(b, ", ...") } else { sb_push(b, "...") }
@@ -476,21 +460,17 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> Gen
             }
         } else if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
-            mut mi: int64 = 0
-            while mi < im.methods_len {
+            for mi in 0..im.methods_len {
                 mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + mi))
                 mb: string = gen_method_func(m, ctx, mf, ast_name(a, im.ty))
                 emit_push_function(m, mb)
                 free(mb)
-                mi++
             }
         } else if it.kind == ik_foreign() {
             fb: ForeignNode = vec_get((*a).foreigns, it.id)
-            mut fi: int64 = 0
-            while fi < fb.funcs_len {
+            for fi in 0..fb.funcs_len {
                 ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + fi))
                 foreign_declare(m, ctx, ff)
-                fi++
             }
         } else if it.kind == ik_struct() {
         } else if it.kind == ik_enum() {

@@ -108,10 +108,8 @@ export func load_module_namespace(imp: string, has_leaf: bool) -> string {
 // copied and nothing here owns a name.
 func copy_export_keys(target: *Map<string, int64>, ex: *Map<string, int64>) -> void {
     keys: *Vector<string> = map_keys(ex)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
+    for i in 0..vec_len(keys) {
         map_put(target, vec_get(keys, i), 1)
-        i++
     }
 }
 
@@ -246,8 +244,7 @@ export func load_export_split(a: *Ast) -> (*Map<string, int64>, *Map<string, int
  *  file's own declarations beat an imported package's export with. */
 export func load_range_globals(a: *Ast, out: *Map<string, int64>, lo: int64, hi: int64) -> void {
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = lo
-    while i < hi {
+    for i in lo..hi {
         it: ItemNode = vec_get(items, i)
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
@@ -258,25 +255,20 @@ export func load_range_globals(a: *Ast, out: *Map<string, int64>, lo: int64, hi:
         } else if it.kind == ik_enum() {
             e: EnumNode = vec_get((*a).enums, it.id)
             map_put(out, ast_name(a, e.name), 1)
-            mut j: int64 = 0
-            while j < e.variants_len {
+            for j in 0..e.variants_len {
                 v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + j))
                 map_put(out, ast_name(a, v.name), 1)
-                j++
             }
         } else if it.kind == ik_interface() {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)
             map_put(out, ast_name(a, iface.name), 1)
         } else if it.kind == ik_foreign() {
             fb: ForeignNode = vec_get((*a).foreigns, it.id)
-            mut k: int64 = 0
-            while k < fb.funcs_len {
+            for k in 0..fb.funcs_len {
                 ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
                 map_put(out, ast_name(a, ff.name), 1)
-                k++
             }
         }
-        i++
     }
 }
 
@@ -289,10 +281,8 @@ export func load_range_globals(a: *Ast, out: *Map<string, int64>, lo: int64, hi:
 export func load_import_prefixes(a: *Ast) -> *Map<string, int64> {
     out: *Map<string, int64> = new_set()
     imps: *Vector<int64> = (*a).imports
-    mut i: int64 = 0
-    while i < vec_len(imps) {
+    for i in 0..vec_len(imps) {
         load_add_namespace(out, ast_name(a, vec_get(imps, i)))
-        i++
     }
     return out
 }

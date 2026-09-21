@@ -37,15 +37,13 @@ func gc_funcval_thunk(s: *GenFuncState, name: string, sig: GenFnSig) -> void {
     sb_push(b, " @")
     sb_push(b, name)
     sb_push(b, ".funcval(ptr %env")
-    mut i: int64 = 0
-    while i < vec_len(params) {
+    for i in 0..vec_len(params) {
         pll: string = cty_ll(c, vec_get(params, i))
         sb_push(b, ", ")
         sb_push(b, pll)
         sb_push(b, " %a")
         sb_push_int(b, i)
         free(pll)
-        i++
     }
     sb_push(b, ") {\nentry:\n  ")
     if !str_eq(retll, "void") { sb_push(b, "%r = ") }
@@ -54,15 +52,13 @@ func gc_funcval_thunk(s: *GenFuncState, name: string, sig: GenFnSig) -> void {
     sb_push(b, " @")
     sb_push(b, name)
     sb_push_char(b, 40)
-    mut j: int64 = 0
-    while j < vec_len(params) {
+    for j in 0..vec_len(params) {
         if j > 0 { sb_push(b, ", ") }
         all: string = cty_ll(c, vec_get(params, j))
         sb_push(b, all)
         sb_push(b, " %a")
         sb_push_int(b, j)
         free(all)
-        j++
     }
     sb_push(b, ")\n  ret ")
     sb_push(b, retll)
@@ -303,8 +299,7 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
         if sig.is_foreign && fscall_needs_abi(c, sig) { return gen_foreign_struct_call(s, name, sig, args_off, args_len) }
         call_ret: string = cty_ll(c, sig.ret)
         args: *StringBuilder = alloc(sb_new())
-        mut i: int64 = 0
-        while i < args_len {
+        for i in 0..args_len {
             if i > 0 { sb_push(args, ", ") }
             aty: int64 = vec_get(sig.params, i)
             aeid: int64 = vec_get((*a).kids, args_off + i)
@@ -329,7 +324,6 @@ export func gen_call(s: *GenFuncState, callee_id: int64, args_off: int64, args_l
                 sb_push(args, out)
                 free(ll)
             }
-            i++
         }
         arg_text: string = gs_built(args)
         sb_free(args)

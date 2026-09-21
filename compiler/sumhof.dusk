@@ -28,11 +28,9 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
     record_lambda_summary(c, e, id)
     a: *Ast = (*(*c).t).ast
     bound: *Map<string, int64> = alloc(map_new())
-    mut p: int64 = 0
-    while p < e.b {
+    for p in 0..e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
         map_put(bound, ast_name(a, pn.name), 1)
-        p++
     }
     used: *Vector<string> = lambda_used_names((*c).t, e, id, bound)
     env: *Map<string, SumVal> = (*c).env
@@ -144,11 +142,9 @@ func sum_transfer_lambda(c: *SumCtx, e: ExprNode) -> (SummaryHandle, *Vector<Cap
     lspans: *Vector<SpanKey> = alloc(vec_new())
     fs: *Vector<FlowProv> = alloc(vec_new())
     syn: *SumCtx = ctx_new(t, (*c).summaries, (*c).gens, fnb, lret, lsink, lcoll, lcap, lspans, fs)
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         ctx_bind_param(syn, ast_name(a, pn.name), pn.ty, i)
-        i++
     }
     sum_block(syn, e.d)
     caps: *Vector<CapFlow> = sort_caps((*syn).capture_flows)
@@ -166,8 +162,7 @@ func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) -> SumV
     lt: *Map<string, int64> = (*c).local_types
     locals: *Map<string, int64> = (*c).locals
     saved: *Vector<SavedParam> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         name: string = ast_name(a, pn.name)
         he: bool = map_has(env, name)
@@ -175,10 +170,8 @@ func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) -> SumV
         ht: bool = map_has(lt, name)
         tv: int64 = unwrap_or(map_get(lt, name), -1)
         vec_push(saved, SavedParam { name: name, had_env: he, env_val: ev, had_ty: ht, ty_val: tv })
-        i++
     }
-    mut j: int64 = 0
-    while j < e.b {
+    for j in 0..e.b {
         pn2: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + j))
         name2: string = ast_name(a, pn2.name)
         map_put(locals, name2, 1)
@@ -188,7 +181,6 @@ func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) -> SumV
         mut seed: SumVal = val_none()
         if (view || reaches) && j < vec_len(seeds) { seed = vec_get(seeds, j) }
         map_put(env, name2, seed)
-        j++
     }
     lret_push(c, val_none())
     sum_block(c, e.d)
@@ -290,10 +282,8 @@ func opaque_mapper(c: *SumCtx, fexpr_id: int64, seeds: *Vector<SumVal>) -> SumVa
     if node.kind == tk_func() { viewy = sum_is_view((*c).t, node.c, (*c).gens) }
     if !viewy { return val_none() }
     mut r: SumVal = val_none()
-    mut i: int64 = 0
-    while i < vec_len(seeds) {
+    for i in 0..vec_len(seeds) {
         r = val_join(r, vec_get(seeds, i))
-        i++
     }
     return r
 }
@@ -317,8 +307,7 @@ func sort_caps(caps: *Vector<CapFlow>) -> *Vector<CapFlow> {
         i++
     }
     out: *Vector<CapFlow> = alloc(vec_new())
-    mut k: int64 = 0
-    while k < vec_len(caps) {
+    for k in 0..vec_len(caps) {
         cf: CapFlow = vec_get(caps, k)
         if k == 0 {
             vec_push(out, cf)
@@ -326,7 +315,6 @@ func sort_caps(caps: *Vector<CapFlow>) -> *Vector<CapFlow> {
             prev: CapFlow = vec_get(caps, k - 1)
             if cf.idx != prev.idx || !str_eq(cf.name, prev.name) { vec_push(out, cf) }
         }
-        k++
     }
     return out
 }
@@ -378,10 +366,8 @@ func fnb_block(t: *SumTables, bid: int64, cand: *Map<string, string>, pois: *Map
     blocks: *Vector<BlockNode> = (*a).blocks
     if bid >= vec_len(blocks) { return }
     b: BlockNode = vec_get(blocks, bid)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         fnb_stmt(t, vec_get((*a).kids, b.off + i), cand, pois)
-        i++
     }
 }
 
@@ -409,11 +395,9 @@ func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string, string>, pois: *Map<
             }
             if !resolved { fnb_poison(name, cand, pois) }
         } else {
-            mut i: int64 = 0
-            while i < s.b {
+            for i in 0..s.b {
                 bind2: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
                 fnb_poison(ast_name(a, bind2.name), cand, pois)
-                i++
             }
         }
     } else if s.kind == sk_assign() {
@@ -448,21 +432,17 @@ func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string, string>, pois: *Map<
 func fnb_match(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, cand: *Map<string, string>, pois: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     fnb_expr(t, scrut, cand, pois)
-    mut i: int64 = 0
-    while i < arms_len {
+    for i in 0..arms_len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + i))
         p: PatternNode = vec_get((*a).patterns, arm.pat)
         if p.kind == pk_variant() {
-            mut k: int64 = 0
-            while k < p.c {
+            for k in 0..p.c {
                 fnb_poison(ast_name(a, vec_get((*a).kids, p.b + k)), cand, pois)
-                k++
             }
         } else if p.kind == pk_ident() {
             fnb_poison(ast_name(a, p.a), cand, pois)
         }
         fnb_block(t, arm.body, cand, pois)
-        i++
     }
 }
 
@@ -473,10 +453,8 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
     e: ExprNode = vec_get(exprs, id)
     if e.kind == xk_call() {
         fnb_expr(t, e.a, cand, pois)
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c {
             fnb_expr(t, vec_get((*a).kids, e.b + i), cand, pois)
-            i++
         }
     } else if e.kind == xk_unary() {
         fnb_expr(t, e.b, cand, pois)
@@ -489,16 +467,12 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
         fnb_expr(t, e.a, cand, pois)
         fnb_expr(t, e.b, cand, pois)
     } else if e.kind == xk_tuple() || e.kind == xk_array() || e.kind == xk_fstr() {
-        mut j: int64 = 0
-        while j < e.b {
+        for j in 0..e.b {
             fnb_expr(t, vec_get((*a).kids, e.a + j), cand, pois)
-            j++
         }
     } else if e.kind == xk_struct_lit() {
-        mut k: int64 = 1
-        while k < e.c {
+        for k in 1..e.c by 2 {
             fnb_expr(t, vec_get((*a).kids, e.b + k), cand, pois)
-            k += 2
         }
     } else if e.kind == xk_lambda() {
         fnb_block(t, e.d, cand, pois)
@@ -513,11 +487,9 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
     } else if e.kind == xk_collect() {
         fnb_expr(t, e.b, cand, pois)
     } else if e.kind == xk_do() {
-        mut m: int64 = 0
-        while m < e.c {
+        for m in 0..e.c {
             db: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + m))
             fnb_expr(t, db.expr, cand, pois)
-            m++
         }
     }
 }
@@ -538,10 +510,8 @@ func collect_block_used(t: *SumTables, bid: int64, used: *Vector<string>, bound:
     if bid >= vec_len(blocks) { return }
     b: BlockNode = vec_get(blocks, bid)
     added: *Vector<string> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         collect_stmt_used(t, vec_get((*a).kids, b.off + i), used, bound, added)
-        i++
     }
     used_unbind(bound, added)
 }
@@ -559,10 +529,8 @@ func used_bind(bound: *Map<string, int64>, name: string, added: *Vector<string>)
 
 // Removes exactly the names used_bind added for a scope.
 func used_unbind(bound: *Map<string, int64>, added: *Vector<string>) -> void {
-    mut i: int64 = 0
-    while i < vec_len(added) {
+    for i in 0..vec_len(added) {
         map_remove(bound, vec_get(added, i))
-        i++
     }
 }
 
@@ -571,11 +539,9 @@ func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: 
     s: StmtNode = vec_get((*a).stmts, sid)
     if s.kind == sk_let() {
         collect_expr_used(t, s.c, used, bound)
-        mut i: int64 = 0
-        while i < s.b {
+        for i in 0..s.b {
             bind: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             used_bind(bound, ast_name(a, bind.name), added)
-            i++
         }
     } else if s.kind == sk_assign() {
         collect_expr_used(t, s.a, used, bound)
@@ -610,23 +576,19 @@ func collect_stmt_used(t: *SumTables, sid: int64, used: *Vector<string>, bound: 
 func collect_match_used(t: *SumTables, scrut: int64, arms_off: int64, arms_len: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     collect_expr_used(t, scrut, used, bound)
-    mut i: int64 = 0
-    while i < arms_len {
+    for i in 0..arms_len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + i))
         p: PatternNode = vec_get((*a).patterns, arm.pat)
         marm: *Vector<string> = alloc(vec_new())
         if p.kind == pk_variant() {
-            mut k: int64 = 0
-            while k < p.c {
+            for k in 0..p.c {
                 used_bind(bound, ast_name(a, vec_get((*a).kids, p.b + k)), marm)
-                k++
             }
         } else if p.kind == pk_ident() {
             used_bind(bound, ast_name(a, p.a), marm)
         }
         collect_block_used(t, arm.body, used, bound)
         used_unbind(bound, marm)
-        i++
     }
 }
 
@@ -647,32 +609,24 @@ func collect_expr_used(t: *SumTables, id: int64, used: *Vector<string>, bound: *
         collect_expr_used(t, e.b, used, bound)
     } else if e.kind == xk_call() {
         collect_expr_used(t, e.a, used, bound)
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c {
             collect_expr_used(t, vec_get((*a).kids, e.b + i), used, bound)
-            i++
         }
     } else if e.kind == xk_field() {
         collect_expr_used(t, e.a, used, bound)
     } else if e.kind == xk_tuple() || e.kind == xk_array() || e.kind == xk_fstr() {
-        mut j: int64 = 0
-        while j < e.b {
+        for j in 0..e.b {
             collect_expr_used(t, vec_get((*a).kids, e.a + j), used, bound)
-            j++
         }
     } else if e.kind == xk_struct_lit() {
-        mut k: int64 = 1
-        while k < e.c {
+        for k in 1..e.c by 2 {
             collect_expr_used(t, vec_get((*a).kids, e.b + k), used, bound)
-            k += 2
         }
     } else if e.kind == xk_lambda() {
         lam: *Vector<string> = alloc(vec_new())
-        mut p: int64 = 0
-        while p < e.b {
+        for p in 0..e.b {
             pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
             used_bind(bound, ast_name(a, pn.name), lam)
-            p++
         }
         collect_block_used(t, e.d, used, bound)
         used_unbind(bound, lam)

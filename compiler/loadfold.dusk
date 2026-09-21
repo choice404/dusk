@@ -26,11 +26,9 @@ export func load_shift_module(a: *Ast, base: int64) -> void {
             shift_block(a, f.body, base)
         } else if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
-            mut j: int64 = 0
-            while j < im.methods_len {
+            for j in 0..im.methods_len {
                 mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
                 shift_block(a, mf.body, base)
-                j++
             }
         }
     }
@@ -38,10 +36,8 @@ export func load_shift_module(a: *Ast, base: int64) -> void {
 
 func shift_block(a: *Ast, id: int64, base: int64) -> void {
     b: BlockNode = vec_get((*a).blocks, id)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         shift_stmt(a, vec_get((*a).kids, b.off + i), base)
-        i++
     }
 }
 
@@ -84,11 +80,9 @@ func shift_stmt(a: *Ast, id: int64, base: int64) -> void {
 
 func shift_match(a: *Ast, scrut: int64, off: int64, len: int64, base: int64) -> void {
     shift_expr(a, scrut, base)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         shift_block(a, arm.body, base)
-        i++
     }
 }
 
@@ -159,10 +153,8 @@ func shift_expr(a: *Ast, id: int64, base: int64) -> void {
 }
 
 func shift_expr_slice(a: *Ast, off: int64, len: int64, base: int64) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         shift_expr(a, vec_get((*a).kids, off + i), base)
-        i++
     }
 }
 
@@ -273,10 +265,8 @@ func fold_ns_put_one(t: FoldNs, prefix: string, suffix: string, moving: *Map<str
         empty: *Map<string, int64> = fold_new_set()
         target: *Map<string, int64> = unwrap_or(map_get(t.moving, prefix), empty)
         keys: *Vector<string> = map_keys(moving)
-        mut i: int64 = 0
-        while i < vec_len(keys) {
+        for i in 0..vec_len(keys) {
             map_put(target, vec_get(keys, i), 1)
-            i++
         }
         vec_free(keys)
         free(keys)
@@ -284,10 +274,8 @@ func fold_ns_put_one(t: FoldNs, prefix: string, suffix: string, moving: *Map<str
         target2: *Map<string, int64> = fold_new_set()
         map_put(t.moving, prefix, target2)
         keys2: *Vector<string> = map_keys(moving)
-        mut j: int64 = 0
-        while j < vec_len(keys2) {
+        for j in 0..vec_len(keys2) {
             map_put(target2, vec_get(keys2, j), 1)
-            j++
         }
         vec_free(keys2)
         free(keys2)
@@ -354,12 +342,10 @@ func fold_bind(fc: FoldCtx, a: *Ast, name: int64) -> void {
 // inner one.
 func fold_is_bound(fc: FoldCtx, name: string) -> bool {
     b: *Vector<*Map<string, int64>> = fc.bound
-    mut i: int64 = 0
-    while i < vec_len(b) {
+    for i in 0..vec_len(b) {
         if map_has(vec_get(b, i), name) {
             return true
         }
-        i++
     }
     return false
 }
@@ -385,42 +371,34 @@ func fold_bind_pattern(fc: FoldCtx, a: *Ast, id: int64) -> void {
     if p.kind == pk_ident() {
         fold_bind(fc, a, p.a)
     } else if p.kind == pk_variant() {
-        mut i: int64 = 0
-        while i < p.c {
+        for i in 0..p.c {
             fold_bind(fc, a, vec_get((*a).kids, p.b + i))
-            i++
         }
     }
 }
 
 func fold_expr_slice(a: *Ast, off: int64, len: int64, fc: FoldCtx) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         fold_expr(a, vec_get((*a).kids, off + i), fc)
-        i++
     }
 }
 
 func fold_match(a: *Ast, scrut: int64, off: int64, len: int64, fc: FoldCtx) -> void {
     fold_expr(a, scrut, fc)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         fold_push_scope(fc)
         fold_bind_pattern(fc, a, arm.pat)
         fold_block(a, arm.body, fc)
         fold_pop_scope(fc)
-        i++
     }
 }
 
 func fold_block(a: *Ast, id: int64, fc: FoldCtx) -> void {
     fold_push_scope(fc)
     b: BlockNode = vec_get((*a).blocks, id)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         fold_stmt(a, vec_get((*a).kids, b.off + i), fc)
-        i++
     }
     fold_pop_scope(fc)
 }
@@ -429,11 +407,9 @@ func fold_block(a: *Ast, id: int64, fc: FoldCtx) -> void {
 // see the binder, so a `json := json.core.load()` still folds the module call on its
 // right and shadows the module for everything after it.
 func fold_bind_let(a: *Ast, s: StmtNode, fc: FoldCtx) -> void {
-    mut i: int64 = 0
-    while i < s.b {
+    for i in 0..s.b {
         bn: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
         fold_bind(fc, a, bn.name)
-        i++
     }
 }
 
@@ -632,25 +608,21 @@ func fold_call_callee(a: *Ast, e: ExprNode, callee_id: int64, fc: FoldCtx) -> vo
 // and shadows the module for the steps that follow.
 func fold_do(a: *Ast, e: ExprNode, fc: FoldCtx) -> void {
     fold_push_scope(fc)
-    mut i: int64 = 0
-    while i < e.c {
+    for i in 0..e.c {
         d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + i))
         fold_expr(a, d.expr, fc)
         if d.name >= 0 {
             fold_bind(fc, a, d.name)
         }
-        i++
     }
     fold_pop_scope(fc)
 }
 
 func fold_lambda(a: *Ast, e: ExprNode, fc: FoldCtx) -> void {
     fold_push_scope(fc)
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         fold_bind(fc, a, pn.name)
-        i++
     }
     fold_block(a, e.d, fc)
     fold_pop_scope(fc)
@@ -682,10 +654,8 @@ func fold_expr(a: *Ast, id: int64, fc: FoldCtx) -> void {
     } else if e.kind == xk_fstr() {
         fold_expr_slice(a, e.a, e.b, fc)
     } else if e.kind == xk_struct_lit() {
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c by 2 {
             fold_expr(a, vec_get((*a).kids, e.b + i + 1), fc)
-            i += 2
         }
     } else if e.kind == xk_lambda() {
         fold_lambda(a, e, fc)
@@ -715,11 +685,9 @@ func fold_func(a: *Ast, id: int64, is_method: bool, fc: FoldCtx) -> void {
     if is_method {
         fold_bind_text(fc, "self")
     }
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         fold_bind(fc, a, pn.name)
-        i++
     }
     fold_block(a, f.body, fc)
     fold_pop_scope(fc)
@@ -736,19 +704,15 @@ export func load_fold_range(a: *Ast, ns: *Map<string, int64>, exports: *Map<stri
     bound: *Vector<*Map<string, int64>> = alloc(vec_new())
     fc: FoldCtx = FoldCtx { ns: ns, exports: exports, own: own, all: all, files: files, errors: errors, bound: bound, seen: seen, mark: mark, resolved: resolved, folded_at: folded_at }
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = lo
-    while i < hi {
+    for i in lo..hi {
         it: ItemNode = vec_get(items, i)
         if it.kind == ik_func() {
             fold_func(a, it.id, false, fc)
         } else if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
-            mut j: int64 = 0
-            while j < im.methods_len {
+            for j in 0..im.methods_len {
                 fold_func(a, vec_get((*a).kids, im.methods_off + j), true, fc)
-                j++
             }
         }
-        i++
     }
 }

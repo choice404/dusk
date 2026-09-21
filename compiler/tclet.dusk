@@ -214,11 +214,9 @@ func record_mut_tuple(tc: *TypeChecker, stmt: StmtNode, bind: BindNode, tyid: in
     val: ExprNode = vec_get((*a).exprs, stmt.c)
     if val.kind != xk_tuple() { return }
     mut has_array: bool = false
-    mut i: int64 = 0
-    while i < val.b {
+    for i in 0..val.b {
         m: ExprNode = vec_get((*a).exprs, vec_get((*a).kids, val.a + i))
         if m.kind == xk_array() { has_array = true }
-        i++
     }
     if !has_array { return }
     map_put((*tc).mut_tuple_types, span_key(val.lo, val.hi), MutTupleEntry { ty: tyid })
@@ -287,8 +285,7 @@ func member_ident_own(tc: *TypeChecker, name: string) -> int64 {
 func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) -> void {
     if value.kind != xk_tuple() { return }
     a: *Ast = (*tc).ast
-    mut i: int64 = 0
-    while i < value.b {
+    for i in 0..value.b {
         mid: int64 = vec_get((*a).kids, value.a + i)
         me: ExprNode = vec_get((*a).exprs, mid)
         key: string = tuple_member_key(prefix, i)
@@ -302,7 +299,6 @@ func record_member_own_rec(tc: *TypeChecker, prefix: string, value: ExprNode) ->
             mv: int64 = match_own_of(tc, mid)
             if mv == own_borrow() { map_put((*tc).tuple_member_own, key, own_borrow()) }
         }
-        i++
     }
 }
 
@@ -329,13 +325,11 @@ func record_ref_member_borrows(tc: *TypeChecker, prefix: string, tyid: int64) ->
     if (*tc).types_only { return }
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind != tyk_tuple() { return }
-    mut i: int64 = 0
-    while i < n.len {
+    for i in 0..n.len {
         mt: int64 = vec_get((*(*tc).ty).kids, n.off + i)
         key: string = tuple_member_key(prefix, i)
         if is_managed_ty(tc, mt) { map_put((*tc).tuple_member_own, key, own_borrow()) }
         record_ref_member_borrows(tc, key, mt)
-        i++
     }
 }
 
@@ -354,11 +348,9 @@ func is_enum_ctor_call(tc: *TypeChecker, expr_id: int64) -> bool {
 func tuple_has_error(tc: *TypeChecker, tyid: int64) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind != tyk_tuple() { return false }
-    mut i: int64 = 0
-    while i < n.len {
+    for i in 0..n.len {
         mt: TyNode = ty_get((*tc).ty, vec_get((*(*tc).ty).kids, n.off + i))
         if mt.kind == tyk_error() { return true }
-        i++
     }
     return false
 }
@@ -448,27 +440,20 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     n: TyNode = ty_get((*tc).ty, vt)
     parts: *Vector<int64> = alloc(vec_new())
     if n.kind == tyk_tuple() && n.len == stmt.b {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             vec_push(parts, vec_get((*(*tc).ty).kids, n.off + i))
-            i++
         }
     } else if n.kind == tyk_unknown() {
-        mut j: int64 = 0
-        while j < stmt.b {
+        for j in 0..stmt.b {
             vec_push(parts, ty_unknown((*tc).ty))
-            j++
         }
     } else {
         tc_emit(tc, "destructuring binding expects a tuple of matching arity", value.lo, value.hi)
-        mut k: int64 = 0
-        while k < stmt.b {
+        for k in 0..stmt.b {
             vec_push(parts, ty_unknown((*tc).ty))
-            k++
         }
     }
-    mut m: int64 = 0
-    while m < stmt.b {
+    for m in 0..stmt.b {
         b: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a + m))
         mut tyid: int64 = vec_get(parts, m)
         if b.ty >= 0 {
@@ -549,23 +534,19 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             declare_own(tc, ast_name(a, b.name), own_tag)
         }
         if (stmt.d & 2) != 0 { record_ref_member_borrows(tc, binder_name, tyid) }
-        m++
     }
     if value.kind == xk_tuple() && value.b == stmt.b {
-        mut n: int64 = 0
-        while n < stmt.b {
+        for n in 0..stmt.b {
             b2: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a + n))
             member_id: int64 = vec_get((*a).kids, value.a + n)
             esc: EscPair = value_escape(tc, member_id)
             set_esc(tc, ast_name(a, b2.name), esc.slice, esc.closure)
             link_binding_aliases(tc, ast_name(a, b2.name), member_id, false)
             record_ptr_borrow_member(tc, ast_name(a, b2.name), member_id)
-            n++
         }
     } else {
         whole: EscPair = value_escape(tc, stmt.c)
-        mut q: int64 = 0
-        while q < stmt.b {
+        for q in 0..stmt.b {
             b3: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a + q))
             part: int64 = vec_get(parts, q)
             if (whole.slice || whole.closure) && member_carries_view(tc, part) {
@@ -574,7 +555,6 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             if links_as_alias(tc, part) {
                 link_binding_aliases(tc, ast_name(a, b3.name), stmt.c, false)
             }
-            q++
         }
     }
 }

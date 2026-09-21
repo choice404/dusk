@@ -90,24 +90,20 @@ func cabi_flatten(c: *CTyArena, ty: int64, base: int64, out: *Vector<CAbiLeaf>) 
         elem: int64 = n.a
         sa: SizeAlign = cty_size_align(c, elem)
         stride: int64 = cabi_align_up(sa.size, sa.align)
-        mut i: int64 = 0
-        while i < n.b {
+        for i in 0..n.b {
             cabi_flatten(c, elem, base + i * stride, out)
-            i++
         }
         return
     }
     if n.kind == ctyk_struct() {
         count: int64 = cty_struct_field_count(c, ty)
         mut off: int64 = 0
-        mut fi: int64 = 0
-        while fi < count {
+        for fi in 0..count {
             fty: int64 = cty_struct_field_ty(c, ty, fi)
             fsa: SizeAlign = cty_size_align(c, fty)
             off = cabi_align_up(off, fsa.align)
             cabi_flatten(c, fty, base + off, out)
             off += fsa.size
-            fi++
         }
         return
     }
@@ -122,14 +118,12 @@ func cabi_flatten(c: *CTyArena, ty: int64, base: int64, out: *Vector<CAbiLeaf>) 
 func cabi_eightbyte_sse(leaves: *Vector<CAbiLeaf>, off: int64) -> bool {
     mut has: bool = false
     mut allfloat: bool = true
-    mut i: int64 = 0
-    while i < vec_len(leaves) {
+    for i in 0..vec_len(leaves) {
         lf: CAbiLeaf = vec_get(leaves, i)
         if lf.off < off + 8 && lf.off + lf.size > off {
             has = true
             if !lf.isfloat { allfloat = false }
         }
-        i++
     }
     return has && allfloat
 }
@@ -138,13 +132,11 @@ func cabi_eightbyte_sse(leaves: *Vector<CAbiLeaf>, off: int64) -> bool {
 // space beyond the struct. This is clang's BitsContainNoUserData, the test that
 // lets a 1/2/4 byte leaf coerce narrow instead of widening to i64.
 func cabi_bits_no_user_data(leaves: *Vector<CAbiLeaf>, startbit: int64, endbit: int64) -> bool {
-    mut i: int64 = 0
-    while i < vec_len(leaves) {
+    for i in 0..vec_len(leaves) {
         lf: CAbiLeaf = vec_get(leaves, i)
         ls: int64 = lf.off * 8
         le: int64 = (lf.off + lf.size) * 8
         if ls < endbit && le > startbit { return false }
-        i++
     }
     return true
 }

@@ -69,12 +69,10 @@ func foreign_ty_ok(t: *TyArena, id: int64) -> bool {
     // refused too: the callback goes one level deep, since C carries a callback
     // as a bare function pointer with no room for a further closure word.
     if n.kind == tyk_func() {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             k: int64 = vec_get((*t).kids, n.off + i)
             if ty_get(t, k).kind == tyk_func() { return false }
             if !foreign_ty_ok(t, k) { return false }
-            i++
         }
         if ty_get(t, n.a).kind == tyk_func() { return false }
         return foreign_ty_ok(t, n.a)
@@ -90,10 +88,8 @@ func callback_has_nested_fn(tc: *TypeChecker, tyid: int64) -> bool {
     t: *TyArena = (*tc).ty
     n: TyNode = ty_get(t, tyid)
     if n.kind != tyk_func() { return false }
-    mut i: int64 = 0
-    while i < n.len {
+    for i in 0..n.len {
         if ty_get(t, vec_get((*t).kids, n.off + i)).kind == tyk_func() { return true }
-        i++
     }
     return ty_get(t, n.a).kind == tyk_func()
 }
@@ -149,12 +145,10 @@ func foreign_struct_cplain(tc: *TypeChecker, name: string) -> string {
     if st.len == 0 {
         return empty_struct_msg(name)
     }
-    mut i: int64 = 0
-    while i < st.len {
+    for i in 0..st.len {
         f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
         r: string = foreign_cplain_field(tc, f.ty, f.name)
         if str_len(r) > 0 { return r }
-        i++
     }
     return ""
 }
@@ -263,18 +257,15 @@ export func check_foreign(tc: *TypeChecker, fb: ForeignNode) -> void {
     if !str_eq(abi, "C") {
         tc_emit(tc, foreign_abi_msg(abi), fb.lo, fb.hi)
     }
-    mut i: int64 = 0
-    while i < fb.funcs_len {
+    for i in 0..fb.funcs_len {
         ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + i))
-        mut j: int64 = 0
-        while j < ff.params_len {
+        for j in 0..ff.params_len {
             p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + j))
             tyid: int64 = tc_type(tc, p.ty)
             preject: string = foreign_param_reject(tc, tyid, ast_name(a, ff.name), ff.variadic)
             if str_len(preject) > 0 {
                 tc_emit(tc, preject, fb.lo, fb.hi)
             }
-            j++
         }
         rt: int64 = tc_type(tc, ff.ret)
         rtn: TyNode = ty_get((*tc).ty, rt)
@@ -292,7 +283,6 @@ export func check_foreign(tc: *TypeChecker, fb: ForeignNode) -> void {
                 tc_emit(tc, rreject, fb.lo, fb.hi)
             }
         }
-        i++
     }
 }
 
@@ -306,11 +296,9 @@ func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>
     if n.kind == tyk_slice() || n.kind == tyk_func() { return cross_view() }
     if n.kind == tyk_array() { return async_cross_reason(tc, n.a, seen) }
     if n.kind == tyk_tuple() {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             r: int64 = async_cross_reason(tc, vec_get((*(*tc).ty).kids, n.off + i), seen)
             if r != cross_ok() { return r }
-            i++
         }
         return cross_ok()
     }
@@ -322,11 +310,9 @@ func async_cross_reason(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>
         if tc_has_embed(tc, name) {
             embeds: *Map<string, TyList> = (*tc).embed_fields
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
-            mut j: int64 = 0
-            while j < list.len {
+            for j in 0..list.len {
                 r2: int64 = async_cross_reason(tc, sig_ty_at((*tc).sigtab, list, j), seen)
                 if r2 != cross_ok() { return r2 }
-                j++
             }
         }
     }
@@ -352,10 +338,8 @@ export func ret_embeds_iface(tc: *TypeChecker, tyid: int64, seen: *Map<string, i
         if tc_has_embed(tc, name) {
             embeds: *Map<string, TyList> = (*tc).embed_fields
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
-            mut j: int64 = 0
-            while j < list.len {
+            for j in 0..list.len {
                 if ret_embeds_iface(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
-                j++
             }
         }
         return false
@@ -367,10 +351,8 @@ export func ret_embeds_iface(tc: *TypeChecker, tyid: int64, seen: *Map<string, i
     // the declared return type); raise-only, since no sound *interface return exists today.
     if n.kind == tyk_ptr() || n.kind == tyk_rawptr() { return ret_embeds_iface(tc, n.a, seen) }
     if n.kind == tyk_tuple() {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if ret_embeds_iface(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i++
         }
     }
     return false
@@ -381,8 +363,7 @@ export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
     if f.generics_len > 0 {
         tc_emit(tc, "an async func cannot take type parameters", f.lo, f.hi)
     }
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         raw: int64 = tc_raw_type(tc, p.ty)
         seen: *Map<string, int64> = alloc(map_new())
@@ -392,7 +373,6 @@ export func check_async_sig(tc: *TypeChecker, f: FuncNode) -> void {
         } else if reason == cross_view() {
             tc_emit(tc, async_take_msg(ast_name(a, p.name), false), f.lo, f.hi)
         }
-        i++
     }
     raw_ret: int64 = tc_raw_type(tc, f.ret)
     seen_ret: *Map<string, int64> = alloc(map_new())

@@ -19,11 +19,9 @@ export struct Place { ok: bool, ty: int64, ptr: string }
 // through gs_lookup; the enum constructor cases route through this.
 func gp_enum_id(a: *Ast, name: string) -> int64 {
     enums: *Vector<EnumNode> = (*a).enums
-    mut i: int64 = 0
-    while i < vec_len(enums) {
+    for i in 0..vec_len(enums) {
         e: EnumNode = vec_get(enums, i)
         if str_eq(ast_name(a, e.name), name) { return i }
-        i++
     }
     return -1
 }
@@ -38,13 +36,11 @@ func gp_iface_method_ret(s: *GenFuncState, iface_name: string, method: string) -
     ifaces: *Vector<InterfaceNode> = (*a).interfaces
     for iface in ifaces {
         if str_eq(ast_name(a, iface.name), iface_name) {
-            mut j: int64 = 0
-            while j < iface.methods_len {
+            for j in 0..iface.methods_len {
                 ms: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + j))
                 if str_eq(ast_name(a, ms.name), method) {
                     return cty_lower_ast(c, a, ms.ret)
                 }
-                j++
             }
         }
     }
@@ -140,10 +136,8 @@ export func static_expr_ty(s: *GenFuncState, id: int64) -> int64 {
     }
     if e.kind == xk_tuple() {
         tys: *Vector<int64> = alloc(vec_new())
-        mut ti: int64 = 0
-        while ti < e.b {
+        for ti in 0..e.b {
             vec_push(tys, gp_lit_ty(s, vec_get((*a).kids, e.a + ti)))
-            ti++
         }
         return cty_tuple_make(c, tys)
     }

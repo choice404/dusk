@@ -137,11 +137,9 @@ func struct_field_ast(tc: *TypeChecker, struct_ast: int64, field: string) -> int
     structs: *Vector<StructNode> = (*a).structs
     for st in structs {
         if str_eq(ast_name(a, st.name), sname) {
-            mut j: int64 = 0
-            while j < st.fields_len {
+            for j in 0..st.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + j))
                 if str_eq(ast_name(a, fld.name), field) { return fld.ty }
-                j++
             }
             return -1
         }
@@ -333,15 +331,13 @@ func check_match_stmt(tc: *TypeChecker, scrut: int64, off: int64, len: int64) ->
     scrut_esc: EscPair = value_escape(tc, scrut)
     a: *Ast = (*tc).ast
     (*tc).branch_depth++
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         push_scope(tc)
         bind_match_arm(tc, arm.pat, st, scrut)
         bind_match_arm_escape(tc, arm.pat, st, scrut, scrut_esc)
         check_block_no_scope(tc, arm.body)
         pop_scope(tc)
-        i++
     }
     (*tc).branch_depth--
     check_match_scrutinee(tc, st, scrut, off, len)
@@ -676,12 +672,10 @@ func check_let_await(tc: *TypeChecker, s: StmtNode, value: ExprNode) -> void {
         mut values: int64 = 2
         if en.kind == tyk_tuple() { values = en.len }
         tc_emit(tc, await_shape_msg(values, nbinds), value.lo, value.hi)
-        mut j: int64 = 0
-        while j < nbinds {
+        for j in 0..nbinds {
             bx: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + j))
             reject_enum_name_binding(tc, ast_name(a, bx.name), value.lo, value.hi)
             declare(tc, ast_name(a, bx.name), ty_unknown((*tc).ty))
-            j++
         }
     }
 }
@@ -689,10 +683,8 @@ func check_let_await(tc: *TypeChecker, s: StmtNode, value: ExprNode) -> void {
 export func check_block_no_scope(tc: *TypeChecker, block_id: int64) -> void {
     a: *Ast = (*tc).ast
     b: BlockNode = vec_get((*a).blocks, block_id)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         check_stmt(tc, vec_get((*a).kids, b.off + i))
-        i++
     }
 }
 

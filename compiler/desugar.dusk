@@ -14,20 +14,16 @@ func empty_kids(a: *Ast) -> (int64, int64) {
 
 func clone_name_kids(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         vec_push(ids, vec_get((*a).kids, off + i))
-        i++
     }
     return ast_kids(a, ids)
 }
 
 func clone_type_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         vec_push(ids, clone_type(a, vec_get((*a).kids, off + i)))
-        i++
     }
     return ast_kids(a, ids)
 }
@@ -84,10 +80,8 @@ func clone_param(a: *Ast, id: int64) -> int64 {
 
 func clone_param_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         vec_push(ids, clone_param(a, vec_get((*a).kids, off + i)))
-        i++
     }
     return ast_kids(a, ids)
 }
@@ -103,10 +97,8 @@ func clone_bind(a: *Ast, id: int64) -> int64 {
 
 func clone_bind_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         vec_push(ids, clone_bind(a, vec_get((*a).kids, off + i)))
-        i++
     }
     return ast_kids(a, ids)
 }
@@ -125,32 +117,26 @@ func clone_pattern(a: *Ast, id: int64) -> int64 {
 
 func rewrite_expr_list(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         vec_push(ids, rewrite_expr(a, vec_get((*a).kids, off + i)))
-        i++
     }
     return ast_kids(a, ids)
 }
 
 func rewrite_field_pairs(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len by 2 {
         vec_push(ids, vec_get((*a).kids, off + i))
         vec_push(ids, rewrite_expr(a, vec_get((*a).kids, off + i + 1)))
-        i += 2
     }
     return ast_kids(a, ids)
 }
 
 func rewrite_match(a: *Ast, scrut: int64, off: int64, len: int64) -> (int64, int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         vec_push(ids, ast_arm(a, clone_pattern(a, arm.pat), rewrite_block(a, arm.body)))
-        i++
     }
     aoff, alen := ast_kids(a, ids)
     return (rewrite_expr(a, scrut), aoff, alen)
@@ -159,10 +145,8 @@ func rewrite_match(a: *Ast, scrut: int64, off: int64, len: int64) -> (int64, int
 func rewrite_block(a: *Ast, id: int64) -> int64 {
     b: BlockNode = vec_get((*a).blocks, id)
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         vec_push(ids, rewrite_stmt(a, vec_get((*a).kids, b.off + i)))
-        i++
     }
     return ast_block(a, ids)
 }
@@ -215,10 +199,8 @@ func rebuilt_incdec(a: *Ast, last: StmtNode) -> int64 {
 func replace_tail(a: *Ast, block_id: int64, new_stmt: int64) -> int64 {
     b: BlockNode = vec_get((*a).blocks, block_id)
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < b.len - 1 {
+    for i in 0..b.len - 1 {
         vec_push(ids, vec_get((*a).kids, b.off + i))
-        i++
     }
     vec_push(ids, new_stmt)
     return ast_block(a, ids)
@@ -277,11 +259,9 @@ func value_ize_branch(a: *Ast, block_id: int64) -> int64 {
 // cloned, so they are reused; only the bodies are rethreaded through value_ize_branch.
 func value_ize_arms(a: *Ast, off: int64, len: int64) -> (int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         vec_push(ids, ast_arm(a, arm.pat, value_ize_branch(a, arm.body)))
-        i++
     }
     return ast_kids(a, ids)
 }
@@ -293,11 +273,9 @@ func value_ize_arms(a: *Ast, off: int64, len: int64) -> (int64, int64) {
 // expression's desugar is unchanged.
 func rewrite_match_value(a: *Ast, scrut: int64, off: int64, len: int64) -> (int64, int64, int64) {
     ids: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         vec_push(ids, ast_arm(a, clone_pattern(a, arm.pat), value_ize_branch(a, rewrite_block(a, arm.body))))
-        i++
     }
     aoff, alen := ast_kids(a, ids)
     return (rewrite_expr(a, scrut), aoff, alen)
@@ -543,10 +521,8 @@ func rewrite_func(a: *Ast, id: int64) -> int64 {
 func rewrite_impl(a: *Ast, id: int64) -> int64 {
     im: ImplNode = vec_get((*a).impls, id)
     methods: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < im.methods_len {
+    for i in 0..im.methods_len {
         vec_push(methods, rewrite_func(a, vec_get((*a).kids, im.methods_off + i)))
-        i++
     }
     return ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)
 }

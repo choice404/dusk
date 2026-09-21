@@ -12,11 +12,9 @@ func c_object_name(path: string) -> string {
     n: int64 = str_len(path)
     mut last: int64 = -1
     mut dot: int64 = -1
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         if path[i] == 47 { last = i }
         if path[i] == 46 { dot = i }
-        i++
     }
     base_start: int64 = last + 1
     mut base_end: int64 = n
@@ -121,11 +119,9 @@ export func write_lib_header(out: string, stem: string, exports: *Vector<string>
     sb_push(b, "_H\n#define DUSK_")
     sb_push(b, guard)
     sb_push(b, "_H\n\n#include <stdint.h>\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n")
-    mut i: int64 = 0
-    while i < vec_len(exports) {
+    for i in 0..vec_len(exports) {
         sb_push(b, vec_get(exports, i))
         sb_push_char(b, 10)
-        i++
     }
     sb_push(b, "\n#ifdef __cplusplus\n}\n#endif\n\n#endif\n")
     text: string = substring(sb_cstr(b), 0, sb_size(b))
@@ -194,14 +190,12 @@ func export_symbol_name(proto: string) -> string {
     n: int64 = str_len(proto)
     mut sp: int64 = -1
     mut lp: int64 = -1
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         if proto[i] == 32 && sp < 0 { sp = i }
         if proto[i] == 40 {
             lp = i
             break
         }
-        i++
     }
     if sp < 0 || lp < 0 || lp <= sp + 1 {
         return substring(proto, 0, 0)
@@ -230,10 +224,8 @@ func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, 
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "ld -r")
     push_arg(cmd, mod_obj)
-    mut i: int64 = 0
-    while i < vec_len(cs_objs) {
+    for i in 0..vec_len(cs_objs) {
         push_arg(cmd, vec_get(cs_objs, i))
-        i++
     }
     sb_push(cmd, " -o")
     push_arg(cmd, merged)
@@ -249,8 +241,7 @@ func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, 
     oc: *StringBuilder = alloc(sb_new())
     sb_push(oc, "llvm-objcopy")
     mut kept: int64 = 0
-    mut j: int64 = 0
-    while j < vec_len(exports) {
+    for j in 0..vec_len(exports) {
         sym: string = export_symbol_name(vec_get(exports, j))
         if str_len(sym) > 0 {
             sb_push(oc, " -G ")
@@ -258,7 +249,6 @@ func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, 
             kept++
         }
         free(sym)
-        j++
     }
     // With no exports, llvm-objcopy given no keep-global flag would leave every
     // symbol global, the interposition hole this whole step exists to close. A
@@ -296,8 +286,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
     }
 
     cs_objs: *Vector<string> = alloc(vec_new())
-    mut ci: int64 = 0
-    while ci < vec_len(csources) {
+    for ci in 0..vec_len(csources) {
         src2: string = vec_get(csources, ci)
         obj2: string = prefixed_obj_path(out, "duskcs_", ci, src2)
         cc: int64 = compile_object(src2, obj2, opt)
@@ -307,7 +296,6 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
             return cc
         }
         vec_push(cs_objs, obj2)
-        ci++
     }
 
     mc: int64 = merge_and_localize(out, mod_obj, cs_objs, exports)
@@ -319,8 +307,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
     vec_push(objs, merged_obj_path(out))
 
     rts: *Vector<string> = runtime_sources()
-    mut ri: int64 = 0
-    while ri < vec_len(rts) {
+    for ri in 0..vec_len(rts) {
         src: string = path_join(rt, vec_get(rts, ri))
         obj: string = prefixed_obj_path(out, "duskrt_", ri, src)
         rc: int64 = compile_object(src, obj, opt)
@@ -331,7 +318,6 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
             return rc
         }
         vec_push(objs, obj)
-        ri++
     }
 
     ar: string = path_join(out, archive_name(stem))
@@ -349,10 +335,8 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
     arcmd: *StringBuilder = alloc(sb_new())
     sb_push(arcmd, "llvm-ar rcsD")
     push_arg(arcmd, ar)
-    mut oi: int64 = 0
-    while oi < vec_len(objs) {
+    for oi in 0..vec_len(objs) {
         push_arg(arcmd, vec_get(objs, oi))
-        oi++
     }
     arline: string = substring(sb_cstr(arcmd), 0, sb_size(arcmd))
     sb_free(arcmd)

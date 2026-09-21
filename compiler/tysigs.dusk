@@ -149,20 +149,16 @@ func new_set() -> *Map<string, int64> {
 func generics_set(s: *TypeSigs, off: int64, len: int64) -> *Map<string, int64> {
     g: *Map<string, int64> = new_set()
     a: *Ast = (*s).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
-        i++
     }
     return g
 }
 
 func push_tys(dst: *Vector<int64>, src: *Vector<int64>) -> TyList {
     off: int64 = vec_len(dst)
-    mut i: int64 = 0
-    while i < vec_len(src) {
+    for i in 0..vec_len(src) {
         vec_push(dst, vec_get(src, i))
-        i++
     }
     return TyList { off: off, len: vec_len(src) }
 }
@@ -175,14 +171,12 @@ func push_tys(dst: *Vector<int64>, src: *Vector<int64>) -> TyList {
 func push_params(s: *TypeSigs, off: int64, len: int64, gens: *Map<string, int64>, fixed: bool, unmangle_fixed: bool) -> TyList {
     vals: *Vector<int64> = alloc(vec_new())
     a: *Ast = (*s).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, off + i))
         mut id: int64 = lower((*s).ty, a, p.ty, gens)
         if fixed { id = fix(s, id) }
         if fixed && unmangle_fixed { id = unmangle((*s).ty, id, (*s).future_elems) }
         vec_push(vals, id)
-        i++
     }
     return push_tys((*s).tys, vals)
 }
@@ -192,14 +186,12 @@ func push_fields(s: *TypeSigs, off: int64, len: int64, gens: *Map<string, int64>
     fields_off: int64 = vec_len(fields_vec)
     raws: *Vector<int64> = alloc(vec_new())
     a: *Ast = (*s).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, off + i))
         raw: int64 = lower((*s).ty, a, fld.ty, gens)
         fixed: int64 = unmangle((*s).ty, fix(s, raw), (*s).future_elems)
         vec_push(fields_vec, FieldSig { name: ast_name(a, fld.name), ty: fixed, raw: raw })
         vec_push(raws, raw)
-        i++
     }
     raw_list: TyList = push_tys((*s).tys, raws)
     return (fields_off, len, raw_list)
@@ -222,19 +214,15 @@ export func fix(s: *TypeSigs, id: int64) -> int64 {
     if n.kind == tyk_array() { return ty_array(t, fix(s, n.a), n.w) }
     if n.kind == tyk_tuple() {
         xs: *Vector<int64> = alloc(vec_new())
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             vec_push(xs, fix(s, vec_get((*t).kids, n.off + i)))
-            i++
         }
         return ty_tuple(t, xs)
     }
     if n.kind == tyk_func() {
         ps: *Vector<int64> = alloc(vec_new())
-        mut j: int64 = 0
-        while j < n.len {
+        for j in 0..n.len {
             vec_push(ps, fix(s, vec_get((*t).kids, n.off + j)))
-            j++
         }
         return ty_func(t, ps, fix(s, n.a))
     }
@@ -249,14 +237,12 @@ func collect_iface(s: *TypeSigs, id: int64) -> void {
     gens: *Map<string, int64> = generics_set(s, iface.generics_off, iface.generics_len)
     methods_vec: *Vector<MethodReq> = (*s).methods
     moff: int64 = vec_len(methods_vec)
-    mut i: int64 = 0
-    while i < iface.methods_len {
+    for i in 0..iface.methods_len {
         m: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + i))
         mname: string = ast_name(a, m.name)
         vec_push(methods_vec, MethodReq { name: mname, arity: m.params_len })
         params: TyList = push_params(s, m.params_off, m.params_len, gens, false, false)
         map_put((*s).iface_method_params, key2(iname, mname), params)
-        i++
     }
     map_put((*s).iface_methods, iname, MethodList { off: moff, len: iface.methods_len })
 }
@@ -270,8 +256,7 @@ func collect_enum(s: *TypeSigs, id: int64) -> void {
     sigs_vec: *Vector<VariantSig> = (*s).variant_sigs
     noff: int64 = vec_len(names_vec)
     embed: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < e.variants_len {
+    for i in 0..e.variants_len {
         v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + i))
         vname: string = ast_name(a, v.name)
         vec_push(names_vec, vname)
@@ -285,20 +270,17 @@ func collect_enum(s: *TypeSigs, id: int64) -> void {
         }
         map_put((*s).variant_owner, vname, ename)
         payload: *Vector<int64> = alloc(vec_new())
-        mut j: int64 = 0
-        while j < v.fields_len {
+        for j in 0..v.fields_len {
             fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, v.fields_off + j))
             raw: int64 = lower((*s).ty, a, fld.ty, gens)
             vec_push(payload, raw)
             vec_push(embed, raw)
-            j++
         }
         list: TyList = push_tys((*s).tys, payload)
         vs: VariantSig = VariantSig { off: list.off, len: list.len }
         vec_push(sigs_vec, vs)
         map_put((*s).variant_payloads, vname, vs)
         map_put((*s).variant_payloads_by_enum, key2(ename, vname), vs)
-        i++
     }
     map_put((*s).enums, ename, EnumSig { off: noff, len: e.variants_len })
     map_put((*s).embed_fields, ename, push_tys((*s).tys, embed))
@@ -311,13 +293,11 @@ func collect_impl(s: *TypeSigs, id: int64) -> void {
     if im.iface >= 0 {
         map_put((*s).impls, key2(ast_name(a, im.iface), recv), 1)
     }
-    mut i: int64 = 0
-    while i < im.methods_len {
+    for i in 0..im.methods_len {
         f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
         gens: *Map<string, int64> = generics_set(s, f.generics_off, f.generics_len)
         params: TyList = push_params(s, f.params_off, f.params_len, gens, false, false)
         map_put((*s).method_params, key2(recv, ast_name(a, f.name)), params)
-        i++
     }
 }
 
@@ -351,8 +331,7 @@ func collect_foreign(s: *TypeSigs, id: int64) -> void {
     a: *Ast = (*s).ast
     fb: ForeignNode = vec_get((*a).foreigns, id)
     gens: *Map<string, int64> = new_set()
-    mut i: int64 = 0
-    while i < fb.funcs_len {
+    for i in 0..fb.funcs_len {
         ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + i))
         name: string = ast_name(a, ff.name)
         raw_params: TyList = push_params(s, ff.params_off, ff.params_len, gens, false, false)
@@ -365,7 +344,6 @@ func collect_foreign(s: *TypeSigs, id: int64) -> void {
         if ff.variadic {
             map_put((*s).variadic_foreigns, name, 1)
         }
-        i++
     }
 }
 
@@ -386,16 +364,13 @@ export func sig_is_foreign(s: *TypeSigs, name: string) -> bool {
 export func collect_sigs(s: *TypeSigs) -> void {
     a: *Ast = (*s).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
+    for i in 0..vec_len(items) {
         it: ItemNode = vec_get(items, i)
         if it.kind == ik_interface() { collect_iface(s, it.id) }
         if it.kind == ik_enum() { collect_enum(s, it.id) }
         if it.kind == ik_impl() { collect_impl(s, it.id) }
-        i++
     }
-    mut j: int64 = 0
-    while j < vec_len(items) {
+    for j in 0..vec_len(items) {
         it2: ItemNode = vec_get(items, j)
         if it2.kind == ik_func() {
             collect_func_sig(s, vec_get((*a).funcs, it2.id))
@@ -404,7 +379,6 @@ export func collect_sigs(s: *TypeSigs) -> void {
         } else if it2.kind == ik_foreign() {
             collect_foreign(s, it2.id)
         }
-        j++
     }
 }
 

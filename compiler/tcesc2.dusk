@@ -222,15 +222,13 @@ func struct_lit_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
     e: ExprNode = vec_get((*a).exprs, expr_id)
     if e.kind != xk_struct_lit() { return no_flow_prov() }
     fp: *Map<string, FlowProv> = (*tc).flow_prov
-    mut j: int64 = 1
-    while j < e.c {
+    for j in 1..e.c by 2 {
         init: int64 = vec_get((*a).kids, e.b + j)
         ie: ExprNode = vec_get((*a).exprs, init)
         if ie.kind == xk_ident() {
             name: string = ast_name(a, ie.a)
             if map_has(fp, name) { return unwrap_or(map_get(fp, name), no_flow_prov()) }
         }
-        j += 2
     }
     return no_flow_prov()
 }
@@ -470,8 +468,7 @@ func check_opaque_call_send(tc: *TypeChecker, callee_id: int64, arg_off: int64, 
     if !callee_is_opaque(tc, callee_id) { return }
     a: *Ast = (*tc).ast
     fp: *Map<string, FlowProv> = (*tc).flow_prov
-    mut i: int64 = 0
-    while i < arg_len {
+    for i in 0..arg_len {
         arg_id: int64 = vec_get((*a).kids, arg_off + i)
         root: string = send_value_root(tc, arg_id)
         mut handled: bool = false
@@ -489,7 +486,6 @@ func check_opaque_call_send(tc: *TypeChecker, callee_id: int64, arg_off: int64, 
                 tc_emit(tc, "this call may store a closure that captures the current frame beyond it; put the captured backing on the heap", lo, hi)
             }
         }
-        i++
     }
 }
 
@@ -686,10 +682,8 @@ func apply_call_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
     // an edge reads the pre-call state (a `two(s, x, y)` that stores s into x then
     // reads x back into y sees x clean at both edges).
     src: *Vector<EscPair> = alloc(vec_new())
-    mut s: int64 = 0
-    while s < arg_len {
+    for s in 0..arg_len {
         vec_push(src, value_escape(tc, vec_get((*a).kids, arg_off + s)))
-        s++
     }
     mut x: int64 = 0
     while x < arg_len && x < 64 {

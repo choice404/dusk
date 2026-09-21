@@ -45,22 +45,18 @@ export func record_store(c: *SumCtx, place_id: int64, src: SumVal, via_call: boo
         ctx_flow_edges(c, srcps, targets)
         if src.frame && !via_call {
             place: ExprNode = vec_get((*a).exprs, place_id)
-            mut j: int64 = 0
-            while j < 64 {
+            for j in 0..64 {
                 if ps_has(targets, j) {
                     vec_push((*c).frame_stores, FlowProv { lo: place.lo, hi: place.hi, src: 0, dst: j })
                 }
-                j++
             }
         }
     }
     locals: *Map<string, int64> = (*c).locals
     if !map_has(pi, root) && !map_has(locals, root) {
         caps: *Vector<CapFlow> = (*c).capture_flows
-        mut k2: int64 = 0
-        while k2 < 64 {
+        for k2 in 0..64 {
             if ps_has(srcps, k2) { vec_push(caps, CapFlow { idx: k2, name: root }) }
-            k2++
         }
     }
     if !map_has(pi, root) { raise_env(c, root, src) }
@@ -158,11 +154,9 @@ func struct_field_ty(t: *SumTables, sname: string, fname: string) -> int64 {
     sidx: *Map<string, int64> = (*t).struct_idx
     if !map_has(sidx, sname) { return (*t).infer_ty }
     st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, sname), 0))
-    mut i: int64 = 0
-    while i < st.fields_len {
+    for i in 0..st.fields_len {
         fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + i))
         if str_eq(ast_name(a, fld.name), fname) { return fld.ty }
-        i++
     }
     return (*t).infer_ty
 }

@@ -186,8 +186,7 @@ export func bind_match_arm(tc: *TypeChecker, pat_id: int64, st: int64, subject_i
         vs: VariantSig = match_binder_sig(tc, ename, ast_name(a, p.a), p.c)
         mut subj_own: int64 = own_borrow()
         if !(*tc).types_only { subj_own = match_subject_own(tc, subject_id) }
-        mut i: int64 = 0
-        while i < p.c {
+        for i in 0..p.c {
             bname: string = ast_name(a, vec_get((*a).kids, p.b + i))
             bty: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
             reject_alloc_shadow(tc, bname, subj.lo, subj.hi)
@@ -200,7 +199,6 @@ export func bind_match_arm(tc: *TypeChecker, pat_id: int64, st: int64, subject_i
                     declare_own(tc, bname, own_borrow())
                 }
             }
-            i++
         }
     } else if p.kind == pk_ident() {
         subj2: ExprNode = vec_get((*a).exprs, subject_id)
@@ -228,8 +226,7 @@ func check_match_coverage(tc: *TypeChecker, ename: string, es: EnumSig, arm_off:
     a: *Ast = (*tc).ast
     covered: *Map<string, int64> = alloc(map_new())
     mut catch_all: bool = false
-    mut i: int64 = 0
-    while i < arm_len {
+    for i in 0..arm_len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arm_off + i))
         p: PatternNode = vec_get((*a).patterns, arm.pat)
         if catch_all {
@@ -253,17 +250,14 @@ func check_match_coverage(tc: *TypeChecker, ename: string, es: EnumSig, arm_off:
                 map_put(covered, name2, 1)
             }
         }
-        i++
     }
     if !catch_all {
         sigs: *TypeSigs = (*tc).sigtab
-        mut j: int64 = 0
-        while j < es.len {
+        for j in 0..es.len {
             v: string = vec_get((*sigs).names, es.off + j)
             if !map_has(covered, v) {
                 tc_emit(tc, missing_variant_msg(v), lo, hi)
             }
-            j++
         }
     }
 }

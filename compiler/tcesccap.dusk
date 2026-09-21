@@ -39,10 +39,8 @@ func bind_scoped(bound: *Map<string, int64>, name: string, added: *Vector<string
 // Removes exactly the names bind_scoped added for a scope, restoring the map to
 // what it was before the scope was entered.
 func unbind_scoped(bound: *Map<string, int64>, added: *Vector<string>) -> void {
-    mut i: int64 = 0
-    while i < vec_len(added) {
+    for i in 0..vec_len(added) {
         map_remove(bound, vec_get(added, i))
-        i++
     }
 }
 
@@ -62,46 +60,36 @@ func collect_capture_expr(tc: *TypeChecker, expr_id: int64, bound: *Map<string, 
         collect_capture_expr(tc, e.b, bound, seen, out)
     } else if e.kind == xk_call() {
         collect_capture_expr(tc, e.a, bound, seen, out)
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c {
             collect_capture_expr(tc, vec_get((*a).kids, e.b + i), bound, seen, out)
-            i++
         }
     } else if e.kind == xk_field() || e.kind == xk_index() {
         collect_capture_expr(tc, e.a, bound, seen, out)
         if e.kind == xk_index() { collect_capture_expr(tc, e.b, bound, seen, out) }
     } else if e.kind == xk_tuple() || e.kind == xk_array() || e.kind == xk_fstr() {
-        mut j: int64 = 0
-        while j < e.b {
+        for j in 0..e.b {
             collect_capture_expr(tc, vec_get((*a).kids, e.a + j), bound, seen, out)
-            j++
         }
     } else if e.kind == xk_struct_lit() {
-        mut k: int64 = 1
-        while k < e.c {
+        for k in 1..e.c by 2 {
             collect_capture_expr(tc, vec_get((*a).kids, e.b + k), bound, seen, out)
-            k += 2
         }
     } else if e.kind == xk_lambda() {
         added: *Vector<string> = alloc(vec_new())
-        mut p: int64 = 0
-        while p < e.b {
+        for p in 0..e.b {
             pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
             bind_scoped(bound, ast_name(a, pn.name), added)
-            p++
         }
         collect_capture_block(tc, e.d, bound, seen, out)
         unbind_scoped(bound, added)
     } else if e.kind == xk_match() {
         collect_capture_expr(tc, e.a, bound, seen, out)
-        mut m: int64 = 0
-        while m < e.c {
+        for m in 0..e.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + m))
             marm: *Vector<string> = alloc(vec_new())
             collect_capture_pat(tc, arm.pat, bound, marm)
             collect_capture_block(tc, arm.body, bound, seen, out)
             unbind_scoped(bound, marm)
-            m++
         }
     } else if e.kind == xk_ifexpr() {
         // A branch body is a block with its own scope, so each is walked with the block's
@@ -126,10 +114,8 @@ func collect_capture_pat(tc: *TypeChecker, pat_id: int64, bound: *Map<string, in
     if p.kind == pk_ident() {
         bind_scoped(bound, ast_name(a, p.a), added)
     } else if p.kind == pk_variant() {
-        mut i: int64 = 0
-        while i < p.c {
+        for i in 0..p.c {
             bind_scoped(bound, ast_name(a, vec_get((*a).kids, p.b + i)), added)
-            i++
         }
     }
 }
@@ -139,11 +125,9 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, 
     s: StmtNode = vec_get((*a).stmts, stmt_id)
     if s.kind == sk_let() {
         collect_capture_expr(tc, s.c, bound, seen, out)
-        mut i: int64 = 0
-        while i < s.b {
+        for i in 0..s.b {
             b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             bind_scoped(bound, ast_name(a, b.name), added)
-            i++
         }
     } else if s.kind == sk_assign() {
         collect_capture_expr(tc, s.a, bound, seen, out)
@@ -172,14 +156,12 @@ func collect_capture_stmt(tc: *TypeChecker, stmt_id: int64, bound: *Map<string, 
         unbind_scoped(bound, forv)
     } else if s.kind == sk_match() {
         collect_capture_expr(tc, s.a, bound, seen, out)
-        mut m: int64 = 0
-        while m < s.c {
+        for m in 0..s.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + m))
             marm: *Vector<string> = alloc(vec_new())
             collect_capture_pat(tc, arm.pat, bound, marm)
             collect_capture_block(tc, arm.body, bound, seen, out)
             unbind_scoped(bound, marm)
-            m++
         }
     }
 }
@@ -195,10 +177,8 @@ func collect_capture_block(tc: *TypeChecker, block_id: int64, bound: *Map<string
     a: *Ast = (*tc).ast
     b: BlockNode = vec_get((*a).blocks, block_id)
     added: *Vector<string> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         collect_capture_stmt(tc, vec_get((*a).kids, b.off + i), bound, seen, out, added)
-        i++
     }
     unbind_scoped(bound, added)
 }
@@ -208,11 +188,9 @@ export func lambda_captures(tc: *TypeChecker, e: ExprNode) -> *Vector<string> {
     seen: *Map<string, int64> = alloc(map_new())
     bound: *Map<string, int64> = alloc(map_new())
     a: *Ast = (*tc).ast
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         map_put(bound, ast_name(a, p.name), 1)
-        i++
     }
     collect_capture_block(tc, e.d, bound, seen, out)
     return out
@@ -229,16 +207,12 @@ export func collect_embedded(tc: *TypeChecker, expr_id: int64, out: *Vector<stri
         name: string = ast_name(a, e.a)
         if links_as_alias(tc, lookup(tc, name)) { vec_push(out, name) }
     } else if e.kind == xk_tuple() || e.kind == xk_array() {
-        mut i: int64 = 0
-        while i < e.b {
+        for i in 0..e.b {
             collect_embedded(tc, vec_get((*a).kids, e.a + i), out)
-            i++
         }
     } else if e.kind == xk_struct_lit() {
-        mut j: int64 = 1
-        while j < e.c {
+        for j in 1..e.c by 2 {
             collect_embedded(tc, vec_get((*a).kids, e.b + j), out)
-            j += 2
         }
     } else if e.kind == xk_call() {
         // An enum constructor is a carrier like a literal: its payload arguments are
@@ -248,10 +222,8 @@ export func collect_embedded(tc: *TypeChecker, expr_id: int64, out: *Vector<stri
         // pointee that stores a frame view. Only a constructor descends here; every
         // other call answers through its summary at the sites that model calls.
         if str_len(variant_name(tc, e.a)) > 0 {
-            mut k: int64 = 0
-            while k < e.c {
+            for k in 0..e.c {
                 collect_embedded(tc, vec_get((*a).kids, e.b + k), out)
-                k++
             }
         }
     }
@@ -278,24 +250,18 @@ func binding_alias_targets(tc: *TypeChecker, expr_id: int64) -> *Vector<string> 
             }
         }
     } else if e.kind == xk_tuple() || e.kind == xk_array() {
-        mut i: int64 = 0
-        while i < e.b {
+        for i in 0..e.b {
             collect_embedded(tc, vec_get((*a).kids, e.a + i), out)
-            i++
         }
     } else if e.kind == xk_struct_lit() {
-        mut j: int64 = 1
-        while j < e.c {
+        for j in 1..e.c by 2 {
             collect_embedded(tc, vec_get((*a).kids, e.b + j), out)
-            j += 2
         }
     } else if e.kind == xk_call() {
         vname: string = variant_name(tc, e.a)
         if str_len(vname) > 0 {
-            mut k: int64 = 0
-            while k < e.c {
+            for k in 0..e.c {
                 collect_embedded(tc, vec_get((*a).kids, e.b + k), out)
-                k++
             }
         } else {
             callee: ExprNode = vec_get((*a).exprs, e.a)
@@ -316,10 +282,8 @@ export func link_binding_aliases(tc: *TypeChecker, name: string, expr_id: int64,
     if (*tc).types_only { return }
     targets: *Vector<string> = binding_alias_targets(tc, expr_id)
     if reassign && ((*tc).branch_depth == 0 || vec_len(targets) == 0) { alias_drop(tc, name) }
-    mut i: int64 = 0
-    while i < vec_len(targets) {
+    for i in 0..vec_len(targets) {
         alias_link(tc, name, vec_get(targets, i))
-        i++
     }
 }
 
@@ -329,10 +293,8 @@ func slice_source_buries_view(tc: *TypeChecker, expr_id: int64) -> bool {
     root: string = store_root(tc, expr_id)
     if str_len(root) > 0 {
         group: *Vector<string> = alias_group(tc, root)
-        mut i: int64 = 0
-        while i < vec_len(group) {
+        for i in 0..vec_len(group) {
             vec_push(ptrs, vec_get(group, i))
-            i++
         }
     } else {
         collect_embedded(tc, expr_id, ptrs)
@@ -430,24 +392,20 @@ export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_ty: int
         // really holds a scalar loses nothing by the extra link, and one that holds a
         // slice or a pointer keeps the frame view it was silently dropping.
         if variant_payload_opaque(tc, ename, vname) {
-            mut oi: int64 = 0
-            while oi < p.c {
+            for oi in 0..p.c {
                 oname: string = ast_name(a, vec_get((*a).kids, p.b + oi))
                 set_esc(tc, oname, scrut.slice, scrut.closure)
                 link_binding_aliases(tc, oname, scrut_id, false)
-                oi++
             }
             return
         }
         vs: VariantSig = arm_variant_sig(tc, ename, vname)
-        mut i: int64 = 0
-        while i < p.c {
+        for i in 0..p.c {
             bname: string = ast_name(a, vec_get((*a).kids, p.b + i))
             set_esc(tc, bname, false, false)
             pty: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
             if (scrut.slice || scrut.closure) && member_carries_view(tc, pty) { set_esc(tc, bname, scrut.slice, scrut.closure) }
             if links_as_alias(tc, pty) { link_binding_aliases(tc, bname, scrut_id, false) }
-            i++
         }
     } else if p.kind == pk_ident() {
         name: string = ast_name(a, p.a)

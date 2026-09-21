@@ -41,8 +41,7 @@ func push_fence(b: *StringBuilder, code: string) -> void {
     n: int64 = str_len(code)
     mut longest: int64 = 0
     mut run: int64 = 0
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         if bytes.byte_at(code, n, i) == 96 {
             run++
             if run > longest {
@@ -51,25 +50,20 @@ func push_fence(b: *StringBuilder, code: string) -> void {
         } else {
             run = 0
         }
-        i++
     }
     mut flen: int64 = 3
     if longest >= 3 {
         flen = longest + 1
     }
     fb: *StringBuilder = alloc(sb_new())
-    mut j: int64 = 0
-    while j < flen {
+    for j in 0..flen {
         sb_push_char(fb, 96)
-        j++
     }
     sb_push(fb, "dusk\n")
     sb_push(fb, code)
     sb_push(fb, "\n")
-    mut k: int64 = 0
-    while k < flen {
+    for k in 0..flen {
         sb_push_char(fb, 96)
-        k++
     }
     out: string = substring(sb_cstr(fb), 0, sb_size(fb))
     push_block(b, out)
@@ -102,8 +96,7 @@ func render_prose(b: *StringBuilder, di: DocInfo) -> void {
     if vec_len(ps) > 0 {
         push_block(b, "Parameters:")
         lb: *StringBuilder = alloc(sb_new())
-        mut j: int64 = 0
-        while j < vec_len(ps) {
+        for j in 0..vec_len(ps) {
             p: DocParam = vec_get(ps, j)
             if j > 0 { sb_push_char(lb, 10) }
             sb_push(lb, "- `")
@@ -115,7 +108,6 @@ func render_prose(b: *StringBuilder, di: DocInfo) -> void {
                 sb_push(lb, inl)
                 free(inl)
             }
-            j++
         }
         list: string = substring(sb_cstr(lb), 0, sb_size(lb))
         push_block(b, list)
@@ -138,10 +130,8 @@ func render_prose(b: *StringBuilder, di: DocInfo) -> void {
     exs: *Vector<string> = di.examples
     if vec_len(exs) > 0 {
         push_block(b, "Example:")
-        mut k: int64 = 0
-        while k < vec_len(exs) {
+        for k in 0..vec_len(exs) {
             push_fence(b, vec_get(exs, k))
-            k++
         }
     }
 }
@@ -169,10 +159,8 @@ func render_bound(b: *StringBuilder, a: *Ast, src: string, n: int64, kind: int64
 func count_kind(a: *Ast, kind: int64) -> int64 {
     items: *Vector<ItemNode> = (*a).items
     mut c: int64 = 0
-    mut i: int64 = 0
-    while i < vec_len(items) {
+    for i in 0..vec_len(items) {
         if vec_get(items, i).kind == kind { c = c + 1 }
-        i++
     }
     return c
 }
@@ -212,8 +200,7 @@ func render_interface(b: *StringBuilder, a: *Ast, src: string, n: int64, iid: in
     free(sig)
     render_bound(b, a, src, n, dk_interface(), iid)
     // Each method signature can carry its own doc, keyed by the method-sig node.
-    mut i: int64 = 0
-    while i < it.methods_len {
+    for i in 0..it.methods_len {
         msid: int64 = vec_get((*a).kids, it.methods_off + i)
         m: MethodSigNode = vec_get((*a).method_sigs, msid)
         push_heading(b, "####", ast_name(a, m.name))
@@ -221,7 +208,6 @@ func render_interface(b: *StringBuilder, a: *Ast, src: string, n: int64, iid: in
         push_fence(b, msig)
         free(msig)
         render_bound(b, a, src, n, dk_method_sig(), msid)
-        i++
     }
 }
 
@@ -231,8 +217,7 @@ func render_impl(b: *StringBuilder, a: *Ast, src: string, n: int64, imid: int64)
     push_heading(b, "###", header)
     free(header)
     render_bound(b, a, src, n, dk_impl(), imid)
-    mut i: int64 = 0
-    while i < im.methods_len {
+    for i in 0..im.methods_len {
         fid: int64 = vec_get((*a).kids, im.methods_off + i)
         f: FuncNode = vec_get((*a).funcs, fid)
         push_heading(b, "####", ast_name(a, f.name))
@@ -240,7 +225,6 @@ func render_impl(b: *StringBuilder, a: *Ast, src: string, n: int64, imid: int64)
         push_fence(b, sig)
         free(sig)
         render_bound(b, a, src, n, dk_func(), fid)
-        i++
     }
 }
 
@@ -277,11 +261,9 @@ func render_foreign_section(b: *StringBuilder, a: *Ast, src: string, n: int64) -
     for it in items {
         if it.kind == ik_foreign() {
             fn: ForeignNode = vec_get((*a).foreigns, it.id)
-            mut j: int64 = 0
-            while j < fn.funcs_len {
+            for j in 0..fn.funcs_len {
                 ffid: int64 = vec_get((*a).kids, fn.funcs_off + j)
                 render_foreign_func(b, a, src, n, ffid)
-                j++
             }
         }
     }
@@ -318,11 +300,9 @@ func push_paradigm_line(b: *StringBuilder, a: *Ast) -> void {
         // reports what the compiler applies, not the directive's absence.
         sb_push(pb, "procedural")
     } else {
-        mut i: int64 = 0
-        while i < vec_len(ps) {
+        for i in 0..vec_len(ps) {
             if i > 0 { sb_push(pb, ", ") }
             sb_push(pb, ast_name(a, vec_get(ps, i)))
-            i++
         }
     }
     out: string = substring(sb_cstr(pb), 0, sb_size(pb))

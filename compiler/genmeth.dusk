@@ -82,8 +82,7 @@ func gm_struct(s: *GenFuncState, ty: int64, ptr: string, method: string, args_of
         args: *StringBuilder = alloc(sb_new())
         sb_push(args, "ptr ")
  sb_push(args, ptr)
-        mut i: int64 = 0
-        while i < args_len {
+        for i in 0..args_len {
             aeid: int64 = vec_get((*a).kids, args_off + i)
             v: Val = gen_expr(s, aeid)
             target: int64 = vec_get(sig.params, i + 1)
@@ -94,7 +93,6 @@ func gm_struct(s: *GenFuncState, ty: int64, ptr: string, method: string, args_of
  sb_push_char(args, 32)
  sb_push(args, av.op)
             free(ll)
- i++
         }
         argtext: string = gs_built(args)
  sb_free(args)
@@ -129,25 +127,21 @@ func gm_iface(s: *GenFuncState, ty: int64, op: string, method: string, args_off:
     tn: CTyNode = vec_get(cty_nodes(c), ty)
     mut iface_id: int64 = -1
     interfaces: *Vector<InterfaceNode> = (*a).interfaces
-    mut ii: int64 = 0
-    while ii < vec_len(interfaces) {
+    for ii in 0..vec_len(interfaces) {
         cand: InterfaceNode = vec_get(interfaces, ii)
         if str_eq(ast_name(a, cand.name), tn.text) { iface_id = ii }
-        ii++
     }
     if iface_id < 0 { return gm_unresolved(s, tn.text, method) }
     iface: InterfaceNode = vec_get(interfaces, iface_id)
     mut slot_index: int64 = -1
     mut sig_id: int64 = -1
-    mut mi: int64 = 0
-    while mi < iface.methods_len {
+    for mi in 0..iface.methods_len {
         mid: int64 = vec_get((*a).kids, iface.methods_off + mi)
         ms0: MethodSigNode = vec_get((*a).method_sigs, mid)
         if str_eq(ast_name(a, ms0.name), method) {
             slot_index = mi
             sig_id = mid
         }
-        mi++
     }
     if sig_id < 0 { return gm_unresolved(s, tn.text, method) }
     ms: MethodSigNode = vec_get((*a).method_sigs, sig_id)
@@ -192,8 +186,7 @@ func gm_iface(s: *GenFuncState, ty: int64, op: string, method: string, args_off:
     args: *StringBuilder = alloc(sb_new())
     sb_push(args, "ptr ")
     sb_push(args, data)
-    mut ai: int64 = 0
-    while ai < args_len {
+    for ai in 0..args_len {
         v: Val = gen_expr(s, vec_get((*a).kids, args_off + ai))
         pid: int64 = vec_get((*a).kids, ms.params_off + ai)
         p: ParamNode = vec_get((*a).params, pid)
@@ -205,7 +198,6 @@ func gm_iface(s: *GenFuncState, ty: int64, op: string, method: string, args_off:
         sb_push_char(args, 32)
         sb_push(args, av.op)
         free(ll)
-        ai++
     }
     ret_ty: int64 = cty_lower_ast(c, a, ms.ret)
     retll: string = cty_ll(c, ret_ty)

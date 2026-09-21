@@ -26,15 +26,13 @@ export func gen_async_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode) -> string 
     sizes: *Vector<int64> = alloc(vec_new())
     aligns: *Vector<int64> = alloc(vec_new())
     param_tys: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         pt: int64 = cty_lower_ast(c, a, p.ty)
         sa: SizeAlign = cty_size_align(c, pt)
         vec_push(param_tys, pt)
         vec_push(sizes, sa.size)
         vec_push(aligns, sa.align)
-        i++
     }
     // The frame layout never handles alignment over 8; a wider type must stop
     // loud rather than misplace a frame slot.
@@ -53,34 +51,28 @@ export func gen_async_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode) -> string 
     lc: *Vector<string> = alloc(vec_new())
     lb: *Vector<string> = alloc(vec_new())
     st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, scopes: scopes, defer_replay: false, replay_base: 0, defers: defers, allocator_name: ga_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: true, frame: fr, cur_lo: f.lo })
-    mut j: int64 = 0
-    while j < f.params_len {
+    for j in 0..f.params_len {
         p2: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + j))
         gep: string = next_tmp(fb)
         frame_add_param(fr, gep, vec_get(prefix.param_offs, j))
         gs_bind(st, ga_copy(ast_name(a, p2.name)), LocalVal { ty: vec_get(param_tys, j), op: gep })
-        j++
     }
     // A using parameter names the ambient allocator, the same scan gen_func runs. The
     // param lives in the async frame (bound to its frame GEP above), so alloc and free in
     // the body resolve the allocator by name through gs_lookup_frame0 and load it from the
     // slot at each site: after an await suspension the poll re-enters and re-reads the
     // allocator from the frame, so it survives the suspension exactly as any other param.
-    mut ui: int64 = 0
-    while ui < f.params_len {
+    for ui in 0..f.params_len {
         up: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + ui))
         if up.is_using {
             (*st).allocator_name = ga_copy(ast_name(a, up.name))
             (*st).allocator_ty = cty_lower_ast(c, a, up.ty)
         }
-        ui++
     }
     place_named_label(fb, "start")
     block: BlockNode = vec_get((*a).blocks, f.body)
-    mut k: int64 = 0
-    while k < block.len {
+    for k in 0..block.len {
         if !(*st).terminated { gen_stmt(st, vec_get((*a).kids, block.off + k)) }
-        k++
     }
     if !(*st).terminated { gen_async_return(st, -1) }
     frame_size: int64 = frame_finalize(fr)

@@ -30,10 +30,8 @@ export func subst_apply(m: *Mono, id: int64, subst: *Map<string, int64>) -> int6
             return mt_named0(a, name)
         }
         newargs: *Vector<int64> = alloc(vec_new())
-        mut i: int64 = 0
-        while i < n.c {
+        for i in 0..n.c {
             vec_push(newargs, subst_apply(m, vec_get((*a).kids, n.b + i), subst))
-            i++
         }
         return mt_named(a, name, newargs)
     }
@@ -43,19 +41,15 @@ export func subst_apply(m: *Mono, id: int64, subst: *Map<string, int64>) -> int6
     if n.kind == tk_array() { return mt_array(a, subst_apply(m, n.a, subst), n.b) }
     if n.kind == tk_tuple() {
         xs: *Vector<int64> = alloc(vec_new())
-        mut j: int64 = 0
-        while j < n.b {
+        for j in 0..n.b {
             vec_push(xs, subst_apply(m, vec_get((*a).kids, n.a + j), subst))
-            j++
         }
         return mt_tuple(a, xs)
     }
     if n.kind == tk_func() {
         ps: *Vector<int64> = alloc(vec_new())
-        mut k: int64 = 0
-        while k < n.b {
+        for k in 0..n.b {
             vec_push(ps, subst_apply(m, vec_get((*a).kids, n.a + k), subst))
-            k++
         }
         return mt_func(a, ps, subst_apply(m, n.c, subst))
     }
@@ -68,10 +62,8 @@ func contains_infer(a: *Ast, id: int64) -> bool {
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_infer() { return true }
     if n.kind == tk_named() {
-        mut i: int64 = 0
-        while i < n.c {
+        for i in 0..n.c {
             if contains_infer(a, vec_get((*a).kids, n.b + i)) { return true }
-            i++
         }
         return false
     }
@@ -79,18 +71,14 @@ func contains_infer(a: *Ast, id: int64) -> bool {
         return contains_infer(a, n.a)
     }
     if n.kind == tk_tuple() {
-        mut j: int64 = 0
-        while j < n.b {
+        for j in 0..n.b {
             if contains_infer(a, vec_get((*a).kids, n.a + j)) { return true }
-            j++
         }
         return false
     }
     if n.kind == tk_func() {
-        mut k: int64 = 0
-        while k < n.b {
+        for k in 0..n.b {
             if contains_infer(a, vec_get((*a).kids, n.a + k)) { return true }
-            k++
         }
         return contains_infer(a, n.c)
     }
@@ -102,10 +90,8 @@ func mentions(a: *Ast, id: int64, names: *Map<string, int64>) -> bool {
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_named() {
         if n.c == 0 { return map_has(names, ast_name(a, n.a)) }
-        mut i: int64 = 0
-        while i < n.c {
+        for i in 0..n.c {
             if mentions(a, vec_get((*a).kids, n.b + i), names) { return true }
-            i++
         }
         return false
     }
@@ -113,18 +99,14 @@ func mentions(a: *Ast, id: int64, names: *Map<string, int64>) -> bool {
         return mentions(a, n.a, names)
     }
     if n.kind == tk_tuple() {
-        mut j: int64 = 0
-        while j < n.b {
+        for j in 0..n.b {
             if mentions(a, vec_get((*a).kids, n.a + j), names) { return true }
-            j++
         }
         return false
     }
     if n.kind == tk_func() {
-        mut k: int64 = 0
-        while k < n.b {
+        for k in 0..n.b {
             if mentions(a, vec_get((*a).kids, n.a + k), names) { return true }
-            k++
         }
         return mentions(a, n.c, names)
     }
@@ -193,8 +175,7 @@ func solve(m: *Mono, off: int64, len: int64, inf: *Map<string, int64>) -> ArgRes
     a: *Ast = (*m).ast
     targs: *Vector<int64> = alloc(vec_new())
     missing: *Vector<string> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         g: string = ast_name(a, vec_get((*a).kids, off + i))
         if map_has(inf, g) {
             vec_push(targs, unwrap_or(map_get(inf, g), -1))
@@ -202,7 +183,6 @@ func solve(m: *Mono, off: int64, len: int64, inf: *Map<string, int64>) -> ArgRes
             vec_push(missing, g)
             vec_push(targs, mt_named0(a, "int64"))
         }
-        i++
     }
     return ArgResult { targs: targs, missing: missing }
 }
@@ -246,10 +226,8 @@ export func build_subst(m: *Mono, off: int64, len: int64, args: *Vector<int64>) 
 export func generics_set(m: *Mono, off: int64, len: int64) -> *Map<string, int64> {
     a: *Ast = (*m).ast
     s: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         map_put(s, ast_name(a, vec_get((*a).kids, off + i)), 1)
-        i++
     }
     return s
 }
@@ -277,10 +255,8 @@ func union_subst(base: *Map<string, int64>, over: *Map<string, int64>) -> *Map<s
 export func call_args(a: *Ast, exprid: int64) -> *Vector<int64> {
     e: ExprNode = vec_get((*a).exprs, exprid)
     out: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < e.c {
+    for i in 0..e.c {
         vec_push(out, vec_get((*a).kids, e.b + i))
-        i++
     }
     return out
 }
@@ -455,11 +431,9 @@ func nongeneric_field_ty(m: *Mono, sname: string, fname: string) -> int64 {
     structs: *Vector<StructNode> = (*a).structs
     for st in structs {
         if str_eq(ast_name(a, st.name), sname) {
-            mut j: int64 = 0
-            while j < st.fields_len {
+            for j in 0..st.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + j))
                 if str_eq(ast_name(a, fld.name), fname) { return fld.ty }
-                j++
             }
             return -1
         }
@@ -493,13 +467,11 @@ func static_ty_field(m: *Mono, exprid: int64, subst: *Map<string, int64>, env: *
             gs: StructNode = vec_get((*a).structs, gsid)
             sargs: *Vector<int64> = named_targs(a, bt)
             fsubst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, sargs)
-            mut fi: int64 = 0
-            while fi < gs.fields_len {
+            for fi in 0..gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
                 if str_eq(ast_name(a, fld.name), name) {
                     return subst_apply(m, subst_apply(m, fld.ty, fsubst), subst)
                 }
-                fi++
             }
         }
         ft: int64 = nongeneric_field_ty(m, s, name)
@@ -516,8 +488,7 @@ export func solve_call(m: *Mono, gfid: int64, args: *Vector<int64>, subst: *Map<
     params: *Map<string, int64> = generics_set(m, gf.generics_off, gf.generics_len)
     inf: *Map<string, int64> = alloc(map_new())
     // Non-lambda arguments first; their bindings are authoritative.
-    mut i: int64 = 0
-    while i < gf.params_len {
+    for i in 0..gf.params_len {
         if i < vec_len(args) {
             argid: int64 = vec_get(args, i)
             if !is_lambda(a, argid) {
@@ -528,15 +499,13 @@ export func solve_call(m: *Mono, gfid: int64, args: *Vector<int64>, subst: *Map<
                 }
             }
         }
-        i++
     }
     // Push down the expected (annotation) type.
     if expected >= 0 {
         unify(m, gf.ret, expected, params, inf)
     }
     // Lambda arguments last; each pins its result-only parameters from its body.
-    mut j: int64 = 0
-    while j < gf.params_len {
+    for j in 0..gf.params_len {
         if j < vec_len(args) {
             argid2: int64 = vec_get(args, j)
             if is_lambda(a, argid2) {
@@ -547,14 +516,12 @@ export func solve_call(m: *Mono, gfid: int64, args: *Vector<int64>, subst: *Map<
                     merged: *Map<string, int64> = union_subst(subst, inf)
                     env2: *Map<string, int64> = map_clone_i64(env)
                     lam: ExprNode = vec_get((*a).exprs, argid2)
-                    mut lp: int64 = 0
-                    while lp < lam.b {
+                    for lp in 0..lam.b {
                         lparam: ParamNode = vec_get((*a).params, vec_get((*a).kids, lam.a + lp))
                         if lp < dn.b {
                             pt: int64 = vec_get((*a).kids, dn.a + lp)
                             map_put(env2, ast_name(a, lparam.name), subst_apply(m, pt, merged))
                         }
-                        lp++
                     }
                     rexpr: int64 = lambda_single_return(a, argid2)
                     if rexpr >= 0 {
@@ -566,7 +533,6 @@ export func solve_call(m: *Mono, gfid: int64, args: *Vector<int64>, subst: *Map<
                 }
             }
         }
-        j++
     }
     applied_ret: int64 = subst_apply(m, gf.ret, inf)
     ret_open: bool = mentions(a, applied_ret, params)
@@ -587,10 +553,8 @@ export func infer_struct_args(m: *Mono, gsid: int64, off: int64, len: int64, exp
         en: TypeNode = vec_get((*a).types, expected)
         if en.kind == tk_named() && str_eq(ast_name(a, en.a), ast_name(a, gs.name)) && en.c > 0 {
             targs: *Vector<int64> = alloc(vec_new())
-            mut i: int64 = 0
-            while i < en.c {
+            for i in 0..en.c {
                 vec_push(targs, subst_apply(m, vec_get((*a).kids, en.b + i), subst))
-                i++
             }
             nomiss: *Vector<string> = alloc(vec_new())
             return ArgResult { targs: targs, missing: nomiss }
@@ -598,12 +562,10 @@ export func infer_struct_args(m: *Mono, gsid: int64, off: int64, len: int64, exp
     }
     params: *Map<string, int64> = generics_set(m, gs.generics_off, gs.generics_len)
     inf: *Map<string, int64> = alloc(map_new())
-    mut fi: int64 = 0
-    while fi < len {
+    for fi in 0..len by 2 {
         fname: string = ast_name(a, vec_get((*a).kids, off + fi))
         vexpr: int64 = vec_get((*a).kids, off + fi + 1)
-        mut si: int64 = 0
-        while si < gs.fields_len {
+        for si in 0..gs.fields_len {
             fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + si))
             if str_eq(ast_name(a, fld.name), fname) {
                 vt: int64 = static_ty(m, vexpr, subst, env)
@@ -611,9 +573,7 @@ export func infer_struct_args(m: *Mono, gsid: int64, off: int64, len: int64, exp
                     unify(m, fld.ty, vt, params, inf)
                 }
             }
-            si++
         }
-        fi += 2
     }
     return solve(m, gs.generics_off, gs.generics_len, inf)
 }
@@ -626,10 +586,8 @@ export func enum_args(m: *Mono, g: string, expected: int64, payload: *Vector<int
         en: TypeNode = vec_get((*a).types, expected)
         if en.kind == tk_named() && str_eq(ast_name(a, en.a), g) && en.c > 0 {
             targs: *Vector<int64> = alloc(vec_new())
-            mut i: int64 = 0
-            while i < en.c {
+            for i in 0..en.c {
                 vec_push(targs, subst_apply(m, vec_get((*a).kids, en.b + i), subst))
-                i++
             }
             nomiss: *Vector<string> = alloc(vec_new())
             return ArgResult { targs: targs, missing: nomiss }
@@ -641,8 +599,7 @@ export func enum_args(m: *Mono, g: string, expected: int64, payload: *Vector<int
     while vi < ge.variants_len {
         va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
         if str_eq(ast_name(a, va.name), variant) {
-            mut fi: int64 = 0
-            while fi < va.fields_len {
+            for fi in 0..va.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + fi))
                 if fi < vec_len(payload) {
                     at: int64 = static_ty(m, vec_get(payload, fi), subst, env)
@@ -650,7 +607,6 @@ export func enum_args(m: *Mono, g: string, expected: int64, payload: *Vector<int
                         unify(m, fld.ty, at, params, inf)
                     }
                 }
-                fi++
             }
             vi = ge.variants_len
         } else {
@@ -665,11 +621,9 @@ export func enum_has_variant(m: *Mono, g: string, v: string) -> bool {
     a: *Ast = (*m).ast
     geid: int64 = unwrap_or(map_get(m_genums(m), g), -1)
     ge: EnumNode = vec_get((*a).enums, geid)
-    mut i: int64 = 0
-    while i < ge.variants_len {
+    for i in 0..ge.variants_len {
         va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + i))
         if str_eq(ast_name(a, va.name), v) { return true }
-        i++
     }
     return false
 }

@@ -29,12 +29,10 @@ export func is_ws(b: int64) -> bool {
 
 // The count of leading ASCII whitespace bytes of the source range [ps, pe).
 func lead_ws(src: string, n: int64, ps: int64, pe: int64) -> int64 {
-    mut i: int64 = ps
-    while i < pe {
+    for i in ps..pe {
         if !is_ws(bytes.byte_at(src, n, i)) {
             return i - ps
         }
-        i++
     }
     return pe - ps
 }
@@ -46,12 +44,10 @@ func line_blank(src: string, n: int64, ps: int64, pe: int64) -> bool {
 // The count of leading ASCII whitespace bytes of a NUL-terminated string.
 export func str_lead_ws(s: string) -> int64 {
     m: int64 = str_len(s)
-    mut i: int64 = 0
-    while i < m {
+    for i in 0..m {
         if !is_ws(s[i]) {
             return i
         }
-        i++
     }
     return m
 }
@@ -61,13 +57,11 @@ export func str_lead_ws(s: string) -> int64 {
 func collect_phys(src: string, n: int64, clo: int64, chi: int64) -> *Vector<PLine> {
     v: *Vector<PLine> = alloc(vec_new())
     mut s: int64 = clo
-    mut i: int64 = clo
-    while i < chi {
+    for i in clo..chi {
         if bytes.byte_at(src, n, i) == 10 {
             vec_push(v, PLine { ps: s, pe: i })
             s = i + 1
         }
-        i++
     }
     vec_push(v, PLine { ps: s, pe: chi })
     return v
@@ -77,8 +71,7 @@ func collect_phys(src: string, n: int64, clo: int64, chi: int64) -> *Vector<PLin
 // `*`, the gutter form; false when no interior line carries content.
 func detect_gutter(src: string, n: int64, phys: *Vector<PLine>) -> bool {
     mut saw: bool = false
-    mut i: int64 = 1
-    while i < vec_len(phys) {
+    for i in 1..vec_len(phys) {
         p: PLine = vec_get(phys, i)
         if !line_blank(src, n, p.ps, p.pe) {
             star: int64 = p.ps + lead_ws(src, n, p.ps, p.pe)
@@ -87,7 +80,6 @@ func detect_gutter(src: string, n: int64, phys: *Vector<PLine>) -> bool {
             }
             saw = true
         }
-        i++
     }
     return saw
 }
@@ -96,8 +88,7 @@ func detect_gutter(src: string, n: int64, phys: *Vector<PLine>) -> bool {
 // indent stripped in the non-gutter form; zero when no interior line carries content.
 func interior_min_indent(src: string, n: int64, phys: *Vector<PLine>) -> int64 {
     mut best: int64 = -1
-    mut i: int64 = 1
-    while i < vec_len(phys) {
+    for i in 1..vec_len(phys) {
         p: PLine = vec_get(phys, i)
         if !line_blank(src, n, p.ps, p.pe) {
             w: int64 = lead_ws(src, n, p.ps, p.pe)
@@ -107,7 +98,6 @@ func interior_min_indent(src: string, n: int64, phys: *Vector<PLine>) -> int64 {
                 best = w
             }
         }
-        i++
     }
     if best < 0 { return 0 }
     return best
@@ -153,10 +143,8 @@ export func normalize_all(src: string, n: int64, lo: int64, hi: int64) -> *Vecto
     }
     gutter: bool = detect_gutter(src, n, phys)
     indent: int64 = interior_min_indent(src, n, phys)
-    mut i: int64 = 1
-    while i < vec_len(phys) {
+    for i in 1..vec_len(phys) {
         vec_push(out, normalize_interior(src, n, vec_get(phys, i), gutter, indent))
-        i++
     }
     return out
 }
@@ -200,11 +188,9 @@ func to_paragraphs(lines: *Vector<string>) -> *Vector<string> {
 
 func join_from(paras: *Vector<string>, start: int64) -> string {
     b: *StringBuilder = alloc(sb_new())
-    mut i: int64 = start
-    while i < vec_len(paras) {
+    for i in start..vec_len(paras) {
         if i > start { sb_push_char(b, 10) }
         sb_push(b, vec_get(paras, i))
-        i++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -261,11 +247,9 @@ export func build_example(raw: *Vector<string>) -> string {
         z--
     }
     b: *StringBuilder = alloc(sb_new())
-    mut k: int64 = a
-    while k < z {
+    for k in a..z {
         if k > a { sb_push_char(b, 10) }
         sb_push(b, vec_get(stripped, k))
-        k++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)

@@ -222,8 +222,7 @@ func cap_serialize_sorted(v: *Vector<CapFlow>) -> string {
         i++
     }
     b: *StringBuilder = alloc(sb_new())
-    mut k: int64 = 0
-    while k < vec_len(v) {
+    for k in 0..vec_len(v) {
         cf: CapFlow = vec_get(v, k)
         mut dup: bool = false
         if k > 0 {
@@ -236,7 +235,6 @@ func cap_serialize_sorted(v: *Vector<CapFlow>) -> string {
             sb_push(b, cf.name)
             sb_push_char(b, 59)
         }
-        k++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -490,10 +488,8 @@ export func check_method_call_escape(tc: *TypeChecker, callee_id: int64, arg_off
     if base.kind == xk_unary() && base.a == uop_deref() { recv_id = base.b }
     eff: *Vector<int64> = alloc(vec_new())
     vec_push(eff, recv_id)
-    mut i: int64 = 0
-    while i < arg_len {
+    for i in 0..arg_len {
         vec_push(eff, vec_get((*a).kids, arg_off + i))
-        i++
     }
     method_check_sinks(tc, rm.mname, rm.sum, eff, lo, hi)
     method_apply_flows(tc, rm.sum, eff, lo, hi)
@@ -518,10 +514,8 @@ func method_check_sinks(tc: *TypeChecker, mname: string, sum: SummaryHandle, eff
 func method_apply_flows(tc: *TypeChecker, sum: SummaryHandle, eff: *Vector<int64>, lo: int64, hi: int64) -> void {
     n: int64 = vec_len(eff)
     src: *Vector<EscPair> = alloc(vec_new())
-    mut s: int64 = 0
-    while s < n {
+    for s in 0..n {
         vec_push(src, value_escape(tc, vec_get(eff, s)))
-        s++
     }
     mut x: int64 = 0
     while x < n && x < 64 {

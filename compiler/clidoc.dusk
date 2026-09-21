@@ -49,13 +49,11 @@ func read_error_line(path: string, e: error) -> string {
 
 // Whether the parameter set kids[off, off+len) binds a parameter named name.
 func params_have(a: *Ast, off: int64, len: int64, name: string) -> bool {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, off + i))
         if str_eq(ast_name(a, p.name), name) {
             return true
         }
-        i++
     }
     return false
 }
@@ -64,13 +62,11 @@ func params_have(a: *Ast, off: int64, len: int64, name: string) -> bool {
 // named name. A `@param` may name a value parameter or a generic type parameter, so a
 // generic `func id<T>(x: T)` documents both `T` and `x` without drift.
 func generics_have(a: *Ast, goff: int64, glen: int64, name: string) -> bool {
-    mut i: int64 = 0
-    while i < glen {
+    for i in 0..glen {
         gname: string = ast_name(a, vec_get((*a).kids, goff + i))
         if str_eq(gname, name) {
             return true
         }
-        i++
     }
     return false
 }
@@ -140,24 +136,20 @@ func dangling_msg() -> string {
 // across both sets, since the check runs on the doc's own tag list.
 func check_func_drift(a: *Ast, di: DocInfo, name: string, off: int64, len: int64, goff: int64, glen: int64, ret: int64, errs: *Vector<Located>) -> void {
     ps: *Vector<DocParam> = di.params
-    mut i: int64 = 0
-    while i < vec_len(ps) {
+    for i in 0..vec_len(ps) {
         p: DocParam = vec_get(ps, i)
         mut dup: bool = false
-        mut k: int64 = 0
-        while k < i {
+        for k in 0..i {
             q: DocParam = vec_get(ps, k)
             if str_eq(q.name, p.name) {
                 dup = true
             }
-            k++
         }
         if dup {
             vec_push(errs, located(p.name_lo, p.name_hi, msg_param_dup(p.name)))
         } else if !params_have(a, off, len, p.name) && !generics_have(a, goff, glen, p.name) {
             vec_push(errs, located(p.name_lo, p.name_hi, msg_param_drift(name, p.name)))
         }
-        i++
     }
     if di.has_ret && type_is_void(a, ret) {
         vec_push(errs, located(di.ret_lo, di.ret_hi, msg_return_void(name)))
@@ -208,10 +200,8 @@ func decl_name(a: *Ast, kind: int64, id: int64, stem: string) -> string {
 func check_bound(a: *Ast, src: string, n: int64, kind: int64, id: int64, lo: int64, hi: int64, stem: string, errs: *Vector<Located>) -> void {
     di: DocInfo = doc_parse(src, n, lo, hi)
     derrs: *Vector<Located> = di.errors
-    mut e: int64 = 0
-    while e < vec_len(derrs) {
+    for e in 0..vec_len(derrs) {
         vec_push(errs, vec_get(derrs, e))
-        e++
     }
     if kind == dk_func() {
         f: FuncNode = vec_get((*a).funcs, id)
@@ -269,15 +259,11 @@ func doc_check(path: string) -> DocCheckResult {
     lex_errs: *Vector<Located> = lx_errors(lx)
     parse_errs: *Vector<Located> = p_errors(p)
     if vec_len(lex_errs) > 0 || vec_len(parse_errs) > 0 {
-        mut i: int64 = 0
-        while i < vec_len(lex_errs) {
+        for i in 0..vec_len(lex_errs) {
             emit_located(path, src, n, vec_get(lex_errs, i))
-            i++
         }
-        mut j: int64 = 0
-        while j < vec_len(parse_errs) {
+        for j in 0..vec_len(parse_errs) {
             emit_located(path, src, n, vec_get(parse_errs, j))
-            j++
         }
         return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }
     }
@@ -285,10 +271,8 @@ func doc_check(path: string) -> DocCheckResult {
     stem: string = stem_of(path)
     doc_errs: *Vector<Located> = collect_doc_errors(a, lx_docs(lx), src, n, stem)
     if vec_len(doc_errs) > 0 {
-        mut k: int64 = 0
-        while k < vec_len(doc_errs) {
+        for k in 0..vec_len(doc_errs) {
             emit_located(path, src, n, vec_get(doc_errs, k))
-            k++
         }
         return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }
     }

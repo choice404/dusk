@@ -46,10 +46,8 @@ export func foreign_takes_struct(tc: *TypeChecker, name: string) -> bool {
     fs: FnSig = sig_fn((*tc).sigtab, name)
     if ty_is_named_struct(tc, fs.raw_ret) { return true }
     p: TyList = fs.raw_params
-    mut i: int64 = 0
-    while i < p.len {
+    for i in 0..p.len {
         if ty_is_named_struct(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
-        i++
     }
     return false
 }
@@ -71,10 +69,8 @@ export func foreign_takes_callback(tc: *TypeChecker, name: string) -> bool {
     fs: FnSig = sig_fn((*tc).sigtab, name)
     if ty_is_func(tc, fs.raw_ret) { return true }
     p: TyList = fs.raw_params
-    mut i: int64 = 0
-    while i < p.len {
+    for i in 0..p.len {
         if ty_is_func(tc, sig_ty_at((*tc).sigtab, p, i)) { return true }
-        i++
     }
     return false
 }
@@ -130,11 +126,9 @@ func no_field_msg(sname: string, fname: string) -> string {
 export func field_read_ty(tc: *TypeChecker, sname: string, fname: string, lo: int64, hi: int64) -> int64 {
     st: StructSig = sig_struct((*tc).sigtab, sname)
     sigs: *TypeSigs = (*tc).sigtab
-    mut i: int64 = 0
-    while i < st.len {
+    for i in 0..st.len {
         f: FieldSig = vec_get((*sigs).fields, st.off + i)
         if str_eq(f.name, fname) { return f.ty }
-        i++
     }
     disp: string = base_type_name(sname)
     tc_emit(tc, no_field_msg(disp, fname), lo, hi)
@@ -246,11 +240,9 @@ export func cannot_index_msg(rendered: string) -> string {
 
 func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64 {
     sigs: *TypeSigs = (*tc).sigtab
-    mut i: int64 = 0
-    while i < st.len {
+    for i in 0..st.len {
         f: FieldSig = vec_get((*sigs).fields, st.off + i)
         if str_eq(f.name, fname) { return i }
-        i++
     }
     return -1
 }
@@ -268,29 +260,22 @@ func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
 export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: int64, lo: int64, hi: int64) -> void {
     a: *Ast = (*tc).ast
     vals: *Vector<int64> = alloc(vec_new())
-    mut vi: int64 = 0
-    while vi < len {
+    for vi in 0..len by 2 {
         val_id: int64 = vec_get((*a).kids, off + vi + 1)
         vec_push(vals, infer_expr(tc, val_id))
-        vi += 2
     }
     structs: *Map<string, StructSig> = (*tc).structs
     if !map_has(structs, name) { return }
     st: StructSig = sig_struct((*tc).sigtab, name)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len by 2 {
         fname: string = ast_name(a, vec_get((*a).kids, off + i))
-        mut j: int64 = i + 2
-        while j < len {
+        for j in i + 2..len by 2 {
             if str_eq(fname, ast_name(a, vec_get((*a).kids, off + j))) {
                 tc_emit(tc, field_dup_msg(fname, name), lo, hi)
             }
-            j += 2
         }
-        i += 2
     }
-    mut k: int64 = 0
-    while k < len {
+    for k in 0..len by 2 {
         fname2: string = ast_name(a, vec_get((*a).kids, off + k))
         val_id2: int64 = vec_get((*a).kids, off + k + 1)
         val: ExprNode = vec_get((*a).exprs, val_id2)
@@ -312,29 +297,22 @@ export func check_struct_lit(tc: *TypeChecker, name: string, off: int64, len: in
                 reject_collector_iface_box(tc, raw, actual, val.lo, val.hi)
             }
         }
-        k += 2
     }
-    mut m: int64 = 0
-    while m < st.len {
+    for m in 0..st.len {
         fld2: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + m)
         mut found: bool = false
-        mut n: int64 = 0
-        while n < len {
+        for n in 0..len by 2 {
             if str_eq(fld2.name, ast_name(a, vec_get((*a).kids, off + n))) { found = true }
-            n += 2
         }
         if !found { tc_emit(tc, missing_field_msg(name, fld2.name), lo, hi) }
-        m++
     }
 }
 
 export func infer_array(tc: *TypeChecker, off: int64, len: int64) -> int64 {
     mut elem: int64 = ty_unknown((*tc).ty)
     a: *Ast = (*tc).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         elem = infer_expr(tc, vec_get((*a).kids, off + i))
-        i++
     }
     return ty_slice((*tc).ty, elem)
 }
@@ -342,10 +320,8 @@ export func infer_array(tc: *TypeChecker, off: int64, len: int64) -> int64 {
 export func infer_tuple(tc: *TypeChecker, off: int64, len: int64) -> int64 {
     xs: *Vector<int64> = alloc(vec_new())
     a: *Ast = (*tc).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         vec_push(xs, infer_expr(tc, vec_get((*a).kids, off + i)))
-        i++
     }
     return ty_tuple((*tc).ty, xs)
 }
@@ -353,14 +329,12 @@ export func infer_tuple(tc: *TypeChecker, off: int64, len: int64) -> int64 {
 export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *Vector<string>) -> int64 {
     a: *Ast = (*tc).ast
     ps: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         if p.is_using {
             tc_emit(tc, "a lambda cannot take a using parameter; a lambda body has no ambient allocator, so allocate in the enclosing function or use the default heap", e.lo, e.hi)
         }
         vec_push(ps, tc_type(tc, p.ty))
-        i++
     }
     saved_ret: int64 = (*tc).cur_ret
     saved_raw_ret: int64 = (*tc).cur_raw_ret
@@ -380,8 +354,7 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
     (*tc).loop_depth = 0
     (*tc).cur_allocator = ""
     push_scope(tc)
-    mut j: int64 = 0
-    while j < e.b {
+    for j in 0..e.b {
         p2: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + j))
         pname: string = ast_name(a, p2.name)
         declare(tc, pname, vec_get(ps, j))
@@ -397,12 +370,9 @@ export func infer_lambda_with_borrows(tc: *TypeChecker, e: ExprNode, borrowed: *
         if !(*tc).types_only && is_typaram_ast(tc, p2.ty) {
             declare_own(tc, pname, own_borrow())
         }
-        j++
     }
-    mut b: int64 = 0
-    while b < vec_len(borrowed) {
+    for b in 0..vec_len(borrowed) {
         declare_own(tc, vec_get(borrowed, b), own_borrow())
-        b++
     }
     check_block_no_scope(tc, e.d)
     pop_scope(tc)
@@ -432,8 +402,7 @@ export func infer_lambda_sig(tc: *TypeChecker, e: ExprNode) -> int64 {
 export func check_match_arm_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
     if (*tc).types_only { return }
     a: *Ast = (*tc).ast
-    mut i: int64 = 0
-    while i < e.c {
+    for i in 0..e.c {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, e.b + i))
         tail_id: int64 = match_arm_tail(a, arm.body)
         if tail_id >= 0 {
@@ -442,7 +411,6 @@ export func check_match_arm_lambdas(tc: *TypeChecker, e: ExprNode) -> void {
                 tc_emit(tc, "a match arm cannot yield a lambda; bind the function to a name outside the match", tail.lo, tail.hi)
             }
         }
-        i++
     }
 }
 
@@ -463,11 +431,9 @@ func stmt_diverges(a: *Ast, sid: int64) -> bool {
     }
     if s.kind == sk_match() {
         if s.c == 0 { return false }
-        mut i: int64 = 0
-        while i < s.c {
+        for i in 0..s.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
             if !block_diverges(a, arm.body) { return false }
-            i++
         }
         return true
     }
@@ -476,10 +442,8 @@ func stmt_diverges(a: *Ast, sid: int64) -> bool {
 
 export func block_diverges(a: *Ast, bid: int64) -> bool {
     b: BlockNode = vec_get((*a).blocks, bid)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         if stmt_diverges(a, vec_get((*a).kids, b.off + i)) { return true }
-        i++
     }
     return false
 }

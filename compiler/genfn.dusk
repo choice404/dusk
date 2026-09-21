@@ -27,8 +27,7 @@ func gf_built(b: *StringBuilder) -> string {
 func param_sig(ctx: *GenCtx, a: *Ast, f: FuncNode) -> string {
     b: *StringBuilder = alloc(sb_new())
     c: *CTyArena = genctx_ctys(ctx)
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         if i > 0 { sb_push(b, ", ") }
         pid: int64 = vec_get((*a).kids, f.params_off + i)
         p: ParamNode = vec_get((*a).params, pid)
@@ -38,7 +37,6 @@ func param_sig(ctx: *GenCtx, a: *Ast, f: FuncNode) -> string {
         free(ll)
         sb_push(b, " %a")
         sb_push_int(b, i)
-        i++
     }
     out: string = gf_built(b)
     sb_free(b)
@@ -85,8 +83,7 @@ func default_ret(s: *GenFuncState) -> void {
 func bind_params(s: *GenFuncState, f: FuncNode) -> void {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         pid: int64 = vec_get((*a).kids, f.params_off + i)
         p: ParamNode = vec_get((*a).params, pid)
         ty: int64 = cty_lower_ast(c, a, p.ty)
@@ -99,7 +96,6 @@ func bind_params(s: *GenFuncState, f: FuncNode) -> void {
         ptr: string = gen_alloca(s, ty)
         gen_store_slot(s, ty, op, ptr)
         gs_bind(s, gf_copy(ast_name(a, p.name)), LocalVal { ty: ty, op: ptr })
-        i++
     }
 }
 
@@ -110,13 +106,11 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     c: *CTyArena = genctx_ctys(ctx)
     ret_ty: int64 = cty_lower_ast(c, a, f.ret)
     unsupported_type(m, c, ret_ty, "function return")
-    mut pcheck: int64 = 0
-    while pcheck < f.params_len {
+    for pcheck in 0..f.params_len {
         pidc: int64 = vec_get((*a).kids, f.params_off + pcheck)
         pc: ParamNode = vec_get((*a).params, pidc)
         pty: int64 = cty_lower_ast(c, a, pc.ty)
         if cty_is_stub(c, pty) { emit_error(m, "unsupported codegen type in function parameter") }
-        pcheck++
     }
     ret_ll: string = cty_ll(c, ret_ty)
     sig: string = param_sig(ctx, a, f)
@@ -156,23 +150,19 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     lb: *Vector<string> = alloc(vec_new())
     st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, scopes: scopes, defer_replay: false, replay_base: 0, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
     bind_params(st, f)
-    mut ui: int64 = 0
-    while ui < f.params_len {
+    for ui in 0..f.params_len {
         upid: int64 = vec_get((*a).kids, f.params_off + ui)
         up: ParamNode = vec_get((*a).params, upid)
         if up.is_using {
             (*st).allocator_name = gf_copy(ast_name(a, up.name))
             (*st).allocator_ty = cty_lower_ast(c, a, up.ty)
         }
-        ui++
     }
     block: BlockNode = vec_get((*a).blocks, f.body)
-    mut i: int64 = 0
-    while i < block.len {
+    for i in 0..block.len {
         if !(*st).terminated {
             gen_stmt(st, vec_get((*a).kids, block.off + i))
         }
-        i++
     }
     if !(*st).terminated { default_ret(st) }
     out: string = finish(fb)
@@ -194,8 +184,7 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
  free(rb)
     sb: *StringBuilder = alloc(sb_new())
     sb_push(sb, "ptr %a0")
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         pid: int64 = vec_get((*a).kids, f.params_off + i)
         p: ParamNode = vec_get((*a).params, pid)
         ll: string = cty_ll(c, cty_lower_ast(c, a, p.ty))
@@ -204,7 +193,6 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
  sb_push(sb, " %a")
  sb_push_int(sb, i + 1)
         free(ll)
- i++
     }
     sig: string = gf_built(sb)
  sb_free(sb)
@@ -219,8 +207,7 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
     lb: *Vector<string> = alloc(vec_new())
     st: *GenFuncState = alloc(GenFuncState { module: m, ctx: ctx, fb: fb, ret: ret_ty, scopes: scopes, defer_replay: false, replay_base: 0, defers: defers, allocator_name: gf_copy(""), allocator_ty: cty_void(c), terminated: false, loop_cont: lc, loop_brk: lb, frame_on: false, frame: frame_new("", "", "", dummy, 0), cur_lo: f.lo })
     gs_bind(st, gf_copy("self"), LocalVal { ty: cty_intern(c, ctyk_struct(), 0, 0, owner), op: gf_copy("%a0") })
-    mut j: int64 = 0
-    while j < f.params_len {
+    for j in 0..f.params_len {
         pid2: int64 = vec_get((*a).kids, f.params_off + j)
         p2: ParamNode = vec_get((*a).params, pid2)
         ty: int64 = cty_lower_ast(c, a, p2.ty)
@@ -233,24 +220,21 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
         ptr: string = gen_alloca(st, ty)
  gen_store_slot(st, ty, op, ptr)
         gs_bind(st, gf_copy(ast_name(a, p2.name)), LocalVal { ty: ty, op: ptr })
-        j++
     }
     // A method takes a `using` allocator like a free function does; without this
     // scan the parameter binds but the ambient allocator stays unset, and bare
     // alloc silently falls to the default heap.
-    mut mu: int64 = 0
-    while mu < f.params_len {
+    for mu in 0..f.params_len {
         mup: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + mu))
         if mup.is_using {
             (*st).allocator_name = gf_copy(ast_name(a, mup.name))
             (*st).allocator_ty = cty_lower_ast(c, a, mup.ty)
         }
-        mu++
     }
     block: BlockNode = vec_get((*a).blocks, f.body)
-    mut k: int64 = 0
-    while k < block.len { if !(*st).terminated { gen_stmt(st, vec_get((*a).kids, block.off + k)) }
- k = k + 1 }
+    for k in 0..block.len {
+        if !(*st).terminated { gen_stmt(st, vec_get((*a).kids, block.off + k)) }
+    }
     if !(*st).terminated { default_ret(st) }
     return finish(fb)
 }

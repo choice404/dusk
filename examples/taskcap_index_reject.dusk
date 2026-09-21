@@ -1,0 +1,27 @@
+@paradigm procedural
+
+// A spawn lambda whose only use of an outer name is an index read, v[0], is
+// refused naming that outer name once monomorphization shows its element type
+// views the spawning frame. An index node keeps its base in the a slot and its
+// index in the b slot, like a range keeps its bounds; the capture walk reads
+// the base, so v is counted as a capture and its ground type, an array of
+// slices, is refused. Reading the operand slots of a binary node once skipped
+// the base, and this program slipped past the ground capture check.
+func sink<T>(x: T) -> void { }
+
+func go<T>(v: T[3]) -> int32 {
+    t, e := spawn(lambda () -> void {
+        sink(v[0])
+    })
+    e.ignore()
+    je := join(t)
+    je.ignore()
+    return 0
+}
+
+func main() -> int32 {
+    xs: int64[3] = [1, 2, 3]
+    s: int64[] = xs[0..3]
+    arr: (int64[])[3] = [s, s, s]
+    return go(arr)
+}

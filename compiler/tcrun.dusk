@@ -69,24 +69,18 @@ func reject_unknown_param_type(tc: *TypeChecker, tyid: int64, lo: int64, hi: int
         if !is_known_type_name(tc, name) {
             tc_emit(tc, unknown_type_msg(name), lo, hi)
         }
-        mut i: int64 = 0
-        while i < n.c {
+        for i in 0..n.c {
             reject_unknown_param_type(tc, vec_get((*a).kids, n.b + i), lo, hi)
-            i++
         }
     } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
         reject_unknown_param_type(tc, n.a, lo, hi)
     } else if n.kind == tk_tuple() {
-        mut j: int64 = 0
-        while j < n.b {
+        for j in 0..n.b {
             reject_unknown_param_type(tc, vec_get((*a).kids, n.a + j), lo, hi)
-            j++
         }
     } else if n.kind == tk_func() {
-        mut k: int64 = 0
-        while k < n.b {
+        for k in 0..n.b {
             reject_unknown_param_type(tc, vec_get((*a).kids, n.a + k), lo, hi)
-            k++
         }
         reject_unknown_param_type(tc, n.c, lo, hi)
     }
@@ -123,8 +117,7 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
     cpi: *Map<string, int64> = alloc(map_new())
     (*tc).cur_params = cp
     (*tc).cur_param_index = cpi
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         reject_iface_targ_annot(tc, p.ty, f.lo, f.hi)
         reject_unknown_param_type(tc, p.ty, f.lo, f.hi)
@@ -156,7 +149,6 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
         }
         n: TyNode = ty_get((*tc).ty, tyid)
         if n.kind == tyk_error() { declare_err(tc, ast_name(a, p.name), f.lo, f.hi) }
-        i++
     }
 }
 
@@ -232,8 +224,7 @@ func check_export_sig(tc: *TypeChecker, f: FuncNode) -> void {
     if str_find(name, "cool_") == 0 {
         tc_emit(tc, "an exported C function name cannot start with 'cool_', which is reserved for the runtime", f.lo, f.hi)
     }
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         tyid: int64 = tc_type(tc, p.ty)
         if export_ty_is_bool(tc, tyid) {
@@ -241,7 +232,6 @@ func check_export_sig(tc: *TypeChecker, f: FuncNode) -> void {
         } else if !export_scalar_ok(tc, tyid) {
             tc_emit(tc, export_ty_msg("parameter", ast_name(a, p.name)), f.lo, f.hi)
         }
-        i++
     }
     rid: int64 = tc_type(tc, f.ret)
     rn: TyNode = ty_get((*tc).ty, rid)
@@ -330,11 +320,9 @@ func stmt_returns(a: *Ast, sid: int64) -> bool {
     }
     if s.kind == sk_match() {
         if s.c == 0 { return false }
-        mut i: int64 = 0
-        while i < s.c {
+        for i in 0..s.c {
             arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
             if !block_returns(a, arm.body) { return false }
-            i++
         }
         return true
     }
@@ -343,10 +331,8 @@ func stmt_returns(a: *Ast, sid: int64) -> bool {
 
 export func block_returns(a: *Ast, bid: int64) -> bool {
     b: BlockNode = vec_get((*a).blocks, bid)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         if stmt_returns(a, vec_get((*a).kids, b.off + i)) { return true }
-        i++
     }
     return false
 }
@@ -372,10 +358,8 @@ func tc_run(tc: *TypeChecker) -> void {
                 tc_emit(tc, out, im.lo, im.hi)
             } else {
                 check_impl_complete(tc, im)
-                mut j: int64 = 0
-                while j < im.methods_len {
+                for j in 0..im.methods_len {
                     check_func(tc, vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j)), ast_name(a, im.ty))
-                    j++
                 }
             }
         } else if it.kind == ik_foreign() {

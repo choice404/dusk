@@ -132,8 +132,7 @@ func cty_names(c: *CTyArena) -> *Map<string, int64> {
     (*c).named_ready = true
     a: *Ast = (*c).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
+    for i in 0..vec_len(items) {
         it: ItemNode = vec_get(items, i)
         mut nm: string = ""
         mut k: int64 = -1
@@ -151,7 +150,6 @@ func cty_names(c: *CTyArena) -> *Map<string, int64> {
             k = ctyk_iface()
         }
         if k >= 0 && !map_has(named, nm) { map_put(named, nm, k) }
-        i++
     }
     return named
 }
@@ -267,14 +265,12 @@ export func cty_ll(c: *CTyArena, id: int64) -> string {
     if n.kind == ctyk_tuple() {
         b4: *StringBuilder = alloc(sb_new())
         sb_push(b4, "{ ")
-        mut i: int64 = 0
-        while i < n.b {
+        for i in 0..n.b {
             if i > 0 { sb_push(b4, ", ") }
             tid: int64 = vec_get((*(*c).ast).kids, n.a + i)
             ll: string = cty_ll(c, cty_lower_ast(c, (*c).ast, tid))
             sb_push(b4, ll)
             free(ll)
-            i++
         }
         sb_push(b4, " }")
         out4: string = cty_built(b4)
@@ -293,11 +289,9 @@ func cty_align_up(n: int64, align: int64) -> int64 {
 func cty_struct_id(c: *CTyArena, name: string) -> int64 {
     a: *Ast = (*c).ast
     structs: *Vector<StructNode> = (*a).structs
-    mut i: int64 = 0
-    while i < vec_len(structs) {
+    for i in 0..vec_len(structs) {
         s: StructNode = vec_get(structs, i)
         if str_eq(ast_name(a, s.name), name) { return i }
-        i++
     }
     return -1
 }
@@ -309,12 +303,10 @@ export func cty_struct_field(c: *CTyArena, ty: int64, name: string) -> int64 {
     if sid < 0 { return -1 }
     a: *Ast = (*c).ast
     s: StructNode = vec_get((*a).structs, sid)
-    mut i: int64 = 0
-    while i < s.fields_len {
+    for i in 0..s.fields_len {
         fid: int64 = vec_get((*a).kids, s.fields_off + i)
         f: FieldNode = vec_get((*a).fields, fid)
         if str_eq(ast_name(a, f.name), name) { return i }
-        i++
     }
     return -1
 }
@@ -398,10 +390,8 @@ func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
     if n.kind == ctyk_array() { return ast_type(a, tk_array(), cty_to_ast(c, n.a), n.b, 0) }
     if n.kind == ctyk_tuple() {
         elems: *Vector<int64> = alloc(vec_new())
-        mut ti: int64 = 0
-        while ti < n.b {
+        for ti in 0..n.b {
             vec_push(elems, cty_to_ast(c, cty_tuple_elem(c, ty, ti)))
-            ti++
         }
         off, len := ast_kids(a, elems)
         return ast_type(a, tk_tuple(), off, len, 0)
@@ -409,10 +399,8 @@ func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
     if n.kind == ctyk_closure() {
         rid: int64 = cty_to_ast(c, cty_closure_ret(c, ty))
         ptypes: *Vector<int64> = alloc(vec_new())
-        mut pi: int64 = 0
-        while pi < n.b {
+        for pi in 0..n.b {
             vec_push(ptypes, cty_to_ast(c, cty_closure_param(c, ty, pi)))
-            pi++
         }
         poff, plen := ast_kids(a, ptypes)
         return ast_type(a, tk_func(), poff, plen, rid)
@@ -422,10 +410,8 @@ func cty_to_ast(c: *CTyArena, ty: int64) -> int64 {
 
 export func cty_tuple_make(c: *CTyArena, elems: *Vector<int64>) -> int64 {
     types: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < vec_len(elems) {
+    for i in 0..vec_len(elems) {
         vec_push(types, cty_to_ast(c, vec_get(elems, i)))
-        i++
     }
     off, len := ast_kids((*c).ast, types)
     return cty_intern(c, ctyk_tuple(), off, len, "")
@@ -434,11 +420,9 @@ export func cty_tuple_make(c: *CTyArena, elems: *Vector<int64>) -> int64 {
 func cty_enum_id(c: *CTyArena, name: string) -> int64 {
     a: *Ast = (*c).ast
     enums: *Vector<EnumNode> = (*a).enums
-    mut i: int64 = 0
-    while i < vec_len(enums) {
+    for i in 0..vec_len(enums) {
         e: EnumNode = vec_get(enums, i)
         if str_eq(ast_name(a, e.name), name) { return i }
-        i++
     }
     return -1
 }
@@ -447,14 +431,12 @@ func cty_fields_size_align(c: *CTyArena, off: int64, len: int64) -> SizeAlign {
     a: *Ast = (*c).ast
     mut size: int64 = 0
     mut align: int64 = 1
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         fid: int64 = vec_get((*a).kids, off + i)
         f: FieldNode = vec_get((*a).fields, fid)
         sa: SizeAlign = cty_size_align(c, cty_lower_ast(c, a, f.ty))
         size = cty_align_up(size, sa.align) + sa.size
         if sa.align > align { align = sa.align }
-        i++
     }
     return SizeAlign { size: cty_align_up(size, align), align: align }
 }
@@ -474,13 +456,11 @@ export func cty_enum_blob_lanes(c: *CTyArena, name: string) -> int64 {
     a: *Ast = (*c).ast
     e: EnumNode = vec_get((*a).enums, id)
     mut largest: int64 = 0
-    mut i: int64 = 0
-    while i < e.variants_len {
+    for i in 0..e.variants_len {
         vid: int64 = vec_get((*a).kids, e.variants_off + i)
         v: VariantNode = vec_get((*a).variants, vid)
         sa: SizeAlign = cty_fields_size_align(c, v.fields_off, v.fields_len)
         if sa.size > largest { largest = sa.size }
-        i++
     }
     return (largest + 7) / 8
 }
@@ -515,13 +495,11 @@ export func cty_size_align(c: *CTyArena, id: int64) -> SizeAlign {
         a: *Ast = (*c).ast
         mut size2: int64 = 0
         mut align2: int64 = 1
-        mut i: int64 = 0
-        while i < n.b {
+        for i in 0..n.b {
             tid: int64 = vec_get((*a).kids, n.a + i)
             tsa: SizeAlign = cty_size_align(c, cty_lower_ast(c, a, tid))
             size2 = cty_align_up(size2, tsa.align) + tsa.size
             if tsa.align > align2 { align2 = tsa.align }
-            i++
         }
         return SizeAlign { size: cty_align_up(size2, align2), align: align2 }
     }

@@ -168,10 +168,8 @@ export func mt_func(a: *Ast, ps: *Vector<int64>, ret: int64) -> int64 {
 export func named_targs(a: *Ast, id: int64) -> *Vector<int64> {
     n: TypeNode = vec_get((*a).types, id)
     out: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < n.c {
+    for i in 0..n.c {
         vec_push(out, vec_get((*a).kids, n.b + i))
-        i++
     }
     return out
 }
@@ -184,13 +182,11 @@ export func mono_mangle(a: *Ast, name: string, args: *Vector<int64>) -> string {
     }
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, name)
-    mut i: int64 = 0
-    while i < vec_len(args) {
+    for i in 0..vec_len(args) {
         sb_push_char(b, 36)
         s: string = mono_flat(a, vec_get(args, i))
         sb_push(b, s)
         free(s)
-        i++
     }
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
@@ -217,11 +213,9 @@ func flat_into(b: *StringBuilder, a: *Ast, id: int64) -> void {
         sb_push(b, ast_name(a, n.a))
         sb_push_char(b, 36)
         sb_push_int(b, n.c)
-        mut i: int64 = 0
-        while i < n.c {
+        for i in 0..n.c {
             sb_push_char(b, 36)
             flat_into(b, a, vec_get((*a).kids, n.b + i))
-            i++
         }
         return
     }
@@ -253,11 +247,9 @@ func flat_into(b: *StringBuilder, a: *Ast, id: int64) -> void {
         sb_push(b, "$t")
         sb_push_int(b, n.b)
         sb_push_char(b, 36)
-        mut i: int64 = 0
-        while i < n.b {
+        for i in 0..n.b {
             if i > 0 { sb_push_char(b, 36) }
             flat_into(b, a, vec_get((*a).kids, n.a + i))
-            i++
         }
         return
     }
@@ -267,11 +259,9 @@ func flat_into(b: *StringBuilder, a: *Ast, id: int64) -> void {
         sb_push(b, "$f")
         sb_push_int(b, n.b)
         sb_push_char(b, 36)
-        mut j: int64 = 0
-        while j < n.b {
+        for j in 0..n.b {
             if j > 0 { sb_push_char(b, 36) }
             flat_into(b, a, vec_get((*a).kids, n.a + j))
-            j++
         }
         sb_push_char(b, 36)
         flat_into(b, a, n.c)
@@ -330,12 +320,10 @@ export func ty_to_ast(m: *Mono, tyid: int64) -> int64 {
     }
     if n.kind == tyk_tuple() {
         xs: *Vector<int64> = alloc(vec_new())
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             e: int64 = ty_to_ast(m, vec_get((*(*m).ty).kids, n.off + i))
             if e < 0 { return -1 }
             vec_push(xs, e)
-            i++
         }
         return mt_tuple(a, xs)
     }

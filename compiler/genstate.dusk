@@ -445,15 +445,12 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
     }
     if fn.kind == ctyk_tuple() && tn.kind == ctyk_tuple() && fn.b == tn.b {
         mut same: bool = true
-        mut si: int64 = 0
-        while si < fn.b {
+        for si in 0..fn.b {
             if cty_tuple_elem(c, from, si) != cty_tuple_elem(c, to, si) { same = false }
-            si++
         }
         if same { return gs_copy(op) }
         mut agg: string = gs_copy("undef")
-        mut i: int64 = 0
-        while i < fn.b {
+        for i in 0..fn.b {
             m: string = next_tmp((*s).fb)
             fll: string = cty_ll(c, from)
             b3: *StringBuilder = alloc(sb_new())
@@ -493,14 +490,12 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
             line((*s).fb, tx2)
             free(tx2)
             agg = d3
-            i++
         }
         return agg
     }
     if fn.kind == ctyk_array() && tn.kind == ctyk_array() && fn.b == tn.b {
         mut agg2: string = gs_copy("undef")
-        mut j: int64 = 0
-        while j < fn.b {
+        for j in 0..fn.b {
             m2: string = next_tmp((*s).fb)
             fll2: string = cty_ll(c, from)
             b5: *StringBuilder = alloc(sb_new())
@@ -538,7 +533,6 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
             line((*s).fb, tx4)
             free(tx4)
             agg2 = d4
-            j++
         }
         return agg2
     }
@@ -640,21 +634,17 @@ export func iface_slot(s: *GenFuncState, value_ty: int64, value: string, method:
     if n.kind != ctyk_iface() { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
     interfaces: *Vector<InterfaceNode> = (*a).interfaces
     mut iface_id: int64 = -1
-    mut ii: int64 = 0
-    while ii < vec_len(interfaces) {
+    for ii in 0..vec_len(interfaces) {
         cand: InterfaceNode = vec_get(interfaces, ii)
         if str_eq(ast_name(a, cand.name), n.text) { iface_id = ii }
-        ii++
     }
     if iface_id < 0 { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
     iface: InterfaceNode = vec_get(interfaces, iface_id)
     mut slot_index: int64 = -1
-    mut mi: int64 = 0
-    while mi < iface.methods_len {
+    for mi in 0..iface.methods_len {
         mid: int64 = vec_get((*a).kids, iface.methods_off + mi)
         ms: MethodSigNode = vec_get((*a).method_sigs, mid)
         if str_eq(ast_name(a, ms.name), method) { slot_index = mi }
-        mi++
     }
     if slot_index < 0 { return IfaceSlot { ok: false, data: gs_copy(""), fp: gs_copy("") } }
     data: string = next_tmp((*s).fb)

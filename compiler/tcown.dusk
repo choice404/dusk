@@ -85,10 +85,8 @@ export func ty_has_error(tc: *TypeChecker, tyid: int64) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_error() { return true }
     if n.kind == tyk_tuple() {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if ty_has_error(tc, vec_get((*(*tc).ty).kids, n.off + i)) { return true }
-            i++
         }
     }
     return false
@@ -115,30 +113,27 @@ func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
         mark_err_handled(tc, ast_name(a, e.a))
     } else if e.kind == xk_unary() {
         mark_errs_in_rec(tc, e.b)
-    } else if e.kind == xk_binary() || e.kind == xk_range() {
+    } else if e.kind == xk_binary() {
         mark_errs_in_rec(tc, e.b)
         mark_errs_in_rec(tc, e.c)
+    } else if e.kind == xk_range() {
+        mark_errs_in_rec(tc, e.a)
+        mark_errs_in_rec(tc, e.b)
     } else if e.kind == xk_call() {
         mark_errs_in_rec(tc, e.a)
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c {
             mark_errs_in_rec(tc, vec_get((*a).kids, e.b + i))
-            i++
         }
     } else if e.kind == xk_field() || e.kind == xk_index() {
         mark_errs_in_rec(tc, e.a)
         if e.kind == xk_index() { mark_errs_in_rec(tc, e.b) }
     } else if e.kind == xk_tuple() || e.kind == xk_array() || e.kind == xk_fstr() {
-        mut j: int64 = 0
-        while j < e.b {
+        for j in 0..e.b {
             mark_errs_in_rec(tc, vec_get((*a).kids, e.a + j))
-            j++
         }
     } else if e.kind == xk_struct_lit() {
-        mut k: int64 = 1
-        while k < e.c {
+        for k in 1..e.c by 2 {
             mark_errs_in_rec(tc, vec_get((*a).kids, e.b + k))
-            k += 2
         }
     } else if e.kind == xk_match() {
         mark_errs_in_rec(tc, e.a)
@@ -149,11 +144,9 @@ func mark_errs_in_rec(tc: *TypeChecker, expr_id: int64) -> void {
     } else if e.kind == xk_incdec() {
         mark_errs_in_rec(tc, e.a)
     } else if e.kind == xk_do() {
-        mut m: int64 = 0
-        while m < e.c {
+        for m in 0..e.c {
             d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + m))
             mark_errs_in_rec(tc, d.expr)
-            m++
         }
     } else if e.kind == xk_await() {
         mark_errs_in_rec(tc, e.a)
@@ -271,10 +264,8 @@ export func branch_tail_at(a: *Ast, e: ExprNode, i: int64) -> int64 {
 func pat_binds_name(a: *Ast, pat_id: int64, name: string) -> bool {
     p: PatternNode = vec_get((*a).patterns, pat_id)
     if p.kind != pk_variant() { return false }
-    mut i: int64 = 0
-    while i < p.c {
+    for i in 0..p.c {
         if str_eq(ast_name(a, vec_get((*a).kids, p.b + i)), name) { return true }
-        i++
     }
     return false
 }
@@ -388,10 +379,8 @@ func binder_payload_ty(tc: *TypeChecker, subj_id: int64, pat_id: int64, binder: 
     if p.kind != pk_variant() { return ty_unknown((*tc).ty) }
     vs: VariantSig = sig_variant_for_enum((*tc).sigtab, ename, ast_name(a, p.a))
     mut idx: int64 = -1
-    mut i: int64 = 0
-    while i < p.c {
+    for i in 0..p.c {
         if str_eq(ast_name(a, vec_get((*a).kids, p.b + i)), binder) { idx = i }
-        i++
     }
     if idx < 0 || idx >= vs.len { return ty_unknown((*tc).ty) }
     return sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, idx)
@@ -452,10 +441,8 @@ func subject_generic_enum_arg(tc: *TypeChecker, subj_id: int64) -> bool {
     if nt.kind == tk_ptr() { named = nt.a }
     en: TypeNode = vec_get((*a).types, named)
     if en.kind != tk_named() { return false }
-    mut i: int64 = 0
-    while i < en.c {
+    for i in 0..en.c {
         if is_typaram_ast(tc, vec_get((*a).kids, en.b + i)) { return true }
-        i++
     }
     return false
 }
@@ -555,11 +542,9 @@ export func check_assign_ownership(tc: *TypeChecker, lhs_id: int64, rhs_id: int6
 
 func struct_field_index(tc: *TypeChecker, st: StructSig, fname: string) -> int64 {
     sigs: *TypeSigs = (*tc).sigtab
-    mut i: int64 = 0
-    while i < st.len {
+    for i in 0..st.len {
         f: FieldSig = vec_get((*sigs).fields, st.off + i)
         if str_eq(f.name, fname) { return i }
-        i++
     }
     return -1
 }

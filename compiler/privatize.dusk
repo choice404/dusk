@@ -35,18 +35,14 @@ func add_private(rnames: *Map<string, int64>, a: *Ast, name: int64, suffix: stri
 }
 
 func add_name_kids(a: *Ast, s: *Map<string, int64>, off: int64, len: int64) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         ren_set_add(s, ast_name(a, vec_get((*a).kids, off + i)))
-        i++
     }
 }
 
 func ren_type_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         ren_ty(r, vec_get((*(*r).ast).kids, off + i), skip)
-        i++
     }
 }
 
@@ -108,12 +104,10 @@ func ren_func_in(r: *Renamer, f: FuncNode, is_method: bool) -> FuncNode {
     if is_method {
         ren_set_add(ren_last_scope(bound), "self")
     }
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         pid: int64 = vec_get((*a).kids, f.params_off + i)
         p: ParamNode = ren_param(r, pid, skip)
         ren_add_bound(r, bound, p.name)
-        i++
     }
     ren_ty(r, f.ret, skip)
     ren_block(r, f.body, skip, bound)
@@ -122,30 +116,24 @@ func ren_func_in(r: *Renamer, f: FuncNode, is_method: bool) -> FuncNode {
 
 func ren_field_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>) -> void {
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         fid: int64 = vec_get((*a).kids, off + i)
         fl: FieldNode = vec_get((*a).fields, fid)
         ren_ty(r, fl.ty, skip)
-        i++
     }
 }
 
 func ren_method_sig_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>) -> void {
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         mid: int64 = vec_get((*a).kids, off + i)
         m: MethodSigNode = vec_get((*a).method_sigs, mid)
-        mut j: int64 = 0
-        while j < m.params_len {
+        for j in 0..m.params_len {
             pid: int64 = vec_get((*a).kids, m.params_off + j)
             p: ParamNode = vec_get((*a).params, pid)
             ren_ty(r, p.ty, skip)
-            j++
         }
         ren_ty(r, m.ret, skip)
-        i++
     }
 }
 
@@ -215,17 +203,13 @@ export func ren_item(r: *Renamer, it: ItemNode) -> void {
         foreigns: *Vector<ForeignNode> = (*a).foreigns
         fb: ForeignNode = vec_get(foreigns, it.id)
         skip4: *Map<string, int64> = ren_new_set()
-        mut k: int64 = 0
-        while k < fb.funcs_len {
+        for k in 0..fb.funcs_len {
             ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
-            mut q: int64 = 0
-            while q < ff.params_len {
+            for q in 0..ff.params_len {
                 pp: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + q))
                 ren_ty(r, pp.ty, skip4)
-                q++
             }
             ren_ty(r, ff.ret, skip4)
-            k++
         }
     }
 }
@@ -234,25 +218,21 @@ func ren_block(r: *Renamer, id: int64, skip: *Map<string, int64>, bound: *Vector
     ren_push_scope(bound)
     a: *Ast = (*r).ast
     b: BlockNode = vec_get((*a).blocks, id)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         ren_stmt(r, vec_get((*a).kids, b.off + i), skip, bound)
-        i++
     }
     ren_pop_scope(bound)
 }
 
 func ren_bind_list_after_value(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         bid: int64 = vec_get((*a).kids, off + i)
         b: BindNode = vec_get((*a).binds, bid)
         if b.ty >= 0 {
             ren_ty(r, b.ty, skip)
         }
         ren_add_bound(r, bound, b.name)
-        i++
     }
 }
 
@@ -310,10 +290,8 @@ func bind_pattern(r: *Renamer, id: int64, bound: *Vector<*Map<string, int64>>) -
     if p.kind == pk_ident() {
         ren_add_bound(r, bound, p.a)
     } else if p.kind == pk_variant() {
-        mut i: int64 = 0
-        while i < p.c {
+        for i in 0..p.c {
             ren_add_bound(r, bound, vec_get((*a).kids, p.b + i))
-            i++
         }
     }
 }
@@ -321,46 +299,38 @@ func bind_pattern(r: *Renamer, id: int64, bound: *Vector<*Map<string, int64>>) -
 func ren_match_value(r: *Renamer, scrut: int64, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     ren_expr(r, scrut, skip, bound)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         aid: int64 = vec_get((*a).kids, off + i)
         arm: ArmNode = vec_get((*a).arms, aid)
         ren_push_scope(bound)
         bind_pattern(r, arm.pat, bound)
         ren_block(r, arm.body, skip, bound)
         ren_pop_scope(bound)
-        i++
     }
 }
 
 func ren_expr_list(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         ren_expr(r, vec_get((*a).kids, off + i), skip, bound)
-        i++
     }
 }
 
 func ren_field_expr_pairs(r: *Renamer, off: int64, len: int64, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len by 2 {
         ren_expr(r, vec_get((*a).kids, off + i + 1), skip, bound)
-        i += 2
     }
 }
 
 func ren_lambda(r: *Renamer, e: ExprNode, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     ren_push_scope(bound)
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         pid: int64 = vec_get((*a).kids, e.a + i)
         p: ParamNode = vec_get((*a).params, pid)
         ren_ty(r, p.ty, skip)
         ren_add_bound(r, bound, p.name)
-        i++
     }
     ren_ty(r, e.c, skip)
     ren_block(r, e.d, skip, bound)
@@ -375,15 +345,13 @@ func ren_lambda(r: *Renamer, e: ExprNode, skip: *Map<string, int64>, bound: *Vec
 func ren_do(r: *Renamer, e: ExprNode, skip: *Map<string, int64>, bound: *Vector<*Map<string, int64>>) -> void {
     a: *Ast = (*r).ast
     ren_push_scope(bound)
-    mut i: int64 = 0
-    while i < e.c {
+    for i in 0..e.c {
         did: int64 = vec_get((*a).kids, e.b + i)
         d: DoBindNode = vec_get((*a).do_binds, did)
         ren_expr(r, d.expr, skip, bound)
         if d.name >= 0 {
             ren_add_bound(r, bound, d.name)
         }
-        i++
     }
     ren_pop_scope(bound)
 }
@@ -529,22 +497,18 @@ export func privatize(a: *Ast, suffix: string, export_suffix: string) -> void {
         return
     }
     r: *Renamer = renamer_new(a, rnames, load_import_prefixes(a), ren_sink_quiet())
-    mut j: int64 = 0
-    while j < vec_len(items) {
+    for j in 0..vec_len(items) {
         ren_item(r, vec_get(items, j))
-        j++
     }
 }
 
 func path_file_name(path: string) -> string {
     n: int64 = str_len(path)
     mut last: int64 = -1
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         if path[i] == 47 {
             last = i
         }
-        i++
     }
     return substring(path, last + 1, n)
 }
@@ -553,12 +517,10 @@ func path_stem(path: string) -> string {
     name: string = path_file_name(path)
     n: int64 = str_len(name)
     mut dot: int64 = -1
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         if name[i] == 46 {
             dot = i
         }
-        i++
     }
     if dot >= 0 {
         return substring(name, 0, dot)

@@ -77,11 +77,9 @@ func push_type(b: *StringBuilder, a: *Ast, id: int64) -> void {
 
 // Appends a comma-separated list of types drawn from the kids arena.
 func push_type_list(b: *StringBuilder, a: *Ast, off: int64, len: int64) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         if i > 0 { sb_push(b, ", ") }
         push_type(b, a, vec_get((*a).kids, off + i))
-        i++
     }
 }
 
@@ -99,11 +97,9 @@ export func docty_type(a: *Ast, id: int64) -> string {
 func push_generics(b: *StringBuilder, a: *Ast, off: int64, len: int64) -> void {
     if len == 0 { return }
     sb_push_char(b, 60)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         if i > 0 { sb_push(b, ", ") }
         sb_push(b, ast_name(a, vec_get((*a).kids, off + i)))
-        i++
     }
     sb_push_char(b, 62)
 }
@@ -121,11 +117,9 @@ func push_param(b: *StringBuilder, a: *Ast, pid: int64) -> void {
 // Appends a parenthesized parameter list from the kids arena.
 func push_params(b: *StringBuilder, a: *Ast, off: int64, len: int64) -> void {
     sb_push_char(b, 40)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         if i > 0 { sb_push(b, ", ") }
         push_param(b, a, vec_get((*a).kids, off + i))
-        i++
     }
     sb_push_char(b, 41)
 }
@@ -172,11 +166,9 @@ export func docty_method_sig(a: *Ast, msid: int64) -> string {
 // function is variadic. A variadic function with no named parameters spells `(...)`.
 func push_foreign_params(b: *StringBuilder, a: *Ast, off: int64, len: int64, variadic: bool) -> void {
     sb_push_char(b, 40)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         if i > 0 { sb_push(b, ", ") }
         push_param(b, a, vec_get((*a).kids, off + i))
-        i++
     }
     if variadic {
         if len > 0 { sb_push(b, ", ") }
@@ -219,15 +211,13 @@ export func docty_struct_sig(a: *Ast, sid: int64) -> string {
         sb_push(b, " {}")
     } else {
         sb_push(b, " {\n")
-        mut i: int64 = 0
-        while i < s.fields_len {
+        for i in 0..s.fields_len {
             fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, s.fields_off + i))
             sb_push(b, "    ")
             sb_push(b, ast_name(a, fld.name))
             sb_push(b, ": ")
             push_type(b, a, fld.ty)
             sb_push(b, ",\n")
-            i++
         }
         sb_push_char(b, 125)
     }
@@ -243,14 +233,12 @@ func push_variant(b: *StringBuilder, a: *Ast, vid: int64) -> void {
     sb_push(b, ast_name(a, v.name))
     if v.fields_len > 0 {
         sb_push_char(b, 40)
-        mut i: int64 = 0
-        while i < v.fields_len {
+        for i in 0..v.fields_len {
             if i > 0 { sb_push(b, ", ") }
             fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, v.fields_off + i))
             sb_push(b, ast_name(a, fld.name))
             sb_push(b, ": ")
             push_type(b, a, fld.ty)
-            i++
         }
         sb_push_char(b, 41)
     }
@@ -267,10 +255,8 @@ export func docty_enum_sig(a: *Ast, eid: int64) -> string {
         sb_push(b, " {}")
     } else {
         sb_push(b, " {\n")
-        mut i: int64 = 0
-        while i < e.variants_len {
+        for i in 0..e.variants_len {
             push_variant(b, a, vec_get((*a).kids, e.variants_off + i))
-            i++
         }
         sb_push_char(b, 125)
     }
@@ -290,15 +276,13 @@ export func docty_interface_sig(a: *Ast, iid: int64) -> string {
         sb_push(b, " {}")
     } else {
         sb_push(b, " {\n")
-        mut i: int64 = 0
-        while i < it.methods_len {
+        for i in 0..it.methods_len {
             msid: int64 = vec_get((*a).kids, it.methods_off + i)
             sb_push(b, "    ")
             sig: string = docty_method_sig(a, msid)
             sb_push(b, sig)
             free(sig)
             sb_push_char(b, 10)
-            i++
         }
         sb_push_char(b, 125)
     }

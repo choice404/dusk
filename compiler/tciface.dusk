@@ -176,10 +176,8 @@ export func reject_collector_iface_box(tc: *TypeChecker, expected: int64, actual
     if (en.kind == tyk_array() || en.kind == tyk_slice()) && (an.kind == tyk_array() || an.kind == tyk_slice()) {
         reject_collector_iface_box(tc, en.a, an.a, lo, hi)
     } else if en.kind == tyk_tuple() && an.kind == tyk_tuple() && en.len == an.len {
-        mut i: int64 = 0
-        while i < en.len {
+        for i in 0..en.len {
             reject_collector_iface_box(tc, vec_get((*(*tc).ty).kids, en.off + i), vec_get((*(*tc).ty).kids, an.off + i), lo, hi)
-            i++
         }
     }
 }
@@ -189,8 +187,7 @@ export func reject_iface_targ_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi
     a: *Ast = (*tc).ast
     n: TypeNode = vec_get((*a).types, tyid)
     if n.kind == tk_named() {
-        mut i: int64 = 0
-        while i < n.c {
+        for i in 0..n.c {
             arg_id: int64 = vec_get((*a).kids, n.b + i)
             arg: TypeNode = vec_get((*a).types, arg_id)
             if arg.kind == tk_named() {
@@ -202,21 +199,16 @@ export func reject_iface_targ_annot(tc: *TypeChecker, tyid: int64, lo: int64, hi
                 }
             }
             reject_iface_targ_annot(tc, arg_id, lo, hi)
-            i++
         }
     } else if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() || n.kind == tk_collector() {
         reject_iface_targ_annot(tc, n.a, lo, hi)
     } else if n.kind == tk_tuple() {
-        mut j: int64 = 0
-        while j < n.b {
+        for j in 0..n.b {
             reject_iface_targ_annot(tc, vec_get((*a).kids, n.a + j), lo, hi)
-            j++
         }
     } else if n.kind == tk_func() {
-        mut k: int64 = 0
-        while k < n.b {
+        for k in 0..n.b {
             reject_iface_targ_annot(tc, vec_get((*a).kids, n.a + k), lo, hi)
-            k++
         }
         reject_iface_targ_annot(tc, n.c, lo, hi)
     }
@@ -268,8 +260,7 @@ export func tuple_iface_mismatch(tc: *TypeChecker, expected: int64, actual: int6
     an: TyNode = ty_get((*tc).ty, actual)
     if en.kind != tyk_tuple() || an.kind != tyk_tuple() || en.len != an.len { return false }
     mut found: bool = false
-    mut i: int64 = 0
-    while i < en.len {
+    for i in 0..en.len {
         ex: int64 = vec_get((*(*tc).ty).kids, en.off + i)
         ac: int64 = vec_get((*(*tc).ty).kids, an.off + i)
         exn: TyNode = ty_get((*tc).ty, ex)
@@ -282,7 +273,6 @@ export func tuple_iface_mismatch(tc: *TypeChecker, expected: int64, actual: int6
                 found = true
             }
         }
-        i++
     }
     return found
 }
@@ -318,11 +308,9 @@ export func chain_ty(tc: *TypeChecker, expr_id: int64) -> int64 {
         fname: string = ast_name(a, e.b)
         if bn.kind == tyk_named() && tc_has_struct(tc, ty_name((*tc).ty, bt)) {
             st: StructSig = sig_struct((*tc).sigtab, ty_name((*tc).ty, bt))
-            mut i: int64 = 0
-            while i < st.len {
+            for i in 0..st.len {
                 f: FieldSig = vec_get((*(*tc).sigtab).fields, st.off + i)
                 if str_eq(f.name, fname) { return f.ty }
-                i++
             }
         }
         if bn.kind == tyk_error() && str_eq(fname, "message") { return ty_str((*tc).ty) }
@@ -361,13 +349,11 @@ export func check_covariance_deep(tc: *TypeChecker, expected: int64, actual: int
     } else if (en.kind == tyk_array() || en.kind == tyk_slice()) && (an.kind == tyk_array() || an.kind == tyk_slice()) {
         v2: ExprNode = vec_get((*(*tc).ast).exprs, value_id)
         if v2.kind == xk_array() {
-            mut j: int64 = 0
-            while j < v2.b {
+            for j in 0..v2.b {
                 sub2: int64 = vec_get((*(*tc).ast).kids, v2.a + j)
                 se2: ExprNode = vec_get((*(*tc).ast).exprs, sub2)
                 at: int64 = chain_ty(tc, sub2)
                 check_covariance_deep(tc, en.a, at, sub2, se2.lo, se2.hi)
-                j++
             }
             return
         }
@@ -469,11 +455,9 @@ export func check_format(tc: *TypeChecker, arg_off: int64, arg_len: int64, first
 }
 
 func method_index(a: *Ast, im: ImplNode, name: string) -> int64 {
-    mut i: int64 = 0
-    while i < im.methods_len {
+    for i in 0..im.methods_len {
         f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
         if str_eq(ast_name(a, f.name), name) { return i }
-        i++
     }
     return -1
 }
@@ -485,8 +469,7 @@ export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
     iface_methods: *Map<string, MethodList> = (*tc).iface_methods
     ml: MethodList = unwrap_or(map_get(iface_methods, iface), MethodList { off: 0, len: 0 })
     tyname: string = ast_name(a, im.ty)
-    mut i: int64 = 0
-    while i < ml.len {
+    for i in 0..ml.len {
         req: MethodReq = vec_get((*(*tc).sigtab).methods, ml.off + i)
         idx: int64 = method_index(a, im, req.name)
         if idx < 0 {
@@ -497,7 +480,6 @@ export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
                 tc_emit(tc, impl_arity_msg(iface, tyname, req.name, m.params_len, req.arity), m.lo, m.hi)
             }
         }
-        i++
     }
 }
 

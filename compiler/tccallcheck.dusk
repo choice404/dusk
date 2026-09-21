@@ -26,10 +26,8 @@ func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int
         return ptr_reaches_future_ty(tc, n.a, seen)
     }
     if n.kind == tyk_tuple() {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if ptr_reaches_future_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -38,10 +36,8 @@ func ptr_reaches_future_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int
         embeds: *Map<string, TyList> = (*tc).embed_fields
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
-            mut j: int64 = 0
-            while j < list.len {
+            for j in 0..list.len {
                 if ptr_reaches_future_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
-                j++
             }
         }
     }
@@ -55,10 +51,8 @@ func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, 
         return ptr_reaches_collector_ty(tc, n.a, seen)
     }
     if n.kind == tyk_tuple() {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if ptr_reaches_collector_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
-            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -67,10 +61,8 @@ func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, 
         embeds: *Map<string, TyList> = (*tc).embed_fields
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
-            mut j: int64 = 0
-            while j < list.len {
+            for j in 0..list.len {
                 if ptr_reaches_collector_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
-                j++
             }
         }
     }
@@ -89,10 +81,8 @@ func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64
     }
     if n.kind == tyk_array() { return spawn_capturable_ty(tc, n.a, seen) }
     if n.kind == tyk_tuple() {
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if !spawn_capturable_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return false }
-            i++
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -103,10 +93,8 @@ func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64
         embeds: *Map<string, TyList> = (*tc).embed_fields
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
-            mut j: int64 = 0
-            while j < list.len {
+            for j in 0..list.len {
                 if !spawn_capturable_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return false }
-                j++
             }
         }
     }
@@ -117,10 +105,8 @@ export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, ar
     a: *Ast = (*tc).ast
     if arg_len != 1 {
         tc_emit(tc, task_one_arg_msg(name), lo, hi)
-        mut i: int64 = 0
-        while i < arg_len {
+        for i in 0..arg_len {
             infer_expr(tc, vec_get((*a).kids, arg_off + i))
-            i++
         }
         return
     }

@@ -35,8 +35,7 @@ func emit(r: *Resolver, msg: string, lo: int64, hi: int64) -> void {
 func collect_globals(r: *Resolver) -> void {
     a: *Ast = (*r).ast
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
+    for i in 0..vec_len(items) {
         it: ItemNode = vec_get(items, i)
         if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
@@ -65,36 +64,29 @@ func collect_globals(r: *Resolver) -> void {
         } else if it.kind == ik_enum() {
             e: EnumNode = vec_get((*a).enums, it.id)
             map_put((*r).globals, ast_name(a, e.name), 1)
-            mut j: int64 = 0
-            while j < e.variants_len {
+            for j in 0..e.variants_len {
                 v: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + j))
                 map_put((*r).globals, ast_name(a, v.name), 1)
-                j++
             }
         } else if it.kind == ik_interface() {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)
             map_put((*r).globals, ast_name(a, iface.name), 1)
         } else if it.kind == ik_foreign() {
             fb: ForeignNode = vec_get((*a).foreigns, it.id)
-            mut k: int64 = 0
-            while k < fb.funcs_len {
+            for k in 0..fb.funcs_len {
                 ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
                 map_put((*r).globals, ast_name(a, ff.name), 1)
-                k++
             }
         }
-        i++
     }
 }
 
 func collect_imports(r: *Resolver) -> void {
     a: *Ast = (*r).ast
     imps: *Vector<int64> = (*a).imports
-    mut i: int64 = 0
-    while i < vec_len(imps) {
+    for i in 0..vec_len(imps) {
         root: string = import_root(ast_name(a, vec_get(imps, i)))
         map_put((*r).imports, root, 1)
-        i++
     }
 }
 
@@ -126,21 +118,17 @@ func pop_scope(r: *Resolver) -> void {
     scope: *Map<string, Var> = vec_get(scopes, idx)
     pending: *Vector<PendingUnused> = alloc(vec_new())
     keys: *Vector<string> = map_keys(scope)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
+    for i in 0..vec_len(keys) {
         name: string = vec_get(keys, i)
         v: Var = unwrap_or(map_get(scope, name), zero_var())
         if v.is_let && !v.used {
             vec_push(pending, PendingUnused { name: name, var: v })
         }
-        i++
     }
     sort_unused(pending)
-    mut j: int64 = 0
-    while j < vec_len(pending) {
+    for j in 0..vec_len(pending) {
         u: PendingUnused = vec_get(pending, j)
         emit(r, quoted_msg("unused variable ", u.name, ""), u.var.lo, u.var.hi)
-        j++
     }
     (*scopes).len = idx
 }
@@ -251,10 +239,8 @@ func resolve_block(r: *Resolver, id: int64) -> void {
     push_scope(r)
     a: *Ast = (*r).ast
     b: BlockNode = vec_get((*a).blocks, id)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         resolve_stmt(r, vec_get((*a).kids, b.off + i))
-        i++
     }
     pop_scope(r)
 }
@@ -262,16 +248,13 @@ func resolve_block(r: *Resolver, id: int64) -> void {
 func resolve_match(r: *Resolver, scrut: int64, off: int64, len: int64) -> void {
     resolve_expr(r, scrut)
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         push_scope(r)
         p: PatternNode = vec_get((*a).patterns, arm.pat)
         if p.kind == pk_variant() {
-            mut j: int64 = 0
-            while j < p.c {
+            for j in 0..p.c {
                 declare(r, ast_name(a, vec_get((*a).kids, p.b + j)), false, false, 0, 0)
-                j++
             }
         } else if p.kind == pk_ident() {
             pname: string = ast_name(a, p.a)
@@ -282,7 +265,6 @@ func resolve_match(r: *Resolver, scrut: int64, off: int64, len: int64) -> void {
         }
         resolve_block(r, arm.body)
         pop_scope(r)
-        i++
     }
 }
 
@@ -290,11 +272,9 @@ func resolve_lambda(r: *Resolver, e: ExprNode) -> void {
     (*r).depth++
     push_scope(r)
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         declare(r, ast_name(a, p.name), false, false, 0, 0)
-        i++
     }
     resolve_block(r, e.d)
     pop_scope(r)
@@ -303,10 +283,8 @@ func resolve_lambda(r: *Resolver, e: ExprNode) -> void {
 
 func resolve_expr_slice(r: *Resolver, off: int64, len: int64) -> void {
     a: *Ast = (*r).ast
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         resolve_expr(r, vec_get((*a).kids, off + i))
-        i++
     }
 }
 
@@ -338,10 +316,8 @@ func rs_type_spelling(r: *Resolver, id: int64) -> bool {
     }
     if e.kind == xk_tuple() {
         if e.b == 0 { return false }
-        mut i: int64 = 0
-        while i < e.b {
+        for i in 0..e.b {
             if !rs_type_spelling(r, vec_get((*a).kids, e.a + i)) { return false }
-            i++
         }
         return true
     }
@@ -365,8 +341,7 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
         if callee.kind == xk_ident() && str_eq(ast_name(a, callee.a), "sizeof") {
             is_sizeof = true
         }
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c {
             arg_id: int64 = vec_get((*a).kids, e.b + i)
             mut walk_arg: bool = true
             if is_sizeof {
@@ -390,7 +365,6 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
             if walk_arg {
                 resolve_expr(r, arg_id)
             }
-            i++
         }
     } else if e.kind == xk_field() {
         resolve_expr(r, e.a)
@@ -407,10 +381,8 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
     } else if e.kind == xk_fstr() {
         resolve_expr_slice(r, e.a, e.b)
     } else if e.kind == xk_struct_lit() {
-        mut j: int64 = 0
-        while j < e.c {
+        for j in 0..e.c by 2 {
             resolve_expr(r, vec_get((*a).kids, e.b + j + 1))
-            j += 2
         }
     } else if e.kind == xk_lambda() {
         resolve_lambda(r, e)
@@ -431,11 +403,9 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
     } else if e.kind == xk_collect() {
         resolve_expr(r, e.b)
     } else if e.kind == xk_do() {
-        mut k: int64 = 0
-        while k < e.c {
+        for k in 0..e.c {
             d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + k))
             resolve_expr(r, d.expr)
-            k++
         }
     }
 }
@@ -446,11 +416,9 @@ func resolve_stmt(r: *Resolver, id: int64) -> void {
     if s.kind == sk_let() {
         resolve_expr(r, s.c)
         val: ExprNode = vec_get((*a).exprs, s.c)
-        mut i: int64 = 0
-        while i < s.b {
+        for i in 0..s.b {
             b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
             declare(r, ast_name(a, b.name), (s.d & 1) != 0, true, val.lo, val.hi)
-            i++
         }
     } else if s.kind == sk_assign() {
         resolve_expr(r, s.b)
@@ -496,10 +464,8 @@ func resolve_stmt(r: *Resolver, id: int64) -> void {
 func set_generics(r: *Resolver, off: int64, len: int64) -> void {
     a: *Ast = (*r).ast
     (*r).cur_generics = new_set()
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         map_put((*r).cur_generics, ast_name(a, vec_get((*a).kids, off + i)), 1)
-        i++
     }
 }
 
@@ -510,11 +476,9 @@ func resolve_func(r: *Resolver, f: FuncNode, is_method: bool) -> void {
     if is_method {
         declare(r, "self", false, false, 0, 0)
     }
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         declare(r, ast_name(a, p.name), false, false, 0, 0)
-        i++
     }
     resolve_block(r, f.body)
     pop_scope(r)
@@ -544,8 +508,7 @@ func resolver_run(r: *Resolver) -> void {
     a: *Ast = (*r).ast
     seen: *Map<string, int64> = new_set()
     items: *Vector<ItemNode> = (*a).items
-    mut i: int64 = 0
-    while i < vec_len(items) {
+    for i in 0..vec_len(items) {
         it: ItemNode = vec_get(items, i)
         name: string = item_name(a, it)
         if str_len(name) > 0 {
@@ -554,25 +517,20 @@ func resolver_run(r: *Resolver) -> void {
             }
             map_put(seen, name, 1)
         }
-        i++
     }
 
-    mut j: int64 = 0
-    while j < vec_len(items) {
+    for j in 0..vec_len(items) {
         it2: ItemNode = vec_get(items, j)
         if it2.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it2.id)
             resolve_func(r, f, false)
         } else if it2.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it2.id)
-            mut k: int64 = 0
-            while k < im.methods_len {
+            for k in 0..im.methods_len {
                 mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + k))
                 resolve_func(r, mf, true)
-                k++
             }
         }
-        j++
     }
 }
 

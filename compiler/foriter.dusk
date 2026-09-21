@@ -236,8 +236,7 @@ func fi_block(a: *Ast, fc: ForCtx, bid: int64) -> int64 {
     b: BlockNode = vec_get((*a).blocks, bid)
     ids: *Vector<int64> = alloc(vec_new())
     mut changed: bool = false
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         sid: int64 = vec_get((*a).kids, b.off + i)
         classes: *Map<int64, int64> = fc.classes
         if map_has(classes, sid) {
@@ -253,7 +252,6 @@ func fi_block(a: *Ast, fc: ForCtx, bid: int64) -> int64 {
             if nsid != sid { changed = true }
             vec_push(ids, nsid)
         }
-        i++
     }
     if !changed { return bid }
     return ast_block(a, ids)
@@ -262,8 +260,7 @@ func fi_block(a: *Ast, fc: ForCtx, bid: int64) -> int64 {
 func fi_arms(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool) {
     ids: *Vector<int64> = alloc(vec_new())
     mut changed: bool = false
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         armid: int64 = vec_get((*a).kids, off + i)
         arm: ArmNode = vec_get((*a).arms, armid)
         nbody: int64 = fi_block(a, fc, arm.body)
@@ -273,7 +270,6 @@ func fi_arms(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool
             vec_push(ids, ast_arm(a, arm.pat, nbody))
             changed = true
         }
-        i++
     }
     if !changed { return (off, len, false) }
     noff, nlen := ast_kids(a, ids)
@@ -350,13 +346,11 @@ func fi_stmt(a: *Ast, fc: ForCtx, sid: int64) -> int64 {
 func fi_expr_list(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool) {
     ids: *Vector<int64> = alloc(vec_new())
     mut changed: bool = false
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         cid: int64 = vec_get((*a).kids, off + i)
         ncid: int64 = fi_expr(a, fc, cid)
         if ncid != cid { changed = true }
         vec_push(ids, ncid)
-        i++
     }
     if !changed { return (off, len, false) }
     noff, nlen := ast_kids(a, ids)
@@ -368,15 +362,13 @@ func fi_expr_list(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64,
 func fi_field_pairs(a: *Ast, fc: ForCtx, off: int64, len: int64) -> (int64, int64, bool) {
     ids: *Vector<int64> = alloc(vec_new())
     mut changed: bool = false
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len by 2 {
         name_kid: int64 = vec_get((*a).kids, off + i)
         expr_kid: int64 = vec_get((*a).kids, off + i + 1)
         nexpr: int64 = fi_expr(a, fc, expr_kid)
         if nexpr != expr_kid { changed = true }
         vec_push(ids, name_kid)
         vec_push(ids, nexpr)
-        i += 2
     }
     if !changed { return (off, len, false) }
     noff, nlen := ast_kids(a, ids)
@@ -504,13 +496,11 @@ func fi_impl(a: *Ast, fc: ForCtx, id: int64) -> int64 {
     im: ImplNode = vec_get((*a).impls, id)
     methods: *Vector<int64> = alloc(vec_new())
     mut changed: bool = false
-    mut i: int64 = 0
-    while i < im.methods_len {
+    for i in 0..im.methods_len {
         mid: int64 = vec_get((*a).kids, im.methods_off + i)
         nmid: int64 = fi_func(a, fc, mid)
         if nmid != mid { changed = true }
         vec_push(methods, nmid)
-        i++
     }
     if !changed { return id }
     return ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)

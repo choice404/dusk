@@ -20,10 +20,8 @@
 
 func build_gens(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
     g: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
-        i++
     }
     return g
 }
@@ -47,12 +45,10 @@ func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: Fun
         ctx_bind_self(c, self_ty, 0)
         idx = 1
     }
-    mut i: int64 = 0
-    while i < f.params_len {
+    for i in 0..f.params_len {
         p: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
         ctx_bind_param(c, ast_name(a, p.name), p.ty, idx)
         idx++
-        i++
     }
     sum_block(c, f.body)
     return ctx_summary(c)
@@ -128,10 +124,8 @@ func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<stri
         callees: *Map<string, int64> = alloc(map_new())
         collect_callees_block(t, mfns, f.body, callees)
         cks: *Vector<string> = map_keys(callees)
-        mut j: int64 = 0
-        while j < vec_len(cks) {
+        for j in 0..vec_len(cks) {
             vec_push(callers_slot(callers, vec_get(cks, j)), fname)
-            j++
         }
     }
 }
@@ -145,13 +139,11 @@ func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
     build_callers(t, funcs, callers)
     queue: *Vector<string> = alloc(vec_new())
     queued: *Map<string, int64> = alloc(map_new())
-    mut i: int64 = 0
-    while i < vec_len(order) {
+    for i in 0..vec_len(order) {
         name: string = vec_get(order, i)
         map_put(summaries, name, empty_summary())
         vec_push(queue, name)
         map_put(queued, name, 1)
-        i++
     }
     // Termination is guaranteed by monotonicity; the cap only guards against a
     // future bug turning the walk non-monotone.
@@ -183,14 +175,12 @@ func enqueue_callers(callers: *Map<string, *Vector<string>>, name: string, queue
     hit: Maybe<*Vector<string>> = map_get(callers, name)
     match hit {
         Some(list) => {
-            mut j: int64 = 0
-            while j < vec_len(list) {
+            for j in 0..vec_len(list) {
                 c: string = vec_get(list, j)
                 if str_len(c) > 0 && !map_has(queued, c) {
                     map_put(queued, c, 1)
                     vec_push(queue, c)
                 }
-                j++
             }
         }
         None => { return }
@@ -203,10 +193,8 @@ func collect_callees_block(t: *SumTables, mfns: *Map<string, int64>, bid: int64,
     blocks: *Vector<BlockNode> = (*a).blocks
     if bid >= vec_len(blocks) { return }
     b: BlockNode = vec_get(blocks, bid)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         collect_callees_stmt(t, mfns, vec_get((*a).kids, b.off + i), out)
-        i++
     }
 }
 
@@ -241,11 +229,9 @@ func collect_callees_stmt(t: *SumTables, mfns: *Map<string, int64>, sid: int64, 
 func collect_callees_match(t: *SumTables, mfns: *Map<string, int64>, scrut: int64, arms_off: int64, arms_len: int64, out: *Map<string, int64>) -> void {
     a: *Ast = (*t).ast
     collect_callees_expr(t, mfns, scrut, out)
-    mut i: int64 = 0
-    while i < arms_len {
+    for i in 0..arms_len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, arms_off + i))
         collect_callees_block(t, mfns, arm.body, out)
-        i++
     }
 }
 
@@ -260,10 +246,8 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
             if map_has(mfns, name) { map_put(out, name, 1) }
         }
         collect_callees_expr(t, mfns, e.a, out)
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c {
             collect_callees_expr(t, mfns, vec_get((*a).kids, e.b + i), out)
-            i++
         }
     } else if e.kind == xk_unary() {
         collect_callees_expr(t, mfns, e.b, out)
@@ -276,16 +260,12 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
         collect_callees_expr(t, mfns, e.a, out)
         collect_callees_expr(t, mfns, e.b, out)
     } else if e.kind == xk_tuple() || e.kind == xk_array() || e.kind == xk_fstr() {
-        mut i: int64 = 0
-        while i < e.b {
+        for i in 0..e.b {
             collect_callees_expr(t, mfns, vec_get((*a).kids, e.a + i), out)
-            i++
         }
     } else if e.kind == xk_struct_lit() {
-        mut i: int64 = 1
-        while i < e.c {
+        for i in 1..e.c by 2 {
             collect_callees_expr(t, mfns, vec_get((*a).kids, e.b + i), out)
-            i += 2
         }
     } else if e.kind == xk_lambda() {
         collect_callees_block(t, mfns, e.d, out)
@@ -300,11 +280,9 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
     } else if e.kind == xk_collect() {
         collect_callees_expr(t, mfns, e.b, out)
     } else if e.kind == xk_do() {
-        mut i: int64 = 0
-        while i < e.c {
+        for i in 0..e.c {
             db: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, e.b + i))
             collect_callees_expr(t, mfns, db.expr, out)
-            i++
         }
     }
 }
@@ -316,12 +294,10 @@ func collect_methods(t: *SumTables, summaries: *Map<string, SummaryHandle>, meth
         if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
             recv: string = ast_name(a, im.ty)
-            mut j: int64 = 0
-            while j < im.methods_len {
+            for j in 0..im.methods_len {
                 m: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
                 sum: SummaryHandle = throwaway_transfer(t, summaries, m, recv)
                 map_put(method_summaries, method_key(recv, ast_name(a, m.name)), sum)
-                j++
             }
         }
     }
@@ -338,10 +314,8 @@ func collect_pass(t: *SumTables, summaries: *Map<string, SummaryHandle>, info: E
         } else if it.kind == ik_impl() {
             im: ImplNode = vec_get((*a).impls, it.id)
             recv: string = ast_name(a, im.ty)
-            mut j: int64 = 0
-            while j < im.methods_len {
+            for j in 0..im.methods_len {
                 collect_one(t, summaries, vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j)), recv, info)
-                j++
             }
         }
     }
@@ -391,15 +365,13 @@ func dedup_frame_stores(fs: *Vector<FlowProv>) -> void {
     n: int64 = vec_len(fs)
     if n <= 1 { return }
     mut write: int64 = 1
-    mut read: int64 = 1
-    while read < n {
+    for read in 1..n {
         cur: FlowProv = vec_get(fs, read)
         prev: FlowProv = vec_get(fs, write - 1)
         if !fp_eq(cur, prev) {
             vec_set(fs, write, cur)
             write++
         }
-        read++
     }
     (*fs).len = write
 }
@@ -460,10 +432,8 @@ func render_flows(flows: int64[64]) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push_char(b, 91)
     mut first: bool = true
-    mut i: int64 = 0
-    while i < 64 {
-        mut j: int64 = 0
-        while j < 64 {
+    for i in 0..64 {
+        for j in 0..64 {
             if flow_has(flows, i, j) {
                 if !first { sb_push_char(b, 44) }
                 sb_push_char(b, 40)
@@ -473,9 +443,7 @@ func render_flows(flows: int64[64]) -> string {
                 sb_push_char(b, 41)
                 first = false
             }
-            j++
         }
-        i++
     }
     sb_push_char(b, 93)
     out: string = substring(sb_cstr(b), 0, sb_size(b))

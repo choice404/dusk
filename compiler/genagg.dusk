@@ -45,18 +45,15 @@ export func gen_struct_lit(s: *GenFuncState, e: ExprNode) -> Val {
     name: string = ast_name(a, e.a)
     if str_eq(name, "error") {
         mut msg: string = gs_copy("null")
-        mut z: int64 = 0
-        while z < e.c {
+        for z in 0..e.c by 2 {
             ni: int64 = vec_get((*a).kids, e.b + z)
             if str_eq(ast_name(a, ni), "message") { msg = gen_expr(s, vec_get((*a).kids, e.b + z + 1)).op }
-            z += 2
         }
         return Val { ty: cty_error(c), op: msg }
     }
     ty: int64 = cty_intern(c, ctyk_struct(), 0, 0, name)
     mut agg: string = gs_copy("undef")
-    mut i: int64 = 0
-    while i < e.c {
+    for i in 0..e.c by 2 {
         fname: string = ast_name(a, vec_get((*a).kids, e.b + i))
         index: int64 = cty_struct_field(c, ty, fname)
         if index >= 0 {
@@ -65,7 +62,6 @@ export func gen_struct_lit(s: *GenFuncState, e: ExprNode) -> Val {
             av: Val = adapt(s, fv, fty)
             agg = ga_insert(s, ty, agg, fty, av.op, index)
         }
-        i += 2
     }
     return Val { ty: ty, op: agg }
 }
@@ -75,8 +71,7 @@ export func gen_array_lit(s: *GenFuncState, e: ExprNode, hint: int64) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
     vals: *Vector<Val> = alloc(vec_new())
     mut elem: int64 = hint
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         eid: int64 = vec_get((*a).kids, e.a + i)
         enode: ExprNode = vec_get((*a).exprs, eid)
         mut v: Val = Val { ty: cty_int(c, 64), op: gs_copy("0") }
@@ -91,16 +86,13 @@ export func gen_array_lit(s: *GenFuncState, e: ExprNode, hint: int64) -> Val {
         if !hinted { v = gen_expr(s, eid) }
         if elem < 0 { elem = v.ty }
         vec_push(vals, v)
-        i++
     }
     if elem < 0 { elem = cty_int(c, 64) }
     aty: int64 = cty_intern(c, ctyk_array(), elem, e.b, "")
     mut agg: string = gs_copy("undef")
-    mut j: int64 = 0
-    while j < vec_len(vals) {
+    for j in 0..vec_len(vals) {
         av: Val = adapt(s, vec_get(vals, j), elem)
         agg = ga_insert(s, aty, agg, elem, av.op, j)
-        j++
     }
     return Val { ty: aty, op: agg }
 }
@@ -110,20 +102,16 @@ export func gen_tuple(s: *GenFuncState, e: ExprNode) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
     vals: *Vector<Val> = alloc(vec_new())
     tys: *Vector<int64> = alloc(vec_new())
-    mut i: int64 = 0
-    while i < e.b {
+    for i in 0..e.b {
         v: Val = gen_expr(s, vec_get((*a).kids, e.a + i))
         vec_push(vals, v)
         vec_push(tys, v.ty)
-        i++
     }
     tty: int64 = cty_tuple_make(c, tys)
     mut agg: string = gs_copy("undef")
-    mut j: int64 = 0
-    while j < vec_len(vals) {
+    for j in 0..vec_len(vals) {
         v2: Val = vec_get(vals, j)
         agg = ga_insert(s, tty, agg, v2.ty, v2.op, j)
-        j++
     }
     return Val { ty: tty, op: agg }
 }

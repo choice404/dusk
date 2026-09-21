@@ -135,13 +135,11 @@ func jp_skip_ws(p: *JParser) -> void {
 // the match before the read walks past the terminator.
 func jp_expect_word(p: *JParser, w: string) -> bool {
     m: int64 = str_len(w)
-    mut i: int64 = 0
-    while i < m {
+    for i in 0..m {
         if (*p).s[(*p).pos + i] != w[i] {
             jp_fail(p, "invalid literal")
             return false
         }
-        i++
     }
     (*p).pos += m
     return true
@@ -151,15 +149,13 @@ func jp_expect_word(p: *JParser, w: string) -> bool {
 // return -1 and leave the cursor where the first bad digit was found.
 func jp_hex4(p: *JParser) -> int64 {
     mut v: int64 = 0
-    mut i: int64 = 0
-    while i < 4 {
+    for i in 0..4 {
         d: int64 = hex_val(jp_peek(p))
         if d < 0 {
             return -1
         }
         v = v * 16 + d
         (*p).pos++
-        i++
     }
     return v
 }
@@ -627,10 +623,8 @@ func hex_digit(v: int64) -> int64 {
 func emit_number(sb: *StringBuilder, v: float64) -> void {
     buf: *raw char = alloc_bytes(32)
     n: int64 = cool_f64_str(v, buf, 32)
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         sb_push_char(sb, buf[i])
-        i++
     }
     free(buf)
 }
@@ -653,13 +647,11 @@ func emit_value(sb: *StringBuilder, j: *Json) -> void {
         JArr(items) => {
             xs: *Vector<*Json> = items
             sb_push_char(sb, 91)
-            mut i: int64 = 0
-            while i < vec_len(xs) {
+            for i in 0..vec_len(xs) {
                 if i > 0 {
                     sb_push_char(sb, 44)
                 }
                 emit_value(sb, vec_get(xs, i))
-                i++
             }
             sb_push_char(sb, 93)
         }
@@ -675,8 +667,7 @@ func emit_value(sb: *StringBuilder, j: *Json) -> void {
 func emit_object(sb: *StringBuilder, fs: *Map<string, *Json>) -> void {
     keys: *Vector<string> = map_keys(fs)
     sb_push_char(sb, 123)
-    mut i: int64 = 0
-    while i < vec_len(keys) {
+    for i in 0..vec_len(keys) {
         if i > 0 {
             sb_push_char(sb, 44)
         }
@@ -688,7 +679,6 @@ func emit_object(sb: *StringBuilder, fs: *Map<string, *Json>) -> void {
             Some(v) => emit_value(sb, v),
             None => {}
         }
-        i++
     }
     sb_push_char(sb, 125)
     vec_free(keys)

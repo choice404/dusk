@@ -20,12 +20,10 @@ struct Gate {
 
 func declares(a: *Ast, name: string) -> bool {
     ps: *Vector<int64> = (*a).paradigms
-    mut i: int64 = 0
-    while i < vec_len(ps) {
+    for i in 0..vec_len(ps) {
         if str_eq(ast_name(a, vec_get(ps, i)), name) {
             return true
         }
-        i++
     }
     return false
 }
@@ -126,20 +124,16 @@ func is_functional_builtin(name: string) -> bool {
 
 func gate_block(g: *Gate, a: *Ast, id: int64) -> void {
     b: BlockNode = vec_get((*a).blocks, id)
-    mut i: int64 = 0
-    while i < b.len {
+    for i in 0..b.len {
         gate_stmt(g, a, vec_get((*a).kids, b.off + i))
-        i++
     }
 }
 
 func gate_match(g: *Gate, a: *Ast, scrut: int64, off: int64, len: int64) -> void {
     gate_expr(g, a, scrut)
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, off + i))
         gate_block(g, a, arm.body)
-        i++
     }
 }
 
@@ -195,27 +189,21 @@ func gate_stmt(g: *Gate, a: *Ast, id: int64) -> void {
 }
 
 func gate_expr_slice(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         gate_expr(g, a, vec_get((*a).kids, off + i))
-        i++
     }
 }
 
 func gate_field_pairs(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len by 2 {
         gate_expr(g, a, vec_get((*a).kids, off + i + 1))
-        i += 2
     }
 }
 
 func gate_do_binds(g: *Gate, a: *Ast, off: int64, len: int64) -> void {
-    mut i: int64 = 0
-    while i < len {
+    for i in 0..len {
         d: DoBindNode = vec_get((*a).do_binds, vec_get((*a).kids, off + i))
         gate_expr(g, a, d.expr)
-        i++
     }
 }
 
@@ -306,11 +294,9 @@ func gate_items(g: *Gate, a: *Ast) -> void {
             what: string = impl_what(ast_name(a, im.ty))
             need_oop(g, what, im.lo, im.hi)
             free(what)
-            mut j: int64 = 0
-            while j < im.methods_len {
+            for j in 0..im.methods_len {
                 mf: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
                 gate_block(g, a, mf.body)
-                j++
             }
         } else if it.kind == ik_interface() {
             iface: InterfaceNode = vec_get((*a).interfaces, it.id)

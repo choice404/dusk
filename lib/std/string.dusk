@@ -22,10 +22,8 @@ foreign "C" {
 export func cbuf(s: string) -> *raw char {
     n: int64 = str_len(s)
     buf: *raw char = alloc_bytes(n + 1)
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         buf[i] = s[i]
-        i++
     }
     buf[n] = 0
     return buf
@@ -99,10 +97,8 @@ export func substring(s: string, lo: int64, hi: int64) -> string {
     }
     count: int64 = b - a
     d: *raw char = alloc_bytes(count + 1)
-    mut i: int64 = 0
-    while i < count {
+    for i in 0..count {
         d[i] = s[a + i]
-        i++
     }
     d[count] = 0
     return cstr(d)
@@ -162,8 +158,7 @@ export func int_to_hex16(n: int64) -> string {
     d: *raw char = alloc_bytes(19)
     d[0] = 48
     d[1] = 120
-    mut i: int64 = 0
-    while i < 16 {
+    for i in 0..16 {
         shift: int64 = 4 * (15 - i)
         nib: int64 = (n >> shift) & 15
         mut ch: int64 = 48 + nib
@@ -171,7 +166,6 @@ export func int_to_hex16(n: int64) -> string {
             ch = 55 + nib
         }
         d[2 + i] = ch
-        i++
     }
     d[18] = 0
     return cstr(d)
@@ -348,10 +342,8 @@ func sb_grow(s: *StringBuilder, need: int64) -> void {
     nd: *raw char = alloc_bytes(nc)
     old: *raw char = (*s).data
     n: int64 = (*s).len
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         nd[i] = old[i]
-        i++
     }
     free(old)
     (*s).data = nd
@@ -388,10 +380,8 @@ export func sb_push(s: *StringBuilder, t: string) -> void {
         sb_grow(s, base + n)
     }
     d: *raw char = (*s).data
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         d[base + i] = t[i]
-        i++
     }
     d[base + n] = 0
     (*s).len = base + n
@@ -510,10 +500,8 @@ export func str_contains(s: string, needle: string) -> bool {
  *  @return a fresh heap string of the slice's bytes the caller owns and frees */
 export func str_from_chars(cs: char[]) -> string {
     s: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < cs.len {
+    for i in 0..cs.len {
         sb_push_char(s, cs[i])
-        i++
     }
     out: string = substring(sb_cstr(s), 0, sb_size(s))
     sb_free(s)
@@ -533,12 +521,10 @@ export func ends_with(s: string, suffix: string) -> bool {
     if m > n {
         return false
     }
-    mut i: int64 = 0
-    while i < m {
+    for i in 0..m {
         if s[n - m + i] != suffix[i] {
             return false
         }
-        i++
     }
     return true
 }
@@ -728,13 +714,11 @@ export func str_split(s: string, sep: string) -> *Vector<string> {
 export func str_join(parts: *Vector<string>, sep: string) -> string {
     sb: *StringBuilder = alloc(sb_new())
     n: int64 = vec_len(parts)
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         if i > 0 {
             sb_push(sb, sep)
         }
         sb_push(sb, vec_get(parts, i))
-        i++
     }
     out: string = substring(sb_cstr(sb), 0, sb_size(sb))
     sb_free(sb)
@@ -792,10 +776,8 @@ export func replace_all(s: string, old: string, new_s: string) -> string {
  *  @return the repeated text as a fresh heap string the caller owns and frees */
 export func repeat(s: string, n: int64) -> string {
     sb: *StringBuilder = alloc(sb_new())
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         sb_push(sb, s)
-        i++
     }
     out: string = substring(sb_cstr(sb), 0, sb_size(sb))
     sb_free(sb)
@@ -812,15 +794,13 @@ export func repeat(s: string, n: int64) -> string {
 export func to_upper(s: string) -> string {
     n: int64 = str_len(s)
     d: *raw char = alloc_bytes(n + 1)
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         c: int64 = int64(s[i])
         if c >= 97 && c <= 122 {
             d[i] = c - 32
         } else {
             d[i] = s[i]
         }
-        i++
     }
     d[n] = 0
     return cstr(d)
@@ -835,15 +815,13 @@ export func to_upper(s: string) -> string {
 export func to_lower(s: string) -> string {
     n: int64 = str_len(s)
     d: *raw char = alloc_bytes(n + 1)
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         c: int64 = int64(s[i])
         if c >= 65 && c <= 90 {
             d[i] = c + 32
         } else {
             d[i] = s[i]
         }
-        i++
     }
     d[n] = 0
     return cstr(d)

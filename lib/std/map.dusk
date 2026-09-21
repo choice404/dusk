@@ -62,10 +62,8 @@ export func map_new<K, V>() -> Map<K, V> {
     // A power of two, the invariant map_slot's mask depends on.
     cap: int64 = 8
     u: *raw bool = alloc_bytes(cap * sizeof(bool))
-    mut i: int64 = 0
-    while i < cap {
+    for i in 0..cap {
         u[i] = false
-        i++
     }
     k: *raw K = alloc_bytes(cap * sizeof(K))
     v: *raw V = alloc_bytes(cap * sizeof(V))
@@ -92,25 +90,21 @@ func map_grow<K, V>(m: *Map<K, V>) -> void {
     old_cap: int64 = (*m).cap
     ncap: int64 = old_cap * 2
     nu: *raw bool = alloc_bytes(ncap * sizeof(bool))
-    mut i: int64 = 0
-    while i < ncap {
+    for i in 0..ncap {
         nu[i] = false
-        i++
     }
     (*m).used = nu
     (*m).keys = alloc_bytes(ncap * sizeof(K))
     (*m).vals = alloc_bytes(ncap * sizeof(V))
     (*m).cap = ncap
     (*m).len = 0
-    mut j: int64 = 0
-    while j < old_cap {
+    for j in 0..old_cap {
         if old_used[j] {
             // Rehash into the new table only; the insertion order record is
             // preserved across a grow, so it is not rebuilt here. The bool result
             // is discarded because a grow never records a new key.
             map_place(m, old_keys[j], old_vals[j])
         }
-        j++
     }
     free(old_used)
     free(old_keys)
@@ -352,10 +346,8 @@ export func map_val_at<K, V>(m: *Map<K, V>, i: int64) -> V {
 export func map_keys<K, V>(m: *Map<K, V>) -> *Vector<K> {
     out: *Vector<K> = alloc(vec_new())
     src: *Vector<K> = (*m).order
-    mut i: int64 = 0
-    while i < vec_len(src) {
+    for i in 0..vec_len(src) {
         vec_push(out, vec_get(src, i))
-        i++
     }
     return out
 }

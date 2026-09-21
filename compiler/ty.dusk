@@ -132,11 +132,9 @@ func sb_push_ty_canon(b: *StringBuilder, t: *TyArena, id: int64) -> void {
         sb_push_char(b, 41)
     } else if n.kind == tyk_tuple() || n.kind == tyk_func() {
         if n.kind == tyk_tuple() { sb_push(b, "T(") } else { sb_push(b, "M(") }
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if i > 0 { sb_push_char(b, 44) }
             sb_push_ty_canon(b, t, vec_get((*t).kids, n.off + i))
-            i++
         }
         if n.kind == tyk_func() {
             sb_push(b, ")->")
@@ -207,11 +205,9 @@ func ty_canon(t: *TyArena, n: TyNode) -> string {
         sb_push_char(b, 41)
     } else if n.kind == tyk_tuple() || n.kind == tyk_func() {
         if n.kind == tyk_tuple() { sb_push(b, "T(") } else { sb_push(b, "M(") }
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if i > 0 { sb_push_char(b, 44) }
             sb_push_ty_canon(b, t, vec_get((*t).kids, n.off + i))
-            i++
         }
         if n.kind == tyk_func() {
             sb_push(b, ")->")
@@ -248,10 +244,8 @@ func ty_intern(t: *TyArena, n: TyNode) -> int64 {
 func ty_kids(t: *TyArena, src: *Vector<int64>) -> (int64, int64) {
     kids: *Vector<int64> = (*t).kids
     off: int64 = vec_len(kids)
-    mut i: int64 = 0
-    while i < vec_len(src) {
+    for i in 0..vec_len(src) {
         vec_push(kids, vec_get(src, i))
-        i++
     }
     return (off, vec_len(src))
 }
@@ -326,19 +320,15 @@ export func lower(t: *TyArena, a: *Ast, id: int64, gens: *Map<string, int64>) ->
     if n.kind == tk_collector() { return ty_collector(t, lower(t, a, n.a, gens)) }
     if n.kind == tk_tuple() {
         xs: *Vector<int64> = alloc(vec_new())
-        mut i: int64 = 0
-        while i < n.b {
+        for i in 0..n.b {
             vec_push(xs, lower(t, a, vec_get((*a).kids, n.a + i), gens))
-            i++
         }
         return ty_tuple(t, xs)
     }
     if n.kind == tk_func() {
         ps: *Vector<int64> = alloc(vec_new())
-        mut j: int64 = 0
-        while j < n.b {
+        for j in 0..n.b {
             vec_push(ps, lower(t, a, vec_get((*a).kids, n.a + j), gens))
-            j++
         }
         return ty_func(t, ps, lower(t, a, n.c, gens))
     }
@@ -392,18 +382,14 @@ export func compat(t: *TyArena, a: int64, b: int64) -> bool {
         if inner.kind == tyk_func() || inner.kind == tyk_slice() { return compat(t, a, nb.a) }
     }
     if na.kind == tyk_tuple() && nb.kind == tyk_tuple() && na.len == nb.len {
-        mut i: int64 = 0
-        while i < na.len {
+        for i in 0..na.len {
             if !compat(t, vec_get((*t).kids, na.off + i), vec_get((*t).kids, nb.off + i)) { return false }
-            i++
         }
         return true
     }
     if na.kind == tyk_func() && nb.kind == tyk_func() && na.len == nb.len {
-        mut j: int64 = 0
-        while j < na.len {
+        for j in 0..na.len {
             if !compat(t, vec_get((*t).kids, na.off + j), vec_get((*t).kids, nb.off + j)) { return false }
-            j++
         }
         return compat(t, na.a, nb.a)
     }
@@ -417,12 +403,10 @@ export func compat(t: *TyArena, a: int64, b: int64) -> bool {
 // the caller frees.
 export func base_type_name(name: string) -> string {
     n: int64 = str_len(name)
-    mut i: int64 = 0
-    while i < n {
+    for i in 0..n {
         if name[i] == 36 {
             return substring(name, 0, i)
         }
-        i++
     }
     return substring(name, 0, n)
 }
@@ -502,10 +486,8 @@ export func ty_strict_eq(t: *TyArena, a: int64, b: int64) -> bool {
     if na.kind == tyk_array() { return na.w == nb.w && ty_strict_eq(t, na.a, nb.a) }
     if na.kind == tyk_tuple() || na.kind == tyk_func() {
         if na.len != nb.len { return false }
-        mut i: int64 = 0
-        while i < na.len {
+        for i in 0..na.len {
             if !ty_strict_eq(t, vec_get((*t).kids, na.off + i), vec_get((*t).kids, nb.off + i)) { return false }
-            i++
         }
         if na.kind == tyk_func() { return ty_strict_eq(t, na.a, nb.a) }
         return true
@@ -578,20 +560,16 @@ func sb_push_ty_src(b: *StringBuilder, t: *TyArena, id: int64) -> void {
         sb_push(b, ty_name(t, id))
     } else if n.kind == tyk_tuple() {
         sb_push_char(b, 40)
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             if i > 0 { sb_push(b, ", ") }
             sb_push_ty_src(b, t, vec_get((*t).kids, n.off + i))
-            i++
         }
         sb_push_char(b, 41)
     } else if n.kind == tyk_func() {
         sb_push_char(b, 40)
-        mut j: int64 = 0
-        while j < n.len {
+        for j in 0..n.len {
             if j > 0 { sb_push(b, ", ") }
             sb_push_ty_src(b, t, vec_get((*t).kids, n.off + j))
-            j++
         }
         sb_push(b, ") -> ")
         sb_push_ty_src(b, t, n.a)
@@ -606,10 +584,8 @@ export func harden(t: *TyArena, id: int64) -> int64 {
     if n.kind == tyk_float() && n.w == 0 { return ty_float(t, 64) }
     if n.kind == tyk_tuple() {
         xs: *Vector<int64> = alloc(vec_new())
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             vec_push(xs, harden(t, vec_get((*t).kids, n.off + i)))
-            i++
         }
         return ty_tuple(t, xs)
     }
@@ -649,19 +625,15 @@ export func unmangle(t: *TyArena, id: int64, future_elems: *Map<string, int64>) 
     if n.kind == tyk_array() { return ty_array(t, unmangle(t, n.a, future_elems), n.w) }
     if n.kind == tyk_tuple() {
         xs: *Vector<int64> = alloc(vec_new())
-        mut i: int64 = 0
-        while i < n.len {
+        for i in 0..n.len {
             vec_push(xs, unmangle(t, vec_get((*t).kids, n.off + i), future_elems))
-            i++
         }
         return ty_tuple(t, xs)
     }
     if n.kind == tyk_func() {
         ps: *Vector<int64> = alloc(vec_new())
-        mut j: int64 = 0
-        while j < n.len {
+        for j in 0..n.len {
             vec_push(ps, unmangle(t, vec_get((*t).kids, n.off + j), future_elems))
-            j++
         }
         return ty_func(t, ps, unmangle(t, n.a, future_elems))
     }
