@@ -1,11 +1,13 @@
-// foriter: the pre-mono container-for rewrite. The surface type pass classifies a
-// `for` whose iterand is a *Vector<T> or *Map<K, V> and records its class in the
-// checker's for_iters table (stmt id -> 1 vector, 2 map-keys, 3 map-pairs). This
-// pass runs after a clean surface pass and before mono, replacing each classified
-// loop in its parent block with the exact index loop a user would write against
-// vec_len/vec_get (or map_len plus the two positional map accessors), so container
-// layout stays in dusk source and codegen never learns it. The synthesized calls
-// ride mono's ordinary worklist and the ground double pass re-checks their types.
+// foriter: the pre-mono for rewrite. The surface type pass classifies a `for` whose
+// iterand is a *Vector<T> or *Map<K, V>, or whose head is a counted range, and records
+// its class in the checker's for_iters table (stmt id -> 1 vector, 2 map-keys, 3
+// map-pairs, 4 range). This pass runs after a clean surface pass and before mono,
+// replacing each classified loop in its parent block with the exact index or cursor
+// loop a user would write against vec_len/vec_get (or map_len plus the two positional
+// map accessors, or a pair of int64 locals), so container layout and the counted
+// loop's arithmetic both stay in dusk source and codegen never learns either. The
+// synthesized calls ride mono's ordinary worklist and the ground double pass re-checks
+// their types.
 //
 // The splice for `for x in v` (class vec), all synthesized spans the for header:
 //     __fit$N := v
@@ -41,9 +43,10 @@
 // iterand it cannot re-infer.
 struct ForCtx { classes: *Map<int64, int64>, asts: *Map<int64, int64> }
 
-// The class values mirror tcstmt's fc_vec/fc_mapkeys/fc_mappairs.
+// The class values mirror tcstmt's fc_vec/fc_mapkeys/fc_mappairs and tcfor's fc_range.
 func fic_vec() -> int64 { return 1 }
 func fic_mappairs() -> int64 { return 3 }
+func fic_range() -> int64 { return 4 }
 
 // A synthesized local name uniquified by the for's stmt id, so every rewritten loop
 // owns a distinct __fit$N / __fi$N pair and nested loops never alias.
@@ -84,6 +87,21 @@ func fi_let(a: *Ast, name: int64, value: int64, flags: int64) -> int64 {
     vec_push(binds, ast_bind(a, name, -1))
     off, len := ast_kids(a, binds)
     return ast_stmt(a, sk_let(), off, len, value, flags)
+}
+
+// A single-name let annotated int64, the shape the counted loop's cursor and limit
+// take, marked with let_range_bound. The mark is the ground pass's backstop: a bound
+// the surface pass left unresolved, a generic call's result say, is judged by the loop
+// head's own strict rule once mono makes it concrete, so a range that counts over a
+// char, a float, or a narrower integer faults at check time instead of reaching
+// codegen. Ordinary annotation compatibility would not do, since it admits a char and
+// a rune as integers. flags carry the same bit field fi_let takes.
+func fi_let_int64(a: *Ast, name: int64, value: int64, flags: int64) -> int64 {
+    ty: int64 = ast_type(a, tk_named(), ast_intern(a, "int64"), 0, 0)
+    binds: *Vector<int64> = alloc(vec_new())
+    vec_push(binds, ast_bind(a, name, ty))
+    off, len := ast_kids(a, binds)
+    return ast_stmt(a, sk_let(), off, len, value, flags | let_range_bound())
 }
 
 // Splices the index loop for a classified for statement into out, the parent
@@ -148,6 +166,69 @@ func fi_splice(a: *Ast, fc: ForCtx, sid: int64, cls: int64, out: *Vector<int64>)
     vec_push(out, ast_stmt(a, sk_while(), cond, while_body, 0, 0))
 }
 
+// Splices the counted loop for `for i in lo..hi by k` into out, the parent block's
+// statement list under construction:
+//     mut __ri$N: int64 = lo
+//     __rhi$N: int64 = hi
+//     while __ri$N < __rhi$N {
+//         i := __ri$N
+//         __ri$N = __ri$N + k
+//         if true { <original body> }
+//     }
+// The two bounds are evaluated exactly once, low bound first, in the order they are
+// written; nothing re-reads them, so a bound that calls or allocates runs once per
+// loop rather than once per iteration. The cursor advances before the body for the
+// same reason the container splice does: a continue jumps to the while condition, and
+// a step at the bottom of the body would spin forever on the first one. The binder is
+// a fresh immutable copy of the cursor, so a lambda capturing it holds that
+// iteration's value. A negative step flips the comparison to `>` and the advance to
+// bop_sub over the step's magnitude, so the synthesized tree carries no negative
+// literal and the direction is settled here rather than at run time. The int64
+// annotations are the ground pass's backstop for a bound the surface left unresolved.
+// The cursor wraps at int64's edge, which is the C semantics the rest of the
+// language's arithmetic already has. Names are uniquified by the for's stmt id, so
+// nested and sibling counted loops never collide, and the `__ri$`/`__rhi$` prefixes
+// keep them clear of the container splice's own names.
+func fi_splice_range(a: *Ast, fc: ForCtx, sid: int64, out: *Vector<int64>) -> void {
+    s: StmtNode = vec_get((*a).stmts, sid)
+    r: ExprNode = vec_get((*a).exprs, s.b)
+    lo: int64 = r.lo
+    hi: int64 = r.hi
+    ri: int64 = fi_gen_name(a, "__ri$", sid)
+    rhi: int64 = fi_gen_name(a, "__rhi$", sid)
+    mut step: int64 = r.d
+    if step == 0 { step = 1 }
+
+    // The bounds, each rewritten first so a container loop nested inside one (in a
+    // lambda argument, say) is spliced too.
+    lo_val: int64 = fi_expr(a, fc, r.a)
+    vec_push(out, fi_let_int64(a, ri, lo_val, 1))
+    hi_val: int64 = fi_expr(a, fc, r.b)
+    vec_push(out, fi_let_int64(a, rhi, hi_val, 0))
+
+    mut cmp: int64 = bop_lt()
+    mut adv_op: int64 = bop_add()
+    mut mag: int64 = step
+    if step < 0 {
+        cmp = bop_gt()
+        adv_op = bop_sub()
+        mag = 0 - step
+    }
+    cond: int64 = ast_expr(a, xk_binary(), lo, hi, cmp, fi_ident(a, ri, lo, hi), fi_ident(a, rhi, lo, hi), 0)
+
+    body_ids: *Vector<int64> = alloc(vec_new())
+    vec_push(body_ids, fi_let(a, s.a, fi_ident(a, ri, lo, hi), 4))
+    k: int64 = ast_expr(a, xk_int(), lo, hi, mag, -1, 0, 0)
+    adv: int64 = ast_expr(a, xk_binary(), lo, hi, adv_op, fi_ident(a, ri, lo, hi), k, 0)
+    vec_push(body_ids, ast_stmt(a, sk_assign(), fi_ident(a, ri, lo, hi), adv, 0, 0))
+    nested: int64 = fi_block(a, fc, s.c)
+    tru: int64 = ast_expr(a, xk_bool(), lo, hi, 1, 0, 0, 0)
+    vec_push(body_ids, ast_stmt(a, sk_if(), tru, nested, -1, 0))
+
+    while_body: int64 = ast_block(a, body_ids)
+    vec_push(out, ast_stmt(a, sk_while(), cond, while_body, 0, 0))
+}
+
 // Rewrites a block, returning the original id when nothing inside changed so the
 // mono dump is minimal for the parts a container loop never touches. A classified
 // for is spliced; every other statement is rewritten in place.
@@ -161,7 +242,11 @@ func fi_block(a: *Ast, fc: ForCtx, bid: int64) -> int64 {
         classes: *Map<int64, int64> = fc.classes
         if map_has(classes, sid) {
             cls: int64 = unwrap_or(map_get(classes, sid), 0)
-            fi_splice(a, fc, sid, cls, ids)
+            if cls == fic_range() {
+                fi_splice_range(a, fc, sid, ids)
+            } else {
+                fi_splice(a, fc, sid, cls, ids)
+            }
             changed = true
         } else {
             nsid: int64 = fi_stmt(a, fc, sid)
@@ -336,7 +421,7 @@ func fi_expr(a: *Ast, fc: ForCtx, eid: int64) -> int64 {
         na: int64 = fi_expr(a, fc, e.a)
         nb: int64 = fi_expr(a, fc, e.b)
         if na == e.a && nb == e.b { return eid }
-        return ast_expr(a, xk_range(), e.lo, e.hi, na, nb, e.c, 0)
+        return ast_expr(a, xk_range(), e.lo, e.hi, na, nb, e.c, e.d)
     }
     if e.kind == xk_tuple() {
         noff, nlen, chg := fi_expr_list(a, fc, e.a, e.b)
@@ -431,12 +516,12 @@ func fi_impl(a: *Ast, fc: ForCtx, id: int64) -> int64 {
     return ast_impl(a, im.iface, im.ty, im.lo, im.hi, methods)
 }
 
-/** Rewrites every classified container for in the module into its index loop, the
- *  pre-mono pass that keeps container layout in dusk source. A no-op when the table
- *  is empty, so a program that iterates no container is left byte-identical and its
- *  emitted IR unchanged.
+/** Rewrites every classified for in the module into its index or cursor loop, the
+ *  pre-mono pass that keeps container layout and the counted loop's arithmetic in dusk
+ *  source. A no-op when the table is empty, so a program that iterates no container and
+ *  counts no range is left byte-identical and its emitted IR unchanged.
  *  @param a the merged module whose classified for loops are rewritten in place
- *  @param for_iters the surface pass table mapping a for stmt id to its class: 1 vector, 2 map-keys, 3 map-pairs
+ *  @param for_iters the surface pass table mapping a for stmt id to its class: 1 vector, 2 map-keys, 3 map-pairs, 4 range
  *  @param for_iter_asts the companion table mapping a for stmt id to its iterand AST type id when one was recovered */
 export func foriter(a: *Ast, for_iters: *Map<int64, int64>, for_iter_asts: *Map<int64, int64>) -> void {
     if map_len(for_iters) == 0 { return }

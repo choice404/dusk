@@ -458,16 +458,12 @@ export func load_check_alias_clash(metas: *Vector<*FileMeta>, alias_file: *Map<s
     seen: *Map<string, int64> = new_set()
     for m in metas {
         p: string = (*m).priv
-        if str_len(p) > 0 {
-            if map_has(loaded, p) {
-                if !map_has(seen, p) {
-                    map_put(seen, p, 1)
-                    if map_has(alias_file, p) {
-                        vec_push(errors, load_diag_at(unwrap_or(map_get(alias_file, p), ""), unwrap_or(map_get(alias_line, p), 0), alias_clash_msg(p)))
-                    } else {
-                        vec_push(errors, load_diag_plain((*m).disp, alias_clash_msg(p)))
-                    }
-                }
+        if str_len(p) > 0 && map_has(loaded, p) && !map_has(seen, p) {
+            map_put(seen, p, 1)
+            if map_has(alias_file, p) {
+                vec_push(errors, load_diag_at(unwrap_or(map_get(alias_file, p), ""), unwrap_or(map_get(alias_line, p), 0), alias_clash_msg(p)))
+            } else {
+                vec_push(errors, load_diag_plain((*m).disp, alias_clash_msg(p)))
             }
         }
     }

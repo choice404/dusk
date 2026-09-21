@@ -274,12 +274,10 @@ func gen_ret_val(s: *GenFuncState, expr: int64) -> Val {
     a: *Ast = (*(*s).ctx).ast
     c: *CTyArena = genctx_ctys((*s).ctx)
     e: ExprNode = vec_get((*a).exprs, expr)
-    if e.kind == xk_ifexpr() || e.kind == xk_match() {
-        if vec_get(cty_nodes(c), (*s).ret).kind != ctyk_void() {
-            slot: string = gen_alloca(s, (*s).ret)
-            gen_into_slot(s, expr, (*s).ret, slot)
-            return Val { ty: (*s).ret, op: gen_load_slot(s, (*s).ret, slot) }
-        }
+    if (e.kind == xk_ifexpr() || e.kind == xk_match()) && vec_get(cty_nodes(c), (*s).ret).kind != ctyk_void() {
+        slot: string = gen_alloca(s, (*s).ret)
+        gen_into_slot(s, expr, (*s).ret, slot)
+        return Val { ty: (*s).ret, op: gen_load_slot(s, (*s).ret, slot) }
     }
     return gen_expr(s, expr)
 }

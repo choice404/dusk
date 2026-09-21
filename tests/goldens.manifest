@@ -969,6 +969,161 @@ mode run
 file examples/forloop.dusk
 out 6\n
 ---
+# The counted loop (1.16.0): `for i in lo..hi` and `for i in lo..hi by k` count
+# through a half open range. The bounds are evaluated once, low first, the binder
+# is a fresh immutable int64 per iteration, and the step is a nonzero integer
+# literal whose sign picks the comparison, so the direction is known at compile
+# time. The run records pin the counts and the evaluation order; the check_fail
+# twins pin every form the head refuses.
+test forrange_counts_up
+mode run
+file examples/forrange_up.dusk
+out 0\n1\n2\n3\n4\n
+---
+test forrange_empty_and_backward_ranges
+mode run
+file examples/forrange_empty.dusk
+out done\n
+---
+test forrange_negative_bounds
+mode run
+file examples/forrange_neg_bounds.dusk
+out -3\n-2\n-1\n0\n
+---
+test forrange_positive_step
+mode run
+file examples/forrange_step2.dusk
+out 0\n2\n4\n6\n8\n
+---
+test forrange_negative_step_counts_down
+mode run
+file examples/forrange_step_down.dusk
+out 10\n7\n4\n1\n
+---
+test forrange_step_against_bounds_is_empty
+mode run
+file examples/forrange_wrong_dir.dusk
+out done\n
+---
+test forrange_bounds_evaluated_once_low_first
+mode run
+file examples/forrange_bound_once.dusk
+out lo\nhi\n1\n2\n3\n
+---
+test forrange_break_continue_terminates
+mode run
+file examples/forrange_break_continue.dusk
+out 1\n3\n5\n7\n
+---
+test forrange_nested_loops
+mode run
+file examples/forrange_nested.dusk
+out 1\n2\n3\n2\n4\n6\n3\n6\n9\n
+---
+test forrange_binder_captured_by_lambda
+mode run
+file examples/forrange_closure.dusk
+out 0\n10\n20\n
+---
+test forrange_async_await_in_body
+mode run
+file examples/forrange_async.dusk
+out 12\n
+---
+test forrange_by_is_contextual
+mode run
+file examples/forrange_by_ident.dusk
+out 10\n
+---
+test forrange_literal_and_cast_bounds_ok
+mode run
+file examples/forrange_int32_literal_ok.dusk
+out 10\n
+---
+test forrange_indexes_a_slice
+mode run
+file examples/forrange_len.dusk
+out 26\n
+---
+test forrange_binder_shadows_an_owner
+mode run
+file examples/forrange_shadow_owner_ok.dusk
+out 0\n1\n7\n
+---
+test forrange_assign_fail
+mode check_fail
+file examples/forrange_assign_fail.dusk
+err_has cannot assign to immutable 'i'
+---
+test forrange_by_zero_fail
+mode check_fail
+file examples/forrange_by_zero_fail.dusk
+err_has a step of 0 never advances the loop; use a nonzero step
+---
+test forrange_by_expr_fail
+mode check_fail
+file examples/forrange_by_expr_fail.dusk
+err_has the step after 'by' must be an integer literal, as in for i in 0..n by 2
+---
+test forrange_by_suffix_fail
+mode check_fail
+file examples/forrange_by_suffix_fail.dusk
+err_has the step after 'by' must be an integer literal, as in for i in 0..n by 2
+---
+test forrange_incl_fail
+mode check_fail
+file examples/forrange_incl_fail.dusk
+err_has a counted loop takes a half open range; write lo..hi + 1 instead of lo..=hi
+---
+test forrange_float_fail
+mode check_fail
+file examples/forrange_float_fail.dusk
+err_has a range bound must be an integer, not float64
+---
+test forrange_int32_fail
+mode check_fail
+file examples/forrange_int32_fail.dusk
+err_has a range bound must be int64, not int32; cast the bound, as in int64(n)
+---
+test forrange_uint_fail
+mode check_fail
+file examples/forrange_uint_fail.dusk
+err_has a range bound must be int64, not uint32; cast the bound, as in int64(n)
+---
+test forrange_pair_fail
+mode check_fail
+file examples/forrange_pair_fail.dusk
+err_has two loop names bind a map's key and value; a range yields one integer
+---
+test forrange_generic_fail
+mode check_fail
+file examples/forrange_generic_fail.dusk
+err_has a range bound must be int64; a value of type parameter T is not known to be one
+---
+test forrange_by_vec_fail
+mode check_fail
+file examples/forrange_by_vec_fail.dusk
+err_has 'by' steps a counted range; write for i in lo..hi by 2
+---
+test forrange_generic_char_fail
+mode check_fail
+file examples/forrange_generic_char_fail.dusk
+err_has a range bound must be int64, not char; cast the bound, as in int64(n)
+---
+test forrange_nested_range_fail
+mode check_fail
+file examples/forrange_nested_range_fail.dusk
+err_has a range bound must be an integer, not a range
+---
+# The parse dump proves the step reaches the tree: a range head carries its step in
+# the node the expression grammar built, printed as one more line under the range, and
+# a head written without a step prints exactly the range every earlier release did.
+test forrange_parse_shows_by
+mode tool
+argv parse examples/forrange_step2.dusk
+out Module {\n    paradigms: [\n        "procedural",\n    ],\n    imports: [],\n    monads: [],\n    items: [\n        Func(\n            Func {\n                exported: false,\n                is_async: false,\n                owning: false,\n                name: "main",\n                span: Span {\n                    lo: 263,\n                    hi: 267,\n                },\n                generics: [],\n                params: [],\n                ret: Named(\n                    "int32",\n                    [],\n                ),\n                body: Block {\n                    stmts: [\n                        For(\n                            For {\n                                var: "i",\n                                iter: Expr {\n                                    kind: Range(\n                                        Expr {\n                                            kind: Int(\n                                                0,\n                                                None,\n                                            ),\n                                            span: Span {\n                                                lo: 294,\n                                                hi: 295,\n                                            },\n                                        },\n                                        Expr {\n                                            kind: Int(\n                                                10,\n                                                None,\n                                            ),\n                                            span: Span {\n                                                lo: 297,\n                                                hi: 299,\n                                            },\n                                        },\n                                        false,\n                                        by: 2,\n                                    ),\n                                    span: Span {\n                                        lo: 294,\n                                        hi: 299,\n                                    },\n                                },\n                                body: Block {\n                                    stmts: [\n                                        Expr(\n                                            Expr {\n                                                kind: Call(\n                                                    Expr {\n                                                        kind: Ident(\n                                                            "println",\n                                                        ),\n                                                        span: Span {\n                                                            lo: 315,\n                                                            hi: 322,\n                                                        },\n                                                    },\n                                                    [\n                                                        Expr {\n                                                            kind: Ident(\n                                                                "i",\n                                                            ),\n                                                            span: Span {\n                                                                lo: 323,\n                                                                hi: 324,\n                                                            },\n                                                        },\n                                                    ],\n                                                ),\n                                                span: Span {\n                                                    lo: 315,\n                                                    hi: 325,\n                                                },\n                                            },\n                                        ),\n                                    ],\n                                },\n                            },\n                        ),\n                        Return(\n                            Some(\n                                Expr {\n                                    kind: Int(\n                                        0,\n                                        None,\n                                    ),\n                                    span: Span {\n                                        lo: 343,\n                                        hi: 344,\n                                    },\n                                },\n                            ),\n                        ),\n                    ],\n                },\n            },\n        ),\n    ],\n}\n
+code 0
+---
 test else_if_chain_selects_one_arm
 mode run
 file examples/elseif.dusk
@@ -3340,7 +3495,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.15.1\n
+out dusk 1.16.0\n
 argv version
 code 0
 ---

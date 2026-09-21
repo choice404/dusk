@@ -60,36 +60,30 @@ func parse_argv(argv: string[]) -> Config {
             i++
             if !has_value(argv, i) { return cfg_err("--filter needs a value") }
             filter = argv[i]
+        } else if str_eq(a, "--timeout") {
+            i++
+            if !has_value(argv, i) { return cfg_err("--timeout needs a value") }
+            t, e := parse_int(argv[i])
+            if e.exists() { return cfg_err("--timeout needs an integer") }
+            timeout = t
+        } else if str_eq(a, "--bin") {
+            i++
+            if !has_value(argv, i) { return cfg_err("--bin needs a value") }
+            bin = argv[i]
+        } else if str_eq(a, "--limit-kb") {
+            i++
+            if !has_value(argv, i) { return cfg_err("--limit-kb needs a value") }
+            lk, le := parse_int(argv[i])
+            if le.exists() { return cfg_err("--limit-kb needs an integer") }
+            limit_kb = lk
         } else {
-            if str_eq(a, "--timeout") {
-                i++
-                if !has_value(argv, i) { return cfg_err("--timeout needs a value") }
-                t, e := parse_int(argv[i])
-                if e.exists() { return cfg_err("--timeout needs an integer") }
-                timeout = t
-            } else {
-                if str_eq(a, "--bin") {
-                    i++
-                    if !has_value(argv, i) { return cfg_err("--bin needs a value") }
-                    bin = argv[i]
-                } else {
-                    if str_eq(a, "--limit-kb") {
-                        i++
-                        if !has_value(argv, i) { return cfg_err("--limit-kb needs a value") }
-                        lk, le := parse_int(argv[i])
-                        if le.exists() { return cfg_err("--limit-kb needs an integer") }
-                        limit_kb = lk
-                    } else {
-                        if starts_with(a, "--") {
-                            return cfg_err("unknown flag '" + a + "'")
-                        }
-                        if !str_eq(manifest, "") {
-                            return cfg_err("unexpected extra argument '" + a + "'")
-                        }
-                        manifest = a
-                    }
-                }
+            if starts_with(a, "--") {
+                return cfg_err("unknown flag '" + a + "'")
             }
+            if !str_eq(manifest, "") {
+                return cfg_err("unexpected extra argument '" + a + "'")
+            }
+            manifest = a
         }
         i++
     }

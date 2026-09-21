@@ -476,11 +476,9 @@ func check_opaque_call_send(tc: *TypeChecker, callee_id: int64, arg_off: int64, 
         root: string = send_value_root(tc, arg_id)
         mut handled: bool = false
         if str_len(root) > 0 {
-            if is_managed_ty(tc, lookup(tc, root)) {
-                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
-                    emit_opaque_send(tc, root, unwrap_or(map_get(fp, root), no_flow_prov()), lo, hi)
-                    handled = true
-                }
+            if is_managed_ty(tc, lookup(tc, root)) && (is_esc_slice(tc, root) || is_esc_closure(tc, root)) {
+                emit_opaque_send(tc, root, unwrap_or(map_get(fp, root), no_flow_prov()), lo, hi)
+                handled = true
             }
         }
         if !handled {
@@ -593,11 +591,9 @@ func check_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
         if ps_has(sum.sinks, j) {
             arg_id: int64 = vec_get((*a).kids, arg_off + j)
             root: string = send_value_root(tc, arg_id)
-            if str_len(root) > 0 {
-                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
-                    prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
-                    emit_sink_reject(tc, cname, root, ps_has(sum.collect_sinks, j), prov, lo, hi)
-                }
+            if str_len(root) > 0 && (is_esc_slice(tc, root) || is_esc_closure(tc, root)) {
+                prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+                emit_sink_reject(tc, cname, root, ps_has(sum.collect_sinks, j), prov, lo, hi)
             }
         }
         j++
@@ -623,11 +619,9 @@ func check_lambda_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64,
         if ps_has(sinks, j) {
             arg_id: int64 = vec_get((*a).kids, arg_off + j)
             root: string = send_value_root(tc, arg_id)
-            if str_len(root) > 0 {
-                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
-                    prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
-                    emit_sink_reject(tc, cname, root, ps_has(collect, j), prov, lo, hi)
-                }
+            if str_len(root) > 0 && (is_esc_slice(tc, root) || is_esc_closure(tc, root)) {
+                prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+                emit_sink_reject(tc, cname, root, ps_has(collect, j), prov, lo, hi)
             }
         }
         j++

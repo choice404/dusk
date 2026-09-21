@@ -175,20 +175,18 @@ c: *CTyArena = genctx_ctys((*s).ctx)
         return
     }
     n: CTyNode = vec_get(cty_nodes(c), take.elem_ty)
-    if n.kind == ctyk_tuple() {
-        if n.b == st.b {
-            whole: string = gen_load_slot(s, take.elem_ty, take.elem_slot)
-            ll: string = cty_ll(c, take.elem_ty)
-            mut i: int64 = 0
-            while i < st.b {
-                ety: int64 = cty_tuple_elem(c, take.elem_ty, i)
-                bind2: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a + i))
-                aw_bind(s, bind2, Val { ty: ety, op: aw_emit_extract(s, ll, whole, i) })
-                i++
-            }
-            free(ll)
-            return
+    if n.kind == ctyk_tuple() && n.b == st.b {
+        whole: string = gen_load_slot(s, take.elem_ty, take.elem_slot)
+        ll: string = cty_ll(c, take.elem_ty)
+        mut i: int64 = 0
+        while i < st.b {
+            ety: int64 = cty_tuple_elem(c, take.elem_ty, i)
+            bind2: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a + i))
+            aw_bind(s, bind2, Val { ty: ety, op: aw_emit_extract(s, ll, whole, i) })
+            i++
         }
+        free(ll)
+        return
     }
     if st.b == 2 {
         b0: BindNode = vec_get((*a).binds, vec_get((*a).kids, st.a))

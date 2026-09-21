@@ -79,6 +79,7 @@ Browse `examples/` for runnable programs. `examples/app.dusk` is a multi module 
 - Functional builtins map, filter, reduce, fold, and foreach, plus monadic `do` notation.
 - Manual memory with `alloc`, `free`, `defer`, pointers, and the raw primitives `sizeof`, `alloc_bytes`, and `ptr_add`.
 - Short circuit `&&`/`||`, a string `==`/`!=` compared by content and `+` to concatenate, explicit width casts like `int32(v)`, and `break`/`continue` in a loop.
+- A `for` that counts a half open range, `for i in 0..n`, steps it by a literal with `for i in n..0 by -1`, or iterates an array, a slice, a string, a `*Vector`, or a `*Map`.
 - Immutability by default with `mut`, errors as values, and per file paradigm gating.
 
 The standard library under `lib/std` is written in dusk. It ships `io`, `string`, `memory.arena`, `functional.maybe`, `functional.either`, and a generic amortized dynamic array `vector`.

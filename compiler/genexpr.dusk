@@ -248,33 +248,31 @@ func gx_binary_vals(s: *GenFuncState, op: int64, av0: Val, rhs: int64) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
     av: Val = gx_lift_to_unsigned(s, av0, bv.ty)
     ty: int64 = av.ty
-    if op == bop_pow() {
-        if !cty_is_float(c, ty) {
-            a64: string = coerce(s, av.ty, av.op, cty_int(c, 64))
-            e64: string = coerce(s, bv.ty, bv.op, cty_int(c, 64))
-            d: string = next_tmp((*s).fb)
-            b: *StringBuilder = alloc(sb_new())
-            mut pow_fn: string = "@cool_pow_i64"
-            if cty_is_unsigned(c, ty) {
-                pow_fn = "@cool_pow_u64"
-                emit_declare((*s).module, "i64 @cool_pow_u64(i64, i64)")
-            }
-            sb_push(b, d)
-            sb_push(b, " = call i64 ")
-            sb_push(b, pow_fn)
-            sb_push(b, "(i64 ")
-            sb_push(b, a64)
-            sb_push(b, ", i64 ")
-            sb_push(b, e64)
-            sb_push_char(b, 41)
-            text: string = gs_built(b)
-            sb_free(b)
-            free(b)
-            line((*s).fb, text)
-            free(text)
-            back: string = coerce(s, cty_int(c, 64), d, ty)
-            return Val { ty: ty, op: back }
+    if op == bop_pow() && !cty_is_float(c, ty) {
+        a64: string = coerce(s, av.ty, av.op, cty_int(c, 64))
+        e64: string = coerce(s, bv.ty, bv.op, cty_int(c, 64))
+        d: string = next_tmp((*s).fb)
+        b: *StringBuilder = alloc(sb_new())
+        mut pow_fn: string = "@cool_pow_i64"
+        if cty_is_unsigned(c, ty) {
+            pow_fn = "@cool_pow_u64"
+            emit_declare((*s).module, "i64 @cool_pow_u64(i64, i64)")
         }
+        sb_push(b, d)
+        sb_push(b, " = call i64 ")
+        sb_push(b, pow_fn)
+        sb_push(b, "(i64 ")
+        sb_push(b, a64)
+        sb_push(b, ", i64 ")
+        sb_push(b, e64)
+        sb_push_char(b, 41)
+        text: string = gs_built(b)
+        sb_free(b)
+        free(b)
+        line((*s).fb, text)
+        free(text)
+        back: string = coerce(s, cty_int(c, 64), d, ty)
+        return Val { ty: ty, op: back }
     }
     bo: string = coerce(s, bv.ty, bv.op, av.ty)
     // The string forms route through the runtime: `+` mints a fresh heap
@@ -342,12 +340,10 @@ func gx_binary_vals(s: *GenFuncState, op: int64, av0: Val, rhs: int64) -> Val {
         r: string = gx_op_line(s, gx_arith_opcode(op, is_float, is_unsigned), ty, av.op, bo)
         return Val { ty: ty, op: r }
     }
-    if op >= bop_eq() {
-        if op <= bop_ge() {
-            mut instr: string = "icmp"
-            if is_float { instr = "fcmp" }
-            return gx_cmp_line(s, instr, gx_cmp_pred(op, is_float, is_unsigned), ty, av.op, bo)
-        }
+    if op >= bop_eq() && op <= bop_ge() {
+        mut instr: string = "icmp"
+        if is_float { instr = "fcmp" }
+        return gx_cmp_line(s, instr, gx_cmp_pred(op, is_float, is_unsigned), ty, av.op, bo)
     }
     if op == bop_and() {
         r2: string = gx_op_line(s, "and", cty_bool(c), av.op, bo)

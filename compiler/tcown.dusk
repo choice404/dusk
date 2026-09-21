@@ -647,17 +647,15 @@ export func check_assign_target(tc: *TypeChecker, lhs_id: int64) -> void {
         }
     }
     ok, root, lo, hi := value_chain_root(tc, lhs_id)
-    if ok {
-        if !str_eq(root, "self") && !is_mutable(tc, root) {
-            b: *StringBuilder = alloc(sb_new())
-            sb_push(b, "cannot assign through immutable '")
-            sb_push(b, root)
-            sb_push(b, "'; declare it 'mut'")
-            msg: string = substring(sb_cstr(b), 0, sb_size(b))
-            sb_free(b)
-            free(b)
-            tc_emit(tc, msg, lo, hi)
-        }
+    if ok && !str_eq(root, "self") && !is_mutable(tc, root) {
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, "cannot assign through immutable '")
+        sb_push(b, root)
+        sb_push(b, "'; declare it 'mut'")
+        msg: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
+        tc_emit(tc, msg, lo, hi)
     }
 }
 

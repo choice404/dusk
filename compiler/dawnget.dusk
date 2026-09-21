@@ -137,10 +137,8 @@ func settle(w: *DawnWant, l: *Lock, url: string, scratch: string, force_all: boo
  *  the commit and off the remote when it does not. Either way the checkout replaces its
  *  directory rather than updating it, so a clone that died leaves no tree at all. */
 func fetch_into(w: *DawnWant, commit: string, from_lock: bool, url: string, scratch: string, dir: string, cache_ok: bool) -> int32 {
-    if cache_ok {
-        if dawn_cache_checkout(scratch, url, (*w).alias, commit, dir) {
-            return 0
-        }
+    if cache_ok && dawn_cache_checkout(scratch, url, (*w).alias, commit, dir) {
+        return 0
     }
     c: DawnClone = dawn_git_checkout(scratch, url, (*w).ref, commit, dir)
     if !c.ok {
@@ -175,10 +173,8 @@ func place(m: *Manifest, w: *DawnWant, commit: string, from_lock: bool, url: str
     dir: string = dep_dir(m, (*w).alias)
     st: Stamp = stamp_read(dir)
     mut stamped: bool = false
-    if st.ok {
-        if str_eq(st.commit, commit) {
-            stamped = true
-        }
+    if st.ok && str_eq(st.commit, commit) {
+        stamped = true
     }
     stamp_free(st)
     mut have: bool = false
@@ -359,10 +355,8 @@ export func dawn_fetch_all(m: *Manifest, force_all: bool, force_alias: string) -
     free(l)
     dawn_rm_rf(scratch)
     free(scratch)
-    if code == 0 && str_len(force_alias) > 0 {
-        if dawn_dep_index(deps, force_alias) < 0 {
-            code = dawn_fail_owned(quote_msg("no package named ", force_alias, " is required here"))
-        }
+    if code == 0 && str_len(force_alias) > 0 && dawn_dep_index(deps, force_alias) < 0 {
+        code = dawn_fail_owned(quote_msg("no package named ", force_alias, " is required here"))
     }
     if code == 0 {
         code = write_lock(m, deps)

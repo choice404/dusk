@@ -173,10 +173,8 @@ export func gen_alloca_raw(s: *GenFuncState, llty: string) -> string {
     if (*s).frame_on {
         // A raw frame slot is one word; a fat type here would silently smash
         // the adjacent slot, so anything wider stops at a named build error.
-        if !str_eq(llty, "i64") {
-            if !str_eq(llty, "ptr") {
-                emit_error((*s).module, "raw frame slot requires a word type")
-            }
+        if !str_eq(llty, "i64") && !str_eq(llty, "ptr") {
+            emit_error((*s).module, "raw frame slot requires a word type")
         }
         frame_add_slot((*s).frame, dest, llty, 8, 8)
         return dest
@@ -445,112 +443,104 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
     if fn.kind == ctyk_rawptr() {
         if tn.kind == ctyk_ptr() { return fat(s, op, "0") }
     }
-    if fn.kind == ctyk_tuple() {
-        if tn.kind == ctyk_tuple() {
-            if fn.b == tn.b {
-                mut same: bool = true
-                mut si: int64 = 0
-                while si < fn.b {
-                    if cty_tuple_elem(c, from, si) != cty_tuple_elem(c, to, si) { same = false }
-                    si++
-                }
-                if same { return gs_copy(op) }
-                mut agg: string = gs_copy("undef")
-                mut i: int64 = 0
-                while i < fn.b {
-                    m: string = next_tmp((*s).fb)
-                    fll: string = cty_ll(c, from)
-                    b3: *StringBuilder = alloc(sb_new())
-                    sb_push(b3, m)
-                    sb_push(b3, " = extractvalue ")
-                    sb_push(b3, fll)
-                    sb_push_char(b3, 32)
-                    sb_push(b3, op)
-                    sb_push(b3, ", ")
-                    sb_push_int(b3, i)
-                    tx: string = gs_built(b3)
-                    sb_free(b3)
-                    free(b3)
-                    line((*s).fb, tx)
-                    free(tx)
-                    ft: int64 = cty_tuple_elem(c, from, i)
-                    tt: int64 = cty_tuple_elem(c, to, i)
-                    cm: string = adapt(s, Val { ty: ft, op: m }, tt).op
-                    d3: string = next_tmp((*s).fb)
-                    tll: string = cty_ll(c, to)
-                    ell: string = cty_ll(c, tt)
-                    b4: *StringBuilder = alloc(sb_new())
-                    sb_push(b4, d3)
-                    sb_push(b4, " = insertvalue ")
-                    sb_push(b4, tll)
-                    sb_push_char(b4, 32)
-                    sb_push(b4, agg)
-                    sb_push(b4, ", ")
-                    sb_push(b4, ell)
-                    sb_push_char(b4, 32)
-                    sb_push(b4, cm)
-                    sb_push(b4, ", ")
-                    sb_push_int(b4, i)
-                    tx2: string = gs_built(b4)
-                    sb_free(b4)
-                    free(b4)
-                    line((*s).fb, tx2)
-                    free(tx2)
-                    agg = d3
-                    i++
-                }
-                return agg
-            }
+    if fn.kind == ctyk_tuple() && tn.kind == ctyk_tuple() && fn.b == tn.b {
+        mut same: bool = true
+        mut si: int64 = 0
+        while si < fn.b {
+            if cty_tuple_elem(c, from, si) != cty_tuple_elem(c, to, si) { same = false }
+            si++
         }
+        if same { return gs_copy(op) }
+        mut agg: string = gs_copy("undef")
+        mut i: int64 = 0
+        while i < fn.b {
+            m: string = next_tmp((*s).fb)
+            fll: string = cty_ll(c, from)
+            b3: *StringBuilder = alloc(sb_new())
+            sb_push(b3, m)
+            sb_push(b3, " = extractvalue ")
+            sb_push(b3, fll)
+            sb_push_char(b3, 32)
+            sb_push(b3, op)
+            sb_push(b3, ", ")
+            sb_push_int(b3, i)
+            tx: string = gs_built(b3)
+            sb_free(b3)
+            free(b3)
+            line((*s).fb, tx)
+            free(tx)
+            ft: int64 = cty_tuple_elem(c, from, i)
+            tt: int64 = cty_tuple_elem(c, to, i)
+            cm: string = adapt(s, Val { ty: ft, op: m }, tt).op
+            d3: string = next_tmp((*s).fb)
+            tll: string = cty_ll(c, to)
+            ell: string = cty_ll(c, tt)
+            b4: *StringBuilder = alloc(sb_new())
+            sb_push(b4, d3)
+            sb_push(b4, " = insertvalue ")
+            sb_push(b4, tll)
+            sb_push_char(b4, 32)
+            sb_push(b4, agg)
+            sb_push(b4, ", ")
+            sb_push(b4, ell)
+            sb_push_char(b4, 32)
+            sb_push(b4, cm)
+            sb_push(b4, ", ")
+            sb_push_int(b4, i)
+            tx2: string = gs_built(b4)
+            sb_free(b4)
+            free(b4)
+            line((*s).fb, tx2)
+            free(tx2)
+            agg = d3
+            i++
+        }
+        return agg
     }
-    if fn.kind == ctyk_array() {
-        if tn.kind == ctyk_array() {
-            if fn.b == tn.b {
-                mut agg2: string = gs_copy("undef")
-                mut j: int64 = 0
-                while j < fn.b {
-                    m2: string = next_tmp((*s).fb)
-                    fll2: string = cty_ll(c, from)
-                    b5: *StringBuilder = alloc(sb_new())
-                    sb_push(b5, m2)
-                    sb_push(b5, " = extractvalue ")
-                    sb_push(b5, fll2)
-                    sb_push_char(b5, 32)
-                    sb_push(b5, op)
-                    sb_push(b5, ", ")
-                    sb_push_int(b5, j)
-                    tx3: string = gs_built(b5)
-                    sb_free(b5)
-                    free(b5)
-                    line((*s).fb, tx3)
-                    free(tx3)
-                    cm2: string = adapt(s, Val { ty: fn.a, op: m2 }, tn.a).op
-                    d4: string = next_tmp((*s).fb)
-                    tll2: string = cty_ll(c, to)
-                    ell2: string = cty_ll(c, tn.a)
-                    b6: *StringBuilder = alloc(sb_new())
-                    sb_push(b6, d4)
-                    sb_push(b6, " = insertvalue ")
-                    sb_push(b6, tll2)
-                    sb_push_char(b6, 32)
-                    sb_push(b6, agg2)
-                    sb_push(b6, ", ")
-                    sb_push(b6, ell2)
-                    sb_push_char(b6, 32)
-                    sb_push(b6, cm2)
-                    sb_push(b6, ", ")
-                    sb_push_int(b6, j)
-                    tx4: string = gs_built(b6)
-                    sb_free(b6)
-                    free(b6)
-                    line((*s).fb, tx4)
-                    free(tx4)
-                    agg2 = d4
-                    j++
-                }
-                return agg2
-            }
+    if fn.kind == ctyk_array() && tn.kind == ctyk_array() && fn.b == tn.b {
+        mut agg2: string = gs_copy("undef")
+        mut j: int64 = 0
+        while j < fn.b {
+            m2: string = next_tmp((*s).fb)
+            fll2: string = cty_ll(c, from)
+            b5: *StringBuilder = alloc(sb_new())
+            sb_push(b5, m2)
+            sb_push(b5, " = extractvalue ")
+            sb_push(b5, fll2)
+            sb_push_char(b5, 32)
+            sb_push(b5, op)
+            sb_push(b5, ", ")
+            sb_push_int(b5, j)
+            tx3: string = gs_built(b5)
+            sb_free(b5)
+            free(b5)
+            line((*s).fb, tx3)
+            free(tx3)
+            cm2: string = adapt(s, Val { ty: fn.a, op: m2 }, tn.a).op
+            d4: string = next_tmp((*s).fb)
+            tll2: string = cty_ll(c, to)
+            ell2: string = cty_ll(c, tn.a)
+            b6: *StringBuilder = alloc(sb_new())
+            sb_push(b6, d4)
+            sb_push(b6, " = insertvalue ")
+            sb_push(b6, tll2)
+            sb_push_char(b6, 32)
+            sb_push(b6, agg2)
+            sb_push(b6, ", ")
+            sb_push(b6, ell2)
+            sb_push_char(b6, 32)
+            sb_push(b6, cm2)
+            sb_push(b6, ", ")
+            sb_push_int(b6, j)
+            tx4: string = gs_built(b6)
+            sb_free(b6)
+            free(b6)
+            line((*s).fb, tx4)
+            free(tx4)
+            agg2 = d4
+            j++
         }
+        return agg2
     }
     return gs_copy(op)
 }
@@ -566,80 +556,70 @@ export func adapt(s: *GenFuncState, v: Val, target: int64) -> Val {
     c: *CTyArena = genctx_ctys((*s).ctx)
     from: CTyNode = vec_get(cty_nodes(c), v.ty)
     to: CTyNode = vec_get(cty_nodes(c), target)
-    if from.kind == ctyk_struct() {
-        if to.kind == ctyk_iface() {
-            slot: string = gen_backing_slot(s, v.ty)
-            gen_store_slot(s, v.ty, v.op, slot)
-            first: string = next_tmp((*s).fb)
-            b0: *StringBuilder = alloc(sb_new())
-            sb_push(b0, first)
-            sb_push(b0, " = insertvalue { ptr, ptr } undef, ptr ")
-            sb_push(b0, slot)
-            sb_push(b0, ", 0")
-            text0: string = gs_built(b0)
-            sb_free(b0)
-            free(b0)
-            line((*s).fb, text0)
-            free(text0)
-            out: string = next_tmp((*s).fb)
-            b1: *StringBuilder = alloc(sb_new())
-            sb_push(b1, out)
-            sb_push(b1, " = insertvalue { ptr, ptr } ")
-            sb_push(b1, first)
-            sb_push(b1, ", ptr @vtable.")
-            sb_push(b1, to.text)
-            sb_push_char(b1, 46)
-            sb_push(b1, from.text)
-            sb_push(b1, ", 1")
-            text1: string = gs_built(b1)
-            sb_free(b1)
-            free(b1)
-            line((*s).fb, text1)
-            free(text1)
-            return Val { ty: target, op: out }
-        }
+    if from.kind == ctyk_struct() && to.kind == ctyk_iface() {
+        slot: string = gen_backing_slot(s, v.ty)
+        gen_store_slot(s, v.ty, v.op, slot)
+        first: string = next_tmp((*s).fb)
+        b0: *StringBuilder = alloc(sb_new())
+        sb_push(b0, first)
+        sb_push(b0, " = insertvalue { ptr, ptr } undef, ptr ")
+        sb_push(b0, slot)
+        sb_push(b0, ", 0")
+        text0: string = gs_built(b0)
+        sb_free(b0)
+        free(b0)
+        line((*s).fb, text0)
+        free(text0)
+        out: string = next_tmp((*s).fb)
+        b1: *StringBuilder = alloc(sb_new())
+        sb_push(b1, out)
+        sb_push(b1, " = insertvalue { ptr, ptr } ")
+        sb_push(b1, first)
+        sb_push(b1, ", ptr @vtable.")
+        sb_push(b1, to.text)
+        sb_push_char(b1, 46)
+        sb_push(b1, from.text)
+        sb_push(b1, ", 1")
+        text1: string = gs_built(b1)
+        sb_free(b1)
+        free(b1)
+        line((*s).fb, text1)
+        free(text1)
+        return Val { ty: target, op: out }
     }
-    if from.kind == ctyk_array() {
-        if to.kind == ctyk_slice() {
-            mut arr: Val = v
-            if from.a != to.a {
-                aty: int64 = cty_intern(c, ctyk_array(), to.a, from.b, "")
-                arr = Val { ty: aty, op: coerce(s, v.ty, v.op, aty) }
-            }
-            return slice_from_array(s, arr, from.b)
+    if from.kind == ctyk_array() && to.kind == ctyk_slice() {
+        mut arr: Val = v
+        if from.a != to.a {
+            aty: int64 = cty_intern(c, ctyk_array(), to.a, from.b, "")
+            arr = Val { ty: aty, op: coerce(s, v.ty, v.op, aty) }
         }
+        return slice_from_array(s, arr, from.b)
     }
     // Slice covariance backstop. A slice value of a concrete element cannot be
     // reinterpreted as a slice of an interface: each element would need reboxing
     // into { data, vtable }, and a whole-slice cast dispatches through garbage.
     // A missed sema sink lands here as a loud, named build error, never a
     // miscompile. Same-element and unknown-element slices fall through.
-    if from.kind == ctyk_slice() {
-        if to.kind == ctyk_slice() {
-            if from.a != to.a {
-                sn: CTyNode = vec_get(cty_nodes(c), from.a)
-                tn2: CTyNode = vec_get(cty_nodes(c), to.a)
-                if sn.kind != ctyk_unknown() {
-                    if tn2.kind == ctyk_iface() {
-                        mut src_name: string = sn.text
-                        if sn.kind != ctyk_struct() && sn.kind != ctyk_enum() && sn.kind != ctyk_iface() {
-                            src_name = cty_ll(c, from.a)
-                        }
-                        mb: *StringBuilder = alloc(sb_new())
-                        sb_push(mb, "cannot pass a slice of '")
-                        sb_push(mb, src_name)
-                        sb_push(mb, "' as a slice of interface '")
-                        sb_push(mb, tn2.text)
-                        sb_push(mb, "'; a slice of concrete values cannot be reinterpreted as a slice of interfaces")
-                        msg: string = gs_built(mb)
-                        sb_free(mb)
-                        free(mb)
-                        emit_error((*s).module, msg)
-                        free(msg)
-                        return Val { ty: target, op: gs_copy("zeroinitializer") }
-                    }
-                }
+    if from.kind == ctyk_slice() && to.kind == ctyk_slice() && from.a != to.a {
+        sn: CTyNode = vec_get(cty_nodes(c), from.a)
+        tn2: CTyNode = vec_get(cty_nodes(c), to.a)
+        if sn.kind != ctyk_unknown() && tn2.kind == ctyk_iface() {
+            mut src_name: string = sn.text
+            if sn.kind != ctyk_struct() && sn.kind != ctyk_enum() && sn.kind != ctyk_iface() {
+                src_name = cty_ll(c, from.a)
             }
+            mb: *StringBuilder = alloc(sb_new())
+            sb_push(mb, "cannot pass a slice of '")
+            sb_push(mb, src_name)
+            sb_push(mb, "' as a slice of interface '")
+            sb_push(mb, tn2.text)
+            sb_push(mb, "'; a slice of concrete values cannot be reinterpreted as a slice of interfaces")
+            msg: string = gs_built(mb)
+            sb_free(mb)
+            free(mb)
+            emit_error((*s).module, msg)
+            free(msg)
+            return Val { ty: target, op: gs_copy("zeroinitializer") }
         }
     }
     return Val { ty: target, op: coerce(s, v.ty, v.op, target) }

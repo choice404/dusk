@@ -463,10 +463,8 @@ export func p_expect_gt(p: *Parser) -> void {
         t.kind = k_assign()
         t.lo = rest_lo
         vec_set((*p).toks, (*p).pos, t)
-    } else {
-        if !p_muted(p) {
-            p_error_owned(p, expected_found("'>'", p))
-        }
+    } else if !p_muted(p) {
+        p_error_owned(p, expected_found("'>'", p))
     }
 }
 
@@ -478,24 +476,18 @@ export func p_split_starstar(p: *Parser) -> void {
 }
 
 func is_digit(c: int64) -> bool {
-    if c >= 48 {
-        if c <= 57 {
-            return true
-        }
+    if c >= 48 && c <= 57 {
+        return true
     }
     return false
 }
 
 func is_alpha(c: int64) -> bool {
-    if c >= 97 {
-        if c <= 122 {
-            return true
-        }
+    if c >= 97 && c <= 122 {
+        return true
     }
-    if c >= 65 {
-        if c <= 90 {
-            return true
-        }
+    if c >= 65 && c <= 90 {
+        return true
     }
     return false
 }
@@ -505,12 +497,10 @@ export func p_num_body_end(p: *Parser, t: Token) -> int64 {
     while is_digit(byte_at((*p).src, (*p).n, i)) {
         i++
     }
-    if byte_at((*p).src, (*p).n, i) == 46 {
-        if is_digit(byte_at((*p).src, (*p).n, i + 1)) {
+    if byte_at((*p).src, (*p).n, i) == 46 && is_digit(byte_at((*p).src, (*p).n, i + 1)) {
+        i++
+        while is_digit(byte_at((*p).src, (*p).n, i)) {
             i++
-            while is_digit(byte_at((*p).src, (*p).n, i)) {
-                i++
-            }
         }
     }
     return i
@@ -549,6 +539,24 @@ func p_has_unsigned_suffix(p: *Parser, t: Token, body_end: int64) -> bool {
         return false
     }
     return byte_at((*p).src, (*p).n, body_end) == 117
+}
+
+/** Whether the integer literal spelled at lo..hi really is a zero, as against one the
+ *  lexer already refused for running past int64's top, which reads back as 0 here. A
+ *  rule that judges a literal's value reads this first, so a fault the lexer already
+ *  named is not buried under a second sentence about a zero the source does not hold.
+ *  @param p the parser, for the source text the literal was spelled in
+ *  @param lo the literal's first byte
+ *  @param hi one past the literal's last byte
+ *  @return true when the span holds no nonzero digit */
+export func p_lit_is_zero(p: *Parser, lo: int64, hi: int64) -> bool {
+    mut i: int64 = lo
+    while i < hi {
+        b: int64 = byte_at((*p).src, (*p).n, i)
+        if b >= 49 && b <= 57 { return false }
+        i++
+    }
+    return true
 }
 
 export func p_int_value(p: *Parser, t: Token) -> int64 {

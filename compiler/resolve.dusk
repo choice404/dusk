@@ -130,10 +130,8 @@ func pop_scope(r: *Resolver) -> void {
     while i < vec_len(keys) {
         name: string = vec_get(keys, i)
         v: Var = unwrap_or(map_get(scope, name), zero_var())
-        if v.is_let {
-            if !v.used {
-                vec_push(pending, PendingUnused { name: name, var: v })
-            }
+        if v.is_let && !v.used {
+            vec_push(pending, PendingUnused { name: name, var: v })
         }
         i++
     }
@@ -364,10 +362,8 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
         resolve_expr(r, e.a)
         callee: ExprNode = vec_get((*a).exprs, e.a)
         mut is_sizeof: bool = false
-        if callee.kind == xk_ident() {
-            if str_eq(ast_name(a, callee.a), "sizeof") {
-                is_sizeof = true
-            }
+        if callee.kind == xk_ident() && str_eq(ast_name(a, callee.a), "sizeof") {
+            is_sizeof = true
         }
         mut i: int64 = 0
         while i < e.c {

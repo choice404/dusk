@@ -111,20 +111,14 @@ func is_digit(c: int64) -> bool {
 
 // The value of one hex digit, or -1 when the byte is not a hex digit.
 func hex_val(c: int64) -> int64 {
-    if c >= 48 {
-        if c <= 57 {
-            return c - 48
-        }
+    if c >= 48 && c <= 57 {
+        return c - 48
     }
-    if c >= 65 {
-        if c <= 70 {
-            return c - 55
-        }
+    if c >= 65 && c <= 70 {
+        return c - 55
     }
-    if c >= 97 {
-        if c <= 102 {
-            return c - 87
-        }
+    if c >= 97 && c <= 102 {
+        return c - 87
     }
     return -1
 }
@@ -181,11 +175,9 @@ func jp_unicode(p: *JParser, sb: *StringBuilder) -> void {
         jp_fail(p, "invalid \\u escape: expected four hex digits")
         return
     }
-    if hi >= 55296 {
-        if hi <= 56319 {
-            jp_surrogate(p, sb, hi)
-            return
-        }
+    if hi >= 55296 && hi <= 56319 {
+        jp_surrogate(p, sb, hi)
+        return
     }
     r: rune = hi
     sb_push_rune(sb, r)
@@ -194,21 +186,17 @@ func jp_unicode(p: *JParser, sb: *StringBuilder) -> void {
 // Complete a surrogate pair whose high half hi is already read. A following
 // \uDC00..DFFF combines into the astral scalar; anything else appends U+FFFD.
 func jp_surrogate(p: *JParser, sb: *StringBuilder, hi: int64) -> void {
-    if jp_peek(p) == 92 {
-        if (*p).s[(*p).pos + 1] == 117 {
-            (*p).pos += 2
-            lo: int64 = jp_hex4(p)
-            if lo < 0 {
-                jp_fail(p, "invalid \\u escape in surrogate pair")
-                return
-            }
-            if lo >= 56320 {
-                if lo <= 57343 {
-                    cp: rune = 65536 + (hi - 55296) * 1024 + (lo - 56320)
-                    sb_push_rune(sb, cp)
-                    return
-                }
-            }
+    if jp_peek(p) == 92 && (*p).s[(*p).pos + 1] == 117 {
+        (*p).pos += 2
+        lo: int64 = jp_hex4(p)
+        if lo < 0 {
+            jp_fail(p, "invalid \\u escape in surrogate pair")
+            return
+        }
+        if lo >= 56320 && lo <= 57343 {
+            cp: rune = 65536 + (hi - 55296) * 1024 + (lo - 56320)
+            sb_push_rune(sb, cp)
+            return
         }
     }
     sb_push_rune(sb, 65533)
@@ -275,21 +263,17 @@ func jp_string_raw(p: *JParser) -> string {
         if c == 0 {
             jp_fail(p, "unterminated string")
             done = true
-        } else {
-            if c == 34 {
-                (*p).pos++
+        } else if c == 34 {
+            (*p).pos++
+            done = true
+        } else if c == 92 {
+            jp_escape(p, sb)
+            if jp_has_err(p) {
                 done = true
-            } else {
-                if c == 92 {
-                    jp_escape(p, sb)
-                    if jp_has_err(p) {
-                        done = true
-                    }
-                } else {
-                    sb_push_char(sb, c)
-                    (*p).pos++
-                }
             }
+        } else {
+            sb_push_char(sb, c)
+            (*p).pos++
         }
     }
     out: string = substring(sb_cstr(sb), 0, sb_size(sb))
@@ -384,14 +368,12 @@ func jp_array(p: *JParser) -> *Json {
         if c == 44 {
             (*p).pos++
             jp_skip_ws(p)
+        } else if c == 93 {
+            (*p).pos++
+            done = true
         } else {
-            if c == 93 {
-                (*p).pos++
-                done = true
-            } else {
-                jp_fail(p, "expected ',' or ']' in array")
-                done = true
-            }
+            jp_fail(p, "expected ',' or ']' in array")
+            done = true
         }
     }
     return alloc(Json.JArr(items))
@@ -460,14 +442,12 @@ func jp_object(p: *JParser) -> *Json {
         if c == 44 {
             (*p).pos++
             jp_skip_ws(p)
+        } else if c == 125 {
+            (*p).pos++
+            done = true
         } else {
-            if c == 125 {
-                (*p).pos++
-                done = true
-            } else {
-                jp_fail(p, "expected ',' or '}' in object")
-                done = true
-            }
+            jp_fail(p, "expected ',' or '}' in object")
+            done = true
         }
     }
     return alloc(Json.JObj(fields))

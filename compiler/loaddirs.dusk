@@ -153,20 +153,16 @@ export func collect_pkg_directives(ps: *PkgSet, pkg: int64, links: *Vector<strin
     lv: *Vector<string> = (*m).links
     for v in lv {
         mut allowed: bool = true
-        if dep {
-            if has_slash(v) {
-                vec_push(errors, dep_link_fault(pkg_manifest_display(ps, pkg), alias))
-                allowed = false
-            }
+        if dep && has_slash(v) {
+            vec_push(errors, dep_link_fault(pkg_manifest_display(ps, pkg), alias))
+            allowed = false
         }
-        if allowed {
-            if !map_has(seen_links, v) {
-                // The manifest is released at the end of the load and the link table
-                // outlives it in the Program, so the value travels as a copy.
-                c: string = copy_string(v)
-                map_put(seen_links, c, 1)
-                vec_push(links, c)
-            }
+        if allowed && !map_has(seen_links, v) {
+            // The manifest is released at the end of the load and the link table
+            // outlives it in the Program, so the value travels as a copy.
+            c: string = copy_string(v)
+            map_put(seen_links, c, 1)
+            vec_push(links, c)
         }
     }
     cv: *Vector<string> = (*m).csources

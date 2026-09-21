@@ -449,18 +449,12 @@ func parse_primary(p: *Parser) -> int64 {
         }
         p_bump(p)
         if str_eq_range((*p).src, t.lo, t.hi, "collector") {
-            if p_at(p, k_lt()) {
-                if !p_nl_here(p) {
-                    if collector_mint_ahead(p) {
-                        return parse_collect_mint(p, t.lo, t.hi)
-                    }
-                }
+            if p_at(p, k_lt()) && !p_nl_here(p) && collector_mint_ahead(p) {
+                return parse_collect_mint(p, t.lo, t.hi)
             }
         }
-        if !(*p).no_struct {
-            if p_at(p, k_lbrace()) {
-                return parse_struct_lit(p, name, t.lo)
-            }
+        if !(*p).no_struct && p_at(p, k_lbrace()) {
+            return parse_struct_lit(p, name, t.lo)
         }
         return ast_expr(p_ast(p), xk_ident(), t.lo, t.hi, name, 0, 0, 0)
     }
@@ -679,11 +673,9 @@ func collector_mint_ahead(p: *Parser) -> bool {
         } else if t.kind == k_shr() {
             depth -= 2
             if depth <= 0 {
-                if depth == 0 {
-                    if i + 1 < vec_len(toks) {
-                        nt2: Token = vec_get(toks, i + 1)
-                        return nt2.kind == k_lparen()
-                    }
+                if depth == 0 && i + 1 < vec_len(toks) {
+                    nt2: Token = vec_get(toks, i + 1)
+                    return nt2.kind == k_lparen()
                 }
                 return false
             }

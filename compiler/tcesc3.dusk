@@ -401,27 +401,25 @@ export func record_ptr_borrows(tc: *TypeChecker, name: string, value_id: int64, 
             if idx >= 0 { ptr_param_borrows_put(tc, name, idx) }
         }
     } else if val.kind == xk_call() {
-        if is_managed_ty(tc, tyid) {
-            if str_len(variant_name(tc, val.a)) == 0 {
-                mask: int64 = summary_alias_mask(tc, val.a, val.c)
-                mut i: int64 = 0
-                mut done: bool = false
-                while i < val.c && i < 64 && !done {
-                    if ps_has(mask, i) {
-                        src_id: int64 = vec_get((*a).kids, val.b + i)
-                        se: ExprNode = vec_get((*a).exprs, src_id)
-                        if se.kind == xk_ident() {
-                            src: string = ast_name(a, se.a)
-                            if is_managed_ty(tc, lookup(tc, src)) { alias_link(tc, name, src) }
-                            idx: int64 = param_alias_of(tc, src)
-                            if idx >= 0 {
-                                ptr_param_borrows_put(tc, name, idx)
-                                done = true
-                            }
+        if is_managed_ty(tc, tyid) && str_len(variant_name(tc, val.a)) == 0 {
+            mask: int64 = summary_alias_mask(tc, val.a, val.c)
+            mut i: int64 = 0
+            mut done: bool = false
+            while i < val.c && i < 64 && !done {
+                if ps_has(mask, i) {
+                    src_id: int64 = vec_get((*a).kids, val.b + i)
+                    se: ExprNode = vec_get((*a).exprs, src_id)
+                    if se.kind == xk_ident() {
+                        src: string = ast_name(a, se.a)
+                        if is_managed_ty(tc, lookup(tc, src)) { alias_link(tc, name, src) }
+                        idx: int64 = param_alias_of(tc, src)
+                        if idx >= 0 {
+                            ptr_param_borrows_put(tc, name, idx)
+                            done = true
                         }
                     }
-                    i++
                 }
+                i++
             }
         }
     } else if val.kind == xk_tuple() {
@@ -508,11 +506,9 @@ func method_check_sinks(tc: *TypeChecker, mname: string, sum: SummaryHandle, eff
         if ps_has(sum.sinks, j) {
             arg_id: int64 = vec_get(eff, j)
             root: string = send_value_root(tc, arg_id)
-            if str_len(root) > 0 {
-                if is_esc_slice(tc, root) || is_esc_closure(tc, root) {
-                    prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
-                    emit_sink_reject(tc, mname, root, ps_has(sum.collect_sinks, j), prov, lo, hi)
-                }
+            if str_len(root) > 0 && (is_esc_slice(tc, root) || is_esc_closure(tc, root)) {
+                prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+                emit_sink_reject(tc, mname, root, ps_has(sum.collect_sinks, j), prov, lo, hi)
             }
         }
         j++

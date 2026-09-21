@@ -259,28 +259,22 @@ export func emit_cstring_body(m: *EmitModule, body: string) -> string {
     mut i: int64 = 0
     while i < str_len(body) {
         mut consumed: bool = false
-        if body[i] == 92 {
-            if i + 3 < str_len(body) {
-                if body[i + 1] == 117 {
-                    if body[i + 2] == 123 {
-                        mut p: int64 = i + 3
-                        mut cp: int64 = 0
-                        mut scanning: bool = true
-                        while scanning {
-                            if p >= str_len(body) { scanning = false }
-                            else if body[p] == 125 { scanning = false }
-                            else {
-                                cp = cp * 16 + emit_hex_val(body[p])
-                                p++
-                            }
-                        }
-                        if p < str_len(body) {
-                            count += emit_encode_scalar(b, cp)
-                            i = p + 1
-                            consumed = true
-                        }
-                    }
+        if body[i] == 92 && i + 3 < str_len(body) && body[i + 1] == 117 && body[i + 2] == 123 {
+            mut p: int64 = i + 3
+            mut cp: int64 = 0
+            mut scanning: bool = true
+            while scanning {
+                if p >= str_len(body) { scanning = false }
+                else if body[p] == 125 { scanning = false }
+                else {
+                    cp = cp * 16 + emit_hex_val(body[p])
+                    p++
                 }
+            }
+            if p < str_len(body) {
+                count += emit_encode_scalar(b, cp)
+                i = p + 1
+                consumed = true
             }
         }
         if !consumed {

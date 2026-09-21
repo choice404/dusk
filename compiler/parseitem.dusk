@@ -145,17 +145,15 @@ func parse_import_path(p: *Parser) -> int64 {
 func parse_item(p: *Parser) -> void {
     exported: bool = p_eat_kw(p, "export")
     mut abi_c: bool = false
-    if exported {
-        if p_at(p, k_str()) {
-            t: Token = p_tok(p)
-            p_bump(p)
-            abi_id: int64 = p_string_body_id(p, t)
-            abi: string = ast_name(p_ast(p), abi_id)
-            if str_eq(abi, "C") {
-                abi_c = true
-            } else {
-                p_error(p, "the only supported export ABI is \"C\"")
-            }
+    if exported && p_at(p, k_str()) {
+        t: Token = p_tok(p)
+        p_bump(p)
+        abi_id: int64 = p_string_body_id(p, t)
+        abi: string = ast_name(p_ast(p), abi_id)
+        if str_eq(abi, "C") {
+            abi_c = true
+        } else {
+            p_error(p, "the only supported export ABI is \"C\"")
         }
     }
     if p_kw(p, "func") {

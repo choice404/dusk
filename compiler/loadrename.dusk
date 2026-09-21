@@ -303,10 +303,8 @@ func check_coverage(a: *Ast, m: *FileMeta, seen_expr: *Vector<int64>, seen_type:
         e: ExprNode = vec_get(exprs, i)
         mut named: bool = e.kind == xk_ident()
         if e.kind == xk_struct_lit() { named = true }
-        if named {
-            if vec_get(seen_expr, i) == 0 {
-                vec_push(errors, load_diag_global(files, e.lo, e.hi, load_missed_msg("name", ast_name(a, e.a))))
-            }
+        if named && vec_get(seen_expr, i) == 0 {
+            vec_push(errors, load_diag_global(files, e.lo, e.hi, load_missed_msg("name", ast_name(a, e.a))))
         }
         i++
     }
@@ -314,10 +312,8 @@ func check_coverage(a: *Ast, m: *FileMeta, seen_expr: *Vector<int64>, seen_type:
     mut j: int64 = (*m).types_lo
     while j < (*m).types_hi {
         t: TypeNode = vec_get(types, j)
-        if t.kind == tk_named() {
-            if vec_get(seen_type, j) == 0 {
-                vec_push(errors, load_diag_plain((*m).disp, load_missed_msg("type", ast_name(a, t.a))))
-            }
+        if t.kind == tk_named() && vec_get(seen_type, j) == 0 {
+            vec_push(errors, load_diag_plain((*m).disp, load_missed_msg("type", ast_name(a, t.a))))
         }
         j++
     }

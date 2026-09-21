@@ -591,10 +591,8 @@ func fold_call_callee(a: *Ast, e: ExprNode, callee_id: int64, fc: FoldCtx) -> vo
         return
     }
     root, rooted := path_root_name(a, callee.a)
-    if rooted {
-        if fold_is_bound(fc, root) {
-            return
-        }
+    if rooted && fold_is_bound(fc, root) {
+        return
     }
     leaf: string = ast_name(a, callee.b)
     exmap: *Map<string, *Map<string, int64>> = fc.exports
@@ -615,11 +613,9 @@ func fold_call_callee(a: *Ast, e: ExprNode, callee_id: int64, fc: FoldCtx) -> vo
     callee.kind = xk_ident()
     callee.a = callee.b
     mut scoped: bool = false
-    if str_len(pick.suffix) > 0 {
-        if map_has(pick.moving, leaf) {
-            callee.a = intern_owned((*a).interner, fold_name_with_suffix(leaf, pick.suffix))
-            scoped = true
-        }
+    if str_len(pick.suffix) > 0 && map_has(pick.moving, leaf) {
+        callee.a = intern_owned((*a).interner, fold_name_with_suffix(leaf, pick.suffix))
+        scoped = true
     }
     if !scoped {
         map_put(fc.resolved, leaf, 1)

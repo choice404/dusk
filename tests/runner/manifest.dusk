@@ -114,10 +114,8 @@ func split_lines(text: string) -> *Vector<Line> {
     while i < n {
         if text[i] == 10 {
             mut hi: int64 = i
-            if hi > start {
-                if text[hi - 1] == 13 {
-                    hi--
-                }
+            if hi > start && text[hi - 1] == 13 {
+                hi--
             }
             vec_push(out, Line { no: no, text: substring(text, start, hi) })
             no++
@@ -153,18 +151,14 @@ func unescape(raw: string) -> Unesc {
             d: char = raw[i + 1]
             if d == 110 {
                 sb_push_char(b, 10)
+            } else if d == 116 {
+                sb_push_char(b, 9)
+            } else if d == 92 {
+                sb_push_char(b, 92)
             } else {
-                if d == 116 {
-                    sb_push_char(b, 9)
-                } else {
-                    if d == 92 {
-                        sb_push_char(b, 92)
-                    } else {
-                        sb_free(b)
-                        free(b)
-                        return Unesc { ok: false, value: "", msg: "unknown escape; only \\n, \\t, and \\\\ are allowed" }
-                    }
-                }
+                sb_free(b)
+                free(b)
+                return Unesc { ok: false, value: "", msg: "unknown escape; only \\n, \\t, and \\\\ are allowed" }
             }
             i += 2
         } else {
@@ -338,11 +332,9 @@ func finalize(st: *BlockState, records: *Vector<Record>, errors: *Vector<string>
     if str_eq(mode, "") {
         push_err(errors, line, "record '" + name + "' has no 'mode'")
         (*st).valid = false
-    } else {
-        if !known_mode(mode) {
-            push_err(errors, line, "unknown mode '" + mode + "' in record '" + name + "'")
-            (*st).valid = false
-        }
+    } else if !known_mode(mode) {
+        push_err(errors, line, "unknown mode '" + mode + "' in record '" + name + "'")
+        (*st).valid = false
     }
     needs_file: bool = str_eq(mode, "run") || str_eq(mode, "run_raw") || str_eq(mode, "check_fail") || str_eq(mode, "check_ok") || str_eq(mode, "build_fail")
     if needs_file && str_eq((*st).file, "") {

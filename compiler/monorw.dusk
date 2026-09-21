@@ -379,7 +379,7 @@ func rw_expr(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<string,
         return ast_expr(a, xk_index(), e.lo, e.hi, rw_expr(m, e.a, subst, env, -1), rw_expr(m, e.b, subst, env, -1), 0, 0)
     }
     if e.kind == xk_range() {
-        return ast_expr(a, xk_range(), e.lo, e.hi, rw_expr(m, e.a, subst, env, -1), rw_expr(m, e.b, subst, env, -1), e.c, 0)
+        return ast_expr(a, xk_range(), e.lo, e.hi, rw_expr(m, e.a, subst, env, -1), rw_expr(m, e.b, subst, env, -1), e.c, e.d)
     }
     if e.kind == xk_tuple() {
         off, len := rw_expr_list(m, e.a, e.b, subst, env)
@@ -492,10 +492,8 @@ func rw_call(m: *Mono, eid: int64, subst: *Map<string, int64>, env: *Map<string,
     // spawn / submit capture check.
     if callee.kind == xk_ident() {
         cname: string = ast_name(a, callee.a)
-        if (str_eq(cname, "spawn") || str_eq(cname, "submit")) && vec_len(args) == 1 {
-            if is_lambda(a, vec_get(args, 0)) {
-                check_task_captures(m, cname, vec_get(args, 0), env, callee.lo, callee.hi)
-            }
+        if (str_eq(cname, "spawn") || str_eq(cname, "submit")) && vec_len(args) == 1 && is_lambda(a, vec_get(args, 0)) {
+            check_task_captures(m, cname, vec_get(args, 0), env, callee.lo, callee.hi)
         }
     }
     // Enum ctor call.

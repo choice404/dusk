@@ -1,0 +1,28 @@
+@paradigm procedural
+@import std.async.future
+@import std.async.loop
+
+// A counted loop inside an async function, with an await in the body. The spliced
+// cursor and bound live across the suspension, so they ride the async task frame
+// and the loop resumes counting where it left off.
+async func dbl(n: int64) -> int64 {
+    return n * 2
+}
+
+async func amain() -> int32 {
+    mut total: int64 = 0
+    for i in 1..4 {
+        d := await dbl(i)
+        total = total + d
+    }
+    println(total)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

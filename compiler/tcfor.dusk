@@ -1,0 +1,204 @@
+// tcfor: the counted loop's judgment, the `for i in lo..hi by k` head.
+//
+// A range is not a value in dusk: it exists inside brackets, where it names a slice,
+// and in a loop head, where it names a count. Neither has a type of its own, so this
+// pass never infers the head as an expression. It infers each bound on its own and
+// judges it, which is what keeps a loop head's diagnostics about bounds rather than
+// about indexing, and then declares the binder the one thing a counted loop can bind:
+// a fresh immutable int64 per iteration.
+//
+// The judgment runs on the un-erased surface AST, before the pre-mono rewrite in
+// foriter turns the head into the cursor loop a user would have written by hand. The
+// class it records is what sends the statement to that rewrite.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import ast
+@import ty
+@import tcstate
+@import tcscope
+@import tcexpr
+@import tcstmt
+
+/** The for-iterand class a counted range records in the checker's for_iters table,
+ *  one past the three container classes tcstmt owns, so the pre-mono rewrite reaches
+ *  its own splice rather than a container one.
+ *  @return the class value the range head records */
+export func fc_range() -> int64 { return 4 }
+
+// A bound whose type is a bare type parameter. No instantiation of it is known to be
+// an int64, so the refusal lands once on the generic rather than once per copy mono
+// would stamp, and it names the parameter the bound was written as.
+func bound_generic_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a range bound must be int64; a value of type parameter ")
+    sb_push(b, name)
+    sb_push(b, " is not known to be one")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// A bound that is not an integer at all: a float, a string, a pointer, a struct. The
+// cursor counts in integers and there is no rounding rule a loop could pick that would
+// not surprise someone, so the type is named and nothing is converted.
+func bound_kind_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a range bound must be an integer, not ")
+    sb_push(b, rendered)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// A bound that is an integer of the wrong width or the wrong signedness, or a char or
+// a rune, which the type rules already let stand in for an integer elsewhere. The mixed
+// width rule the rest of the language keeps holds in a loop head too, so the message
+// names the cast that fixes it rather than widening silently.
+func bound_width_msg(rendered: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a range bound must be int64, not ")
+    sb_push(b, rendered)
+    sb_push(b, "; cast the bound, as in int64(n)")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Whether an integer type is one the cursor counts in: a signed int64, or the width 0
+// an unsuffixed literal carries, which adapts to int64 the way it adapts anywhere else.
+func bound_ty_ok(n: TyNode) -> bool {
+    if n.a != 0 { return false }
+    if n.w == 0 { return true }
+    return n.w == 64
+}
+
+/** Judges a value standing in a range bound position, the one rule both the loop head
+ *  and the rewritten bound binding answer to. A char and a rune take the cast sentence
+ *  rather than the not-an-integer one, since the type rules already let either stand in
+ *  for an integer: the fix is the cast, not a different value. An unknown type is
+ *  permissive here, the caller deciding whether it has a better reason to refuse.
+ *  @param tc the checker, for the type arena and the diagnostic list
+ *  @param eid the expression standing in bound position, whose span carries the caret
+ *  @param t that expression's inferred type */
+export func judge_range_bound(tc: *TypeChecker, eid: int64, t: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, eid)
+    if e.kind == xk_range() {
+        tc_emit(tc, "a range bound must be an integer, not a range", e.lo, e.hi)
+        return
+    }
+    n: TyNode = ty_get((*tc).ty, t)
+    if n.kind == tyk_unknown() { return }
+    if n.kind == tyk_char() || n.kind == tyk_rune() {
+        tc_emit(tc, bound_width_msg(ty_render((*tc).ty, t)), e.lo, e.hi)
+        return
+    }
+    if n.kind != tyk_int() {
+        tc_emit(tc, bound_kind_msg(ty_render((*tc).ty, t)), e.lo, e.hi)
+        return
+    }
+    if !bound_ty_ok(n) { tc_emit(tc, bound_width_msg(ty_render((*tc).ty, t)), e.lo, e.hi) }
+}
+
+// The type parameter a bound is written as, or the empty string when it is not one.
+// The type lowering erases a parameter to the same wildcard an unresolved inference
+// hole carries, so the binding's un-erased AST type is what tells the two apart. Only a
+// bare name is recovered, which is the shape a generic bound is written in; anything
+// else unknown stays the permissive case.
+func bound_type_param(tc: *TypeChecker, eid: int64) -> string {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, eid)
+    if e.kind != xk_ident() { return "" }
+    astty: int64 = binding_ast_of(tc, ast_name(a, e.a))
+    if astty < 0 { return "" }
+    n: TypeNode = vec_get((*a).types, astty)
+    if n.kind != tk_named() { return "" }
+    nm: string = ast_name(a, n.a)
+    gmap: *Map<string, int64> = (*tc).cur_generics
+    if map_has(gmap, nm) { return nm }
+    return ""
+}
+
+// Judges one bound of a counted range. The bound is inferred on its own rather than
+// through the range node: the node has no type, and inferring it would run the index
+// rules, whose signedness message names an index nobody wrote. A bound that is itself a
+// range is refused before it is inferred at all, for the same reason. An unknown bound
+// stays permissive, since the surface pass leaves a generic call's result unresolved and
+// the rewrite's marked `int64` binding judges it on the ground module once mono makes it
+// concrete. A bare type parameter is the one unknown-shaped bound refused here, since
+// no instantiation of it is known to count, and refusing once on the generic beats
+// refusing once per copy mono would stamp.
+func check_range_bound(tc: *TypeChecker, eid: int64) -> void {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, eid)
+    if e.kind == xk_range() {
+        tc_emit(tc, "a range bound must be an integer, not a range", e.lo, e.hi)
+        return
+    }
+    t: int64 = infer_expr(tc, eid)
+    n: TyNode = ty_get((*tc).ty, t)
+    if n.kind == tyk_unknown() {
+        tp: string = bound_type_param(tc, eid)
+        if str_len(tp) > 0 { tc_emit(tc, bound_generic_msg(tp), e.lo, e.hi) }
+        return
+    }
+    judge_range_bound(tc, eid, t)
+}
+
+/** Judges a counted loop, `for i in lo..hi` with an optional `by k`, and declares its
+ *  binder over the body. Called from the sk_for arm ahead of any inference on the
+ *  subject, so the head's own messages are the ones a bad bound earns.
+ *  @param tc the checker, whose for_iters table records the loop for the pre-mono rewrite
+ *  @param id the sk_for statement id, the key the rewrite reads and the name suffix it uses
+ *  @param s the for statement node: a the binder, b the range subject, c the body, d the second binder plus one
+ *  @param r the range subject node: a the low bound, b the high bound, c inclusive, d the step */
+export func check_range_for(tc: *TypeChecker, id: int64, s: StmtNode, r: ExprNode) -> void {
+    a: *Ast = (*tc).ast
+    // The pair form binds a map's key and its value. A range hands back one integer per
+    // iteration and has no second half to bind, so two names over one is refused rather
+    // than silently leaving the second unbound.
+    if s.d != 0 {
+        tc_emit(tc, "two loop names bind a map's key and value; a range yields one integer", r.lo, r.hi)
+    }
+    check_range_bound(tc, r.a)
+    check_range_bound(tc, r.b)
+    // The surface pass owns the classification the pre-mono rewrite consumes, exactly as
+    // the container classes do. The ground pass runs over the already rewritten module,
+    // where no range head survives, so declining to record there keeps a leftover head
+    // the loud codegen backstop rather than a silent pass through to a crash.
+    if !(*tc).types_only { map_put((*tc).for_iters, id, fc_range()) }
+    push_scope(tc)
+    name: string = ast_name(a, s.a)
+    reject_alloc_shadow(tc, name, r.lo, r.hi)
+    reject_enum_name_binding(tc, name, r.lo, r.hi)
+    // The binder is a fresh int64 per iteration and immutable: the cursor the lowering
+    // owns is the only thing that advances, so a body that assigns the name earns the
+    // ordinary immutable store reject rather than losing the write at the next step. It
+    // is a plain integer, so it holds no view of anything and escapes nowhere.
+    declare(tc, name, ty_int((*tc).ty, 64))
+    set_esc(tc, name, false, false)
+    // The binder owns nothing, and saying so is what stops an outer binding of the same
+    // name from lending it an ownership record: the tables are keyed by name, so a loop
+    // that shadows a managed pointer would otherwise read the outer owner's state
+    // through the counter and refuse a plain copy of it. A container binder declares its
+    // own class for the same reason.
+    declare_own(tc, name, own_borrow())
+    // The refused second binder is still declared, a wildcard, so the body's uses of it
+    // resolve against something and the one precise message above is not buried under a
+    // pile of follow-on faults.
+    if s.d != 0 {
+        second: string = ast_name(a, s.d - 1)
+        reject_enum_name_binding(tc, second, r.lo, r.hi)
+        declare(tc, second, ty_unknown((*tc).ty))
+        set_esc(tc, second, false, false)
+    }
+    loop_body_fixpoint(tc, s.c)
+    pop_scope(tc)
+}

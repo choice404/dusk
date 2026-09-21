@@ -431,13 +431,11 @@ export func gen_place(s: *GenFuncState, id: int64) -> Place {
             return Place { ok: true, ty: lv.ty, ptr: lv.op }
         }
     }
-    if e.kind == xk_unary() {
-        if e.a == uop_deref() {
-            v: Val = gen_expr(s, e.b)
-            n: CTyNode = vec_get(cty_nodes(c), v.ty)
-            if n.kind == ctyk_ptr() { return Place { ok: true, ty: n.a, ptr: fat_checked(s, v.op) } }
-            if n.kind == ctyk_rawptr() { return Place { ok: true, ty: n.a, ptr: v.op } }
-        }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        v: Val = gen_expr(s, e.b)
+        n: CTyNode = vec_get(cty_nodes(c), v.ty)
+        if n.kind == ctyk_ptr() { return Place { ok: true, ty: n.a, ptr: fat_checked(s, v.op) } }
+        if n.kind == ctyk_rawptr() { return Place { ok: true, ty: n.a, ptr: v.op } }
     }
     if e.kind == xk_field() {
         base: Place = gen_place(s, e.a)

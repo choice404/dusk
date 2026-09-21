@@ -17,6 +17,7 @@
 @import tcesc
 @import tcesccap
 @import tcesc3
+@import tcfor
 
 func lit_hex_val(b: int64) -> int64 {
     if b >= 48 && b <= 57 { return b - 48 }
@@ -41,28 +42,22 @@ func str_lit_byte_len(text: string) -> int64 {
     mut i: int64 = 0
     while i < str_len(text) {
         mut consumed: bool = false
-        if text[i] == 92 {
-            if i + 3 < str_len(text) {
-                if text[i + 1] == 117 {
-                    if text[i + 2] == 123 {
-                        mut p: int64 = i + 3
-                        mut cp: int64 = 0
-                        mut scanning: bool = true
-                        while scanning {
-                            if p >= str_len(text) { scanning = false }
-                            else if text[p] == 125 { scanning = false }
-                            else {
-                                cp = cp * 16 + lit_hex_val(text[p])
-                                p++
-                            }
-                        }
-                        if p < str_len(text) {
-                            count += utf8_width_of(cp)
-                            i = p + 1
-                            consumed = true
-                        }
-                    }
+        if text[i] == 92 && i + 3 < str_len(text) && text[i + 1] == 117 && text[i + 2] == 123 {
+            mut p: int64 = i + 3
+            mut cp: int64 = 0
+            mut scanning: bool = true
+            while scanning {
+                if p >= str_len(text) { scanning = false }
+                else if text[p] == 125 { scanning = false }
+                else {
+                    cp = cp * 16 + lit_hex_val(text[p])
+                    p++
                 }
+            }
+            if p < str_len(text) {
+                count += utf8_width_of(cp)
+                i = p + 1
+                consumed = true
             }
         }
         if !consumed {
@@ -376,10 +371,16 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     if b.ty >= 0 {
         reject_iface_targ_annot(tc, b.ty, value.lo, value.hi)
         lt: int64 = tc_type(tc, b.ty)
-        if !compat((*tc).ty, lt, vt) {
-            if !check_char_array_lit(tc, lt, stmt.c) {
-                tc_emit(tc, annot_mismatch_msg(ast_name(a, b.name)), value.lo, value.hi)
-            }
+        // A counted loop's bound binding is judged by the loop head's own rule, not by
+        // annotation compatibility. compat lets a char, a rune, and a literal of any
+        // width stand in for an int64, so a bound laundered through a generic would pass
+        // the `int64` annotation the rewrite wrote and reach codegen counting over it.
+        // This is also what keeps the synthesized binding name out of the diagnostic: the
+        // caret sits on the bound the source holds and the sentence is the loop head's.
+        if (stmt.d & let_range_bound()) != 0 {
+            judge_range_bound(tc, stmt.c, vt)
+        } else if !compat((*tc).ty, lt, vt) && !check_char_array_lit(tc, lt, stmt.c) {
+            tc_emit(tc, annot_mismatch_msg(ast_name(a, b.name)), value.lo, value.hi)
         }
         check_lit_fits_target(tc, stmt.c, lt)
         tyid = lt
