@@ -1,0 +1,26 @@
+// A receive timeout on a datagram socket nobody sends to surfaces as the would block
+// error, the same spelling read_buf uses for a stream.
+@paradigm procedural
+@import std.net.udp
+
+func main() -> int32 {
+    fd, e := udp_bind(addr_loopback(0))
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    te := net_set_read_timeout(fd, 50)
+    te.ignore()
+    buf: *raw char = alloc_bytes(16)
+    n, from, re := udp_recv_from(fd, buf, 16)
+    if re.exists() {
+        println(re.toString())
+    } else {
+        println(n)
+        println(addr_port(from))
+    }
+    free(buf)
+    ce := net_close(fd)
+    ce.ignore()
+    return 0
+}

@@ -1,0 +1,58 @@
+// resolve over the names a box always has. localhost is loopback in either family
+// in whatever order /etc/hosts gives, a literal returns itself, and the empty name
+// is an error beside an empty vector.
+@paradigm procedural
+@import std.net
+@import std.vector
+
+func is_loopback(a: Addr) -> bool {
+    return addr_eq(a, addr_loopback(80)) || addr_eq(a, addr_loopback6(80))
+}
+
+func main() -> int32 {
+    v, e := resolve("localhost", 80)
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    mut ok: bool = vec_len(v) > 0
+    for i in 0..vec_len(v) {
+        if !is_loopback(vec_get(v, i)) {
+            ok = false
+        }
+    }
+    if ok {
+        println("ok")
+    } else {
+        println("bad")
+    }
+    vec_free(v)
+    free(v)
+    v4, e4 := resolve("127.0.0.1", 81)
+    e4.ignore()
+    if vec_len(v4) == 1 {
+        s4 := addr_string(vec_get(v4, 0))
+        println(s4)
+        free(s4)
+    }
+    vec_free(v4)
+    free(v4)
+    v6, e6 := resolve("::1", 82)
+    e6.ignore()
+    if vec_len(v6) == 1 {
+        s6 := addr_string(vec_get(v6, 0))
+        println(s6)
+        free(s6)
+    }
+    vec_free(v6)
+    free(v6)
+    none, ne := resolve("", 1)
+    if ne.exists() {
+        println(f"error {vec_len(none)}")
+    } else {
+        println("resolved")
+    }
+    vec_free(none)
+    free(none)
+    return 0
+}

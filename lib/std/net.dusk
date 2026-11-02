@@ -1,0 +1,362 @@
+/** std.net: blocking sockets. TCP over IPv4 and IPv6 and unix domain stream sockets,
+ *  every one addressed by the Addr value std.net.addr defines, which this file imports and
+ *  so hands to every program that imports it. net_dial connects, net_listen and net_accept
+ *  serve, net_shutdown_write is the half close, net_local_addr and net_peer_addr read a
+ *  socket's two ends back, three setters cover TCP_NODELAY and the two timeouts, and
+ *  resolve is the one name lookup in the standard library, blocking getaddrinfo on the
+ *  calling thread.
+ *
+ *  A connected socket is a descriptor and nothing more, the int64 std.async.net and
+ *  Writer.Fd already use, so fd_writer(fd) and fd_reader(fd) from std.io turn it into a
+ *  stream with nothing added, and net_close, writer_close, reader_close, and fd_close are
+ *  the same close(2). Every call here blocks the thread that makes it; a program on the
+ *  event loop uses std.async.net instead, and resolve_async there is the loop's lookup.
+ *
+ *  The cool_net_* shims live in the C runtime beside the nonblocking cool_tcp_* family.
+ *  Each one returns a descriptor or 0 on success and -1 with errno on failure, so every
+ *  wrapper reads os_errno immediately after the shim and builds its error from errstr,
+ *  the std.fs convention. The address crosses the boundary as the 32 byte AddrRec that
+ *  addr_pack fills, with a unix path beside it as the NUL terminated buffer addr_path_cbuf
+ *  copies; both are freed here once the shim has returned. resolve reads the getaddrinfo
+ *  list through cool_net_resolve, which flattens it into records, since a struct addrinfo
+ *  chain is a C layout dusk never walks; its error text comes from cool_net_resolve_error
+ *  on the same thread, right after the failing call, because the code behind it is thread
+ *  local.
+ *
+ *  Every exported name carries the net_ prefix, or is resolve, because an exported dusk
+ *  function takes a bare link symbol and libc owns socket, connect, bind, listen, accept,
+ *  shutdown, getaddrinfo, and the rest of the socket API. */
+
+@paradigm procedural
+
+@import std.net.addr
+@import std.string
+@import std.os
+@import std.vector
+
+// The blocking socket shims in the C runtime, each one a descriptor or 0 on success and
+// -1 with errno on failure. cool_net_shutdown takes 1 for the write side and 0 for the
+// read side; cool_net_setopt takes 1 for TCP_NODELAY, 2 for the receive timeout, and 3
+// for the send timeout, the timeouts in milliseconds. cool_net_resolve fills up to cap
+// records and returns the count, or -1 with the resolver's code kept for
+// cool_net_resolve_error on this thread. cool_io_close is the close(2) std.io uses
+foreign "C" {
+    func cool_net_dial(rec: *void, path: *void) -> int64
+    func cool_net_listen(rec: *void, path: *void, backlog: int64) -> int64
+    func cool_net_accept(lfd: int64, rec: *void) -> int64
+    func cool_net_local_addr(fd: int64, rec: *void) -> int64
+    func cool_net_peer_addr(fd: int64, rec: *void) -> int64
+    func cool_net_shutdown(fd: int64, how: int64) -> int64
+    func cool_net_setopt(fd: int64, which: int64, value: int64) -> int64
+    func cool_net_resolve(host: *void, port: int64, recs: *void, cap: int64) -> int64
+    func cool_net_resolve_error() -> *raw char
+    func cool_io_close(fd: int64) -> int64
+}
+
+// The most addresses resolve hands back for one name
+func net_resolve_cap() -> int64 {
+    return 16
+}
+
+// The error for an errno value read right after a failing shim
+func net_os_error(code: int64) -> error {
+    return error { message: errstr(code) }
+}
+
+// The error a shim's status reports: empty on 0, the errno text otherwise. code is read
+// by the caller immediately after the shim, before anything else crosses the boundary
+func net_status(rc: int64, code: int64) -> error {
+    if rc != 0 {
+        return net_os_error(code)
+    }
+    return error {}
+}
+
+/** Opens a blocking, close on exec stream socket of a's family and connects it to a.
+ *  Returns the connected descriptor, ready for fd_writer and fd_reader, or -1 with the
+ *  OS failure: Connection refused when nothing listens, No such file or directory for a
+ *  missing unix path, Too many open files when the descriptor table is full. An
+ *  interrupted connect is retried inside the runtime and a handshake that completed in
+ *  the gap counts as connected. a is a value and the unix path it may borrow is read only
+ *  during the call. Blocking: never call it inside an async func; std.async.net's
+ *  net_dial_async is the loop's form.
+ *  @param a the address to connect to
+ *  @return the connected descriptor paired with an error; on failure the descriptor is -1
+ *  and the error carries strerror's text
+ *  @example
+ *  fd, e := net_dial(addr_loopback(8080))
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  we := write_line(fd_writer(fd), "hello")
+ *  we.ignore()
+ *  ce := net_close(fd)
+ *  ce.ignore() */
+export func net_dial(a: Addr) -> (int64, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(a, rec)
+    path: *raw char = addr_path_cbuf(a)
+    fd: int64 = cool_net_dial(rec, path)
+    code: int64 = os_errno()
+    free(path)
+    free(rec)
+    if fd < 0 {
+        return (-1, net_os_error(code))
+    }
+    return (fd, error {})
+}
+
+/** Opens a blocking, close on exec stream socket, binds it to a, and listens. An IP
+ *  listener sets SO_REUSEADDR, so a port left in TIME_WAIT by the last run binds again at
+ *  once; an IPv6 listener sets IPV6_V6ONLY, so [::]:port and 0.0.0.0:port can coexist. A
+ *  port of 0 asks the OS for one; read it back with net_local_addr. backlog is the accept
+ *  queue depth, and 0 or below reads as 128. A unix path that already exists fails with
+ *  Address already in use, since this call never unlinks: remove a stale socket file with
+ *  remove_file first, and remove the one this call creates after net_close. On failure
+ *  the half open socket is closed before the error returns.
+ *  @param a the address to bind, a port of 0 taking an ephemeral one
+ *  @param backlog the accept queue depth, 0 or below meaning 128
+ *  @return the listening descriptor paired with an error; on failure the descriptor is -1
+ *  @example
+ *  lfd, e := net_listen(addr_loopback(0), 0)
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  bound, be := net_local_addr(lfd)
+ *  be.ignore()
+ *  println(addr_port(bound)) */
+export func net_listen(a: Addr, backlog: int64) -> (int64, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(a, rec)
+    path: *raw char = addr_path_cbuf(a)
+    fd: int64 = cool_net_listen(rec, path, backlog)
+    code: int64 = os_errno()
+    free(path)
+    free(rec)
+    if fd < 0 {
+        return (-1, net_os_error(code))
+    }
+    return (fd, error {})
+}
+
+/** Blocks until one connection arrives on the listener lfd and returns it as a blocking,
+ *  close on exec descriptor beside the peer's address. An interrupted accept is retried
+ *  inside the runtime. Over a unix listener the peer is Addr.Unix(""), the unnamed
+ *  address, since a connecting unix socket has no path of its own. Closing the listener
+ *  later does not close the connections accepted from it. Blocking: a server on the loop
+ *  uses std.async.net's net_accept_async instead.
+ *  A thread blocked here is not woken by net_close on another thread (the blocked call
+ *  keeps the old socket and the number is reused at once); call net_shutdown_read(lfd)
+ *  instead, which makes this return Invalid argument, then join, then close.
+ *  @param lfd the listening descriptor from net_listen
+ *  @return the client descriptor and the peer address paired with an error; on failure the
+ *  descriptor is -1 and the address is Addr.Ip4(0, 0)
+ *  @example
+ *  cfd, peer, e := net_accept(lfd)
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  s := addr_string(peer)
+ *  println(s)
+ *  free(s) */
+export func net_accept(lfd: int64) -> (int64, Addr, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    fd: int64 = cool_net_accept(lfd, rec)
+    code: int64 = os_errno()
+    if fd < 0 {
+        free(rec)
+        return (-1, Addr.Ip4(0, 0), net_os_error(code))
+    }
+    peer: Addr = addr_unpack(rec[0])
+    free(rec)
+    return (fd, peer, error {})
+}
+
+/** Closes a socket descriptor, the same close(2) fd_close, writer_close, and reader_close
+ *  make, with an interrupted close counted as closed. Whoever opened a descriptor closes
+ *  it, once: a socket wrapped in both a Writer and a Reader is closed through one of them
+ *  or through this, never twice, since a later open may have reused the number. A unix
+ *  listener's socket file is not removed here; remove_file does that.
+ *  Unlike writer_close and reader_close this closes any descriptor, the standard
+ *  three included. A listener another thread is blocked in cannot be stopped by
+ *  closing it; see net_accept.
+ *  @param fd the descriptor to close
+ *  @return an empty error on success, or the OS failure */
+export func net_close(fd: int64) -> error {
+    rc: int64 = cool_io_close(fd)
+    code: int64 = os_errno()
+    return net_status(rc, code)
+}
+
+/** Shuts down the write side of a connected socket, the half close. The peer's next read
+ *  reaches end of stream once it has drained what was already sent, so its read_to_end
+ *  returns, and this side keeps reading the reply until the peer closes. The descriptor
+ *  stays open and is still closed with net_close afterwards. A write through this socket
+ *  after the shutdown returns Broken pipe, never a fault, since the runtime ignores
+ *  SIGPIPE process wide.
+ *  @param fd the connected descriptor
+ *  @return an empty error on success, or the OS failure, ENOTCONN on an unconnected socket
+ *  @example
+ *  we := write_string(fd_writer(fd), request)
+ *  we.ignore()
+ *  se := net_shutdown_write(fd)
+ *  se.ignore()
+ *  reply, re := read_to_end(fd_reader(fd)) */
+export func net_shutdown_write(fd: int64) -> error {
+    rc: int64 = cool_net_shutdown(fd, 1)
+    code: int64 = os_errno()
+    return net_status(rc, code)
+}
+
+/** Shuts down the read side of a connected socket: this side's reads return end of stream
+ *  from now on, and the peer is not told. The descriptor stays open and is still closed
+ *  with net_close afterwards.
+ *  @param fd the connected descriptor
+ *  @return an empty error on success, or the OS failure */
+export func net_shutdown_read(fd: int64) -> error {
+    rc: int64 = cool_net_shutdown(fd, 0)
+    code: int64 = os_errno()
+    return net_status(rc, code)
+}
+
+// Reads one end of a socket through a shim that fills a record: 0 for the local end,
+// 1 for the peer. The record is unpacked into an Addr and freed here
+func net_read_end(fd: int64, which: int64) -> (Addr, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    mut rc: int64 = 0
+    if which == 0 {
+        rc = cool_net_local_addr(fd, rec)
+    } else {
+        rc = cool_net_peer_addr(fd, rec)
+    }
+    code: int64 = os_errno()
+    if rc != 0 {
+        free(rec)
+        return (Addr.Ip4(0, 0), net_os_error(code))
+    }
+    a: Addr = addr_unpack(rec[0])
+    free(rec)
+    return (a, error {})
+}
+
+/** The address this side of a socket is bound to, through getsockname: the port a
+ *  listener bound to 0 was given, or the ephemeral port and address a dialed socket
+ *  picked up. Over a unix socket the result is Addr.Unix(""), the unnamed address, since
+ *  a record carries no path.
+ *  @param fd the socket to read
+ *  @return the local address paired with an error; on failure the address is Addr.Ip4(0, 0) */
+export func net_local_addr(fd: int64) -> (Addr, error) {
+    return net_read_end(fd, 0)
+}
+
+/** The address of the peer a socket is connected to, through getpeername. An unconnected
+ *  socket, a listener included, is the error Transport endpoint is not connected. Over a
+ *  unix socket the result is Addr.Unix(""), the unnamed address.
+ *  @param fd the connected socket to read
+ *  @return the peer address paired with an error; on failure the address is Addr.Ip4(0, 0) */
+export func net_peer_addr(fd: int64) -> (Addr, error) {
+    return net_read_end(fd, 1)
+}
+
+/** Sets or clears TCP_NODELAY on a TCP socket, so a small write goes out at once instead
+ *  of waiting to coalesce with the next one. A socket that is not TCP, a unix stream
+ *  socket included, is the error Operation not supported.
+ *  @param fd the TCP socket
+ *  @param on true to send small writes at once, false to let the kernel coalesce them
+ *  @return an empty error on success, or the OS failure */
+export func net_set_nodelay(fd: int64, on: bool) -> error {
+    mut value: int64 = 0
+    if on {
+        value = 1
+    }
+    rc: int64 = cool_net_setopt(fd, 1, value)
+    code: int64 = os_errno()
+    return net_status(rc, code)
+}
+
+/** Sets the receive timeout of a socket in milliseconds, SO_RCVTIMEO. A blocking read
+ *  that waits longer than ms fails, and read_buf reports it as the error would block,
+ *  since the OS reports EAGAIN; a 0 clears the timeout and a negative ms is the error
+ *  Invalid argument. Applies to a stream and a datagram socket alike.
+ *  @param fd the socket
+ *  @param ms the longest a read waits, in milliseconds, 0 to wait forever
+ *  @return an empty error on success, or the OS failure */
+export func net_set_read_timeout(fd: int64, ms: int64) -> error {
+    rc: int64 = cool_net_setopt(fd, 2, ms)
+    code: int64 = os_errno()
+    return net_status(rc, code)
+}
+
+/** Sets the send timeout of a socket in milliseconds, SO_SNDTIMEO. A blocking write that
+ *  cannot finish within ms fails, and write_buf reports the count that went out before
+ *  the timeout beside the error Resource temporarily unavailable; a 0 clears the timeout
+ *  and a negative ms is the error Invalid argument.
+ *  @param fd the socket
+ *  @param ms the longest a write waits, in milliseconds, 0 to wait forever
+ *  @return an empty error on success, or the OS failure */
+export func net_set_write_timeout(fd: int64, ms: int64) -> error {
+    rc: int64 = cool_net_setopt(fd, 3, ms)
+    code: int64 = os_errno()
+    return net_status(rc, code)
+}
+
+// A fresh heap copy of the resolver's text for the last failure on this thread, read
+// right after the failing cool_net_resolve so the thread local code is still its own
+func net_resolve_error_text() -> string {
+    text: string = cstr(cool_net_resolve_error())
+    return substring(text, 0, str_len(text))
+}
+
+/** Looks host up through getaddrinfo, blocking the calling thread until the resolver
+ *  answers, and returns every address it reported in the resolver's order with port set
+ *  on each one, at most 16. No flags are passed, so a literal address returns itself,
+ *  localhost returns what /etc/hosts says, and a name goes to the resolver the OS
+ *  configured. Every entry is Ip4 or Ip6. The vector is fresh heap memory the caller
+ *  frees with vec_free then free; the addresses inside are plain values, so copying one
+ *  out before the free is fine. On failure the vector is empty and the error carries the
+ *  resolver's own sentence, Name or service not known for an unknown host among others,
+ *  so a program tests exists rather than matching the text. Blocking: a lookup against a
+ *  slow resolver takes seconds, and inside an async func it stalls every task on the
+ *  loop, which the checker cannot see. Call it before the loop starts, or on a spawned
+ *  thread that hands the vector back through a channel, or use std.async.net's
+ *  resolve_async for one address on the loop.
+ *  @param host the host name or literal address to look up, borrowed
+ *  @param port the port written into every address returned
+ *  @return the addresses as a fresh heap vector the caller owns, paired with an error; on
+ *  failure the vector is empty and the error carries the resolver's text
+ *  @example
+ *  v, e := resolve("localhost", 80)
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  fd, de := net_dial(vec_get(v, 0))
+ *  vec_free(v)
+ *  free(v) */
+export func resolve(host: string, port: int64) -> (*Vector<Addr>, error) {
+    out: *Vector<Addr> = alloc(vec_new())
+    if port < 0 || port > 65535 {
+        return (out, error { message: "port out of range" })
+    }
+    cap: int64 = net_resolve_cap()
+    hbuf: *raw char = cbuf(host)
+    recs: *raw AddrRec = alloc_bytes(cap * sizeof(AddrRec))
+    count: int64 = cool_net_resolve(hbuf, port, recs, cap)
+    if count < 0 {
+        // The resolver's code is thread local and good only until the next lookup on
+        // this thread, so its text is copied before anything else happens
+        text: string = net_resolve_error_text()
+        free(hbuf)
+        free(recs)
+        return (out, error { message: text })
+    }
+    free(hbuf)
+    if count == 0 {
+        free(recs)
+        return (out, error { message: "no address found" })
+    }
+    for i in 0..count {
+        vec_push(out, addr_unpack(recs[i]))
+    }
+    free(recs)
+    return (out, error {})
+}

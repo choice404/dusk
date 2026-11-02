@@ -1,0 +1,19 @@
+// The vector resolve returns is the caller's to free once. The first read is valid
+// and prints the address; after vec_free and free the pointer's generation no longer
+// matches, so the second read faults instead of touching freed memory.
+@paradigm procedural
+@import std.net
+@import std.vector
+
+func main() -> int32 {
+    v, e := resolve("127.0.0.1", 80)
+    e.ignore()
+    s := addr_string(vec_get(v, 0))
+    println(s)
+    free(s)
+    vec_free(v)
+    free(v)
+    a := vec_get(v, 0)
+    println(addr_port(a))
+    return 0
+}

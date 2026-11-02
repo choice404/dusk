@@ -1,0 +1,66 @@
+// A blocking datagram round trip over loopback. Two sockets bind port 0 and read their
+// ports back, A sends four bytes to B, B receives them beside the sender's address and
+// checks it is A's, then B replies to that address and A prints the reply.
+@paradigm procedural
+@import std.net.udp
+@import std.string
+
+func main() -> int32 {
+    a, ae := udp_bind(addr_loopback(0))
+    if ae.exists() {
+        printerr(ae)
+        return 1
+    }
+    b, be := udp_bind(addr_loopback(0))
+    if be.exists() {
+        printerr(be)
+        return 1
+    }
+    a_addr, a_err := net_local_addr(a)
+    a_err.ignore()
+    b_addr, b_err := net_local_addr(b)
+    b_err.ignore()
+    ping: *raw char = cbuf("ping")
+    sent, se := udp_send_to(a, ping, 4, b_addr)
+    free(ping)
+    if se.exists() {
+        printerr(se)
+        return 1
+    }
+    if sent != 4 {
+        printerr("short send")
+    }
+    buf: *raw char = alloc_bytes(64)
+    got, from, re := udp_recv_from(b, buf, 64)
+    if re.exists() {
+        printerr(re)
+        return 1
+    }
+    println(got)
+    println(addr_eq(from, a_addr))
+    pong: *raw char = cbuf("pong")
+    back, pe := udp_send_to(b, pong, 4, from)
+    free(pong)
+    pe.ignore()
+    if back != 4 {
+        printerr("short reply")
+    }
+    n, who, ar := udp_recv_from(a, buf, 64)
+    if ar.exists() {
+        printerr(ar)
+        return 1
+    }
+    if !addr_eq(who, b_addr) {
+        printerr("unexpected sender")
+    }
+    buf[n] = 0
+    text: string = substring(cstr(buf), 0, n)
+    println(text)
+    free(text)
+    free(buf)
+    c1 := net_close(a)
+    c1.ignore()
+    c2 := net_close(b)
+    c2.ignore()
+    return 0
+}

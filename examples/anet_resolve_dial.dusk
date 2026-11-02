@@ -1,0 +1,95 @@
+// resolve_async then net_dial_async, the client's path on the loop: the literal
+// 127.0.0.1 resolves with the listener's port, the result is dialed, and the server
+// task echoes the four bytes back.
+@paradigm procedural
+@import std.async.net
+@import std.net
+@import std.async.future
+@import std.async.loop
+
+async func serve(lfd: int64) -> (int64, error) {
+    cfd, ae := await tcp_accept(lfd)
+    if ae.exists() {
+        return (1, ae)
+    }
+    buf: *raw char = alloc_bytes(64)
+    n, re := await tcp_read(cfd, buf, 64)
+    if re.exists() {
+        free(buf)
+        cc := tcp_close(cfd)
+        cc.ignore()
+        return (2, re)
+    }
+    w, we := await tcp_write(cfd, buf, n)
+    we.ignore()
+    free(buf)
+    cc := tcp_close(cfd)
+    cc.ignore()
+    if w != n {
+        return (3, error { message: "short echo write" })
+    }
+    return (0, error {})
+}
+
+async func client(port: int64) -> (int64, error) {
+    a, ae := await resolve_async("127.0.0.1", port)
+    if ae.exists() {
+        return (1, ae)
+    }
+    fd, ce := await net_dial_async(a)
+    if ce.exists() {
+        return (2, ce)
+    }
+    msg: *raw char = cbuf("ping")
+    w, we := await tcp_write(fd, msg, 4)
+    we.ignore()
+    if w != 4 {
+        free(msg)
+        cc := tcp_close(fd)
+        cc.ignore()
+        return (3, error { message: "short request write" })
+    }
+    n, re := await tcp_read(fd, msg, 4)
+    re.ignore()
+    msg[n] = 0
+    println(cstr(msg))
+    free(msg)
+    cc := tcp_close(fd)
+    cc.ignore()
+    return (0, error {})
+}
+
+async func amain() -> int32 {
+    lfd, le := tcp_listen(0, 4)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    port, pe := tcp_local_port(lfd)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    sf := serve(lfd)
+    cv, ce := await client(port)
+    ce.ignore()
+    sv, se := await sf
+    se.ignore()
+    lc := tcp_close(lfd)
+    lc.ignore()
+    if cv != 0 || sv != 0 {
+        return 1
+    }
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    rc := async_run(amain())
+    reactor_stop()
+    loop_free()
+    return rc
+}

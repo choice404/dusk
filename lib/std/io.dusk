@@ -34,6 +34,7 @@
 // indexed on the dusk side, since the reverse binding of *void to *raw T is refused, so a
 // copy into or out of a caller's buffer goes through it.
 foreign "C" {
+    func cool_os_eagain() -> int64
     func cool_io_write(fd: int64, buf: *void, n: int64) -> int64
     func cool_io_read(fd: int64, buf: *void, cap: int64) -> int64
     func cool_io_flush(fd: int64) -> int64
@@ -80,9 +81,10 @@ export struct StringReader {
 }
 
 // EAGAIN, the errno a non blocking descriptor sets when a read would have had to wait.
-// EWOULDBLOCK is the same value on Linux, so one test covers both.
+// The runtime answers it, since the value differs between Linux and the BSDs, and
+// EWOULDBLOCK is the same value everywhere dusk builds, so one test covers both.
 func io_eagain() -> int64 {
-    return 11
+    return cool_os_eagain()
 }
 
 /** A Writer over standard output. Bytes go through the C stdout stream, so they land in

@@ -1,0 +1,63 @@
+// net_accept_async hands back the peer beside the client fd. The client task dials
+// the tcp_listen port through net_dial_async and reads its own local port; the server
+// task accepts and reads the peer's port; the two agree.
+@paradigm procedural
+@import std.async.net
+@import std.net
+@import std.async.future
+@import std.async.loop
+
+async func serve(lfd: int64) -> (int64, error) {
+    cfd, peer, ae := await net_accept_async(lfd)
+    if ae.exists() {
+        return (-1, ae)
+    }
+    cc := tcp_close(cfd)
+    cc.ignore()
+    return (addr_port(peer), error {})
+}
+
+async func client(port: int64) -> (int64, error) {
+    fd, ce := await net_dial_async(addr_loopback(port))
+    if ce.exists() {
+        return (-2, ce)
+    }
+    local, le := net_local_addr(fd)
+    le.ignore()
+    cc := tcp_close(fd)
+    cc.ignore()
+    return (addr_port(local), error {})
+}
+
+async func amain() -> int32 {
+    lfd, le := tcp_listen(0, 4)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    port, pe := tcp_local_port(lfd)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    sf := serve(lfd)
+    cp, ce := await client(port)
+    ce.ignore()
+    sp, se := await sf
+    se.ignore()
+    lc := tcp_close(lfd)
+    lc.ignore()
+    println(cp == sp && cp > 0)
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    rc := async_run(amain())
+    reactor_stop()
+    loop_free()
+    return rc
+}

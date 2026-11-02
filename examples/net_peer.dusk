@@ -1,0 +1,71 @@
+// The two ends of a connection agree. The client sends its own local port as text,
+// the server compares it with the peer port net_accept reported and prints the
+// verdict before closing, and the client, once its read_to_end has returned, prints
+// the peer address it read while the connection was open with the port replaced by
+// 0, so the transcript is fixed despite the ephemeral ports. The peer is read before
+// the half close: once both sides have shut down, getpeername reports ENOTCONN.
+@paradigm procedural
+@import std.net
+@import std.io
+@import std.string
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    text, re := read_to_end(fd_reader(cfd))
+    re.ignore()
+    claimed, pe := parse_int(text)
+    pe.ignore()
+    println(addr_port(peer) == claimed)
+    free(text)
+    ce := net_close(cfd)
+    ce.ignore()
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    mine, me := net_local_addr(fd)
+    me.ignore()
+    peer, pe := net_peer_addr(fd)
+    pe.ignore()
+    port_text: string = int_to_string(addr_port(mine))
+    we := write_string(fd_writer(fd), port_text)
+    we.ignore()
+    free(port_text)
+    se := net_shutdown_write(fd)
+    se.ignore()
+    rest, re := read_to_end(fd_reader(fd))
+    re.ignore()
+    free(rest)
+    s := addr_string(addr_with_port(peer, 0))
+    println(s)
+    free(s)
+    ce := net_close(fd)
+    ce.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

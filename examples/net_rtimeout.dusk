@@ -1,0 +1,46 @@
+// A receive timeout surfaces through std.io as the would block error. The dial
+// completes into the listener's backlog, so the accept returns at once with no
+// second thread, and a read on the side nobody writes to gives up after 50ms.
+@paradigm procedural
+@import std.net
+@import std.io
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return 1
+    }
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+    te := net_set_read_timeout(cfd, 50)
+    te.ignore()
+    buf: *raw char = alloc_bytes(16)
+    n, re := read_buf(fd_reader(cfd), buf, 16)
+    if re.exists() {
+        println(re.toString())
+    } else {
+        println(n)
+    }
+    free(buf)
+    c1 := net_close(cfd)
+    c1.ignore()
+    c2 := net_close(fd)
+    c2.ignore()
+    c3 := net_close(lfd)
+    c3.ignore()
+    return 0
+}

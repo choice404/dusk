@@ -1,0 +1,50 @@
+// The datagram round trip over the IPv6 loopback. Strict: a box with ::1 disabled fails
+// here with Address not available.
+@paradigm procedural
+@import std.net.udp
+@import std.string
+
+func main() -> int32 {
+    a, ae := udp_bind(addr_loopback6(0))
+    if ae.exists() {
+        printerr(ae)
+        return 1
+    }
+    b, be := udp_bind(addr_loopback6(0))
+    if be.exists() {
+        printerr(be)
+        return 1
+    }
+    a_addr, a_err := net_local_addr(a)
+    a_err.ignore()
+    b_addr, b_err := net_local_addr(b)
+    b_err.ignore()
+    ping: *raw char = cbuf("ping")
+    sent, se := udp_send_to(a, ping, 4, b_addr)
+    free(ping)
+    if se.exists() {
+        printerr(se)
+        return 1
+    }
+    if sent != 4 {
+        printerr("short send")
+    }
+    buf: *raw char = alloc_bytes(64)
+    got, from, re := udp_recv_from(b, buf, 64)
+    if re.exists() {
+        free(buf)
+        printerr(re)
+        return 1
+    }
+    text: string = substring(cstr(buf), 0, got)
+    free(buf)
+    println(got)
+    println(addr_eq(from, a_addr))
+    println(text)
+    free(text)
+    c1 := net_close(a)
+    c1.ignore()
+    c2 := net_close(b)
+    c2.ignore()
+    return 0
+}

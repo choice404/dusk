@@ -1910,7 +1910,7 @@ The six async examples 0.4.0 and 0.4.1 built by hand around a completer lambda n
 
 Added in 0.4.3. `std.async.net` puts TCP over the reactor's readiness futures. A socket is an ordinary file descriptor the reactor already knows how to watch, so the networking surface is a thin standard library layer over the non blocking socket calls and the `readable` and `writable` watches, with no new event machinery and no compiler change.
 
-`tcp_listen`, `tcp_local_port`, and `tcp_close` are synchronous. `tcp_accept`, `tcp_connect`, `tcp_read`, and `tcp_write` are async funcs: each tries its non blocking socket call, and when the call would block it awaits `readable` or `writable` on the descriptor and retries, so a server that accepts many connections and a client that connects both suspend and resume as tasks under `async_run`, never pumping the loop from inside a task. `tcp_connect` finishes the non blocking connect handshake by awaiting writability and then reading the socket error, so a connection refused after the handshake began surfaces as a clean error rather than a descriptor that fails on first use. `tcp_write` sends every byte, looping over writability and the non blocking write until the whole buffer is gone, so a short write never silently drops the tail. Addresses are literal IPv4 dotted quads; there is no name resolution yet. A listener bound to port 0 is assigned an ephemeral port the caller reads back with `tcp_local_port`.
+`tcp_listen`, `tcp_local_port`, and `tcp_close` are synchronous. `tcp_accept`, `tcp_connect`, `tcp_read`, and `tcp_write` are async funcs: each tries its non blocking socket call, and when the call would block it awaits `readable` or `writable` on the descriptor and retries, so a server that accepts many connections and a client that connects both suspend and resume as tasks under `async_run`, never pumping the loop from inside a task. `tcp_connect` finishes the non blocking connect handshake by awaiting writability and then reading the socket error, so a connection refused after the handshake began surfaces as a clean error rather than a descriptor that fails on first use. `tcp_write` sends every byte, looping over writability and the non blocking write until the whole buffer is gone, so a short write never silently drops the tail. The seven `tcp_` functions take literal IPv4 dotted quads and do no name resolution; the `Addr` forms and the lookup that came after them are described below. A listener bound to port 0 is assigned an ephemeral port the caller reads back with `tcp_local_port`.
 
 Awaiting a networking future is subject to the same rule as any other await: it is legal only inside an `async func`, and awaiting `tcp_accept` or `tcp_connect` from a synchronous function is rejected, `'await' is only legal inside an async func`.
 
@@ -1931,6 +1931,18 @@ async func serve(lfd: int64) -> int64 {
     return w
 }
 ```
+
+### Blocking sockets, addresses, and name lookup
+
+Added in 1.17.1. `std.net` is the blocking socket layer beside the event loop's: TCP over IPv4 and IPv6 and unix domain stream sockets, with `std.net.udp` for datagram sockets over IPv4 and IPv6. Every call in both modules blocks the calling thread, so a program on the event loop uses `std.async.net` instead, and the checker does not distinguish the two; a blocking call inside an `async func` stalls every task on the loop. No compiler change underlies the modules. They are standard library code over a family of socket shims in the C runtime.
+
+One value type addresses all of it. `Addr`, defined by `std.net.addr` and brought in by an import of `std.net`, `std.net.udp`, or `std.async.net`, is an enum of three variants, `Ip4(ip: int64, port: int64)`, `Ip6(hi: uint64, lo: uint64, port: int64)`, and `Unix(path: string)`. `ip` is the 32 bit address as one host order integer, and `hi` and `lo` are the 128 bit address as two big endian halves. An `Addr` is a plain value that never owns heap memory: it crosses a `spawn` and a channel, sits in a `Vector<Addr>`, and enters and leaves an `async func` as any other value does. `Unix` borrows the path string it was built from, which has to outlive the address; the one function that returns heap memory is `addr_string`, whose result the caller frees. An address that comes back from `net_accept`, `net_local_addr`, or `net_peer_addr` over a unix socket is `Addr.Unix("")`, the unnamed address. `addr_ip4`, `addr_ip6`, and the loopback constructors fault with a `fatal: net:` line on an octet outside `0..255` or a port outside `0..65535`, since a literal address is a programmer's constant; `addr_parse` reads only a literal IPv4 or IPv6 address, never a host name, and reports a bad literal or a bad port as an error value.
+
+A socket is an `int64` descriptor, whether it comes from `net_dial`, `net_listen`, `net_accept`, `udp_bind`, or the async forms. `net_listen` binds and listens, with `SO_REUSEADDR` on an IP socket and `IPV6_V6ONLY` on an IPv6 socket, and never unlinks a unix socket file, so a path that exists fails with `Address already in use` and the caller removes it. A connected socket is a stream through `fd_writer` and `fd_reader` from `std.io`, and `net_shutdown_write` is the half close that lets a peer's `read_to_end` return while this side keeps reading. Whoever opened a descriptor closes it once, through any of `net_close`, `fd_close`, `writer_close`, or `reader_close`, which are the same `close(2)`. A datagram longer than the buffer `udp_recv_from` receives into is truncated silently. The unix family is not available for datagram sockets, and `udp_bind` refuses a unix address.
+
+`std.async.net` keeps its seven `tcp_` functions and gains `net_dial_async`, `net_accept_async`, `udp_send_async`, `udp_recv_async`, and `resolve_async`, all taking and returning `Addr`. `net_accept_async` over a listener from `net_listen` requires `fd_nonblock(lfd)` first, since the accept on a blocking descriptor blocks inside the call.
+
+Name lookup is `getaddrinfo`. `resolve(host, port)` runs it on the calling thread with no flags and returns up to 16 addresses in the OS's order as a heap vector the caller frees, `vec_free` then `free`. `resolve_async(host, port)` runs it on a helper thread the runtime owns and returns the first address, and an `await` of it is never declared idle: the helper counts as live work until it has completed the future, so a task whose only pending work is a lookup suspends and resumes under `async_run` rather than ending in the idle fatal. A failed lookup is an error value whose text is the platform resolver's, which a program tests with `exists` and does not match against.
 
 ### The memory model
 
@@ -1972,6 +1984,9 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax a
 | std.os                 | the process environment, the command shell, and the errno read  |
 | std.process            | runs a shell command as a child and reads its output back       |
 | std.fs                 | files, directories, and paths over the libc calls               |
+| std.net.addr           | the Addr value: an IPv4, IPv6, or unix domain socket address    |
+| std.net                | blocking TCP and unix stream sockets, half close, options, and the name lookup |
+| std.net.udp            | blocking datagram sockets over IPv4 and IPv6                    |
 | std.concurrent.atomic  | sequentially consistent int64 atomics                           |
 | std.concurrent.channel | bounded thread safe queue between threads                       |
 | std.concurrent.pool    | the global thread pool behind the submit builtin                |
@@ -1981,7 +1996,7 @@ See [Source Files](#source-files-directives-imports-exports) for import syntax a
 | std.async.loop         | the event loop's lifecycle                                      |
 | std.async.time         | timers as futures the loop completes                            |
 | std.async.io           | the readiness reactor, pipes, and non blocking read/write       |
-| std.async.net          | TCP over the readiness reactor, non blocking connect and accept |
+| std.async.net          | TCP over the readiness reactor, non blocking connect and accept, the Addr forms, and resolve_async |
 
 ### Command Line Parsing with `std.flags`
 

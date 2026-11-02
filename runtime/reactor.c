@@ -38,15 +38,22 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "reactor_poller.h"
@@ -395,6 +402,16 @@ static int cool_apple_set_nb_cloexec(int fd) {
     }
     return 0;
 }
+
+/* Sets fd close on exec without changing its blocking mode. Returns 0 on
+   success, 1 on any fcntl failure; the caller closes fd and preserves errno. */
+static int cool_apple_set_cloexec(int fd) {
+    int flags = fcntl(fd, F_GETFD, 0);
+    if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+        return 1;
+    }
+    return 0;
+}
 #endif
 
 /* Creates a pipe, widening both fds into out2[0..1]; 0 ok, 1 on a generic
@@ -670,6 +687,537 @@ int64_t cool_tcp_connect_error(int64_t fd) {
         return -1;
     }
     return (int64_t)err;
+}
+
+/* The network boundary record matches the dusk AddrRec layout. IP bytes are
+   in network order and the port is in host order; unix paths cross separately.
+   These shims touch no reactor state and return ordinary file descriptors. */
+typedef struct {
+    int64_t family;
+    int64_t port;
+    uint8_t ip[16];
+} cool_net_rec;
+_Static_assert(sizeof(cool_net_rec) == 32, "AddrRec must be 32 bytes");
+
+static __thread int64_t cool_net_gai_last = 0;
+
+/* Builds a zeroed socket address before a caller opens any descriptor. Returns
+   0 on success, -1 with EINVAL for an unknown family, invalid IP port or empty
+   unix path, or ENAMETOOLONG when the unix path exceeds 107 bytes or cannot fit
+   the platform's sun_path with its terminator.
+   A NULL path is empty. IPv6 scope and flow information stay zero. */
+static int cool_net_sockaddr(int64_t family, int64_t port, const uint8_t *ip,
+                             const char *path, struct sockaddr_storage *out,
+                             socklen_t *len) {
+    memset(out, 0, sizeof(*out));
+    if ((family == 4 || family == 6) && (port < 0 || port > 65535)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (family == 4) {
+        struct sockaddr_in *addr = (struct sockaddr_in *)out;
+        addr->sin_family = AF_INET;
+        addr->sin_port = htons((uint16_t)port);
+        memcpy(&addr->sin_addr, ip, 4);
+        *len = sizeof(*addr);
+        return 0;
+    }
+    if (family == 6) {
+        struct sockaddr_in6 *addr = (struct sockaddr_in6 *)out;
+        addr->sin6_family = AF_INET6;
+        addr->sin6_port = htons((uint16_t)port);
+        memcpy(&addr->sin6_addr, ip, 16);
+        *len = sizeof(*addr);
+        return 0;
+    }
+    if (family == 1) {
+        struct sockaddr_un *addr = (struct sockaddr_un *)out;
+        size_t path_len = strlen(path ? path : "");
+        if (path_len > 107 || path_len >= sizeof(addr->sun_path)) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (path_len == 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        addr->sun_family = AF_UNIX;
+        memcpy(addr->sun_path, path, path_len + 1);
+        *len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_len + 1);
+        return 0;
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+/* Fills a boundary record from an IP or unix socket address. Always zeroes the
+   record first, leaving unknown families and short addresses as family 0.
+   Unnamed unix peers still have family 1; NULL rec is a no-op. */
+static void cool_net_fill(void *rec, const struct sockaddr *sa, socklen_t len) {
+    if (!rec) {
+        return;
+    }
+    memset(rec, 0, sizeof(cool_net_rec));
+    if (len < offsetof(struct sockaddr, sa_family) + sizeof(sa->sa_family)) {
+        return;
+    }
+    cool_net_rec record = {0};
+    if (sa->sa_family == AF_INET && len >= sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *addr = (const struct sockaddr_in *)sa;
+        record.family = 4;
+        record.port = ntohs(addr->sin_port);
+        memcpy(record.ip, &addr->sin_addr, 4);
+    } else if (sa->sa_family == AF_INET6 && len >= sizeof(struct sockaddr_in6)) {
+        const struct sockaddr_in6 *addr = (const struct sockaddr_in6 *)sa;
+        record.family = 6;
+        record.port = ntohs(addr->sin6_port);
+        memcpy(record.ip, &addr->sin6_addr, 16);
+    } else if (sa->sa_family == AF_UNIX
+               && len >= offsetof(struct sockaddr_un, sun_path)) {
+        record.family = 1;
+    }
+    memcpy(rec, &record, sizeof(record));
+}
+
+/* Opens a blocking, close-on-exec stream and connects to rec and path. Returns
+   the fd or -1 with errno preserved after closing a half-open socket. EINTR
+   retries connect; an already connected retry succeeds, and a still pending
+   retry waits for POLLOUT then reads SO_ERROR before handing back the fd. */
+int64_t cool_net_dial(void *rec, void *path) {
+    cool_net_rec *record = (cool_net_rec *)rec;
+    struct sockaddr_storage addr;
+    socklen_t len;
+    if (cool_net_sockaddr(record->family, record->port, record->ip,
+                          (char *)path, &addr, &len) != 0) {
+        return -1;
+    }
+#if defined(__APPLE__)
+    int fd = socket(addr.ss_family, SOCK_STREAM, 0);
+#else
+    int fd = socket(addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+#if defined(__APPLE__)
+    if (cool_apple_set_cloexec(fd) != 0) {
+        goto fail;
+    }
+#endif
+    int rc;
+    int has_interrupted = 0;
+    do {
+        rc = connect(fd, (struct sockaddr *)&addr, len);
+        if (rc != 0 && errno == EINTR) {
+            has_interrupted = 1;
+        }
+    } while (rc != 0 && errno == EINTR);
+    if (rc == 0 || (has_interrupted && errno == EISCONN)) {
+        return (int64_t)fd;
+    }
+    if (has_interrupted && (errno == EALREADY || errno == EINPROGRESS)) {
+        struct pollfd pending = {fd, POLLOUT, 0};
+        do {
+            rc = poll(&pending, 1, -1);
+        } while (rc < 0 && errno == EINTR);
+        if (rc < 0) {
+            goto fail;
+        }
+        int error = 0;
+        socklen_t error_len = sizeof(error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_len) < 0) {
+            goto fail;
+        }
+        if (error == 0) {
+            return (int64_t)fd;
+        }
+        errno = error;
+    }
+fail: {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+}
+
+/* Opens a blocking, close-on-exec listener for an IP address or unix path.
+   IP listeners reuse the address; IPv6 listeners accept only IPv6. A backlog
+   <= 0 means 128 and values above INT_MAX clamp to INT_MAX. Never unlinks a
+   unix path. Returns the fd or -1, closing it with errno preserved on failure. */
+int64_t cool_net_listen(void *rec, void *path, int64_t backlog) {
+    cool_net_rec *record = (cool_net_rec *)rec;
+    struct sockaddr_storage addr;
+    socklen_t len;
+    if (cool_net_sockaddr(record->family, record->port, record->ip,
+                          (char *)path, &addr, &len) != 0) {
+        return -1;
+    }
+#if defined(__APPLE__)
+    int fd = socket(addr.ss_family, SOCK_STREAM, 0);
+#else
+    int fd = socket(addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+#if defined(__APPLE__)
+    if (cool_apple_set_cloexec(fd) != 0) {
+        goto fail;
+    }
+#endif
+    int one = 1;
+    if (record->family != 1
+        && setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) != 0) {
+        goto fail;
+    }
+    if (record->family == 6
+        && setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one)) != 0) {
+        goto fail;
+    }
+    if (bind(fd, (struct sockaddr *)&addr, len) != 0) {
+        goto fail;
+    }
+    int bl = backlog <= 0 ? 128 : (backlog > INT_MAX ? INT_MAX : (int)backlog);
+    if (listen(fd, bl) != 0) {
+        goto fail;
+    }
+    return (int64_t)fd;
+fail: {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+}
+
+/* Accepts a blocking, close-on-exec client and fills rec with its peer address.
+   EINTR is retried. Returns the client fd or -1 with errno; a flag setup failure
+   closes the new client with errno preserved. NULL rec skips the address copy. */
+int64_t cool_net_accept(int64_t lfd, void *rec) {
+    struct sockaddr_storage addr;
+    socklen_t len;
+    int client;
+    do {
+        len = sizeof(addr);
+#if defined(__APPLE__)
+        client = accept((int)lfd, (struct sockaddr *)&addr, &len);
+#else
+        client = accept4((int)lfd, (struct sockaddr *)&addr, &len, SOCK_CLOEXEC);
+#endif
+    } while (client < 0 && errno == EINTR);
+    if (client < 0) {
+        return -1;
+    }
+#if defined(__APPLE__)
+    if (cool_apple_set_cloexec(client) != 0) {
+        int saved_errno = errno;
+        close(client);
+        errno = saved_errno;
+        return -1;
+    }
+#endif
+    cool_net_fill(rec, (struct sockaddr *)&addr, len);
+    return (int64_t)client;
+}
+
+/* Reads the local socket address into rec, including an ephemeral bound port.
+   Returns 0 on success or -1 with errno from getsockname. NULL rec skips the
+   address copy while still probing the descriptor. */
+int64_t cool_net_local_addr(int64_t fd, void *rec) {
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (getsockname((int)fd, (struct sockaddr *)&addr, &len) != 0) {
+        return -1;
+    }
+    cool_net_fill(rec, (struct sockaddr *)&addr, len);
+    return 0;
+}
+
+/* Reads the connected peer address into rec. Returns 0 on success or -1 with
+   errno from getpeername, including ENOTCONN. NULL rec skips the address copy. */
+int64_t cool_net_peer_addr(int64_t fd, void *rec) {
+    struct sockaddr_storage addr;
+    socklen_t len = sizeof(addr);
+    if (getpeername((int)fd, (struct sockaddr *)&addr, &len) != 0) {
+        return -1;
+    }
+    cool_net_fill(rec, (struct sockaddr *)&addr, len);
+    return 0;
+}
+
+/* Shuts down writing when how is 1, reading otherwise. Returns 0 on success
+   or -1 with errno from shutdown; the descriptor remains open. */
+int64_t cool_net_shutdown(int64_t fd, int64_t how) {
+    return shutdown((int)fd, how == 1 ? SHUT_WR : SHUT_RD);
+}
+
+/* Sets TCP_NODELAY (which 1), receive timeout (2), or send timeout (3). Timeouts
+   are milliseconds and 0 clears them. Returns 0 on success or -1 with errno;
+   negative timeouts and unknown options fail with EINVAL before setsockopt. */
+int64_t cool_net_setopt(int64_t fd, int64_t which, int64_t value) {
+    if (which == 1) {
+        int is_enabled = value != 0;
+        return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &is_enabled, sizeof(is_enabled));
+    }
+    if ((which != 2 && which != 3) || value < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct timeval timeout;
+    timeout.tv_sec = value / 1000;
+    timeout.tv_usec = (value % 1000) * 1000;
+    int option = which == 2 ? SO_RCVTIMEO : SO_SNDTIMEO;
+    return setsockopt((int)fd, SOL_SOCKET, option, &timeout, sizeof(timeout));
+}
+
+/* Opens a blocking, close-on-exec UDP socket bound to rec. IPv6 is IPv6 only;
+   unix fails with EAFNOSUPPORT before any syscall. Returns the fd or -1 with
+   errno, closing a half-open socket with the original error preserved. */
+int64_t cool_net_udp_open(void *rec) {
+    cool_net_rec *record = (cool_net_rec *)rec;
+    if (record->family == 1) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+    struct sockaddr_storage addr;
+    socklen_t len;
+    if (cool_net_sockaddr(record->family, record->port, record->ip, "", &addr, &len) != 0) {
+        return -1;
+    }
+#if defined(__APPLE__)
+    int fd = socket(addr.ss_family, SOCK_DGRAM, 0);
+#else
+    int fd = socket(addr.ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+#if defined(__APPLE__)
+    if (cool_apple_set_cloexec(fd) != 0) {
+        goto fail;
+    }
+#endif
+    int one = 1;
+    if (record->family == 6
+        && setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one)) != 0) {
+        goto fail;
+    }
+    if (bind(fd, (struct sockaddr *)&addr, len) != 0) {
+        goto fail;
+    }
+    return (int64_t)fd;
+fail: {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -1;
+    }
+}
+
+/* Sends one datagram to an IP record. Returns the byte count or -1 with errno;
+   EINTR is retried and EAGAIN passes through. Negative sizes fail with EINVAL
+   and unix destinations fail with EAFNOSUPPORT before sendto. */
+int64_t cool_net_send_to(int64_t fd, void *buf, int64_t n, void *rec) {
+    if (n < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    cool_net_rec *record = (cool_net_rec *)rec;
+    if (record->family == 1) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+    struct sockaddr_storage addr;
+    socklen_t len;
+    if (cool_net_sockaddr(record->family, record->port, record->ip, "", &addr, &len) != 0) {
+        return -1;
+    }
+    ssize_t count;
+    do {
+        count = sendto((int)fd, buf, (size_t)n, 0, (struct sockaddr *)&addr, len);
+    } while (count < 0 && errno == EINTR);
+    return (int64_t)count;
+}
+
+/* Receives one datagram and fills rec with its sender. A long datagram truncates
+   to cap; NULL rec skips the address copy. Returns the byte count or -1 with
+   errno, retrying EINTR and passing EAGAIN through. Negative cap fails EINVAL. */
+int64_t cool_net_recv_from(int64_t fd, void *buf, int64_t cap, void *rec) {
+    if (cap < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct sockaddr_storage addr;
+    socklen_t len;
+    ssize_t count;
+    do {
+        len = sizeof(addr);
+        count = recvfrom((int)fd, buf, (size_t)cap, 0, (struct sockaddr *)&addr, &len);
+    } while (count < 0 && errno == EINTR);
+    if (count < 0) {
+        return -1;
+    }
+    cool_net_fill(rec, (struct sockaddr *)&addr, len);
+    return (int64_t)count;
+}
+
+/* Starts a nonblocking, close-on-exec stream connection to rec and path. Returns
+   the fd on an immediate connect or EINPROGRESS; the caller awaits writable
+   then reads cool_tcp_connect_error. EINTR is retried. Returns -1 on refused
+   connect or a full unix backlog, -3 on EMFILE/ENFILE at socket mint, and -2
+   otherwise. Every half-open fd is closed with errno preserved on failure. */
+int64_t cool_net_connect_nb(void *rec, void *path) {
+    cool_net_rec *record = (cool_net_rec *)rec;
+    struct sockaddr_storage addr;
+    socklen_t len;
+    if (cool_net_sockaddr(record->family, record->port, record->ip,
+                          (char *)path, &addr, &len) != 0) {
+        return -2;
+    }
+#if defined(__APPLE__)
+    int fd = socket(addr.ss_family, SOCK_STREAM, 0);
+#else
+    int fd = socket(addr.ss_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+#endif
+    if (fd < 0) {
+        return (errno == EMFILE || errno == ENFILE) ? -3 : -2;
+    }
+#if defined(__APPLE__)
+    if (cool_apple_set_nb_cloexec(fd) != 0) {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+        return -2;
+    }
+#endif
+    int rc;
+    do {
+        rc = connect(fd, (struct sockaddr *)&addr, len);
+    } while (rc != 0 && errno == EINTR);
+    if (rc == 0 || errno == EINPROGRESS || errno == EISCONN || errno == EALREADY) {
+        /* EISCONN and EALREADY only follow an EINTR retry: the handshake the first
+           call started finished or is still running, and the caller's writable
+           wait plus SO_ERROR read settles it either way. */
+        return (int64_t)fd;
+    }
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return (saved_errno == ECONNREFUSED || saved_errno == EAGAIN) ? -1 : -2;
+}
+
+/* Accepts a nonblocking, close-on-exec client and fills its peer record. EINTR
+   is retried. Returns the fd, -1 on EAGAIN/EWOULDBLOCK, -3 on EMFILE/ENFILE,
+   or -2 otherwise. A flag setup failure closes the new fd with errno preserved;
+   NULL rec skips the address copy. */
+int64_t cool_net_accept_nb(int64_t lfd, void *rec) {
+    struct sockaddr_storage addr;
+    socklen_t len;
+    int client;
+    do {
+        len = sizeof(addr);
+#if defined(__APPLE__)
+        client = accept((int)lfd, (struct sockaddr *)&addr, &len);
+#else
+        client = accept4((int)lfd, (struct sockaddr *)&addr, &len,
+                         SOCK_NONBLOCK | SOCK_CLOEXEC);
+#endif
+    } while (client < 0 && errno == EINTR);
+    if (client < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return -1;
+        }
+        return (errno == EMFILE || errno == ENFILE) ? -3 : -2;
+    }
+#if defined(__APPLE__)
+    if (cool_apple_set_nb_cloexec(client) != 0) {
+        int saved_errno = errno;
+        close(client);
+        errno = saved_errno;
+        return -2;
+    }
+#endif
+    cool_net_fill(rec, (struct sockaddr *)&addr, len);
+    return (int64_t)client;
+}
+
+/* Parses a bare IPv4 or IPv6 literal into a zeroed record, leaving port 0.
+   Returns 4 or 6 on success, or 0 for invalid text with the record still zero. */
+int64_t cool_addr_parse(void *text, void *rec) {
+    cool_net_rec record = {0};
+    memset(rec, 0, sizeof(record));
+    if (inet_pton(AF_INET, (char *)text, record.ip) == 1) {
+        record.family = 4;
+    } else if (inet_pton(AF_INET6, (char *)text, record.ip) == 1) {
+        record.family = 6;
+    } else {
+        return 0;
+    }
+    memcpy(rec, &record, sizeof(record));
+    return record.family;
+}
+
+/* Formats the bare IP address without a port or brackets, returning its byte
+   length. Returns -1 with EAFNOSUPPORT for an unknown family, ENOSPC for a
+   nonpositive cap, or the errno from inet_ntop when the output cannot fit. */
+int64_t cool_addr_format(void *rec, void *out, int64_t cap) {
+    cool_net_rec *record = (cool_net_rec *)rec;
+    if (record->family != 4 && record->family != 6) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+    if (cap <= 0) {
+        errno = ENOSPC;
+        return -1;
+    }
+    int family = record->family == 4 ? AF_INET : AF_INET6;
+    if (!inet_ntop(family, record->ip, (char *)out, (socklen_t)cap)) {
+        return -1;
+    }
+    return (int64_t)strlen((char *)out);
+}
+
+/* Resolves a host into up to cap IP records with the requested host-order port.
+   Returns the count written, including 0 when cap <= 0 or no IP address was
+   found. Returns -1 on resolver failure or an invalid port, keeping the opaque
+   getaddrinfo code on this thread for cool_net_resolve_error. Frees every
+   successful getaddrinfo list, including when no records are written. */
+int64_t cool_net_resolve(void *host, int64_t port, void *recs, int64_t cap) {
+    if (port < 0 || port > 65535) {
+        cool_net_gai_last = EAI_SERVICE;
+        return -1;
+    }
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *results = NULL;
+    int rc = getaddrinfo((char *)host, NULL, &hints, &results);
+    if (rc != 0) {
+        cool_net_gai_last = rc;
+        return -1;
+    }
+    int64_t count = 0;
+    for (struct addrinfo *entry = results; entry && count < cap; entry = entry->ai_next) {
+        if (entry->ai_family != AF_INET && entry->ai_family != AF_INET6) {
+            continue;
+        }
+        cool_net_rec record;
+        cool_net_fill(&record, entry->ai_addr, entry->ai_addrlen);
+        record.port = port;
+        memcpy((uint8_t *)recs + count * sizeof(record), &record, sizeof(record));
+        count++;
+    }
+    freeaddrinfo(results);
+    return count;
+}
+
+/* Returns the resolver's text for the last failed cool_net_resolve on this
+   thread. Must be read on the thread that called cool_net_resolve because the
+   opaque getaddrinfo code is thread local. The returned string is borrowed. */
+char *cool_net_resolve_error(void) {
+    return (char *)gai_strerror((int)cool_net_gai_last);
 }
 
 /* Sets the soft RLIMIT_NOFILE (open descriptor) limit to n, preserving the hard

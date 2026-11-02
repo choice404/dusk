@@ -1,0 +1,94 @@
+// The async echo over IPv6 loopback. net_listen binds [::1]:0, the bound address is
+// read back through net_local_addr and handed to the client task, which dials it
+// through net_dial_async and awaits the handshake. Strict: a box with ::1 disabled
+// fails the listen with Address not available.
+@paradigm procedural
+@import std.async.net
+@import std.net
+@import std.async.future
+@import std.async.loop
+
+async func serve(lfd: int64) -> (int64, error) {
+    cfd, ae := await tcp_accept(lfd)
+    if ae.exists() {
+        return (1, ae)
+    }
+    buf: *raw char = alloc_bytes(64)
+    n, re := await tcp_read(cfd, buf, 64)
+    if re.exists() {
+        free(buf)
+        cc := tcp_close(cfd)
+        cc.ignore()
+        return (2, re)
+    }
+    w, we := await tcp_write(cfd, buf, n)
+    we.ignore()
+    free(buf)
+    cc := tcp_close(cfd)
+    cc.ignore()
+    if w != n {
+        return (3, error { message: "short echo write" })
+    }
+    return (0, error {})
+}
+
+async func client(a: Addr) -> (int64, error) {
+    fd, ce := await net_dial_async(a)
+    if ce.exists() {
+        return (1, ce)
+    }
+    msg: *raw char = cbuf("ping")
+    w, we := await tcp_write(fd, msg, 4)
+    we.ignore()
+    if w != 4 {
+        free(msg)
+        cc := tcp_close(fd)
+        cc.ignore()
+        return (2, error { message: "short request write" })
+    }
+    n, re := await tcp_read(fd, msg, 4)
+    re.ignore()
+    msg[n] = 0
+    println(cstr(msg))
+    free(msg)
+    cc := tcp_close(fd)
+    cc.ignore()
+    return (0, error {})
+}
+
+async func amain() -> int32 {
+    lfd, le := net_listen(addr_loopback6(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    ne := fd_nonblock(lfd)
+    ne.ignore()
+    bound, be := net_local_addr(lfd)
+    if be.exists() {
+        printerr(be)
+        return 1
+    }
+    sf := serve(lfd)
+    cv, ce := await client(bound)
+    ce.ignore()
+    sv, se := await sf
+    se.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    if cv != 0 || sv != 0 {
+        return 1
+    }
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    se := reactor_start()
+    se.ignore()
+    rc := async_run(amain())
+    reactor_stop()
+    loop_free()
+    return rc
+}

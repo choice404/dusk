@@ -1,0 +1,46 @@
+// resolve_async over the names a box always has, with the lookup as the only pending
+// work on the loop: the helper thread's gauge is what keeps the await from being
+// declared idle. localhost is loopback in either family, a literal returns itself, and
+// the empty name is an error.
+@paradigm procedural
+@import std.async.net
+@import std.net
+@import std.async.future
+@import std.async.loop
+
+func is_loopback(a: Addr) -> bool {
+    return addr_eq(a, addr_loopback(80)) || addr_eq(a, addr_loopback6(80))
+}
+
+async func amain() -> int32 {
+    a, e := await resolve_async("localhost", 80)
+    if e.exists() {
+        printerr(e)
+        return 1
+    }
+    if is_loopback(a) {
+        println("ok")
+    } else {
+        println("bad")
+    }
+    a4, e4 := await resolve_async("127.0.0.1", 81)
+    e4.ignore()
+    s4 := addr_string(a4)
+    println(s4)
+    free(s4)
+    none, ne := await resolve_async("", 1)
+    if ne.exists() {
+        println("error")
+    } else {
+        println(addr_port(none))
+    }
+    return 0
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    rc := async_run(amain())
+    loop_free()
+    return rc
+}

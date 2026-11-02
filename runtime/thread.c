@@ -419,6 +419,88 @@ void *cool_chan_recv_future(void *ch, int64_t elem_size) {
     return fut;
 }
 
+extern int64_t cool_net_resolve(void *host, int64_t port, void *recs, int64_t cap);
+extern char *cool_net_resolve_error(void);
+
+/* The awaitable name resolution bridge owns a host copy until its detached
+   helper completes a 32 byte address future. The live-thread gauge is raised
+   before the helper is created and dropped strictly after the completion
+   returns, then the loop is kicked, exactly the cool_chan_recv bridge discipline. */
+typedef struct {
+    char *host;
+    int64_t port;
+    void *fut;
+    int64_t gen;
+} cool_resolve_bridge;
+
+/* Runs off the loop thread. Resolves one address and reads any resolver error
+   immediately on this same thread, then completes the future with the record
+   and the error staged behind a local. No address completes with a zero record
+   and an error. The completion is refusal tolerant, so a freed or already taken
+   awaiter loses quietly with no fault, the racing completer rule. The gauge is
+   dropped strictly after the completion returns and the loop kicked, so the
+   completion is visible under the loop lock before the count can reach zero.
+   Frees the host copy and returns NULL after kicking the loop. */
+static void *cool_net_resolve_bridge_main(void *arg) {
+    cool_resolve_bridge bridge = *(cool_resolve_bridge *)arg;
+    free(arg);
+    uint8_t rec[32] = {0};
+    int64_t count = cool_net_resolve(bridge.host, bridge.port, rec, 1);
+    void *err = NULL;
+    if (count < 0) {
+        err = cool_net_resolve_error();
+    } else if (count == 0) {
+        err = (void *)"no address found";
+    }
+    cool_future_complete(bridge.fut, bridge.gen, rec, &err);
+    free(bridge.host);
+    __atomic_fetch_sub(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
+    cool_loop_kick();
+    return NULL;
+}
+
+/* Mints a pending 32 byte future, copies host (NULL means empty), and spawns a
+   detached resolver helper. Returns the future handle; allocation failure is
+   fatal. On a create failure the raised gauge is dropped back and the future
+   is completed with a zero record and an error so the awaiter is never left
+   parked on a resolution that will never run; no awaiter can be parked yet at
+   that point since the handle has not been returned, so the drop-then-complete
+   order cannot false-fire the deadlock gate. */
+void *cool_net_resolve_future(void *host, int64_t port) {
+    void *fut = cool_future_new(32);
+    int64_t gen = cool_future_gen(fut);
+    cool_resolve_bridge *bridge = malloc(sizeof *bridge);
+    if (!bridge) {
+        cool_thread_fatal("fatal: out of memory\n");
+    }
+    bridge->host = strdup(host ? (char *)host : "");
+    if (!bridge->host) {
+        cool_thread_fatal("fatal: out of memory\n");
+    }
+    bridge->port = port;
+    bridge->fut = fut;
+    bridge->gen = gen;
+    // Raised before the create so the count can never dip below the number of
+    // resolutions in flight; a refused create takes it right back.
+    __atomic_fetch_add(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, cool_net_resolve_bridge_main, bridge) != 0) {
+        __atomic_fetch_sub(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
+        void *zero = calloc(1, 32);
+        if (!zero) {
+            cool_thread_fatal("fatal: out of memory\n");
+        }
+        void *err = (void *)"name resolution could not start a helper thread";
+        cool_future_complete(fut, gen, zero, &err);
+        free(zero);
+        free(bridge->host);
+        free(bridge);
+        return fut;
+    }
+    pthread_detach(thread);
+    return fut;
+}
+
 /* Mutexes and condition variables, thin wrappers over pthread with the named
    fault contract the rest of the runtime keeps. The mutex is the error
    checking kind, so relocking by the holder and unlocking by a non holder,

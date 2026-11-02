@@ -4,7 +4,9 @@
  *  keyword await consumes, the same Future<int64> std.async.io mints. The five
  *  cool_tcp_* shims live in the reactor: they open, probe, and drive the
  *  nonblocking handshakes; the readiness surface here folds them into async funcs
- *  that compose under async_run. IPv4 dotted literals only, no DNS. The readiness
+ *  that compose under async_run; the tcp_ functions take an IPv4 dotted literal
+ *  and the net_ and udp_ functions below take an Addr from std.net.addr, with
+ *  resolve_async as the loop's name lookup. The readiness
  *  mask the reactor completes with is 1 readable, 2 writable, 4 hangup, 8 error,
  *  ORed together; an 8 bit means the kernel reported a socket error while we
  *  parked, which we surface rather than spin on. */
@@ -12,6 +14,8 @@
 @import std.async.io
 @import std.async.future
 @import std.string
+@import std.net.addr
+@import std.os
 
 foreign "C" {
     func cool_tcp_listen(port: int64, backlog: int64) -> int64
@@ -195,4 +199,241 @@ export async func tcp_write(fd: int64, buf: *void, n: int64) -> (int64, error) {
         sent = sent + w
     }
     return (sent, error {})
+}
+
+// The cool_net_* nonblocking shims the Addr forms use, beside the cool_tcp_* family
+// above. cool_net_connect_nb and cool_net_accept_nb return a descriptor, -1 for
+// would block (a refusal for the connect), -3 for an exhausted fd table, and -2 for a
+// hard error with errno set. cool_net_send_to and cool_net_recv_from return the byte
+// count or -1 with errno, EAGAIN included. cool_net_resolve_future mints a 32 byte
+// future a detached helper completes with one AddrRec once getaddrinfo answers
+foreign "C" {
+    func cool_os_eagain() -> int64
+    func cool_net_connect_nb(rec: *void, path: *void) -> int64
+    func cool_net_accept_nb(lfd: int64, rec: *void) -> int64
+    func cool_net_send_to(fd: int64, buf: *void, n: int64, rec: *void) -> int64
+    func cool_net_recv_from(fd: int64, buf: *void, cap: int64, rec: *void) -> int64
+    func cool_net_resolve_future(host: *void, port: int64) -> *void
+}
+
+// EAGAIN, the errno a nonblocking socket sets when a send or receive would have had
+// to wait. EWOULDBLOCK is the same value on Linux, so one test covers both
+func net_eagain() -> int64 {
+    return cool_os_eagain()
+}
+
+// The readiness bit the reactor sets when the kernel reported a socket error while
+// the task was parked
+func net_mask_error() -> int64 {
+    return 8
+}
+
+// The error for an errno value read right after a failing shim, the std.net text
+func net_errno_error(code: int64) -> error {
+    return error { message: errstr(code) }
+}
+
+/** Connects a nonblocking, close on exec stream socket to a, the tcp_connect
+ *  handshake over any Addr: TCP on IPv4 or IPv6, or a unix domain stream socket.
+ *  cool_net_connect_nb mints the socket and starts the connect; it returns the fd
+ *  (connected or in progress), -1 for an immediate refusal, -3 when the fd table is
+ *  exhausted at the socket mint, or -2 for a hard failure whose errno text becomes the
+ *  error (Invalid argument for an empty unix path, File name too long past 107 bytes).
+ *  A pending fd is finished by awaiting writable(fd), then reading the deferred
+ *  SO_ERROR: 0 is connected, a positive errno is a deferred refusal carried as its
+ *  strerror text, and the fd is closed before that error returns. A unix connect
+ *  completes at once or fails; an EAGAIN from a full unix backlog is reported as the
+ *  connection was refused. a is a value and the unix path it may borrow is read only
+ *  during the call.
+ *  @param a the address to connect to
+ *  @return a connected, nonblocking client fd paired with an error that exists on any refusal
+ *  @example
+ *  fd, e := await net_dial_async(addr_loopback(8080))
+ *  if e.exists() {
+ *      return (1, e)
+ *  } */
+export async func net_dial_async(a: Addr) -> (int64, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(a, rec)
+    path: *raw char = addr_path_cbuf(a)
+    fd := cool_net_connect_nb(rec, path)
+    code := os_errno()
+    free(path)
+    free(rec)
+    if fd == -3 {
+        return (-1, error { message: "too many open files" })
+    }
+    if fd == -2 {
+        return (-1, net_errno_error(code))
+    }
+    if fd == -1 {
+        return (-1, error { message: "the connection was refused" })
+    }
+    m, e := await writable(fd)
+    e.ignore()
+    if (m & net_mask_error()) != 0 {
+        // The kernel reports a refused, timed out, or unreachable connect as an error
+        // wake, so the deferred SO_ERROR is read before the socket closes and its text
+        // is the message; the fixed sentence covers the rare wake with no code behind it
+        we := cool_tcp_connect_error(fd)
+        ce := fd_close(fd)
+        ce.ignore()
+        if we > 0 {
+            return (-1, net_errno_error(we))
+        }
+        return (-1, error { message: "the connection was refused" })
+    }
+    se := cool_tcp_connect_error(fd)
+    if se > 0 {
+        ce := fd_close(fd)
+        ce.ignore()
+        return (-1, net_errno_error(se))
+    }
+    if se == -1 {
+        ce := fd_close(fd)
+        ce.ignore()
+        return (-1, error { message: "the connect status could not be read" })
+    }
+    return (fd, error {})
+}
+
+/** Accepts one pending connection off the listening fd and returns it beside the
+ *  peer's address, tcp_accept with the peer. The loop is tcp_accept's: a -1 from
+ *  cool_net_accept_nb parks on readable(lfd) and retries when the listener wakes, a
+ *  mask error bit surfaces as an error rather than a spin, a -3 is the terminal too
+ *  many open files, and a -2 is a hard error carried as its errno text. The client fd
+ *  is nonblocking and close on exec. Over a listener from net_listen call
+ *  fd_nonblock(lfd) first, since cool_net_accept_nb on a blocking listener blocks
+ *  inside accept; over tcp_listen nothing more is needed. Over a unix listener the
+ *  peer is Addr.Unix(""), the unnamed address.
+ *  @param lfd the listening socket to accept on
+ *  @return the client fd and its peer address paired with an error; on failure the fd
+ *  is -1 and the address is Addr.Ip4(0, 0) */
+export async func net_accept_async(lfd: int64) -> (int64, Addr, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    mut client := cool_net_accept_nb(lfd, rec)
+    mut code := os_errno()
+    while client == -1 {
+        m, e := await readable(lfd)
+        e.ignore()
+        if (m & net_mask_error()) != 0 {
+            free(rec)
+            return (-1, Addr.Ip4(0, 0), error { message: "the listening socket reported an error while waiting to accept" })
+        }
+        client = cool_net_accept_nb(lfd, rec)
+        code = os_errno()
+    }
+    if client == -3 {
+        free(rec)
+        return (-1, Addr.Ip4(0, 0), error { message: "too many open files" })
+    }
+    if client == -2 {
+        free(rec)
+        return (-1, Addr.Ip4(0, 0), net_errno_error(code))
+    }
+    peer: Addr = addr_unpack(rec[0])
+    free(rec)
+    return (client, peer, error {})
+}
+
+/** Sends one datagram of n bytes from buf to the IP address to, over a nonblocking
+ *  datagram socket from udp_bind followed by fd_nonblock. One sendto per turn: a full
+ *  send buffer, EAGAIN, parks on writable(fd) and retries, a mask error bit surfaces
+ *  as an error, and any other failure is the errno text (Message too long past the
+ *  datagram limit, Address family not supported by protocol for a unix address). A
+ *  datagram is sent whole or not at all, so the count is n on success and 0 beside the
+ *  error otherwise.
+ *  @param fd the bound, nonblocking datagram socket
+ *  @param buf the source buffer
+ *  @param n the datagram length in bytes
+ *  @param to the IP address to send to
+ *  @return n paired with an empty error, or 0 paired with the failure */
+export async func udp_send_async(fd: int64, buf: *void, n: int64, to: Addr) -> (int64, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(to, rec)
+    mut sent := cool_net_send_to(fd, buf, n, rec)
+    mut code := os_errno()
+    while sent < 0 && code == net_eagain() {
+        m, e := await writable(fd)
+        e.ignore()
+        if (m & net_mask_error()) != 0 {
+            free(rec)
+            return (0, error { message: "the socket reported an error while waiting to send" })
+        }
+        sent = cool_net_send_to(fd, buf, n, rec)
+        code = os_errno()
+    }
+    free(rec)
+    if sent < 0 {
+        return (0, net_errno_error(code))
+    }
+    return (sent, error {})
+}
+
+/** Receives one datagram into buf, at most cap bytes, and returns the count beside
+ *  the sender's address, over a nonblocking datagram socket from udp_bind followed by
+ *  fd_nonblock. Each turn awaits readable(fd), checks the mask error bit, then does one
+ *  recvfrom; an EAGAIN after the wake parks again instead of returning, and any other
+ *  failure is the errno text. A datagram longer than cap is truncated to cap silently,
+ *  the socket API's rule. Stage buf through alloc_bytes, the channel element idiom.
+ *  @param fd the bound, nonblocking datagram socket
+ *  @param buf the destination buffer, staged through alloc_bytes
+ *  @param cap the buffer capacity in bytes
+ *  @return the count received and the sender's address paired with an error; on
+ *  failure the count is 0 and the address is Addr.Ip4(0, 0) */
+export async func udp_recv_async(fd: int64, buf: *void, cap: int64) -> (int64, Addr, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    mut got := -1
+    mut code := net_eagain()
+    while got < 0 && code == net_eagain() {
+        m, e := await readable(fd)
+        e.ignore()
+        if (m & net_mask_error()) != 0 {
+            free(rec)
+            return (0, Addr.Ip4(0, 0), error { message: "the socket reported an error while waiting to receive" })
+        }
+        got = cool_net_recv_from(fd, buf, cap, rec)
+        code = os_errno()
+    }
+    if got < 0 {
+        free(rec)
+        return (0, Addr.Ip4(0, 0), net_errno_error(code))
+    }
+    from: Addr = addr_unpack(rec[0])
+    free(rec)
+    return (got, from, error {})
+}
+
+/** Looks host up through getaddrinfo on a detached helper thread the runtime owns and
+ *  returns the first address it reported with port set, while the loop keeps cranking
+ *  every other task. The helper raises the live thread gauge before it starts, so an
+ *  await whose only pending work is this lookup is never declared idle. No flags are
+ *  passed, so a literal address returns itself and localhost returns the first line
+ *  /etc/hosts gives, in either family. On failure the error carries the resolver's own
+ *  sentence, Name or service not known for an unknown host among others, or no address
+ *  found for a name with no IP entry, so a program tests exists rather than matching
+ *  the text. One address, not the list: a program that needs every address calls
+ *  std.net's resolve before the loop starts, or on a spawned thread that hands the
+ *  vector back through a channel read with chan_recv_async. host is borrowed: an
+ *  async body runs when the loop first cranks the task, not at the call, so host is
+ *  read and copied for the helper then; keep it alive and unchanged until the await
+ *  returns.
+ *  @param host the host name or literal address to look up, borrowed
+ *  @param port the port written into the address returned
+ *  @return the first address paired with an error; on failure the address is Addr.Ip4(0, 0)
+ *  @example
+ *  a, e := await resolve_async("localhost", 80)
+ *  if e.exists() {
+ *      return (1, e)
+ *  }
+ *  fd, de := await net_dial_async(a) */
+export async func resolve_async(host: string, port: int64) -> (Addr, error) {
+    hbuf: *raw char = cbuf(host)
+    f: Future<AddrRec> = future_wrap(cool_net_resolve_future(hbuf, port))
+    free(hbuf)
+    rec, e := await f
+    if e.exists() {
+        return (Addr.Ip4(0, 0), e)
+    }
+    return (addr_unpack(rec), error {})
 }

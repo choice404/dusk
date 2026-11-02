@@ -1,0 +1,32 @@
+// A write through a Writer over a socket that was already closed is an error value,
+// Bad file descriptor, never a fault.
+@paradigm procedural
+@import std.net
+@import std.io
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    w: Writer = fd_writer(fd)
+    ce := net_close(fd)
+    ce.ignore()
+    we := write_line(w, "late")
+    if we.exists() {
+        println("error")
+    } else {
+        println("wrote")
+    }
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

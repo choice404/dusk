@@ -1665,9 +1665,251 @@ loop_free()
 
 The readiness mask is 1 for readable, 2 for writable, 4 for hangup, and 8 for error, ORed together. Only one watch may be armed on a file descriptor at a time; a second watch on an already armed fd is a fault. `future_free` on a readiness future does not disarm its watch. Stage `read_nb` and `write_nb` buffers through `alloc_bytes`, the same idiom `Pipe`'s own two fds use internally. Writing to a pipe whose read end is closed delivers `SIGPIPE` and kills the process; do not write to a pipe with no reader.
 
+## std.net
+
+Added in 1.17.1. Blocking sockets: TCP over IPv4 and IPv6 and unix domain stream sockets, all addressed through one value type, `Addr`. The address type lives in its own file, `std.net.addr`, and `@import std.net`, `@import std.net.udp`, and `@import std.async.net` each bring it, so a program names `Addr` and the `addr_` functions with no import of its own.
+
+### Addresses
+
+`Addr` is an enum with one variant per socket family the net modules bind:
+
+```text
+export enum Addr {
+    Ip4(ip: int64, port: int64),
+    Ip6(hi: uint64, lo: uint64, port: int64),
+    Unix(path: string),
+}
+```
+
+`Ip4.ip` is the 32 bit address as one host order integer, so `127.0.0.1` is `2130706433`. `Ip6.hi` and `Ip6.lo` are the 128 bits as two big endian halves, so `::1` is `hi` 0 and `lo` 1; the IPv6 scope id is not carried. `Unix.path` is a borrowed path of at most 107 bytes. Matching an `Addr` is supported and stable: the three variants are the three families this release binds, and a fourth would arrive as a release note, not a silent addition.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `addr_ip4(a: int64, b: int64, c: int64, d: int64, port: int64) -> Addr` | `a.b.c.d:port`. An octet outside `0..255` or a port outside `0..65535` is a misuse fault. |
+| `addr_ip6(hi: uint64, lo: uint64, port: int64) -> Addr`         | An IPv6 address from its two halves; the same port rule.       |
+| `addr_unix(path: string) -> Addr`                               | A unix socket path, borrowed, never copied or freed.           |
+| `addr_loopback(port: int64) -> Addr`                            | `127.0.0.1:port`.                                              |
+| `addr_loopback6(port: int64) -> Addr`                           | `[::1]:port`.                                                  |
+| `addr_parse(text: string, port: int64) -> (Addr, error)`        | A dotted quad or a bare IPv6 literal through `inet_pton`; anything else is the error `not an IP address: <text>`. |
+| `addr_port(a: Addr) -> int64`                                   | The port, or 0 for a unix address.                             |
+| `addr_with_port(a: Addr, port: int64) -> Addr`                  | A copy with the port replaced; a unix address comes back unchanged. |
+| `addr_string(a: Addr) -> string`                                | `127.0.0.1:8080`, `[::1]:443`, or the unix path, as a fresh heap string. |
+| `addr_eq(a: Addr, b: Addr) -> bool`                             | Same family and same fields; unix paths compare by bytes.      |
+
+`addr_parse` never looks a name up. It takes a literal address written without brackets or a zone and nothing else, so `localhost` is an error here exactly as `1.2.3` is; `resolve` is the name lookup. A port outside `0..65535` is the error `port out of range`, since this call has an error channel. `addr_ip4`, `addr_ip6`, and `addr_with_port` fault instead, printing a `fatal: net:` line and aborting the way `std.flags` does, because the octets and the port they take are a programmer's constants and a bad one is a bug, not input. `addr_string` formats through `inet_ntop`, so an IPv6 address prints in its canonical compressed form, `2001:db8::1` rather than the eight groups.
+
+```text
+@import std.net
+
+a, e := addr_parse("2001:db8::1", 443)
+if e.exists() {
+    return e
+}
+s := addr_string(a)
+println(s)
+free(s)
+
+local := addr_loopback(0)
+println(addr_eq(addr_with_port(local, 8080), addr_ip4(127, 0, 0, 1, 8080)))
+println(addr_port(addr_unix("/tmp/app.sock")))
+```
+
+An `Addr` is a value and never owns heap memory, so it returns from a function, sits in a `Vector`, crosses a `spawn` and a channel, and enters or leaves an `async func` with nothing to free. `Addr.Unix` borrows the string it was built from, so keep that string alive while the address is in use; an `Addr.Unix` that comes back from an accept or an address query is the unnamed address with the empty string. `addr_string` is the one call here that hands back memory: free its result.
+
+`AddrRec` and the three helpers `addr_pack`, `addr_unpack`, and `addr_path_cbuf` are the C boundary the net modules share. `AddrRec` is a 32 byte record, `family` 4, 6, or 1 for unix, a host order `port`, and 16 `ip` bytes in network order, laid out to match the runtime's own record; a unix path crosses beside it as a NUL terminated buffer. They are exported only because the sibling modules must name them, and a program never builds a record itself.
+
+### Blocking sockets
+
+Every function below blocks the thread that calls it, and a socket it hands back is an `int64` descriptor, the same number `fd_writer`, `fd_reader`, `Writer.Fd`, and `std.async.net` use. Each error is the OS's own `strerror` text read right after the call, `Connection refused`, `Address already in use`, `Too many open files`.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `net_dial(a: Addr) -> (int64, error)`                           | Connect a blocking, close on exec stream socket to `a`; `-1` and the OS failure when nothing listens or the unix path is missing. An interrupted connect is retried. |
+| `net_listen(a: Addr, backlog: int64) -> (int64, error)`         | Bind and listen; `SO_REUSEADDR` on an IP socket, `IPV6_V6ONLY` on IPv6, `backlog` of 0 or below reads as 128, port 0 asks the OS for one. Never unlinks a unix path. |
+| `net_accept(lfd: int64) -> (int64, Addr, error)`                | Block for one connection; the client descriptor and its peer address, `Addr.Unix("")` over a unix listener. On failure `-1` and `Addr.Ip4(0, 0)`. |
+| `net_close(fd: int64) -> error`                                 | `close(2)`, the same call `fd_close`, `writer_close`, and `reader_close` make. |
+| `net_shutdown_write(fd: int64) -> error`                        | The half close: the peer reads end of stream once it drains what was sent, and this side still reads. |
+| `net_shutdown_read(fd: int64) -> error`                         | This side's reads return end of stream; the peer is not told.  |
+| `net_local_addr(fd: int64) -> (Addr, error)`                    | `getsockname`; the port a listener bound to 0 was given.       |
+| `net_peer_addr(fd: int64) -> (Addr, error)`                     | `getpeername`; `Transport endpoint is not connected` on a listener, an unconnected socket, or a connection both sides have shut down. |
+| `net_set_nodelay(fd: int64, on: bool) -> error`                 | `TCP_NODELAY`; an error on a socket that is not TCP.           |
+| `net_set_read_timeout(fd: int64, ms: int64) -> error`           | `SO_RCVTIMEO` in milliseconds; a read that waits longer is the `read_buf` error `would block`. 0 clears it. |
+| `net_set_write_timeout(fd: int64, ms: int64) -> error`          | `SO_SNDTIMEO` in milliseconds; `write_buf` reports the count sent before the timeout beside `Resource temporarily unavailable`. 0 clears it. |
+| `resolve(host: string, port: int64) -> (*Vector<Addr>, error)`  | Blocking `getaddrinfo`; every address for `host` with `port` set, in the resolver's order, at most 16, as a fresh vector. |
+
+A connected socket is a stream the moment `std.io` wraps it, so there is no socket writer or reader of its own: `fd_writer(fd)` writes to it with `write_string`, `write_line`, and `write_buf`, `fd_reader(fd)` reads from it with `read_buf` and `read_to_end`, and `std.bufio` buffers either side. The server below is one thread per connection, the shape a small blocking server takes; the client writes a request, half closes, and reads the whole reply.
+
+```text
+@paradigm procedural
+@import std.net
+@import std.io
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    request, re := read_to_end(fd_reader(cfd))
+    re.ignore()
+    we := write_string(fd_writer(cfd), request)
+    we.ignore()
+    free(request)
+    ce := net_close(cfd)
+    ce.ignore()
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    te.ignore()
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    e := write_line(fd_writer(fd), "hello")
+    e.ignore()
+    se := net_shutdown_write(fd)
+    se.ignore()
+    reply, rre := read_to_end(fd_reader(fd))
+    rre.ignore()
+    print(reply)
+    free(reply)
+    ce := net_close(fd)
+    ce.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}
+```
+
+The half close is how a request and reply protocol ends its request without a length prefix or a delimiter. `net_shutdown_write(fd)` sends the peer a FIN: the peer's `read_to_end` returns once it has drained what was already sent, the peer writes its reply and closes, and this side's `read_to_end` returns in turn. The descriptor is still open after the shutdown and is still closed with `net_close`; a write through it after the shutdown returns `Broken pipe`, never a fault, since the runtime ignores `SIGPIPE` process wide. `net_shutdown_read` is the other direction, this side's reads return end of stream from now on and the peer is not told; it is rarer, and a server that wants no more of a request after it has read the header uses it.
+
+The listener is a descriptor too, so one `net_close` covers every socket a program opens, and closing a listener does not close the connections accepted from it. A unix listener leaves its socket file behind: `net_close` closes the descriptor and never unlinks, and `net_listen` over a path that exists fails with `Address already in use`, so remove a stale file with `remove_file` before the listen and remove the one this run created after the close.
+
+```text
+@import std.net
+@import std.fs
+
+path: string = "/tmp/app.sock"
+stale := remove_file(path)
+stale.ignore()
+lfd, le := net_listen(addr_unix(path), 0)
+...
+lc := net_close(lfd)
+lc.ignore()
+gone := remove_file(path)
+gone.ignore()
+```
+
+### Ownership and lifetime
+
+An `Addr` is a value and never owns heap memory. `Addr.Unix` borrows the path string it was built from, so keep that string alive while the address is in use; an `Addr.Unix` that comes back from `net_accept`, `net_local_addr`, or `net_peer_addr` is the unnamed address with the empty string. `addr_string` returns a fresh heap string you free.
+
+`resolve` returns a vector you own: `vec_free(v)` then `free(v)`. The addresses inside are plain values, so copying one out before the free is fine, and reading the vector after the free is the runtime's `use of a freed or stale pointer` fault.
+
+Whoever opened a descriptor closes it, once. `net_dial`, `net_listen`, `net_accept`, and `udp_bind` each hand you a descriptor; `net_close` and `fd_close` are `close(2)` on any descriptor, and `writer_close` and `reader_close` are the same call for a descriptor above 2 (they flush and keep the standard three open), so a socket wrapped in both a `Writer` and a `Reader` is closed through one of them, not both, and a socket that landed on descriptor 0 to 2 because the program closed its standard stream is closed through `net_close`. Closing a listener does not close the connections accepted from it. Closing a listener does not wake a thread blocked in `net_accept` on it either: the blocked call keeps the old socket, the descriptor number is reused by the next open, and a `join` on that thread waits forever. To stop a blocking server, call `net_shutdown_read(lfd)` from the other thread, which makes the blocked `net_accept` return `Invalid argument`, then `join`, then `net_close`.
+
+Half close: `net_shutdown_write(fd)` tells the peer you are done sending, its `read_to_end` returns, and you still read the reply. A `Writer` over a socket shut down for writing, or over a socket the peer closed, returns `Broken pipe` from the next write and never faults; `SIGPIPE` is ignored process wide.
+
+A `Writer` or `Reader` over a closed socket returns an error, `Bad file descriptor`, never a fault, unless a later open has reused the number, in which case the bytes land in that stream; close once and drop every copy.
+
+A unix listener leaves its socket file behind; `net_close` closes the descriptor and never unlinks, so `remove_file(path)` after the close, and before a `net_listen` that reuses the path.
+
+A server thread is a `spawn` that captures the listener fd and joins at the end, the shape above; a datagram or stream socket crosses a `spawn` as its `int64`, and an `Addr` crosses as a value.
+
+Blocking only: every function in `std.net` and `std.net.udp` blocks the calling thread, and calling one inside an `async func` stalls every task on the loop; the checker cannot see it. `std.async.net` is the surface for the loop, and `resolve_async` is the loop's name lookup.
+
+### Name resolution
+
+`resolve(host, port)` is blocking `getaddrinfo(host, NULL, AF_UNSPEC, SOCK_STREAM)` with no flags, so a literal address returns itself, `localhost` returns what `/etc/hosts` says in its order, `::1` first on a box that lists it first, and a name goes to the resolver the OS configured. Every entry is `Ip4` or `Ip6` with `port` set, in the resolver's order, at most 16. On failure the vector is empty and the error carries the resolver's own sentence, `Name or service not known` for an unknown host among others, so test `exists` rather than matching the text.
+
+```text
+@import std.net
+@import std.vector
+
+v, e := resolve("localhost", 80)
+if e.exists() {
+    return e
+}
+fd, de := net_dial(vec_get(v, 0))
+vec_free(v)
+free(v)
+if de.exists() {
+    return de
+}
+```
+
+A lookup against `localhost` answers in microseconds; a real name against a slow resolver takes seconds, and during that time the calling thread does nothing else. Inside an `async func` that thread is the loop, so every timer, accept, and read waits with it, and the checker cannot see the stall. An async program has three ways out, named in the order to reach for them: call `resolve` before the loop starts, right for a client with one host and free; call `std.async.net`'s `resolve_async(host, port)`, which resolves the first address on a helper thread the runtime owns while the loop keeps cranking, right for a server that resolves per request; or, when the loop needs every address and not just the first, `spawn` a thread that calls `resolve` and hands the vector back through a channel read with `chan_recv_async`.
+
+## std.net.udp
+
+Added in 1.17.1. Blocking datagram sockets over IPv4 and IPv6, addressed through the same `Addr` as `std.net`. The module imports `std.net`, so `@import std.net.udp` brings the address functions and the socket calls that apply to a datagram socket too: `net_close`, `net_local_addr`, `net_set_read_timeout`, and `net_set_write_timeout`. Every call here blocks the calling thread; `std.async.net`'s `udp_send_async` and `udp_recv_async` are the loop's forms, over a socket from `udp_bind` set nonblocking with `fd_nonblock`.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `udp_bind(a: Addr) -> (int64, error)`                           | Open a blocking, close on exec datagram socket of `a`'s family and bind it; `IPV6_V6ONLY` on IPv6, port 0 asks the OS for one. A unix address is the error `udp_bind takes an IP address` before any syscall. On failure `-1`. |
+| `udp_send_to(fd: int64, buf: *void, n: int64, to: Addr) -> (int64, error)` | One `sendto` of the `n` bytes at `buf` to `to`; a datagram goes whole or not at all, so the count is `n`, or 0 with the OS failure: `Message too long` past the datagram limit, `Resource temporarily unavailable` on a full nonblocking buffer. An interrupted send is retried. |
+| `udp_recv_from(fd: int64, buf: *void, cap: int64) -> (int64, Addr, error)` | One `recvfrom` of at most `cap` bytes into `buf`, the sender's address beside the count. A longer datagram is truncated to `cap` silently. A receive timeout or a nonblocking socket with nothing queued is the error `would block`, the `read_buf` spelling. On failure 0 and `Addr.Ip4(0, 0)`. |
+
+A datagram socket is a descriptor like a stream socket, and the two sockets below trade one datagram each way in a single thread: both bind port 0 on loopback, each reads its port back with `net_local_addr`, and the receiver answers to the address `udp_recv_from` handed it. A client that only sends and awaits replies binds `addr_loopback(0)` or `addr_ip4(0, 0, 0, 0, 0)`.
+
+```text
+@import std.net.udp
+@import std.string
+
+a, ae := udp_bind(addr_loopback(0))
+if ae.exists() {
+    return ae
+}
+b, be := udp_bind(addr_loopback(0))
+if be.exists() {
+    return be
+}
+b_addr, le := net_local_addr(b)
+le.ignore()
+
+ping: *raw char = cbuf("ping")
+sent, se := udp_send_to(a, ping, 4, b_addr)
+free(ping)
+if se.exists() {
+    return se
+}
+
+buf: *raw char = alloc_bytes(512)
+n, from, re := udp_recv_from(b, buf, 512)
+if re.exists() {
+    free(buf)
+    return re
+}
+back, pe := udp_send_to(b, buf, n, from)
+pe.ignore()
+free(buf)
+
+c1 := net_close(a)
+c1.ignore()
+c2 := net_close(b)
+c2.ignore()
+```
+
+`udp_recv_from` fills `buf` up to `cap` and drops whatever did not fit, with no error and no second read that recovers the tail, so size the buffer for the largest datagram you expect; 65507 bytes is the most an IPv4 datagram carries. `net_set_read_timeout(fd, ms)` bounds the wait, and a receive that times out is the error `would block`, so a server loop that polls a socket between other work tests that text, or `exists` alone when any failure ends the loop.
+
+Unix datagram sockets and connected UDP are not in this release: `udp_bind` refuses an `Addr.Unix` before any syscall, and `udp_send_to` over a unix address is `Address family not supported by protocol` from the OS. A datagram socket is closed with `net_close`, once, like any other descriptor, and it crosses a `spawn` as its `int64`.
+
 ## std.async.net
 
-TCP over the readiness reactor. Sockets are non blocking file descriptors the reactor watches, so this module is a thin layer over `std.async.io`. The connecting and accepting calls are `async func`s that await `readable` or `writable` and retry; the setup and teardown calls are synchronous. Literal IPv4 addresses only, no name resolution.
+TCP and UDP over the readiness reactor. Sockets are non blocking file descriptors the reactor watches, so this module is a thin layer over `std.async.io`. The connecting, accepting, sending, and receiving calls are `async func`s that await `readable` or `writable` and retry; the setup and teardown calls are synchronous. The seven `tcp_` functions from 0.4.x stay as they were, loopback IPv4 by literal and no name resolution; the five functions added in 1.17.1 take and return the `Addr` value `std.net.addr` defines, so `@import std.async.net` names `Addr` and the `addr_` functions with no import of its own, and `resolve_async` is the loop's name lookup.
 
 | Function                                                        | Description                                                    |
 | --------------------------------------------------------------- | -------------------------------------------------------------- |
@@ -1678,8 +1920,13 @@ TCP over the readiness reactor. Sockets are non blocking file descriptors the re
 | `async func tcp_read(fd: int64, buf: *void, cap: int64) -> (int64, error)` | Await readability and read once; 0 is end of stream. |
 | `async func tcp_write(fd: int64, buf: *void, n: int64) -> (int64, error)` | Write every byte, awaiting writability as needed.     |
 | `tcp_close(fd: int64) -> error`                                  | Close a descriptor.                                            |
+| `async func net_dial_async(a: Addr) -> (int64, error)`           | The `tcp_connect` handshake over any `Addr`: TCP on IPv4 or IPv6, or a unix stream socket. A pending connect awaits `writable` then reads `SO_ERROR`; a refusal is an error value. |
+| `async func net_accept_async(lfd: int64) -> (int64, Addr, error)` | `tcp_accept` with the peer address beside the client descriptor, `Addr.Unix("")` over a unix listener. |
+| `async func udp_send_async(fd: int64, buf: *void, n: int64, to: Addr) -> (int64, error)` | One datagram to `to`; a full send buffer awaits `writable` and retries. `n` on success, 0 beside the error otherwise. |
+| `async func udp_recv_async(fd: int64, buf: *void, cap: int64) -> (int64, Addr, error)` | Await `readable`, then one `recvfrom`; the count and the sender's address. A datagram longer than `cap` is truncated to `cap`. |
+| `async func resolve_async(host: string, port: int64) -> (Addr, error)` | The first address `getaddrinfo` returns for `host` with `port` set, resolved on a helper thread while the loop keeps cranking. |
 
-The four `async func` heads are shown as declared: a call to one mints a task and a future rather than running the body, so it is `await`ed inside another `async func`, and awaiting it is legal nowhere else. A server accept loop and its clients run as tasks under `async_run`.
+The nine `async func` heads are shown as declared: a call to one mints a task and a future rather than running the body, so it is `await`ed inside another `async func`, and awaiting it is legal nowhere else. A server accept loop and its clients run as tasks under `async_run`.
 
 ```text
 @paradigm procedural
@@ -1699,6 +1946,84 @@ async func serve(lfd: int64) -> int64 {
     return w
 }
 ```
+
+### Sockets over Addr
+
+`net_dial_async` is `tcp_connect` over the address value: `cool_net_connect_nb` mints a nonblocking, close on exec stream socket of `a`'s family and starts the connect, a pending handshake parks on `writable(fd)`, and the deferred `SO_ERROR` decides the result, 0 for connected and a positive errno for a refusal carried as its `strerror` text, `Connection refused` for a closed port. An immediate refusal is `the connection was refused`, a full unix backlog included, since the kernel reports that as `EAGAIN`; a hard failure before any watch is armed carries the OS text, `Invalid argument` for an empty unix path and `File name too long` past 107 bytes; an exhausted descriptor table is `too many open files`. The descriptor it hands back is nonblocking and ready for `tcp_read` and `tcp_write`, and `tcp_close`, `net_close`, and `fd_close` are the same `close(2)`.
+
+`net_accept_async` is `tcp_accept` with the peer: the client descriptor is nonblocking and close on exec, and the address beside it is the peer's, `Addr.Unix("")` over a unix listener since a connecting unix socket has no path of its own. The listener may come from `tcp_listen`, which is already nonblocking, or from `std.net`'s `net_listen`, which is blocking and must go through `fd_nonblock(lfd)` before the first accept; a blocking listener would otherwise hold the loop inside `accept` until a client arrives. The same rule applies to `tcp_accept` over a `net_listen` descriptor. The accept loop is the one `tcp_accept` runs: a would block parks on `readable(lfd)` and retries, a readiness error bit surfaces as an error rather than a spin, and `too many open files` is terminal, never re armed against a listener that stays ready with a connection the descriptor table cannot receive.
+
+```text
+@paradigm procedural
+@import std.async.net
+@import std.net
+
+async func serve(lfd: int64) -> (int64, error) {
+    cfd, peer, ae := await net_accept_async(lfd)
+    if ae.exists() {
+        return (-1, ae)
+    }
+    cc := tcp_close(cfd)
+    cc.ignore()
+    return (addr_port(peer), error {})
+}
+
+async func amain() -> int32 {
+    lfd, le := net_listen(addr_loopback6(0), 0)
+    le.ignore()
+    ne := fd_nonblock(lfd)
+    ne.ignore()
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    sf := serve(lfd)
+    fd, de := await net_dial_async(bound)
+    de.ignore()
+    ...
+}
+```
+
+### Datagrams on the loop
+
+A datagram socket for the loop comes from `std.net.udp`'s `udp_bind` followed by `fd_nonblock(fd)`; the socket stays an `int64`, so `net_local_addr`, `net_close`, and the timeouts from `std.net` apply to it unchanged. `udp_send_async` is one `sendto` per turn: a full send buffer, `EAGAIN`, parks on `writable(fd)` and retries, and any other failure carries the OS text, `Message too long` past the datagram limit. A datagram is sent whole or not at all, so the count is `n` on success and 0 beside the error. `udp_recv_async` awaits `readable(fd)`, checks the readiness error bit, then does one `recvfrom`; an `EAGAIN` after the wake, a spurious readiness, re parks instead of returning, so a receive task minted before the sender runs sits on the armed socket and wakes when the datagram lands. A datagram longer than `cap` is truncated to `cap` silently, the socket API's rule, and the sender's address comes back beside the count as a value.
+
+```text
+async func receiver(fd: int64) -> (int64, error) {
+    buf: *raw char = alloc_bytes(16)
+    n, from, e := await udp_recv_async(fd, buf, 16)
+    free(buf)
+    if e.exists() {
+        return (0, e)
+    }
+    s := addr_string(from)
+    println(s)
+    free(s)
+    return (n, error {})
+}
+```
+
+### The loop's name lookup
+
+`resolve_async(host, port)` is the one lookup that never stalls the loop. `std.net`'s `resolve` is blocking `getaddrinfo` on the calling thread, and inside an `async func` that thread is the loop, so every timer, accept, and read waits for the resolver with it and the checker cannot see the stall. `resolve_async` instead hands the name to a detached helper thread the runtime owns, which runs the same `getaddrinfo` and completes a future the task awaits; the helper raises the live thread gauge before it starts and drops it after the completion, so an await whose only pending work is this lookup is never declared idle. The result is the first address the resolver returned, with `port` set, in either family: `localhost` is whichever loopback `/etc/hosts` lists first, a literal returns itself. On failure the address is `Addr.Ip4(0, 0)` and the error carries the resolver's own sentence, `Name or service not known` for an unknown host, `no address found` for a name with no IP entry, so test `exists` rather than matching the text. `host` is borrowed and copied for the helper before the call returns. An async body runs when the loop first cranks its task, so `host` is read then, not at the call; keep it alive and unchanged until the await returns. And a helper is a thread the loop owns until it completes, so do not `loop_free` while a `resolve_async` may still be running: a completion into a freed loop is a fault.
+
+One address, not the list. A future's element is a fixed size copy the helper writes, so it carries one `AddrRec` and never a vector; one address is what a client dials. A program on the loop that needs every address for a name has two ways, named in the order to reach for them: call `resolve` before the loop starts, free for a client with one host, or `spawn` a thread that calls `resolve` and hands the vector back through a channel read with `chan_recv_async`.
+
+```text
+async func client(port: int64) -> (int64, error) {
+    a, ae := await resolve_async("127.0.0.1", port)
+    if ae.exists() {
+        return (1, ae)
+    }
+    fd, ce := await net_dial_async(a)
+    if ce.exists() {
+        return (2, ce)
+    }
+    ...
+}
+```
+
+### Ownership on the loop
+
+Every address that enters or leaves these functions is a value: an `Addr` never owns heap memory, so the peer from `net_accept_async`, the sender from `udp_recv_async`, and the result of `resolve_async` are kept, compared with `addr_eq`, or formatted with `addr_string` with nothing to free but `addr_string`'s text. An `Addr.Unix` passed to `net_dial_async` borrows its path only for the duration of the call. Whoever opened a descriptor closes it, once: `net_dial_async` and `net_accept_async` each hand you one, `tcp_close`, `net_close`, and `fd_close` are the same `close(2)`, and a descriptor is closed only after every watch on it has fired or been disarmed, the `std.async.io` rule. The buffers `udp_send_async`, `udp_recv_async`, `tcp_read`, and `tcp_write` take are yours, staged through `alloc_bytes` and freed after the await returns.
 
 ## Async keywords
 

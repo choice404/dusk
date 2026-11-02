@@ -1,0 +1,69 @@
+// The echo over a unix domain stream socket. net_listen never unlinks, so a stale
+// file from a dead run is removed before the listen and the file this run creates
+// is removed after the close. The peer of a unix connection is the unnamed address.
+@paradigm procedural
+@import std.net
+@import std.io
+@import std.fs
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    if !addr_eq(peer, addr_unix("")) {
+        printerr("unexpected peer")
+    }
+    text, re := read_to_end(fd_reader(cfd))
+    re.ignore()
+    w: Writer = fd_writer(cfd)
+    pe := write_string(w, "echo:")
+    pe.ignore()
+    te := write_string(w, text)
+    te.ignore()
+    free(text)
+    ce := net_close(cfd)
+    ce.ignore()
+}
+
+func main() -> int32 {
+    path: string = "/tmp/dusk_net_unix_echo.sock"
+    stale := remove_file(path)
+    stale.ignore()
+    a: Addr = addr_unix(path)
+    lfd, le := net_listen(a, 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    fd, de := net_dial(a)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    e1 := write_line(fd_writer(fd), "unix")
+    e1.ignore()
+    se := net_shutdown_write(fd)
+    se.ignore()
+    reply, re := read_to_end(fd_reader(fd))
+    re.ignore()
+    print(reply)
+    free(reply)
+    ce := net_close(fd)
+    ce.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    gone := remove_file(path)
+    gone.ignore()
+    return 0
+}

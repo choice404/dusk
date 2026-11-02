@@ -1,0 +1,55 @@
+// The option setters. TCP_NODELAY and a send timeout take on a connected TCP socket;
+// TCP_NODELAY on a unix stream socket is an error, since the option is TCP's.
+@paradigm procedural
+@import std.net
+@import std.fs
+
+func report(e: error) -> void {
+    if e.exists() {
+        println("error")
+    } else {
+        println("ok")
+    }
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    report(net_set_nodelay(fd, true))
+    report(net_set_write_timeout(fd, 100))
+    path: string = "/tmp/dusk_net_setopt.sock"
+    stale := remove_file(path)
+    stale.ignore()
+    ulfd, ule := net_listen(addr_unix(path), 0)
+    if ule.exists() {
+        printerr(ule)
+        return 1
+    }
+    ufd, ude := net_dial(addr_unix(path))
+    if ude.exists() {
+        printerr(ude)
+        return 1
+    }
+    report(net_set_nodelay(ufd, true))
+    c1 := net_close(ufd)
+    c1.ignore()
+    c2 := net_close(ulfd)
+    c2.ignore()
+    gone := remove_file(path)
+    gone.ignore()
+    c3 := net_close(fd)
+    c3.ignore()
+    c4 := net_close(lfd)
+    c4.ignore()
+    return 0
+}

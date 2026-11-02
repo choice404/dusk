@@ -1,0 +1,63 @@
+// The loopback echo over IPv6: the listener binds [::1]:0, the client dials the
+// address read back from it, and the bytes come back behind "echo:".
+@paradigm procedural
+@import std.net
+@import std.io
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    if !addr_eq(addr_with_port(peer, 0), addr_loopback6(0)) {
+        printerr("unexpected peer")
+    }
+    text, re := read_to_end(fd_reader(cfd))
+    re.ignore()
+    w: Writer = fd_writer(cfd)
+    pe := write_string(w, "echo:")
+    pe.ignore()
+    te := write_string(w, text)
+    te.ignore()
+    free(text)
+    ce := net_close(cfd)
+    ce.ignore()
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback6(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    e1 := write_line(fd_writer(fd), "v6")
+    e1.ignore()
+    se := net_shutdown_write(fd)
+    se.ignore()
+    reply, re := read_to_end(fd_reader(fd))
+    re.ignore()
+    print(reply)
+    free(reply)
+    ce := net_close(fd)
+    ce.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

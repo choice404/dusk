@@ -1,0 +1,399 @@
+/** std.net.addr: the socket address value std.net, std.net.udp, and std.async.net all
+ *  take and hand back. An Addr is an IPv4 address and port, an IPv6 address and port, or
+ *  a unix domain socket path, and it is a plain enum value: it returns from a function,
+ *  sits in a vector, crosses a spawn and a channel, and enters or leaves an async func the
+ *  way any other value does. An Addr never owns heap memory. Addr.Unix borrows the path
+ *  string it was built from, so that string stays alive while the address is in use, and
+ *  the only function here that hands back memory is addr_string, whose text the caller
+ *  frees.
+ *
+ *  Parsing and formatting go through two shims in the C runtime, cool_addr_parse over
+ *  inet_pton and cool_addr_format over inet_ntop, so the text forms are the C library's
+ *  own, the canonical IPv6 compression included. Neither one ever looks a name up:
+ *  addr_parse takes a literal address and nothing else, and resolve in std.net is the
+ *  name lookup.
+ *
+ *  AddrRec is the 32 byte record every socket shim reads or fills, laid out exactly as
+ *  the runtime's cool_net_rec. addr_pack, addr_unpack, and addr_path_cbuf convert between
+ *  it and an Addr for the sibling modules; a program never builds one itself.
+ *
+ *  Every exported name carries the addr_ prefix, since an exported dusk function takes a
+ *  bare link symbol and libc owns inet_pton, inet_ntop, and the rest of the socket API. */
+
+@paradigm procedural
+
+@import std.string
+
+// The two address shims in the C runtime. cool_addr_parse fills a zeroed record from a
+// bare IPv4 or IPv6 literal and returns 4, 6, or 0 for neither; cool_addr_format writes
+// the bare address text of a family 4 or 6 record and returns its length or -1. abort
+// is libc's own, the misuse fault std.flags and std.vector already raise
+foreign "C" {
+    func cool_addr_parse(text: *void, rec: *void) -> int64
+    func cool_addr_format(rec: *void, out: *void, cap: int64) -> int64
+    func abort() -> void
+}
+
+/** A socket address. Ip4 carries the 32 bit address as one host order integer, so
+ *  127.0.0.1 is 2130706433, and a port. Ip6 carries the 128 bit address as two big endian
+ *  halves, so ::1 is hi 0 and lo 1, and a port; a scope id is not carried. Unix carries a
+ *  borrowed path of at most 107 bytes and no port. Build one with addr_ip4, addr_ip6,
+ *  addr_unix, addr_loopback, addr_loopback6, or addr_parse. Matching an Addr is supported
+ *  and stable: these three variants are the three socket families the net modules bind. */
+export enum Addr {
+    Ip4(ip: int64, port: int64),
+    Ip6(hi: uint64, lo: uint64, port: int64),
+    Unix(path: string),
+}
+
+/** The 32 byte C boundary record every socket shim reads or fills. family is 4, 6, or 1
+ *  for unix, port is in host order, and ip holds the address bytes in network order with
+ *  an IPv4 address in the first four. A unix record carries no path; the path crosses
+ *  beside it as a NUL terminated buffer from addr_path_cbuf. Exported because the sibling
+ *  net modules name it; programs never build one. */
+export struct AddrRec {
+    family: int64,
+    port: int64,
+    ip: char[16],
+}
+
+// Prints a "fatal: net: ..." line naming the misused call and the bad value, then
+// aborts. A literal address is a programmer's constant, so a bad octet or port is a
+// program bug, the std.flags contract
+func addr_fault(call: string, what: string, value: int64, bounds: string) -> void {
+    text: string = int_to_string(value)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "fatal: net: ")
+    sb_push(b, call)
+    sb_push(b, ": ")
+    sb_push(b, what)
+    sb_push(b, " ")
+    sb_push(b, text)
+    sb_push(b, " is outside ")
+    sb_push(b, bounds)
+    printerr(sb_cstr(b))
+    abort()
+}
+
+// Faults when port cannot sit in a TCP or UDP header
+func addr_check_port(call: string, port: int64) -> void {
+    if port < 0 || port > 65535 {
+        addr_fault(call, "port", port, "0..65535")
+    }
+}
+
+// Faults when an IPv4 octet is outside a byte
+func addr_check_octet(octet: int64) -> void {
+    if octet < 0 || octet > 255 {
+        addr_fault("addr_ip4", "octet", octet, "0..255")
+    }
+}
+
+/** An IPv4 address from its four dotted octets, a.b.c.d, and a port. A literal address
+ *  is a programmer's constant, so an octet outside 0..255 or a port outside 0..65535 is a
+ *  misuse fault that prints a "fatal: net:" line and aborts, not an error value.
+ *  @param a the first octet, the most significant byte
+ *  @param b the second octet
+ *  @param c the third octet
+ *  @param d the fourth octet, the least significant byte
+ *  @param port the port, 0 asking the OS for one at bind
+ *  @return the Addr.Ip4 value
+ *  @example
+ *  a := addr_ip4(127, 0, 0, 1, 8080)
+ *  s := addr_string(a)
+ *  println(s)
+ *  free(s) */
+export func addr_ip4(a: int64, b: int64, c: int64, d: int64, port: int64) -> Addr {
+    addr_check_octet(a)
+    addr_check_octet(b)
+    addr_check_octet(c)
+    addr_check_octet(d)
+    addr_check_port("addr_ip4", port)
+    return Addr.Ip4((a << 24) | (b << 16) | (c << 8) | d, port)
+}
+
+/** An IPv6 address from its two big endian 64 bit halves and a port: hi holds the first
+ *  eight bytes and lo the last eight, so ::1 is addr_ip6(0u64, 1u64, port). A port outside
+ *  0..65535 is the misuse fault addr_ip4 raises.
+ *  @param hi the high 64 bits of the address
+ *  @param lo the low 64 bits of the address
+ *  @param port the port, 0 asking the OS for one at bind
+ *  @return the Addr.Ip6 value */
+export func addr_ip6(hi: uint64, lo: uint64, port: int64) -> Addr {
+    addr_check_port("addr_ip6", port)
+    return Addr.Ip6(hi, lo, port)
+}
+
+/** A unix domain socket address over path. The path is borrowed for the address's life,
+ *  never copied or freed, so keep it alive while the address is in use. A path over 107
+ *  bytes is refused later, with File name too long, by the call that binds or dials it.
+ *  @param path the socket file path, borrowed
+ *  @return the Addr.Unix value */
+export func addr_unix(path: string) -> Addr {
+    return Addr.Unix(path)
+}
+
+/** The IPv4 loopback address 127.0.0.1 on port.
+ *  @param port the port, 0 asking the OS for one at bind
+ *  @return the Addr.Ip4 loopback value */
+export func addr_loopback(port: int64) -> Addr {
+    return addr_ip4(127, 0, 0, 1, port)
+}
+
+/** The IPv6 loopback address ::1 on port.
+ *  @param port the port, 0 asking the OS for one at bind
+ *  @return the Addr.Ip6 loopback value */
+export func addr_loopback6(port: int64) -> Addr {
+    return addr_ip6(0u64, 1u64, port)
+}
+
+/** Parses a literal IP address, a dotted quad such as 127.0.0.1 or an IPv6 literal such
+ *  as 2001:db8::1 written without brackets or a zone, and pairs it with port. Anything
+ *  else, a host name included, is the error "not an IP address: " followed by the text;
+ *  this never looks a name up, resolve in std.net does. A port outside 0..65535 is the
+ *  error "port out of range" rather than a fault, since this call has an error channel.
+ *  text is borrowed.
+ *  @param text the literal address to parse
+ *  @param port the port to pair it with
+ *  @return the parsed Addr paired with an error; on failure the Addr is Addr.Ip4(0, 0)
+ *  @example
+ *  a, e := addr_parse("::1", 443)
+ *  if e.exists() {
+ *      return e
+ *  } */
+export func addr_parse(text: string, port: int64) -> (Addr, error) {
+    if port < 0 || port > 65535 {
+        return (Addr.Ip4(0, 0), error { message: "port out of range" })
+    }
+    buf: *raw char = cbuf(text)
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    family: int64 = cool_addr_parse(buf, rec)
+    free(buf)
+    if family == 0 {
+        free(rec)
+        return (Addr.Ip4(0, 0), error { message: "not an IP address: " + text })
+    }
+    rec[0].port = port
+    a: Addr = addr_unpack(rec[0])
+    free(rec)
+    return (a, error {})
+}
+
+/** The port of an address.
+ *  @param a the address to read
+ *  @return the port, or 0 for a unix address */
+export func addr_port(a: Addr) -> int64 {
+    match a {
+        Ip4(ip, port) => {
+            return port
+        },
+        Ip6(hi, lo, port) => {
+            return port
+        },
+        Unix(path) => {
+            return 0
+        },
+    }
+}
+
+/** A copy of a with its port replaced. A unix address has no port and comes back
+ *  unchanged. A port outside 0..65535 is the misuse fault addr_ip4 raises.
+ *  @param a the address to copy
+ *  @param port the new port
+ *  @return the copy with port in place of the old one */
+export func addr_with_port(a: Addr, port: int64) -> Addr {
+    match a {
+        Ip4(ip, old) => {
+            addr_check_port("addr_with_port", port)
+            return Addr.Ip4(ip, port)
+        },
+        Ip6(hi, lo, old) => {
+            addr_check_port("addr_with_port", port)
+            return Addr.Ip6(hi, lo, port)
+        },
+        Unix(path) => {
+            return Addr.Unix(path)
+        },
+    }
+}
+
+// The bare address text of an IP address through inet_ntop, a fresh heap string. The
+// buffer holds the longest IPv6 text, 45 bytes and the NUL, with room to spare
+func addr_ip_text(a: Addr) -> string {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(a, rec)
+    out: *raw char = alloc_bytes(64)
+    n: int64 = cool_addr_format(rec, out, 64)
+    free(rec)
+    if n < 0 {
+        free(out)
+        printerr("fatal: net: addr_string: the address could not be formatted")
+        abort()
+    }
+    text: string = substring(cstr(out), 0, n)
+    free(out)
+    return text
+}
+
+/** The text of an address as a fresh heap string the caller frees: 127.0.0.1:8080 for
+ *  IPv4, [::1]:443 for IPv6 with the canonical inet_ntop compression, or a copy of the
+ *  path for a unix address.
+ *  @param a the address to format
+ *  @return the text, a fresh heap string the caller owns and frees */
+export func addr_string(a: Addr) -> string {
+    match a {
+        Ip4(ip, port) => {
+            host: string = addr_ip_text(a)
+            out: string = f"{host}:{port}"
+            free(host)
+            return out
+        },
+        Ip6(hi, lo, port) => {
+            host: string = addr_ip_text(a)
+            out: string = f"[{host}]:{port}"
+            free(host)
+            return out
+        },
+        Unix(path) => {
+            return substring(path, 0, str_len(path))
+        },
+    }
+}
+
+// The family code an AddrRec carries for a: 4, 6, or 1 for unix
+func addr_family(a: Addr) -> int64 {
+    match a {
+        Ip4(ip, port) => {
+            return 4
+        },
+        Ip6(hi, lo, port) => {
+            return 6
+        },
+        Unix(path) => {
+            return 1
+        },
+    }
+}
+
+// The path of a unix address, borrowed, or the empty string for an IP address
+func addr_path(a: Addr) -> string {
+    match a {
+        Ip4(ip, port) => {
+            return ""
+        },
+        Ip6(hi, lo, port) => {
+            return ""
+        },
+        Unix(path) => {
+            return path
+        },
+    }
+}
+
+/** Whether two addresses are the same: the same family and the same fields, a unix path
+ *  compared by its bytes.
+ *  @param a the first address
+ *  @param b the second address
+ *  @return true when a and b name the same address */
+export func addr_eq(a: Addr, b: Addr) -> bool {
+    if addr_family(a) != addr_family(b) {
+        return false
+    }
+    if addr_family(a) == 1 {
+        return str_eq(addr_path(a), addr_path(b))
+    }
+    ra: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    rb: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(a, ra)
+    addr_pack(b, rb)
+    mut same: bool = ra[0].port == rb[0].port
+    for i in 0..16 {
+        if ra[0].ip[i] != rb[0].ip[i] {
+            same = false
+        }
+    }
+    free(ra)
+    free(rb)
+    return same
+}
+
+// Writes the eight bytes of half into rec's ip bytes at base, most significant first
+func addr_put_half(rec: *raw AddrRec, base: int64, half: uint64) -> void {
+    for i in 0..8 {
+        shift: uint64 = uint64(56 - 8 * i)
+        rec[0].ip[base + i] = char((half >> shift) & 255u64)
+    }
+}
+
+/** Writes rec[0] from a: the family code, the port, and the address bytes in network
+ *  order, every unused byte zeroed. A unix address writes its family and nothing else,
+ *  since the path crosses beside the record through addr_path_cbuf. Boundary helper for
+ *  the sibling net modules.
+ *  @param a the address to pack
+ *  @param rec the record to fill, owned by the caller */
+export func addr_pack(a: Addr, rec: *raw AddrRec) -> void {
+    rec[0].family = addr_family(a)
+    rec[0].port = 0
+    for i in 0..16 {
+        rec[0].ip[i] = 0
+    }
+    match a {
+        Ip4(ip, port) => {
+            rec[0].port = port
+            rec[0].ip[0] = char((ip >> 24) & 255)
+            rec[0].ip[1] = char((ip >> 16) & 255)
+            rec[0].ip[2] = char((ip >> 8) & 255)
+            rec[0].ip[3] = char(ip & 255)
+        },
+        Ip6(hi, lo, port) => {
+            rec[0].port = port
+            addr_put_half(rec, 0, hi)
+            addr_put_half(rec, 8, lo)
+        },
+        Unix(path) => {
+            rec[0].port = 0
+        },
+    }
+}
+
+// Reads eight of r's ip bytes from base as one big endian half
+func addr_get_half(r: AddrRec, base: int64) -> uint64 {
+    mut half: uint64 = 0u64
+    for i in 0..8 {
+        byte: int64 = int64(r.ip[base + i]) & 255
+        half = (half << 8u64) | uint64(byte)
+    }
+    return half
+}
+
+/** The Addr a record describes, the inverse of addr_pack. Family 4 and 6 rebuild the
+ *  value from the address bytes and the port, family 1 gives Addr.Unix(""), the unnamed
+ *  address, since a record carries no path, and any other family gives Addr.Ip4(0, 0).
+ *  Boundary helper for the sibling net modules.
+ *  @param r the record to read
+ *  @return the address the record describes */
+export func addr_unpack(r: AddrRec) -> Addr {
+    if r.family == 4 {
+        mut ip: int64 = 0
+        for i in 0..4 {
+            ip = (ip << 8) | (int64(r.ip[i]) & 255)
+        }
+        return Addr.Ip4(ip, r.port)
+    }
+    if r.family == 6 {
+        return Addr.Ip6(addr_get_half(r, 0), addr_get_half(r, 8), r.port)
+    }
+    if r.family == 1 {
+        return Addr.Unix("")
+    }
+    return Addr.Ip4(0, 0)
+}
+
+/** A fresh NUL terminated copy of a unix address's path, or a one byte empty buffer for
+ *  an IP address, the path argument every socket shim takes beside the record. Boundary
+ *  helper for the sibling net modules.
+ *  @param a the address whose path to copy
+ *  @return a fresh buffer the caller frees once the shim that reads it has returned */
+export func addr_path_cbuf(a: Addr) -> *raw char {
+    return cbuf(addr_path(a))
+}

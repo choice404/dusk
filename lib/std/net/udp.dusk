@@ -1,0 +1,173 @@
+/** std.net.udp: blocking datagram sockets over IPv4 and IPv6. udp_bind opens a socket
+ *  bound to an Addr, udp_send_to sends one datagram to an address, and udp_recv_from
+ *  receives one datagram beside the address it came from. Every datagram is sent whole
+ *  or not at all, and one longer than the buffer it is received into is truncated to the
+ *  buffer silently, the socket API's rule. Connected UDP and unix datagram sockets are
+ *  not in this release; udp_bind refuses a unix address before any syscall.
+ *
+ *  A datagram socket is a descriptor like a stream socket, so net_close, net_local_addr,
+ *  net_set_read_timeout, and net_set_write_timeout from std.net apply to it unchanged,
+ *  and this file imports std.net so a program that imports std.net.udp has them. A
+ *  client binds addr_loopback(0) or addr_ip4(0, 0, 0, 0, 0) and reads the port back with
+ *  net_local_addr. Every call here blocks the calling thread; a program on the event loop
+ *  uses udp_send_async and udp_recv_async in std.async.net over a socket from udp_bind
+ *  set nonblocking with fd_nonblock.
+ *
+ *  The three shims live in the C runtime beside the blocking cool_net_* family and share
+ *  its contract: a descriptor or a count on success, -1 with errno on failure, so every
+ *  wrapper reads os_errno immediately after the shim and builds its error from errstr,
+ *  the std.fs convention. EAGAIN is the one errno named here, since a receive timeout
+ *  from net_set_read_timeout or a nonblocking socket reports it, and it becomes the
+ *  error would block, the read_buf spelling. The address crosses the boundary as the 32
+ *  byte AddrRec addr_pack fills and addr_unpack reads.
+ *
+ *  Every exported name carries the udp_ prefix, since an exported dusk function takes a
+ *  bare link symbol and libc owns sendto, recvfrom, bind, and the rest. */
+
+@paradigm procedural
+
+@import std.net
+@import std.net.addr
+@import std.string
+@import std.os
+
+// The datagram shims in the C runtime. cool_net_udp_open mints a blocking, close on exec
+// datagram socket of the record's family and binds it, returning the descriptor;
+// cool_net_send_to sends n bytes of buf to the record's address and returns the count;
+// cool_net_recv_from receives up to cap bytes into buf, fills the record from the
+// sender, and returns the count. Each one is -1 with errno on failure, EINTR retried
+// inside and EAGAIN passed through
+foreign "C" {
+    func cool_os_eagain() -> int64
+    func cool_net_udp_open(rec: *void) -> int64
+    func cool_net_send_to(fd: int64, buf: *void, n: int64, rec: *void) -> int64
+    func cool_net_recv_from(fd: int64, buf: *void, cap: int64, rec: *void) -> int64
+}
+
+// EAGAIN, the errno a receive timeout or a nonblocking socket sets when a datagram would
+// have had to wait. EWOULDBLOCK is the same value on Linux, so one test covers both
+func udp_eagain() -> int64 {
+    return cool_os_eagain()
+}
+
+// The error for an errno value read right after a failing shim
+func udp_os_error(code: int64) -> error {
+    return error { message: errstr(code) }
+}
+
+// Whether a is a unix address, the family a datagram socket here does not take
+func udp_is_unix(a: Addr) -> bool {
+    match a {
+        Ip4(ip, port) => {
+            return false
+        },
+        Ip6(hi, lo, port) => {
+            return false
+        },
+        Unix(path) => {
+            return true
+        },
+    }
+}
+
+/** Opens a blocking, close on exec datagram socket of a's family and binds it to a. An
+ *  IPv6 socket sets IPV6_V6ONLY, so [::]:port and 0.0.0.0:port can coexist. A port of 0
+ *  asks the OS for one; read it back with net_local_addr. A client that only sends and
+ *  receives replies binds addr_loopback(0) or addr_ip4(0, 0, 0, 0, 0). A unix address is
+ *  refused with the error udp_bind takes an IP address before any syscall, since unix
+ *  datagram sockets are not in this release. On an OS failure, Address already in use
+ *  among others, the half open socket is closed before the error returns. Close the
+ *  descriptor with net_close.
+ *  @param a the IP address to bind, a port of 0 taking an ephemeral one
+ *  @return the bound descriptor paired with an error; on failure the descriptor is -1
+ *  @example
+ *  fd, e := udp_bind(addr_loopback(0))
+ *  if e.exists() {
+ *      return e
+ *  }
+ *  bound, be := net_local_addr(fd)
+ *  be.ignore()
+ *  println(addr_port(bound)) */
+export func udp_bind(a: Addr) -> (int64, error) {
+    if udp_is_unix(a) {
+        return (-1, error { message: "udp_bind takes an IP address" })
+    }
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(a, rec)
+    fd: int64 = cool_net_udp_open(rec)
+    code: int64 = os_errno()
+    free(rec)
+    if fd < 0 {
+        return (-1, udp_os_error(code))
+    }
+    return (fd, error {})
+}
+
+/** Sends the n bytes at buf as one datagram from fd to the address to. A datagram goes
+ *  out whole or not at all, so on success the count is n; on failure the count is 0 and
+ *  the error is the OS's, Message too long past the datagram limit, Resource temporarily
+ *  unavailable on a full nonblocking buffer, Network is unreachable with no route to to.
+ *  An interrupted send is retried inside the runtime. A unix address is refused with
+ *  Address family not supported by protocol. buf is borrowed for the call and to is read
+ *  during it.
+ *  @param fd the datagram socket from udp_bind
+ *  @param buf the bytes to send, at least n of them
+ *  @param n the datagram length in bytes
+ *  @param to the IP address to send to
+ *  @return the count sent paired with an error; on failure the count is 0
+ *  @example
+ *  msg: *raw char = cbuf("ping")
+ *  n, e := udp_send_to(fd, msg, 4, addr_loopback(9000))
+ *  free(msg)
+ *  if e.exists() {
+ *      return e
+ *  } */
+export func udp_send_to(fd: int64, buf: *void, n: int64, to: Addr) -> (int64, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    addr_pack(to, rec)
+    count: int64 = cool_net_send_to(fd, buf, n, rec)
+    code: int64 = os_errno()
+    free(rec)
+    if count < 0 {
+        return (0, udp_os_error(code))
+    }
+    return (count, error {})
+}
+
+/** Receives one datagram from fd into buf, at most cap bytes, and returns its length
+ *  beside the address it came from. buf is a staged raw buffer the caller owns and must
+ *  size to at least cap bytes. A datagram longer than cap is truncated to cap and the
+ *  rest is dropped silently, the socket API's rule, so size buf for the largest datagram
+ *  expected. The call blocks until a datagram arrives; a receive timeout set with
+ *  net_set_read_timeout that passes first, or a nonblocking socket with nothing queued,
+ *  is the error would block, the read_buf spelling. An interrupted receive is retried
+ *  inside the runtime.
+ *  @param fd the datagram socket from udp_bind
+ *  @param buf the destination buffer the caller owns, at least cap bytes
+ *  @param cap the most bytes to receive
+ *  @return the count received and the sender's address paired with an error; on failure
+ *  the count is 0 and the address is Addr.Ip4(0, 0)
+ *  @example
+ *  buf: *raw char = alloc_bytes(512)
+ *  n, from, e := udp_recv_from(fd, buf, 512)
+ *  if e.exists() {
+ *      free(buf)
+ *      return e
+ *  }
+ *  re, se := udp_send_to(fd, buf, n, from)
+ *  free(buf) */
+export func udp_recv_from(fd: int64, buf: *void, cap: int64) -> (int64, Addr, error) {
+    rec: *raw AddrRec = alloc_bytes(sizeof(AddrRec))
+    count: int64 = cool_net_recv_from(fd, buf, cap, rec)
+    code: int64 = os_errno()
+    if count < 0 {
+        free(rec)
+        if code == udp_eagain() {
+            return (0, Addr.Ip4(0, 0), error { message: "would block" })
+        }
+        return (0, Addr.Ip4(0, 0), udp_os_error(code))
+    }
+    from: Addr = addr_unpack(rec[0])
+    free(rec)
+    return (count, from, error {})
+}

@@ -3495,7 +3495,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.17.0\n
+out dusk 1.17.1\n
 argv version
 code 0
 ---
@@ -7859,4 +7859,205 @@ test fmt_alternate_form_and_c_range
 mode run
 file examples/fmt_alt_and_c_edges.dusk
 out 3.|3.e+00|1.|123456.|1.E+08\n[�|�|�|A]\n[�|�]\n
+---
+# std.net.addr: the address value the net modules share. Formatting goes through
+# inet_ntop, so the IPv6 rows pin the canonical compression; parsing never looks a
+# name up, so a host name is an error like any other text that is not a literal.
+test addr_ip4_formats_and_reads_back
+mode run
+file examples/addr_ip4.dusk
+out 127.0.0.1:8080\n8080\n127.0.0.1:9090\n
+---
+test addr_ip6_formats_the_canonical_form
+mode run
+file examples/addr_ip6.dusk
+out [::1]:443\n[2001:db8::1]:0\n
+---
+test addr_parse_reads_both_families
+mode run
+file examples/addr_parse.dusk
+out 127.0.0.1:80\n[::1]:443\n[2001:db8::1]:8443\nerror\nerror\n
+---
+test addr_unix_keeps_its_path
+mode run
+file examples/addr_unix.dusk
+out /tmp/x.sock\n0\n
+---
+test addr_eq_compares_by_value
+mode run
+file examples/addr_eq.dusk
+out true\nfalse\ntrue\nfalse\n
+---
+# An Addr is a plain value: it sits in a vector, crosses a spawn, and enters and
+# leaves an async func.
+test addr_crosses_a_spawn_and_a_vector
+mode run
+file examples/addr_cross.dusk
+out 192.168.1.9:53\n/tmp/x.sock\n[::1]:443\n
+---
+test addr_parse_error_unhandled_is_rejected
+mode check_fail
+file examples/addr_parse_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# std.net: the blocking socket layer. Every row binds port 0 or a unix path under
+# /tmp, reads the port back, serves from a spawned thread or the listener's own
+# backlog, and checks a fixed byte exchange through std.io's Writer and Reader.
+test net_loopback_echo_over_writer_and_reader
+mode run
+file examples/net_echo.dusk
+out echo:hello\nworld\n
+---
+# Strict: a box with ::1 disabled fails this row with Address not available.
+test net_ip6_loopback_echo
+mode run
+file examples/net_echo6.dusk
+out echo:v6\n
+---
+test net_unix_stream_echo
+mode run
+file examples/net_unix.dusk
+out echo:unix\n
+---
+test net_peer_and_local_addr_agree
+mode run
+file examples/net_peer.dusk
+out true\n127.0.0.1:0\n
+---
+# The listener is closed before the dial; another process binding the freed port in
+# the gap would connect instead of failing, so a rare failure here reads as that.
+test net_dial_refused_is_an_error
+mode run
+file examples/net_refused.dusk
+out error\n
+---
+test net_read_timeout_surfaces_as_would_block
+mode run
+file examples/net_rtimeout.dusk
+out would block\n
+---
+test net_nodelay_and_write_timeout_set
+mode run
+file examples/net_setopt.dusk
+out ok\nok\nerror\n
+---
+test net_write_after_close_is_an_error
+mode run
+file examples/net_wclosed.dusk
+out error\n
+---
+# resolve sees localhost, the two literals, and the empty name only, never a real
+# host; the localhost check is order insensitive since /etc/hosts may list ::1 first.
+test net_resolve_localhost_is_loopback
+mode run
+file examples/net_resolve.dusk
+out ok\n127.0.0.1:81\n[::1]:82\nerror 0\n
+---
+test net_dial_result_unhandled_is_rejected
+mode check_fail
+file examples/net_dial_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# A read of the resolve vector after its free is the runtime's generation fault, the
+# use_after_free_faults shape; the checker has no static free then use rule.
+test net_resolve_list_used_after_free_faults
+mode run_raw
+file examples/net_resolve_stale.dusk
+out 127.0.0.1:80\n
+ok false
+err_has use of a freed or stale pointer
+---
+# std.net.udp: blocking datagram sockets. Every row binds port 0 on loopback and reads
+# the port back, exchanges a fixed datagram between two sockets in one thread, and
+# checks the count, the sender's address, and the bytes.
+test udp_loopback_round_trip
+mode run
+file examples/udp_round.dusk
+out 4\ntrue\npong\n
+---
+# Strict: a box with ::1 disabled fails this row with Address not available.
+test udp_ip6_round_trip
+mode run
+file examples/udp_round6.dusk
+out 4\ntrue\nping\n
+---
+test udp_recv_timeout_surfaces_as_would_block
+mode run
+file examples/udp_rtimeout.dusk
+out would block\n
+---
+# recvfrom with a short buffer drops the tail silently, the socket API's rule.
+test udp_truncates_a_long_datagram
+mode run
+file examples/udp_trunc.dusk
+out 4\n
+---
+test udp_bind_unix_is_refused
+mode run
+file examples/udp_bind_unix.dusk
+out udp_bind takes an IP address\n
+---
+test udp_send_result_unhandled_is_rejected
+mode check_fail
+file examples/udp_send_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# std.async.net over Addr: the nonblocking dial and accept, the two datagram forms,
+# and the loop's name lookup. Every row binds port 0 or a unix path under /tmp, reads
+# the address back, runs the server as a task on the same loop, and checks a fixed
+# byte exchange.
+test anet_dial_async_unix_echo
+mode run
+file examples/anet_dial_unix.dusk
+out ping\n
+---
+# Strict: a box with ::1 disabled fails this row with Address not available.
+test anet_dial_async_ip6_echo
+mode run
+file examples/anet_dial_ip6.dusk
+out ping\n
+---
+test anet_accept_async_reports_the_peer
+mode run
+file examples/anet_accept_peer.dusk
+out true\n
+---
+# The listener is closed before the dial; another process binding the freed port in
+# the gap would connect instead of failing, so a rare failure here reads as that.
+test anet_dial_async_refused_is_an_error
+mode run
+file examples/anet_dial_refused.dusk
+out error\n
+---
+# The receive task parks on an armed datagram socket before the send runs, so the wake
+# drives the recvfrom; the sockets are bound through the runtime's datagram shim that
+# udp_bind wraps.
+test anet_udp_async_round_trip
+mode run
+file examples/anet_udp.dusk
+out 4\ntrue\npong\n
+---
+# The lookup is the only pending work on the loop, so a helper that failed to raise the
+# live thread gauge would fault the await as idle instead of printing.
+test anet_resolve_async_localhost
+mode run
+file examples/anet_resolve.dusk
+out ok\n127.0.0.1:81\nerror\n
+---
+test anet_resolve_async_then_dial
+mode run
+file examples/anet_resolve_dial.dusk
+out ping\n
+---
+test anet_dial_async_error_unhandled_is_rejected
+mode check_fail
+file examples/anet_dial_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# A thread blocked in net_accept is woken by net_shutdown_read on the listener, not
+# by net_close; the recipe is shutdown, join, close.
+test net_shutdown_read_wakes_a_blocked_accept
+mode run
+file examples/net_accept_wake.dusk
+out accept ended\njoined\n
 ---

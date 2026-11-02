@@ -1,0 +1,23 @@
+// A dial to a port nothing listens on is an error value, Connection refused, never a
+// fault. The listener is closed before the dial so the port is known to be free.
+@paradigm procedural
+@import std.net
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    fd, de := net_dial(bound)
+    if de.exists() {
+        println("error")
+    } else {
+        println(fd)
+    }
+    return 0
+}

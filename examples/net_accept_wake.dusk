@@ -1,0 +1,44 @@
+// Stopping a blocking server. A thread blocked in net_accept is not woken by
+// net_close on the listener from another thread: the blocked call keeps the old
+// socket and the descriptor number is reused at once, so a join would wait forever.
+// net_shutdown_read on the listener is the wake: the blocked accept returns an error
+// (Invalid argument), the thread prints it and leaves, join returns, and the listener
+// is closed after the join.
+@paradigm procedural
+@import std.net
+@import std.concurrent.thread
+
+func serve(lfd: int64) -> void {
+    fd, peer, e := net_accept(lfd)
+    if e.exists() {
+        println("accept ended")
+        return
+    }
+    println(addr_port(peer))
+    c := net_close(fd)
+    c.ignore()
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    sleep_ms(100)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    println("joined")
+    return 0
+}

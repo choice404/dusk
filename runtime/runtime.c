@@ -1275,6 +1275,14 @@ int64_t cool_f64_bits(double x) {
     return bits;
 }
 
+/* The errno a nonblocking descriptor sets when a read or write would have had to
+   wait. EWOULDBLOCK is the same value on every platform dusk builds for, so one
+   test covers both; the value differs between Linux (11) and the BSDs (35), which
+   is why the library asks instead of carrying the number. */
+int64_t cool_os_eagain(void) {
+    return EAGAIN;
+}
+
 /* The inverse of cool_f64_bits: the double whose IEEE bits are the given
    integer, through memcpy. The float printer's test corpus builds its hard
    cases from bits, since a float literal has no exponent form. */
