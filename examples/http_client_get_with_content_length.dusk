@@ -1,0 +1,80 @@
+// http_get against a raw server thread. The listener binds port 0 and reads the port
+// back; the thread accepts one client, reads the request head, prints its request line
+// and whether the Host field names the listener and Connection: close arrived, and only
+// then writes a fixed Content-Length response and closes, so its lines always print
+// before the client's.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    want: string = format("127.0.0.1:%d", [arg_int(addr_port(bound))])
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    line, le := read_line_capped(b, 1024)
+    le.ignore()
+    println(line)
+    free(line)
+    h: *Vector<Header> = headers_new()
+    he := read_headers(b, h, 4096, 32)
+    he.ignore()
+    host, has_host := headers_get(h, "Host")
+    println(has_host && host == want)
+    conn, has_conn := headers_get(h, "Connection")
+    println(has_conn && conn == "close")
+    we := write_string(fd_writer(cfd), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello")
+    we.ignore()
+    ce := net_close(cfd)
+    ce.ignore()
+    headers_free(h)
+    free(h)
+    bufreader_free(b)
+    free(b)
+    free(want)
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    url: string = format("http://127.0.0.1:%d/x", [arg_int(addr_port(bound))])
+    resp, e := http_get(url)
+    if e.exists() {
+        println(e)
+    }
+    println((*resp).status)
+    ctype, ok := headers_get((*resp).headers, "Content-Type")
+    if ok {
+        println(ctype)
+    }
+    println(response_text(resp))
+    println((*resp).body_len)
+    response_free(resp)
+    free(resp)
+    free(url)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

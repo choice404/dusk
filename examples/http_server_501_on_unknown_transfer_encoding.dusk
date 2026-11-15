@@ -1,0 +1,61 @@
+// A transfer coding other than chunked alone is 501 Not Implemented: the server cannot
+// tell where the body ends, so it answers and closes.
+@paradigm procedural
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    response_set_body(resp, "ok")
+    return resp
+}
+
+// Writes the request bytes and reads the whole reply
+func exchange(a: Addr, request: string) -> string {
+    fd, de := net_dial(a)
+    if de.exists() {
+        printerr(de)
+        return substring("", 0, 0)
+    }
+    we := write_string(fd_writer(fd), request)
+    we.ignore()
+    reply, re := read_to_end(fd_reader(fd))
+    re.ignore()
+    ce := net_close(fd)
+    ce.ignore()
+    return reply
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    (*s).send_date = false
+    t, te := spawn(lambda () -> void {
+        e := http_serve_one(s, 0, handle)
+        if e.exists() {
+            println(e)
+        }
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    reply := exchange(bound, "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: gzip\r\n\r\nabc")
+    je := join(t)
+    je.ignore()
+    q: string = format("%q", [arg_str(reply)])
+    println(q)
+    free(q)
+    free(reply)
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

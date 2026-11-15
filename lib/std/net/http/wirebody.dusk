@@ -1,0 +1,639 @@
+/** std.net.http.wirebody: the byte half of the HTTP/1.1 wire, imported by
+ *  std.net.http.wire and reached through it. The capped line read every head parser and the
+ *  chunked decoder stand on, the three body readers, the chunked writer, and the single
+ *  write a message leaves in. Nothing here knows a message type: a reader takes a
+ *  *BufReader, a writer takes a Writer, and a body is a *raw char buffer and a length.
+ *
+ *  Every limit is checked before the bytes it guards are read or stored, and a body buffer
+ *  grows only as the bytes arrive, never to a size a peer merely claimed. A string index is
+ *  not bounds checked at runtime, so every index here is bounded by a length measured
+ *  first. A string or a buffer handed back beside an error is a real heap value the caller
+ *  frees exactly as on success, and every error is a sentence from the closed set
+ *  std.net.http.wire lists. */
+
+@paradigm procedural
+
+@import std.io
+@import std.bufio
+@import std.string
+
+// A growing byte buffer a body read fills: data holds len bytes and a NUL after them
+// inside cap bytes, grown by doubling as the bytes arrive rather than to a size a peer
+// merely claimed
+struct WireAcc {
+    data: *raw char,
+    len: int64,
+    cap: int64,
+}
+
+// The longest trailer line read_body_chunked reads
+func wire_chunk_line_max() -> int64 {
+    return 8192
+}
+
+// The longest chunk size line read_body_chunked reads. A size is at most 16 hex digits, so
+// the rest of this budget is all a chunk extension gets, and a peer cannot pad every data
+// byte with kilobytes of extension the reader would have to consume
+func wire_chunk_size_line_max() -> int64 {
+    return 256
+}
+
+// The most trailer fields read_body_chunked discards before it refuses the trailer
+func wire_trailer_max() -> int64 {
+    return 100
+}
+
+// The scratch size a body read moves bytes through
+func wire_scratch() -> int64 {
+    return 8192
+}
+
+func wire_fail(msg: string) -> error {
+    return error { message: msg }
+}
+
+func wire_min(a: int64, b: int64) -> int64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+func wire_floor0(n: int64) -> int64 {
+    if n < 0 {
+        return 0
+    }
+    return n
+}
+
+func wire_is_digit(c: int64) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// SP or HTAB, the optional whitespace RFC 9110 lets surround a field value
+func wire_is_ows(c: int64) -> bool {
+    return c == 32 || c == 9
+}
+
+// The value of a hex digit byte, either case, or -1 when c is not one
+func wire_hex_value(c: int64) -> int64 {
+    if wire_is_digit(c) {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return -1
+}
+
+// The offset of the first byte c in s[lo, hi), or -1
+func wire_find(s: string, lo: int64, hi: int64, c: int64) -> int64 {
+    for i in lo..hi {
+        if int64(s[i]) == c {
+            return i
+        }
+    }
+    return -1
+}
+
+// The sentence a failed read becomes: a would block is the socket's timeout, and any other
+// failure keeps the reader's own text after the prefix
+func wire_read_failure(text: string) -> error {
+    if text == "would block" {
+        return wire_fail("http: timed out")
+    }
+    return wire_fail("http: read failed: " + text)
+}
+
+// The sentence a body read that found no byte becomes: a read failure as itself, and the
+// end of the stream as a truncated body
+func wire_body_end(b: *BufReader) -> error {
+    fe := bufreader_err(b)
+    if fe.exists() {
+        return wire_read_failure(fe.toString())
+    }
+    return wire_fail("http: truncated body")
+}
+
+// A line read failure inside a body: the stream ending at or inside a chunk size line or a
+// trailer line is a truncated body, and every other sentence stands
+func wire_body_line_fail(e: error) -> error {
+    text: string = e.toString()
+    if text == "http: connection closed" || text == "http: truncated line" {
+        e.ignore()
+        return wire_fail("http: truncated body")
+    }
+    return e
+}
+
+// The empty body buffer, one byte holding its NUL, handed back beside a body read error
+func wire_empty_buf() -> *raw char {
+    d: *raw char = alloc_bytes(1)
+    d[0] = 0
+    return d
+}
+
+// The end of a line read that found no byte: a read failure as itself, and the end of the
+// stream as a clean close before any byte or a truncated line after some
+func wire_line_end(b: *BufReader, count: int64) -> error {
+    fe := bufreader_err(b)
+    if fe.exists() {
+        return wire_read_failure(fe.toString())
+    }
+    if count == 0 {
+        return wire_fail("http: connection closed")
+    }
+    return wire_fail("http: truncated line")
+}
+
+// The byte after a CR: an LF ends the line, while any other byte and the end of the stream
+// are a bare CR. A read failure there is reported as itself, with the CR kept in sb since
+// it arrived before the failure, so an empty partial line always means no byte did
+func wire_after_cr(b: *BufReader, sb: *StringBuilder) -> error {
+    c, ok := bufreader_read_byte(b)
+    if ok {
+        if c == 10 {
+            return error {}
+        }
+        return wire_fail("http: bare carriage return")
+    }
+    fe := bufreader_err(b)
+    if fe.exists() {
+        sb_push_char(sb, 13)
+        return wire_read_failure(fe.toString())
+    }
+    return wire_fail("http: bare carriage return")
+}
+
+// Reads one line into sb: the line's bytes without its LF or the CR before it, and the empty
+// error at the LF or the sentence that stopped the read. A count reaching max stops before
+// the next read, so a line never costs more than max bytes of memory or of input. An empty
+// lf_fail lets a bare LF end the line, the tolerance a head gets; any other lf_fail is the
+// sentence a line ended by a lone LF fails with, the strict CR LF rule of the chunk lines
+func wire_line_into(b: *BufReader, sb: *StringBuilder, max: int64, lf_fail: string) -> error {
+    mut count: int64 = 0
+    while true {
+        c, ok := bufreader_read_byte(b)
+        if !ok {
+            return wire_line_end(b, count)
+        }
+        if c == 10 {
+            if str_len(lf_fail) > 0 {
+                return wire_fail(lf_fail)
+            }
+            return error {}
+        }
+        if c == 13 {
+            return wire_after_cr(b, sb)
+        }
+        if c == 0 {
+            return wire_fail("http: control character")
+        }
+        sb_push_char(sb, c)
+        count++
+        if count >= max {
+            return wire_fail("http: line too long")
+        }
+    }
+    return error {}
+}
+
+/** Reads one line, ended by an LF, with a CR right before the LF removed, so neither ending
+ *  is ever part of the line. A bare LF ending is accepted, as RFC 9112 lets a recipient do;
+ *  a CR followed by anything but an LF, or by the end of the stream, is http: bare carriage
+ *  return, and a NUL byte is http: control character. A line that reaches max bytes before
+ *  its LF is http: line too long, and nothing past that byte is read, so the longest line
+ *  accepted is max - 1 bytes. The end of the stream before any byte is http: connection
+ *  closed and after some is http: truncated line; a read failure is http: timed out when
+ *  the reader reports would block, a socket's read timeout, and http: read failed: and the
+ *  reader's own text otherwise.
+ *  @param b the buffered reader to read from, borrowed and advanced in place
+ *  @param max the line cap in bytes, the line ending not counted
+ *  @return the line as a fresh heap string the caller frees, paired with an error; beside
+ *  an error the string holds the bytes read before the failure, the offending CR or NUL
+ *  left out, the empty heap string when no byte arrived, and is freed the same way
+ *  @example
+ *  line, e := read_line_capped(b, 8192)
+ *  if e.exists() {
+ *      println(e)
+ *  } else {
+ *      println(line)
+ *  }
+ *  free(line) */
+export func read_line_capped(b: *BufReader, max: int64) -> (string, error) {
+    line, e := wire_read_line(b, max, "")
+    return (line, e)
+}
+
+// One line the way read_line_capped reads it, with lf_fail deciding a bare LF ending as
+// wire_line_into does
+func wire_read_line(b: *BufReader, max: int64, lf_fail: string) -> (string, error) {
+    sb: *StringBuilder = alloc(sb_new())
+    e := wire_line_into(b, sb, max, lf_fail)
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return (out, e)
+}
+
+func wire_acc_new() -> *WireAcc {
+    d: *raw char = alloc_bytes(64)
+    d[0] = 0
+    return alloc(WireAcc { data: d, len: 0, cap: 64 })
+}
+
+// Appends n bytes from src, doubling the buffer while the bytes and their NUL would not fit
+func wire_acc_push(a: *WireAcc, src: *raw char, n: int64) -> void {
+    base: int64 = (*a).len
+    need: int64 = base + n + 1
+    if need > (*a).cap {
+        mut nc: int64 = (*a).cap * 2
+        while nc < need {
+            nc = nc * 2
+        }
+        nd: *raw char = alloc_bytes(nc)
+        old: *raw char = (*a).data
+        for i in 0..base {
+            nd[i] = old[i]
+        }
+        free(old)
+        (*a).data = nd
+        (*a).cap = nc
+    }
+    d: *raw char = (*a).data
+    for i in 0..n {
+        d[base + i] = src[i]
+    }
+    d[base + n] = 0
+    (*a).len = base + n
+}
+
+// Reads exactly n more bytes onto the end of a through a scratch buffer, the buffer
+// growing only as the bytes arrive; the stream ending first is a truncated body
+func wire_acc_read(a: *WireAcc, b: *BufReader, n: int64) -> error {
+    if n <= 0 {
+        return error {}
+    }
+    cap: int64 = wire_min(n, wire_scratch())
+    tmp: *raw char = alloc_bytes(cap)
+    mut left: int64 = n
+    while left > 0 {
+        got, e := bufreader_read(b, tmp, wire_min(left, cap))
+        if e.exists() {
+            free(tmp)
+            return wire_read_failure(e.toString())
+        }
+        if got <= 0 {
+            free(tmp)
+            return wire_fail("http: truncated body")
+        }
+        wire_acc_push(a, tmp, got)
+        left = left - got
+    }
+    free(tmp)
+    return error {}
+}
+
+/** Reads exactly n body bytes, the Content-Length framing. An n above max is http: body
+ *  too large before a byte is read, and a negative n is http: bad Content-Length; the
+ *  stream ending first is http: truncated body, and a read failure is http: timed out or
+ *  http: read failed: as read_line_capped reports it. The buffer grows as the bytes arrive,
+ *  so a length a peer claims and never sends costs no more than what did arrive.
+ *  @param b the buffered reader to read from, borrowed and advanced in place
+ *  @param n the body length from body_framing
+ *  @param max the body ceiling in bytes
+ *  @return a fresh heap buffer of the n bytes with a NUL after them, which the caller owns
+ *  and frees, paired with an error; beside an error it is a one byte empty buffer, freed
+ *  the same way */
+export func read_body_fixed(b: *BufReader, n: int64, max: int64) -> (*raw char, error) {
+    if n < 0 {
+        return (wire_empty_buf(), wire_fail("http: bad Content-Length"))
+    }
+    if n > max {
+        return (wire_empty_buf(), wire_fail("http: body too large"))
+    }
+    a: *WireAcc = wire_acc_new()
+    e := wire_acc_read(a, b, n)
+    if e.exists() {
+        free((*a).data)
+        free(a)
+        return (wire_empty_buf(), e)
+    }
+    d: *raw char = (*a).data
+    free(a)
+    return (d, error {})
+}
+
+// The size a chunk size line s[0, hi) names as 1 to 16 hex digits, -2 when it is not that,
+// and -1 when the value passes what an int64 holds, which every budget refuses. Past 2^59 -
+// 1 one more digit would pass 2^63 - 1, so the value stops growing there and the remaining
+// digits are only checked
+func wire_hex_size(s: string, hi: int64) -> int64 {
+    if hi < 1 || hi > 16 {
+        return -2
+    }
+    mut v: int64 = 0
+    mut over: bool = false
+    for i in 0..hi {
+        d: int64 = wire_hex_value(int64(s[i]))
+        if d < 0 {
+            return -2
+        }
+        if v > 576460752303423487 {
+            over = true
+        } else {
+            v = v * 16 + d
+        }
+    }
+    if over {
+        return -1
+    }
+    return v
+}
+
+// Reads one chunk size line and answers the size it names: the line must end in CR LF, it
+// is cut at its first ; since chunk extensions are ignored, and its trailing SP and HTAB
+// are removed
+func wire_chunk_size(b: *BufReader) -> (int64, error) {
+    line, e := wire_read_line(b, wire_chunk_size_line_max(), "http: bad chunk size")
+    if e.exists() {
+        free(line)
+        return (0, wire_body_line_fail(e))
+    }
+    n: int64 = str_len(line)
+    mut hi: int64 = wire_find(line, 0, n, 59)
+    if hi < 0 {
+        hi = n
+    }
+    while hi > 0 && wire_is_ows(int64(line[hi - 1])) {
+        hi--
+    }
+    size: int64 = wire_hex_size(line, hi)
+    free(line)
+    if size == -2 {
+        return (0, wire_fail("http: bad chunk size"))
+    }
+    return (size, error {})
+}
+
+// The CR LF that must follow a chunk's data
+func wire_chunk_end(b: *BufReader) -> error {
+    c1, ok1 := bufreader_read_byte(b)
+    if !ok1 {
+        return wire_body_end(b)
+    }
+    if c1 != 13 {
+        return wire_fail("http: bad chunk terminator")
+    }
+    c2, ok2 := bufreader_read_byte(b)
+    if !ok2 {
+        return wire_body_end(b)
+    }
+    if c2 != 10 {
+        return wire_fail("http: bad chunk terminator")
+    }
+    return error {}
+}
+
+// Reads the trailer section after the last chunk and discards it: lines until the empty
+// one, each ended by CR LF and under the chunk line cap, at most wire_trailer_max of them
+// before the empty line, so a peer that streams trailer lines without end is refused after
+// a bounded read
+func wire_skip_trailers(b: *BufReader) -> error {
+    mut count: int64 = 0
+    while true {
+        line, e := wire_read_line(b, wire_chunk_line_max(), "http: bad chunk terminator")
+        n: int64 = str_len(line)
+        free(line)
+        if e.exists() {
+            return wire_body_line_fail(e)
+        }
+        if n == 0 {
+            return error {}
+        }
+        count++
+        if count > wire_trailer_max() {
+            return wire_fail("http: too many headers")
+        }
+    }
+    return error {}
+}
+
+// Decodes a chunked body onto a: chunk after chunk until the last one and its trailers. A
+// chunk's size is judged against what the budget has left before a byte of it is read
+func wire_chunks_into(a: *WireAcc, b: *BufReader, max: int64) -> error {
+    while true {
+        size, se := wire_chunk_size(b)
+        if se.exists() {
+            return se
+        }
+        if size < 0 || size > max - (*a).len {
+            return wire_fail("http: body too large")
+        }
+        if size == 0 {
+            return wire_skip_trailers(b)
+        }
+        re := wire_acc_read(a, b, size)
+        if re.exists() {
+            return re
+        }
+        ce := wire_chunk_end(b)
+        if ce.exists() {
+            return ce
+        }
+    }
+    return error {}
+}
+
+/** Reads a body in chunked transfer coding, by RFC 9112. Every chunk size line and every
+ *  trailer line must end in CR LF, with none of the bare LF tolerance a head line gets: a
+ *  size line ended by a lone LF is http: bad chunk size and a trailer line ended by one is
+ *  http: bad chunk terminator, so a peer cannot frame a body one way for this reader and
+ *  another for a stricter one. Each chunk size line is cut at its
+ *  first ; so the extensions are ignored, stripped of trailing SP and HTAB, and must then be
+ *  1 to 16 hex digits, or it is http: bad chunk size; a size that would take the running
+ *  total past max is http: body too large before a byte of the chunk is read; a chunk's
+ *  data must be followed by CR LF, or it is http: bad chunk terminator; the stream ending
+ *  anywhere before the trailer section is done is http: truncated body. A chunk size line
+ *  is capped at 256 bytes and a trailer line at 8192, http: line too long past that, and
+ *  the trailer section is read and discarded up to 100 fields, http: too many headers past
+ *  that. A read failure is http: timed out or http: read failed: as read_line_capped
+ *  reports it.
+ *  @param b the buffered reader to read from, borrowed and advanced in place
+ *  @param max the body ceiling in bytes, the decoded data counted and nothing else
+ *  @return a fresh heap buffer of the decoded bytes with a NUL after them, which the caller
+ *  owns and frees, and their count, paired with an error; beside an error the buffer is a
+ *  one byte empty one, freed the same way, and the count is 0 */
+export func read_body_chunked(b: *BufReader, max: int64) -> (*raw char, int64, error) {
+    a: *WireAcc = wire_acc_new()
+    e := wire_chunks_into(a, b, wire_floor0(max))
+    if e.exists() {
+        free((*a).data)
+        free(a)
+        return (wire_empty_buf(), 0, e)
+    }
+    d: *raw char = (*a).data
+    count: int64 = (*a).len
+    free(a)
+    return (d, count, error {})
+}
+
+// Every byte to the end of the stream onto a, at most max of them: each read asks for one
+// byte past what the budget has left, so a body longer than max is caught after reading
+// max + 1 bytes and no more
+func wire_drain_into(a: *WireAcc, b: *BufReader, max: int64) -> error {
+    tmp: *raw char = alloc_bytes(wire_scratch())
+    while true {
+        room: int64 = max - (*a).len
+        mut want: int64 = wire_scratch()
+        if room < want {
+            want = room + 1
+        }
+        got, e := bufreader_read(b, tmp, want)
+        if e.exists() {
+            free(tmp)
+            return wire_read_failure(e.toString())
+        }
+        if got <= 0 {
+            free(tmp)
+            return error {}
+        }
+        if got > room {
+            free(tmp)
+            return wire_fail("http: body too large")
+        }
+        wire_acc_push(a, tmp, got)
+    }
+    free(tmp)
+    return error {}
+}
+
+/** Reads every byte to the end of the stream, the framing of a response with neither a
+ *  Content-Length nor a Transfer-Encoding field. A body past max is http: body too large
+ *  after reading at most max + 1 bytes, and a read failure is http: timed out or http: read
+ *  failed: as read_line_capped reports it.
+ *  @param b the buffered reader to read from, borrowed and advanced to the end
+ *  @param max the body ceiling in bytes
+ *  @return a fresh heap buffer of the bytes with a NUL after them, which the caller owns and
+ *  frees, and their count, paired with an error; beside an error the buffer is a one byte
+ *  empty one, freed the same way, and the count is 0 */
+export func read_body_to_close(b: *BufReader, max: int64) -> (*raw char, int64, error) {
+    a: *WireAcc = wire_acc_new()
+    e := wire_drain_into(a, b, wire_floor0(max))
+    if e.exists() {
+        free((*a).data)
+        free(a)
+        return (wire_empty_buf(), 0, e)
+    }
+    d: *raw char = (*a).data
+    count: int64 = (*a).len
+    free(a)
+    return (d, count, error {})
+}
+
+// Writes all n bytes of buf to w as one write. write_buf's count is n whenever its error
+// is empty, so a short count with no error is a writer that broke that rule, and it is
+// reported rather than taken for success
+func wire_write_all(w: Writer, buf: *raw char, n: int64) -> error {
+    wrote, e := write_buf(w, buf, n)
+    if e.exists() {
+        return e
+    }
+    if wrote < n {
+        return wire_fail("http: short write")
+    }
+    return error {}
+}
+
+// The count of lowercase hex digits v takes, v at least 1
+func wire_hex_width(v: int64) -> int64 {
+    mut n: int64 = 1
+    mut x: int64 = v >> 4
+    while x > 0 {
+        n++
+        x = x >> 4
+    }
+    return n
+}
+
+// One chunk staged whole, its size in lowercase hex, CR LF, the piece of body at off, and
+// CR LF, then written as one write
+func wire_write_chunk(w: Writer, body: *raw char, off: int64, piece: int64) -> error {
+    digits: int64 = wire_hex_width(piece)
+    total: int64 = digits + piece + 4
+    buf: *raw char = alloc_bytes(total + 1)
+    mut v: int64 = piece
+    for k in 0..digits {
+        d: int64 = v & 15
+        buf[digits - 1 - k] = d < 10 ? char(48 + d) : char(87 + d)
+        v = v >> 4
+    }
+    buf[digits] = 13
+    buf[digits + 1] = 10
+    for i in 0..piece {
+        buf[digits + 2 + i] = body[off + i]
+    }
+    buf[total - 2] = 13
+    buf[total - 1] = 10
+    buf[total] = 0
+    e := wire_write_all(w, buf, total)
+    free(buf)
+    return e
+}
+
+/** Writes n body bytes in chunked transfer coding: chunks of at most chunk bytes, each one
+ *  its size in lowercase hex, CR LF, the bytes, and CR LF, staged and handed to w as one
+ *  write, then the last chunk 0 CR LF CR LF with no trailer. A chunk below 1 reads as 4096,
+ *  and an n below 1 writes the last chunk alone. Nothing is written after the first error,
+ *  and a writer that reports a short count with no error is http: short write.
+ *  @param w the writer to write to
+ *  @param body the body bytes, borrowed, at least n of them
+ *  @param n the body length
+ *  @param chunk the largest chunk in bytes
+ *  @return an empty error once the last chunk is written, or the first write error */
+export func write_chunked(w: Writer, body: *raw char, n: int64, chunk: int64) -> error {
+    mut size: int64 = chunk
+    if size < 1 {
+        size = 4096
+    }
+    mut off: int64 = 0
+    while off < n {
+        piece: int64 = wire_min(size, n - off)
+        e := wire_write_chunk(w, body, off, piece)
+        if e.exists() {
+            return e
+        }
+        off = off + piece
+    }
+    return write_string(w, "0\r\n\r\n")
+}
+
+/** Writes a message head and its body as one buffer in one write, so a small message
+ *  leaves in one segment. The head is written as built, with nothing added; a chunked
+ *  body is sent by calling this with n 0 and then write_chunked. A writer that reports a
+ *  short count with no error is http: short write rather than a silent success.
+ *  @param w the writer to write to
+ *  @param head the head bytes, from write_request_head or write_response_head, borrowed
+ *  @param body the body bytes, borrowed, at least n of them
+ *  @param n the body length; a value below 0 reads as 0
+ *  @return an empty error once every byte is written, or the write error */
+export func write_message(w: Writer, head: *StringBuilder, body: *raw char, n: int64) -> error {
+    hn: int64 = sb_size(head)
+    bn: int64 = wire_floor0(n)
+    total: int64 = hn + bn
+    buf: *raw char = alloc_bytes(total + 1)
+    hd: *raw char = (*head).data
+    for i in 0..hn {
+        buf[i] = hd[i]
+    }
+    for i in 0..bn {
+        buf[hn + i] = body[i]
+    }
+    buf[total] = 0
+    e := wire_write_all(w, buf, total)
+    free(buf)
+    return e
+}

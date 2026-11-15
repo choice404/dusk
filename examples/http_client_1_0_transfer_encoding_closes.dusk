@@ -1,0 +1,90 @@
+// An HTTP/1.0 response that carries Transfer-Encoding marks the Conn closed even when it
+// asks for keep-alive: a 1.0 hop may have framed that message differently, so RFC 9112
+// has the recipient close after it. The chunked body still reads, and the next conn_send
+// is refused with nothing written.
+@paradigm procedural
+@import std.net.http.client
+@import std.concurrent.thread
+@import std.fmt
+
+// Reads one request head, answers it, and waits for the client to close
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    line, le := read_line_capped(b, 1024)
+    le.ignore()
+    free(line)
+    h: *Vector<Header> = headers_new()
+    he := read_headers(b, h, 4096, 32)
+    he.ignore()
+    headers_free(h)
+    free(h)
+    we := write_string(fd_writer(cfd), "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n2\r\nhi\r\n0\r\n\r\n")
+    we.ignore()
+    rest, re := read_to_end(fd_reader(cfd))
+    re.ignore()
+    free(rest)
+    bufreader_free(b)
+    free(b)
+    ce := net_close(cfd)
+    ce.ignore()
+}
+
+func send(c: *Conn) -> void {
+    req: *Request = request_new("GET", "/")
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println(response_text(resp))
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    send(c)
+    println((*c).is_open)
+    send(c)
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

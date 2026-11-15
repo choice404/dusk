@@ -1,0 +1,27 @@
+// read_body_chunked decodes a chunked body: the chunks joined, a chunk extension after a
+// ; ignored, and the trailer section read and dropped.
+@paradigm procedural
+@import std.net.http.wire
+
+func decode(text: string) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    body, n, e := read_body_chunked(b, 1048576)
+    if e.exists() {
+        println(e)
+    } else {
+        print(cstr(body))
+        print(" ")
+        println(n)
+    }
+    free(body)
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func main() -> int32 {
+    decode("4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")
+    decode("3;ext=1\r\nabc\r\n0\r\nTrailer: x\r\n\r\n")
+    return 0
+}

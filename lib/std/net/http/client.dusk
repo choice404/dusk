@@ -1,0 +1,734 @@
+/** std.net.http.client: the HTTP/1.1 client. http_dial opens a Conn to the origin a Url
+ *  names, conn_send writes one Request on it and reads the Response back, and the Conn stays
+ *  open for the next request until either side says close; http_get, http_post, and
+ *  http_send are the one shot forms that dial, send with Connection: close, and tear the
+ *  connection down before they return. http_read_response is the response reader conn_send
+ *  stands on, exported so a canned response parses from a string_reader too.
+ *
+ *  A Conn is the one place a transport lives. conn_open_plain is the only constructor that
+ *  turns a connected socket into the Reader and the Writer a Conn holds, conn_close is the
+ *  only teardown, and every other function here reads through the Conn's buffered reader
+ *  and writes through its Writer and nothing else, so a later stream variant enters at
+ *  those two functions and http_dial with no change to the exchange.
+ *
+ *  Every error is a value. The wire's sentences come back as they are; the client adds
+ *  http: connection is closed, http: too many interim responses, http: unsupported scheme,
+ *  http: unexpected data on the connection, http: CONNECT is not supported, and the https
+ *  refusal, and a resolver or dial failure keeps its own text. A Response
+ *  handed back beside an error is a real response_new(0), released with response_free then
+ *  free like any other, and a Conn handed back beside an error holds no socket and is
+ *  released with conn_close then free. Every call blocks the calling thread, bounded by
+ *  the socket timeouts; nothing here belongs inside an async func. */
+
+@paradigm procedural
+
+@import std.net.http.wire
+@import std.url
+@import std.net
+@import std.io
+@import std.bufio
+@import std.string
+
+/** One client connection. fd is the connected socket, -1 for a Conn that never connected
+ *  or that conn_close closed;
+ *  r and w are the two stream halves over it; rd is the buffered reader over r that every
+ *  read goes through, owned by the Conn; host is the Host field value for this connection,
+ *  a fresh heap string the Conn owns; is_open says whether another request may be sent;
+ *  max_body is the response body ceiling, 8388608 bytes by default; timeout_ms is the read
+ *  and write timeout on the socket, 30000 by default. Build one with http_dial and release
+ *  it with conn_close then free. */
+export struct Conn {
+    fd: int64,
+    r: Reader,
+    w: Writer,
+    rd: *BufReader,
+    host: string,
+    is_open: bool,
+    max_body: int64,
+    timeout_ms: int64,
+}
+
+// The response body ceiling a fresh Conn starts with, 8 MiB
+func client_max_body_default() -> int64 {
+    return 8388608
+}
+
+// The socket read and write timeout a fresh Conn starts with, in milliseconds
+func client_timeout_default() -> int64 {
+    return 30000
+}
+
+// The longest status line the client reads
+func client_line_max() -> int64 {
+    return 8192
+}
+
+// The header section budget of one response, in bytes
+func client_header_bytes() -> int64 {
+    return 65536
+}
+
+// The most header fields one response may carry
+func client_header_count() -> int64 {
+    return 100
+}
+
+// The most interim 1xx responses read in a row before the final one
+func client_interim_max() -> int64 {
+    return 8
+}
+
+// The size of the buffered reader over a connection
+func client_buffer_size() -> int64 {
+    return 8192
+}
+
+// The largest chunk a chunked request body goes out in
+func client_chunk_size() -> int64 {
+    return 4096
+}
+
+func client_fail(msg: string) -> error {
+    return error { message: msg }
+}
+
+// The first of two errors that exists, the other one discarded, or the empty error
+func client_first(a: error, b: error) -> error {
+    if a.exists() {
+        b.ignore()
+        return a
+    }
+    return b
+}
+
+// The one constructor that turns a connected socket into a Conn: the only place the two
+// stream halves are made, so a later transport enters here and in http_dial alone. host is
+// copied in; a socket of -1 gives a Conn that is closed from the start and holds no socket
+func conn_open_plain(fd: int64, host: string, timeout_ms: int64) -> *Conn {
+    r: Reader = fd_reader(fd)
+    w: Writer = fd_writer(fd)
+    rd: *BufReader = bufreader_new(r, client_buffer_size())
+    h: string = substring(host, 0, str_len(host))
+    return alloc(Conn {
+        fd: fd,
+        r: r,
+        w: w,
+        rd: rd,
+        host: h,
+        is_open: fd >= 0,
+        max_body: client_max_body_default(),
+        timeout_ms: timeout_ms,
+    })
+}
+
+// The Conn handed back beside a dial error: no socket, closed from the start, released
+// with conn_close then free like any other
+func client_closed_conn() -> *Conn {
+    return conn_open_plain(-1, "", 0)
+}
+
+// The addresses to dial for u: the scheme decides first, so an https or unknown scheme is
+// refused before any lookup, then the host is resolved with the Url's port on every entry
+func client_resolve(u: *Url) -> (*Vector<Addr>, error) {
+    scheme: string = (*u).scheme
+    if header_name_eq(scheme, "https") {
+        none: *Vector<Addr> = alloc(vec_new())
+        return (none, client_fail("http: the https scheme needs TLS, which this release does not ship"))
+    }
+    if !header_name_eq(scheme, "http") {
+        none: *Vector<Addr> = alloc(vec_new())
+        return (none, client_fail("http: unsupported scheme"))
+    }
+    return resolve((*u).host, (*u).port)
+}
+
+/** Opens a connection to the origin u names. Scheme http resolves the host, dials each
+ *  address in the resolver's order until one connects, sets TCP_NODELAY and the default 30
+ *  second read and write timeouts, and records url_host_header's text as the connection's
+ *  Host. Scheme https is the error http: the https scheme needs TLS, which this release
+ *  does not ship, with no lookup and no socket; any other scheme is http: unsupported
+ *  scheme. A lookup failure keeps the resolver's text, and a dial failure is the last
+ *  address's error, Connection refused when nothing listens. Neither the lookup nor the
+ *  connect has a timeout of its own: the socket timeouts start once a dial has connected,
+ *  so a resolver or a host that never answers holds the call as long as the OS waits. u is
+ *  borrowed and may be freed as soon as this returns.
+ *  @param u the parsed URL to connect to, borrowed
+ *  @return a fresh heap Conn the caller releases with conn_close then free, paired with an
+ *  error; beside an error the Conn holds no socket and is released the same way
+ *  @example
+ *  u, pe := url_parse("http://127.0.0.1:8080/")
+ *  pe.ignore()
+ *  c, de := http_dial(u)
+ *  url_free(u)
+ *  free(u)
+ *  if de.exists() {
+ *      println(de)
+ *  }
+ *  ce := conn_close(c)
+ *  ce.ignore()
+ *  free(c) */
+export func http_dial(u: *Url) -> (*Conn, error) {
+    addrs, re := client_resolve(u)
+    if re.exists() {
+        vec_free(addrs)
+        free(addrs)
+        return (client_closed_conn(), re)
+    }
+    mut fd: int64 = -1
+    mut fail: error = error { message: "no address found" }
+    for i in 0..vec_len(addrs) {
+        got, de := net_dial(vec_get(addrs, i))
+        if !de.exists() {
+            fd = got
+            break
+        }
+        fail = de
+    }
+    vec_free(addrs)
+    free(addrs)
+    if fd < 0 {
+        return (client_closed_conn(), fail)
+    }
+    fail.ignore()
+    host: string = url_host_header(u)
+    c: *Conn = conn_open_plain(fd, host, client_timeout_default())
+    free(host)
+    se := client_first(net_set_nodelay(fd, true), conn_set_timeout(c, (*c).timeout_ms))
+    if se.exists() {
+        ce := conn_close(c)
+        ce.ignore()
+        free(c)
+        return (client_closed_conn(), se)
+    }
+    return (c, error {})
+}
+
+/** Closes the connection's socket, frees its buffered reader and its host, marks it
+ *  closed, and sets fd to -1, so a conn_send that reaches it before the free is refused
+ *  rather than reading freed memory; free the Conn block itself with free once this
+ *  returns. This is the one place a transport is torn down: conn_send never closes the
+ *  socket, even after the server said close, so every http_dial pairs with exactly one
+ *  conn_close. A Conn that never connected closes nothing here and frees its parts the same
+ *  way. A second conn_close on one Conn is the runtime's use of a freed or stale pointer
+ *  fault, since the buffered reader is already gone.
+ *  @param c the connection to close, borrowed
+ *  @return an empty error on success, or the OS failure from the close */
+export func conn_close(c: *Conn) -> error {
+    fd: int64 = (*c).fd
+    (*c).is_open = false
+    bufreader_free((*c).rd)
+    free((*c).rd)
+    free((*c).host)
+    if fd < 0 {
+        return error {}
+    }
+    ce := net_close(fd)
+    // The number is the kernel's to reuse from here on, so the Conn stops naming it
+    (*c).fd = -1
+    return ce
+}
+
+/** Sets both socket timeouts, the read and the write, to ms milliseconds and records it in
+ *  timeout_ms. A read that waits past it is the wire error http: timed out; a 0 clears both
+ *  and every read waits forever; a negative ms is the error Invalid argument and changes
+ *  nothing. The timeout is per read, not per exchange, so a body that keeps arriving never
+ *  trips it.
+ *  @param c the connection, borrowed and changed in place
+ *  @param ms the longest one read or write waits, in milliseconds, 0 to wait forever
+ *  @return an empty error on success, or the OS failure */
+export func conn_set_timeout(c: *Conn, ms: int64) -> error {
+    re := net_set_read_timeout((*c).fd, ms)
+    if re.exists() {
+        return re
+    }
+    we := net_set_write_timeout((*c).fd, ms)
+    if we.exists() {
+        return we
+    }
+    (*c).timeout_ms = ms
+    return error {}
+}
+
+/** Sets the response body ceiling: a body past n bytes is the wire error http: body too
+ *  large, refused before a byte of it is read when its length is known up front.
+ *  @param c the connection, borrowed and changed in place
+ *  @param n the largest response body accepted, in bytes */
+export func conn_set_max_body(c: *Conn, n: int64) -> void {
+    (*c).max_body = n
+}
+
+// Whether a request of this method carries content even when it is empty, so it states
+// Content-Length: 0 rather than leave the server to guess
+func client_method_has_content(method: string) -> bool {
+    return method == "POST" || method == "PUT" || method == "PATCH"
+}
+
+// A tchar, the bytes RFC 9110 lets a token hold: a letter, a digit, or !#$%&'*+-.^_`|~
+func client_is_tchar(c: int64) -> bool {
+    if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+        return true
+    }
+    if c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 {
+        return true
+    }
+    return c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
+}
+
+// Whether s is one or more tchar bytes
+func client_is_token(s: string) -> bool {
+    n: int64 = str_len(s)
+    if n == 0 {
+        return false
+    }
+    for i in 0..n {
+        if !client_is_tchar(int64(s[i])) {
+            return false
+        }
+    }
+    return true
+}
+
+// Whether every byte of s is visible ASCII, 0x21 through 0x7E, the bytes a target holds
+func client_is_visible(s: string) -> bool {
+    n: int64 = str_len(s)
+    for i in 0..n {
+        c: int64 = int64(s[i])
+        if c < 33 || c > 126 {
+            return false
+        }
+    }
+    return true
+}
+
+// The request refused before a byte of it is written, so the connection stays as it was:
+// CONNECT, which asks for a tunnel this client does not make, a method that is not a
+// token, a path or query byte outside 0x21 through 0x7E, and a header name that is empty
+// or not a token, each one a head the writer would otherwise send in a shape the server
+// reads differently
+func client_check_request(req: *Request) -> error {
+    if (*req).method == "CONNECT" {
+        return client_fail("http: CONNECT is not supported")
+    }
+    if !client_is_token((*req).method) {
+        return client_fail("http: bad method")
+    }
+    if !client_is_visible((*req).path) || !client_is_visible((*req).query) {
+        return client_fail("http: bad target")
+    }
+    h: *Vector<Header> = (*req).headers
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        if !client_is_token(f.name) {
+            return client_fail("http: bad header name")
+        }
+    }
+    return error {}
+}
+
+// Whether the buffered reader holds bytes no request asked for: a response the server
+// sent past the one the last exchange read, which the next exchange would take for its own
+func client_has_unread(c: *Conn) -> bool {
+    rd: *BufReader = (*c).rd
+    return (*rd).lo < (*rd).hi
+}
+
+// The client's own fields, decided before the head is written: Host when the request has
+// none, and the framing, which the client owns outright, so a stale Content-Length or
+// Transfer-Encoding left from an earlier send can never frame this one wrong
+func client_frame(c: *Conn, req: *Request) -> void {
+    if !headers_has((*req).headers, "Host") {
+        headers_set((*req).headers, "Host", (*c).host)
+    }
+    if (*req).chunked {
+        headers_set((*req).headers, "Transfer-Encoding", "chunked")
+        headers_remove((*req).headers, "Content-Length")
+        return
+    }
+    headers_remove((*req).headers, "Transfer-Encoding")
+    if (*req).body_len > 0 || client_method_has_content((*req).method) {
+        n: string = int_to_string((*req).body_len)
+        headers_set((*req).headers, "Content-Length", n)
+        free(n)
+        return
+    }
+    headers_remove((*req).headers, "Content-Length")
+}
+
+// Writes the head and the body: a whole body leaves with the head in one write, and a
+// chunked one follows the head in chunks
+func client_write_request(c: *Conn, req: *Request) -> error {
+    head: *StringBuilder = alloc(sb_new())
+    write_request_head(head, req)
+    mut n: int64 = (*req).body_len
+    if (*req).chunked {
+        n = 0
+    }
+    e := write_message((*c).w, head, (*req).body, n)
+    sb_free(head)
+    free(head)
+    if e.exists() || !(*req).chunked {
+        return e
+    }
+    return write_chunked((*c).w, (*req).body, (*req).body_len, client_chunk_size())
+}
+
+// Whether any field named name in h holds token in its comma separated list
+func client_list_has(h: *Vector<Header>, name: string, token: string) -> bool {
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, name) && token_list_has(f.value, token) {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether the response's body ran to the end of the stream: a response that carries a body
+// and names neither framing field, the one body_framing reads until the close
+func client_ran_to_close(req: *Request, resp: *Response) -> bool {
+    if !client_has_body((*req).method, (*resp).status) {
+        return false
+    }
+    h: *Vector<Header> = (*resp).headers
+    return !headers_has(h, "Content-Length") && !headers_has(h, "Transfer-Encoding")
+}
+
+// Whether another request may follow this exchange on the same connection: not after a
+// body read to the close, a switch of protocols, a close either side asked for, a 1.0
+// response that carried Transfer-Encoding, which a 1.0 hop may have framed differently,
+// the rule RFC 9112 6.1 gives, or a 1.0 response that did not ask to be kept alive
+func client_keeps_open(req: *Request, resp: *Response) -> bool {
+    if (*resp).status == 101 || client_ran_to_close(req, resp) {
+        return false
+    }
+    if client_list_has((*req).headers, "Connection", "close") {
+        return false
+    }
+    if client_list_has((*resp).headers, "Connection", "close") {
+        return false
+    }
+    if (*resp).minor == 0 && headers_has((*resp).headers, "Transfer-Encoding") {
+        return false
+    }
+    if (*resp).minor == 0 {
+        return client_list_has((*resp).headers, "Connection", "keep-alive")
+    }
+    return true
+}
+
+/** Sends req on the connection and reads the response. Before the head is written the
+ *  client sets its own fields with headers_set, so a second send of the same request
+ *  repeats them rather than doubling them: Host to the connection's host when the request
+ *  carries none, Transfer-Encoding: chunked with any Content-Length removed when chunked is
+ *  true, and otherwise Content-Length from body_len when the body is not empty or the method
+ *  is POST, PUT, or PATCH, with any Transfer-Encoding removed. The body leaves with the head
+ *  in one write, or in 4096 byte chunks after it when chunked is true. The response is read
+ *  through http_read_response with the connection's max_body. The connection is marked
+ *  closed after a response that says Connection: close, a request that said it, a 1.0
+ *  response without keep-alive or with Transfer-Encoding, a body read to the close, a 101,
+ *  and after every error, the write path included, so no exchange continues on a stream
+ *  whose framing is unknown. A kept connection the server closed while it sat idle fails
+ *  the next send with http: connection closed, and the program dials again. A connection
+ *  already closed is http: connection is closed with nothing written. Bytes the server
+ *  sent past the last response, waiting in the
+ *  buffered reader when the next send begins, are http: unexpected data on the connection,
+ *  and the connection is marked closed with nothing written. A request the writer could not
+ *  send as one message is refused before a byte is written and the connection stays as it
+ *  was: the method CONNECT, matched case sensitively, is http: CONNECT is not supported, a
+ *  method that is not a token is http: bad method, a path or query byte below 0x21 or
+ *  above 0x7E is http: bad target, so a program percent encodes such text with url_encode,
+ *  and a header name that is empty or not a token is http: bad header name. An empty query
+ *  is never written, so a request built from the target /a? goes out as /a. req is
+ *  borrowed and never freed here.
+ *  @param c the connection to send on, borrowed and changed in place
+ *  @param req the request to send, borrowed; the client's fields land in its headers
+ *  @return a fresh heap Response the caller releases with response_free then free, paired
+ *  with an error; beside an error the Response is response_new(0), released the same way
+ *  @example
+ *  req := request_new("GET", "/status")
+ *  resp, e := conn_send(c, req)
+ *  if e.exists() {
+ *      println(e)
+ *  } else {
+ *      println((*resp).status)
+ *  }
+ *  response_free(resp)
+ *  free(resp)
+ *  request_free(req)
+ *  free(req) */
+export func conn_send(c: *Conn, req: *Request) -> (*Response, error) {
+    if !(*c).is_open {
+        return (response_new(0), client_fail("http: connection is closed"))
+    }
+    ve := client_check_request(req)
+    if ve.exists() {
+        return (response_new(0), ve)
+    }
+    if client_has_unread(c) {
+        (*c).is_open = false
+        return (response_new(0), client_fail("http: unexpected data on the connection"))
+    }
+    client_frame(c, req)
+    we := client_write_request(c, req)
+    if we.exists() {
+        (*c).is_open = false
+        return (response_new(0), we)
+    }
+    resp, re := http_read_response((*c).rd, (*req).method, (*c).max_body)
+    if re.exists() {
+        (*c).is_open = false
+        return (resp, re)
+    }
+    if !client_keeps_open(req, resp) {
+        (*c).is_open = false
+    }
+    return (resp, error {})
+}
+
+// One status line and its header section, with the client's limits
+func client_read_one_head(b: *BufReader) -> (*Response, error) {
+    line, le := read_line_capped(b, client_line_max())
+    if le.exists() {
+        free(line)
+        return (response_new(0), le)
+    }
+    resp, pe := parse_status_line(line)
+    free(line)
+    if pe.exists() {
+        return (resp, pe)
+    }
+    he := read_headers(b, (*resp).headers, client_header_bytes(), client_header_count())
+    if he.exists() {
+        response_free(resp)
+        free(resp)
+        return (response_new(0), he)
+    }
+    return (resp, error {})
+}
+
+// An interim response, one the final response follows: every 1xx but 101, which switches
+// the protocol and is final
+func client_is_interim(status: int64) -> bool {
+    return status >= 100 && status < 200 && status != 101
+}
+
+// The final response head: interim responses are read whole and dropped, at most
+// client_interim_max of them in a row
+func client_read_head(b: *BufReader) -> (*Response, error) {
+    mut interim: int64 = 0
+    while true {
+        resp, e := client_read_one_head(b)
+        if e.exists() || !client_is_interim((*resp).status) {
+            return (resp, e)
+        }
+        response_free(resp)
+        free(resp)
+        interim++
+        if interim > client_interim_max() {
+            return (response_new(0), client_fail("http: too many interim responses"))
+        }
+    }
+    return (response_new(0), error {})
+}
+
+// Whether a response to method with this status carries a body: never for HEAD, a 1xx, a
+// 204, or a 304, whatever its fields say
+func client_has_body(method: string, status: int64) -> bool {
+    if method == "HEAD" || (status >= 100 && status < 200) {
+        return false
+    }
+    return status != 204 && status != 304
+}
+
+// A Content-Length body of n bytes into resp
+func client_body_fixed(b: *BufReader, resp: *Response, n: int64, max: int64) -> error {
+    body, e := read_body_fixed(b, n, max)
+    if e.exists() {
+        free(body)
+        return e
+    }
+    free((*resp).body)
+    (*resp).body = body
+    (*resp).body_len = n
+    return error {}
+}
+
+// A chunked body into resp, which then records that it arrived chunked
+func client_body_chunked(b: *BufReader, resp: *Response, max: int64) -> error {
+    body, count, e := read_body_chunked(b, max)
+    if e.exists() {
+        free(body)
+        return e
+    }
+    free((*resp).body)
+    (*resp).body = body
+    (*resp).body_len = count
+    (*resp).chunked = true
+    return error {}
+}
+
+// A body that runs to the end of the stream into resp
+func client_body_to_close(b: *BufReader, resp: *Response, max: int64) -> error {
+    body, count, e := read_body_to_close(b, max)
+    if e.exists() {
+        free(body)
+        return e
+    }
+    free((*resp).body)
+    (*resp).body = body
+    (*resp).body_len = count
+    return error {}
+}
+
+// The body body_framing chose, read into resp: kind 1 a Content-Length of n, 2 chunked, 3
+// to the close, and kind 0, which a response never gets, no body
+func client_read_body(b: *BufReader, resp: *Response, kind: int64, n: int64, max: int64) -> error {
+    if kind == 1 {
+        return client_body_fixed(b, resp, n, max)
+    }
+    if kind == 2 {
+        return client_body_chunked(b, resp, max)
+    }
+    if kind == 3 {
+        return client_body_to_close(b, resp, max)
+    }
+    return error {}
+}
+
+/** Reads one response from b, the reader conn_send uses, exported so a program can parse a
+ *  canned response from a string_reader. Interim 1xx responses before the final one are read
+ *  whole and dropped, 100 Continue among them, and more than 8 in a row is http: too many
+ *  interim responses; a 101 is final. The status line is capped at 8192 bytes and the header
+ *  section at 65536 bytes and 100 fields. A response to HEAD, a 1xx, a 204, and a 304 carry
+ *  no body whatever the fields say; any other body is framed by body_framing and read with
+ *  max_body as its ceiling, chunked set when it arrived chunked. Every failure is a wire
+ *  sentence as the wire reports it. b is borrowed and advanced past the response.
+ *  @param b the buffered reader to read from, borrowed and advanced in place
+ *  @param method the method of the request this answers, borrowed; HEAD reads no body
+ *  @param max_body the body ceiling in bytes
+ *  @return a fresh heap Response the caller releases with response_free then free, paired
+ *  with an error; beside an error the Response is response_new(0), released the same way
+ *  @example
+ *  text := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+ *  sr: *StringReader = alloc(string_reader_new(text))
+ *  b := bufreader_new(string_reader(sr), 4096)
+ *  resp, e := http_read_response(b, "GET", 1024)
+ *  e.ignore()
+ *  println(response_text(resp))
+ *  response_free(resp)
+ *  free(resp)
+ *  bufreader_free(b)
+ *  free(b)
+ *  free(sr) */
+export func http_read_response(b: *BufReader, method: string, max_body: int64) -> (*Response, error) {
+    resp, he := client_read_head(b)
+    if he.exists() || !client_has_body(method, (*resp).status) {
+        return (resp, he)
+    }
+    kind, n, fe := body_framing((*resp).headers, false)
+    if fe.exists() {
+        response_free(resp)
+        free(resp)
+        return (response_new(0), fe)
+    }
+    be := client_read_body(b, resp, kind, n, max_body)
+    if be.exists() {
+        response_free(resp)
+        free(resp)
+        return (response_new(0), be)
+    }
+    return (resp, error {})
+}
+
+// Points req at u: the URL is the destination, so its path and query replace the
+// request's, copied, and the request keeps its method, headers, and body
+func client_retarget(req: *Request, u: *Url) -> void {
+    free((*req).path)
+    (*req).path = substring((*u).path, 0, str_len((*u).path))
+    free((*req).query)
+    (*req).query = substring((*u).query, 0, str_len((*u).query))
+}
+
+/** One request to the URL on a connection of its own. url is parsed, its origin dialed,
+ *  the request's path and query replaced by the URL's, Connection: close set, the request
+ *  sent with conn_send, and the connection closed and freed before this returns. The URL is
+ *  the destination and the request is the message: its method, headers, and body go out as
+ *  they are, with the client's fields set the way conn_send sets them, so a Host field the
+ *  request already carries is sent as it is; remove it with headers_remove before sending
+ *  one request on to a second origin. A 3xx comes back as it is; read Location through
+ *  headers_get to follow it. A URL parse failure is the url: sentence, a dial failure the
+ *  dial's error, and the rest conn_send's. url and req are borrowed; req keeps the fields
+ *  written into it and is never freed here.
+ *  @param url the URL text to send to, borrowed
+ *  @param req the request to send, borrowed
+ *  @return a fresh heap Response the caller releases with response_free then free, paired
+ *  with an error; beside an error the Response is response_new(0), released the same way */
+export func http_send(url: string, req: *Request) -> (*Response, error) {
+    u, pe := url_parse(url)
+    if pe.exists() {
+        url_free(u)
+        free(u)
+        return (response_new(0), pe)
+    }
+    c, de := http_dial(u)
+    if de.exists() {
+        url_free(u)
+        free(u)
+        ce := conn_close(c)
+        ce.ignore()
+        free(c)
+        return (response_new(0), de)
+    }
+    client_retarget(req, u)
+    url_free(u)
+    free(u)
+    headers_set((*req).headers, "Connection", "close")
+    resp, se := conn_send(c, req)
+    // The exchange is over by the close, so a close failure cannot cost the response
+    // anything and the response is what the caller asked for
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    return (resp, se)
+}
+
+/** A GET of the URL through http_send, the request built and freed here.
+ *  @param url the URL text to fetch, borrowed
+ *  @return a fresh heap Response the caller releases with response_free then free, paired
+ *  with an error; beside an error the Response is response_new(0), released the same way
+ *  @example
+ *  resp, e := http_get("http://127.0.0.1:8080/hello")
+ *  if e.exists() {
+ *      println(e)
+ *  } else {
+ *      println(response_text(resp))
+ *  }
+ *  response_free(resp)
+ *  free(resp) */
+export func http_get(url: string) -> (*Response, error) {
+    req: *Request = request_new("GET", "/")
+    resp, e := http_send(url, req)
+    request_free(req)
+    free(req)
+    return (resp, e)
+}
+
+/** A POST of body to the URL through http_send, with Content-Type set to content_type and
+ *  the body copied in, the request built and freed here. An empty body still states
+ *  Content-Length: 0.
+ *  @param url the URL text to post to, borrowed
+ *  @param content_type the Content-Type field value, copied in
+ *  @param body the body text, copied in up to its NUL
+ *  @return a fresh heap Response the caller releases with response_free then free, paired
+ *  with an error; beside an error the Response is response_new(0), released the same way */
+export func http_post(url: string, content_type: string, body: string) -> (*Response, error) {
+    req: *Request = request_new("POST", "/")
+    headers_set((*req).headers, "Content-Type", content_type)
+    request_set_body(req, body)
+    resp, e := http_send(url, req)
+    request_free(req)
+    free(req)
+    return (resp, e)
+}

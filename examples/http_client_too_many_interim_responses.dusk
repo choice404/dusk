@@ -1,0 +1,49 @@
+// The interim skip is bounded: http_read_response over a string_reader drops up to 8 interim
+// responses in a row before the final one and refuses a ninth, so a server streaming 100
+// Continue without end cannot spin the client. A 101 is final, not interim, and carries no
+// body.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+// The canned bytes: count interim 100 responses, then the final response text
+func canned(count: int64, last: string) -> string {
+    sb: *StringBuilder = alloc(sb_new())
+    for i in 0..count {
+        sb_push(sb, "HTTP/1.1 100 Continue\r\n\r\n")
+    }
+    sb_push(sb, last)
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// Reads one response out of text and prints its status and body, or the error
+func show(text: string) -> void {
+    sr: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(sr), 64)
+    resp, e := http_read_response(b, "GET", 1024)
+    if e.exists() {
+        println(e)
+    } else {
+        print_fmt("%d %d %q\n", [arg_int((*resp).status), arg_int((*resp).body_len), arg_str(response_text(resp))])
+    }
+    response_free(resp)
+    free(resp)
+    bufreader_free(b)
+    free(b)
+    free(sr)
+}
+
+func main() -> int32 {
+    ok: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+    eight: string = canned(8, ok)
+    show(eight)
+    free(eight)
+    nine: string = canned(9, ok)
+    show(nine)
+    free(nine)
+    show("HTTP/1.1 101 Switching Protocols\r\nUpgrade: other\r\n\r\nnot http")
+    return 0
+}

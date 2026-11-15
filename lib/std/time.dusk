@@ -408,3 +408,73 @@ export func format_iso8601(c: Civil) -> string {
     free(s)
     return out
 }
+
+// The three letter English day name for a weekday, 0 for Sunday through 6 for Saturday
+func imf_day_name(w: int64) -> string {
+    if w == 0 { return "Sun" }
+    if w == 1 { return "Mon" }
+    if w == 2 { return "Tue" }
+    if w == 3 { return "Wed" }
+    if w == 4 { return "Thu" }
+    if w == 5 { return "Fri" }
+    return "Sat"
+}
+
+// The three letter English month name for a month in [1, 12]
+func imf_month_name(m: int64) -> string {
+    if m == 1 { return "Jan" }
+    if m == 2 { return "Feb" }
+    if m == 3 { return "Mar" }
+    if m == 4 { return "Apr" }
+    if m == 5 { return "May" }
+    if m == 6 { return "Jun" }
+    if m == 7 { return "Jul" }
+    if m == 8 { return "Aug" }
+    if m == 9 { return "Sep" }
+    if m == 10 { return "Oct" }
+    if m == 11 { return "Nov" }
+    return "Dec"
+}
+
+// Appends n zero padded to width digits, the piece pad_int builds, and frees the copy
+func imf_push_padded(b: *StringBuilder, n: int64, width: int64) -> void {
+    t: string = pad_int(n, width)
+    sb_push(b, t)
+    free(t)
+}
+
+/** Renders c as an RFC 9110 IMF fixdate, the form an HTTP Date field carries, Sun, 06 Nov
+ *  1994 08:49:37 GMT: the three letter day from weekday, a comma, the two digit day, the
+ *  three letter month, the year padded to four digits, the time as HH:MM:SS, and the
+ *  literal GMT, since every Civil here is UTC. c is first normalized through
+ *  unix_from_civil and civil_from_unix, so an out of range field rolls forward the way
+ *  unix_from_civil reads it and every part of the text names the same instant. The form
+ *  is defined for years 0 through 9999; a year outside that prints with its own digits.
+ *  @param c the UTC calendar reading to render
+ *  @return the IMF fixdate text as a fresh heap string the caller owns and frees
+ *  @example
+ *  d := format_imf_fixdate(civil_from_unix(now_unix()))
+ *  println(d)
+ *  free(d) */
+export func format_imf_fixdate(c: Civil) -> string {
+    n: Civil = civil_from_unix(unix_from_civil(c))
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, imf_day_name(weekday(n)))
+    sb_push(b, ", ")
+    imf_push_padded(b, n.day, 2)
+    sb_push_char(b, 32)
+    sb_push(b, imf_month_name(n.month))
+    sb_push_char(b, 32)
+    imf_push_padded(b, n.year, 4)
+    sb_push_char(b, 32)
+    imf_push_padded(b, n.hour, 2)
+    sb_push_char(b, 58)
+    imf_push_padded(b, n.minute, 2)
+    sb_push_char(b, 58)
+    imf_push_padded(b, n.second, 2)
+    sb_push(b, " GMT")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}

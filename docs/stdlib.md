@@ -998,6 +998,7 @@ Added in 1.4.1. Wall clock reads paired with a pure dusk proleptic Gregorian civ
 | `format_iso8601(c: Civil) -> string`           | Renders `c` as `"YYYY-MM-DDTHH:MM:SSZ"`.                       |
 | `weekday(c: Civil) -> int64`                   | The day of week, 0 Sunday through 6 Saturday.                  |
 | `parse_iso8601(s: string) -> (Civil, error)`   | Parse an ISO 8601 UTC string, the strict inverse of `format_iso8601`. |
+| `format_imf_fixdate(c: Civil) -> string`       | Renders `c` as an RFC 9110 IMF fixdate, `"Sun, 06 Nov 1994 08:49:37 GMT"`. |
 
 `Civil` is a plain struct, one `int64` field per component: `year` (proleptic Gregorian, so a year before 1 is zero or negative), `month` in `[1, 12]`, `day` in `[1, the month's length]`, and `hour`, `minute`, `second` in their ordinary ranges. There is no sub-second field; `now_ns` and `now_ms` carry finer precision on their own.
 
@@ -1032,6 +1033,16 @@ println(be.exists())                       // true, 2100 is not a leap year
 ```
 
 `parse_iso8601(s)` returns `(Civil, error)` and is the strict inverse of `format_iso8601`. It reads exactly `[-]Y{4,}-MM-DDTHH:MM:SSZ`, at least four ASCII digits of year with an optional leading `-`, two digits for every other field, an uppercase `T` and `Z`, and nothing after the `Z`. It accepts no fractional seconds, no timezone offset, and no lowercase spelling, since those are shapes `format_iso8601` never emits. As an input boundary it validates: the month is 1 to 12, the day is checked by round tripping through `civil_from_days(days_from_civil(y, m, d))` so a leap day is exact with no month length table, the hour is 0 to 23, and the minute and second are 0 to 59, so a literal leap second `:60` is rejected. A structural mismatch returns `iso8601: malformed timestamp` and an out of range field returns `iso8601: field out of range`. The law is `parse_iso8601(format_iso8601(c)) == c` for every representable `Civil`, negative and wider than four digit years included.
+
+Added in 1.17.2, `format_imf_fixdate(c)` renders the IMF fixdate RFC 9110 gives an HTTP `Date` field: the three letter day name from `weekday`, a comma, the two digit day, the three letter month name, the year padded to four digits, the time as `HH:MM:SS`, and the literal `GMT`, since every `Civil` here is UTC. The value is normalized through `unix_from_civil` and `civil_from_unix` first, so an out of range field rolls forward exactly as `unix_from_civil` reads it and the day name, the date, and the time always name the same instant. The result is a fresh heap string you free. The format is defined for the years 0 through 9999, the four digits the IMF fixdate grammar gives a year; an instant outside them renders a year of more digits or a sign, which no HTTP recipient reads as a date.
+
+```text
+@import std.time
+
+d := format_imf_fixdate(civil_from_unix(784111777))
+println(d)                                 // Sun, 06 Nov 1994 08:49:37 GMT
+free(d)
+```
 
 ## std.memory.allocator
 
@@ -1906,6 +1917,826 @@ c2.ignore()
 `udp_recv_from` fills `buf` up to `cap` and drops whatever did not fit, with no error and no second read that recovers the tail, so size the buffer for the largest datagram you expect; 65507 bytes is the most an IPv4 datagram carries. `net_set_read_timeout(fd, ms)` bounds the wait, and a receive that times out is the error `would block`, so a server loop that polls a socket between other work tests that text, or `exists` alone when any failure ends the loop.
 
 Unix datagram sockets and connected UDP are not in this release: `udp_bind` refuses an `Addr.Unix` before any syscall, and `udp_send_to` over a unix address is `Address family not supported by protocol` from the OS. A datagram socket is closed with `net_close`, once, like any other descriptor, and it crosses a `spawn` as its `int64`.
+
+## std.url
+
+Added in 1.17.2. A parsed URL and the percent coding of RFC 3986. A URL is not an HTTP idea, so the module carries no socket and imports only `std.string`; the http client is its first consumer, and any program that reads the same grammar, a redirect target among them, uses it the same way.
+
+```text
+export struct Url {
+    scheme: string,
+    host: string,
+    port: int64,
+    path: string,
+    query: string,
+    fragment: string,
+}
+```
+
+Every string field is a fresh heap copy the `Url` owns, and an absent part is the empty heap string, so you read any field without testing it first. `scheme` is lowercased. `host` keeps its case and is the bare host, an IPv6 literal without its brackets. `port` is the explicit port, or the scheme's default, 80 for `http` and 443 for `https`, or 0 for a scheme with no default. `path` is the path as written with its percent encoding untouched, empty when the URL has none. `query` and `fragment` are the text after `?` and `#` without the marks.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `url_parse(text: string) -> (*Url, error)`                      | Parses `scheme://host[:port][/path][?query][#fragment]` into a fresh `Url`. |
+| `url_free(u: *Url) -> void`                                     | Frees the five strings; free the block with `free` after.      |
+| `url_default_port(scheme: string) -> int64`                     | 80 for `http`, 443 for `https`, 0 otherwise, ASCII case folded. |
+| `url_host_header(u: *Url) -> string`                            | The `Host` field value: the host, in brackets when it holds a `:`, then `:port` when the port is not the scheme's default. |
+| `url_target(u: *Url) -> string`                                 | The request target in origin form: the path, `/` when it is empty, then `?` and the query when there is one; never the fragment. |
+| `url_encode(s: string) -> string`                               | Every byte outside the unreserved set, letters, digits, `-`, `.`, `_`, and `~`, as `%XX` in uppercase hex. |
+| `url_decode(s: string) -> (string, error)`                      | Every `%XX` back to its byte; `+` is left alone.               |
+
+The scheme is an ASCII letter followed by letters, digits, `+`, `-`, and `.`. The query runs from the first `?` after the authority to the first `#` after it, and the fragment from that `#` to the end, so a `?` inside a query or a `#` inside a fragment is kept as text. An empty port after the colon, `http://h:/`, reads as the scheme's default, the way RFC 3986 lets it. `url_parse` fails with one of a closed set of sentences, each one a value a program may match:
+
+| Error                                    | Cause                                                          |
+| ---------------------------------------- | -------------------------------------------------------------- |
+| `url: control character`                 | a byte below 0x21, a space or a control character, anywhere in the text |
+| `url: no scheme`                         | the text does not open with a scheme and `://`                 |
+| `url: user information is not supported` | an `@` in the authority                                        |
+| `url: empty host`                        | nothing between `://` and the port, path, query, or fragment, or `[]` |
+| `url: bad host`                          | an unclosed `[`, a byte after `]` other than `:`, a bracket inside a plain host, or a bracketed host that is not hex digits, colons, and dots with at least one colon |
+| `url: bad port`                          | a port byte that is not a digit, or a port above 65535         |
+
+User information is refused rather than dropped: RFC 9110 deprecates it in an `http` URL, and silently discarding a credential is the worse surprise. Brackets hold an IPv6 literal and nothing else, so `http://[127.0.0.1]/` and `http://[localhost]/` are `url: bad host` rather than a host whose brackets `url_host_header` would drop. On failure the `Url` beside the error is real, every field the empty heap string and the port 0, so every call pairs with `url_free` and `free` on either path.
+
+```text
+@import std.url
+
+u, e := url_parse("http://[::1]:8080/a/b?x=1#top")
+if e.exists() {
+    println(e)
+} else {
+    host := url_host_header(u)
+    target := url_target(u)
+    println(host)                          // [::1]:8080
+    println(target)                        // /a/b?x=1
+    free(host)
+    free(target)
+}
+url_free(u)
+free(u)
+```
+
+The path and the query keep their percent encoding exactly as written, because a decoded path would encode back differently and a request target goes out as the program wrote it. `url_decode` undoes the encoding on request. A `%` not followed by two hex digits is `url: bad percent escape`, and so is `%00`, since a decoded NUL would end the string early and drop what followed it with no sign. `url_decode` never turns `+` into a space: that is the form encoding rule, which belongs to a form parser. Both coding functions return a fresh heap string you free, and the one `url_decode` hands back beside an error is the empty heap string, freed the same way.
+
+```text
+q := url_encode("a b/c~d%")
+println(q)                                 // a%20b%2Fc~d%25
+back, de := url_decode(q)
+if de.exists() {
+    println(de)
+} else {
+    println(back)                          // a b/c~d%
+}
+free(back)
+free(q)
+```
+
+`url_host_header`, `url_target`, and `url_encode` each return a fresh heap string, and `url_default_port` and every field read allocate nothing. The parser is byte wise and bounds every index by the measured length of the text, so a `Url` never reads past its input whatever the bytes are.
+
+## std.net.http
+
+Added in 1.17.2. An HTTP/1.1 client and a small server in pure dusk over the blocking sockets of `std.net` and the stream layer of `std.io` and `std.bufio`, with no change to the compiler or the runtime. The wire is RFC 9110 and RFC 9112: a request line and a status line, header fields, `Content-Length` bodies, chunked transfer coding in both directions, `Connection: close` and keep alive, `Host` required on a request, and a 1.0 response tolerated on read.
+
+The layer is four modules. The wire imports the message types, the client and the server each import the wire, and the client alone imports `std.url` and dials. Imports are transitive, so a program names the highest one it needs:
+
+| Module                 | Contents                                                       |
+| ---------------------- | -------------------------------------------------------------- |
+| `std.net.http`         | The message types, `Header`, `Request`, and `Response`, the header list functions, and `status_text`. |
+| `std.net.http.wire`    | The parsers, the framing rule, the chunked coding, and the head writers, over a `*BufReader` and a `Writer` and never a descriptor. |
+| `std.net.http.client`  | A `Conn` over one connection, `http_get`, `http_post`, and `http_send`. |
+| `std.net.http.server`  | A sequential accept loop with a typed context and a named handler. |
+
+`@import std.net.http.client` brings `Url`, the message types, the header functions, and `std.net`'s `Addr` with it, and `@import std.net.http.server` brings the same set plus the server. A program that only builds and reads messages imports `std.net.http`. The client and the server never import each other, so a client program links no accept loop and a server program links no resolver call.
+
+### Messages and headers
+
+```text
+export struct Header { name: string, value: string }
+
+export struct Request {
+    method: string,
+    path: string,
+    query: string,
+    minor: int64,
+    headers: *Vector<Header>,
+    body: *raw char,
+    body_len: int64,
+    chunked: bool,
+}
+
+export struct Response {
+    status: int64,
+    reason: string,
+    minor: int64,
+    headers: *Vector<Header>,
+    body: *raw char,
+    body_len: int64,
+    chunked: bool,
+}
+```
+
+`method`, `path`, `query`, `reason`, and every header name and value are fresh heap strings the message owns. A request's target is held split at its first `?`, `path` before it and `query` after it without the mark, so a target with no query has the empty `query`. `minor` is the HTTP/1.x minor version, `1` or `0`. `body` is a heap buffer of `body_len` bytes with a NUL appended after them, never null and one byte when the body is empty. `chunked` asks a writer to send the body in chunked coding, and a parser sets it to say the body arrived that way.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `headers_new() -> *Vector<Header>`                              | An empty header list on the heap.                              |
+| `headers_add(h: *Vector<Header>, name: string, value: string) -> void` | Appends a copy of both strings; a repeated name is kept in order. |
+| `headers_set(h: *Vector<Header>, name: string, value: string) -> void` | Removes every field named `name`, then appends one copy.       |
+| `headers_get(h: *Vector<Header>, name: string) -> (string, bool)` | The value of the first field named `name`, borrowed from the list; the empty literal and `false` when absent. |
+| `headers_has(h: *Vector<Header>, name: string) -> bool`         | Whether a field of that name is present.                       |
+| `headers_remove(h: *Vector<Header>, name: string) -> int64`     | Removes and frees every field of that name; how many went.     |
+| `headers_free(h: *Vector<Header>) -> void`                      | Frees every name and value and the backing buffer; free the block with `free` after. |
+| `header_name_eq(a: string, b: string) -> bool`                  | ASCII case insensitive byte equality, no allocation.           |
+| `request_new(method: string, target: string) -> *Request`       | `method` copied, `target` split at its first `?`, `minor` 1, empty headers and body, `chunked` false. |
+| `request_text(r: *Request) -> string`                           | The body bytes up to the first NUL, a borrowed view.           |
+| `request_set_body(r: *Request, text: string) -> void`           | Replaces the body with a copy of `text`; `body_len` is its byte count. |
+| `request_set_body_bytes(r: *Request, buf: *raw char, n: int64) -> void` | Replaces the body with a copy of `n` raw bytes, a NUL among them kept. |
+| `request_free(r: *Request) -> void`                             | Frees the method, path, query, headers and their list block, and body; free the block with `free` after. |
+| `response_new(status: int64) -> *Response`                      | `status`, `reason` a copy of `status_text(status)`, `minor` 1, empty headers and body, `chunked` false. |
+| `response_text(r: *Response) -> string`                         | `request_text`'s twin.                                         |
+| `response_set_body(r: *Response, text: string) -> void`         | `request_set_body`'s twin.                                     |
+| `response_set_body_bytes(r: *Response, buf: *raw char, n: int64) -> void` | `request_set_body_bytes`'s twin.                           |
+| `response_free(r: *Response) -> void`                           | Frees the reason, headers and their list block, and body; free the block with `free` after. |
+| `status_text(code: int64) -> string`                            | The reason phrase for a status code, a literal; the empty literal for a code it does not know. |
+
+The header section is an ordered `*Vector<Header>` rather than a `Map`, since header fields are a list that may repeat a name, `Set-Cookie` and `Via` among them, and a field name compares case insensitively. Every lookup is a linear scan through `header_name_eq`, which folds ASCII case byte by byte and allocates nothing, cheaper than a hash over the dozen fields a message carries. `headers_get` answers with the first match, the rule RFC 9110 permits for every field but `Set-Cookie`; a program that wants every value of a repeated field walks the list with `vec_len`, `vec_get`, and `header_name_eq`. `headers_set` is the call to reach for when a field must appear exactly once, `Host` or `Content-Length`, since it removes every field of the name before it appends. `headers_set` copies the name and the value, and `headers_remove` copies the name, before either frees a field, so both take a borrow from the same list, the value `headers_get` returned or the name of a field read with `vec_get`, and `headers_set(h, "Host", v)` with `v` from `headers_get(h, "Host")` keeps the value.
+
+```text
+@import std.net.http
+
+h := headers_new()
+headers_add(h, "Set-Cookie", "a=1")
+headers_add(h, "Set-Cookie", "b=2")
+headers_set(h, "Content-Type", "text/plain")
+first, ok := headers_get(h, "set-cookie")
+if ok {
+    println(first)                         // a=1
+}
+for i in 0..vec_len(h) {
+    f := vec_get(h, i)
+    if header_name_eq(f.name, "Set-Cookie") {
+        println(f.value)                   // a=1, then b=2
+    }
+}
+println(headers_remove(h, "SET-COOKIE"))   // 2
+headers_free(h)
+free(h)
+```
+
+A body is a raw buffer plus a length rather than a string, because a string ends at its first NUL: an image or a protobuf body carried as one would be cut there with no sign. `request_text` and `response_text` are zero copy views of the bytes up to the first NUL, the right read for a text body, while `body_len` stays the true byte count, so a binary body reads as a prefix here and arrives whole through `(*r).body` and `(*r).body_len`. `request_set_body` copies a string, `request_set_body_bytes` copies raw bytes, and each makes its copy before it frees the old body, so the new text may be a view of the current one.
+
+```text
+resp := response_new(404)
+println((*resp).reason)                    // Not Found
+headers_set((*resp).headers, "Content-Type", "text/plain")
+response_set_body(resp, "no such page")
+println(response_text(resp))               // no such page
+println((*resp).body_len)                  // 12
+response_free(resp)
+free(resp)
+```
+
+`status_text` knows the reason phrase of every code RFC 9110 defines, `200 OK`, `404 Not Found`, `413 Content Too Large`, `431 Request Header Fields Too Large`, and the other codes the IANA registry assigns from 1xx through 5xx. A code the table does not know, `299` or the reserved `418` among them, is the empty string, which is a legal empty reason on the wire. The result is a literal, so read it or copy it and never free it; `response_new` copies it into the `reason` the response owns.
+
+A message owns everything inside it. `request_free` and `response_free` release the strings, every header and the header list block, and the body, and the block itself is yours to `free` after, the convention `vec_free` and `bufreader_free` follow. `headers_add` and `headers_set` copy what you pass, so the strings you built stay yours to free. A header value from `headers_get` and a text view from `request_text` or `response_text` are borrows into the message, valid until that header is removed, the body is replaced, or the message is freed; copy one with `substring` to keep it, and never free it. The checker does not track ownership on a `string`, so a `free` of such a borrow passes check, and the message's own free of the same block later is the runtime's `fatal: double free` fault. A header list you made with `headers_new` and never handed to a message is released with `headers_free` then `free`. Reading a message after its free is the runtime's `use of a freed or stale pointer` fault.
+
+### The wire
+
+`std.net.http.wire` is the HTTP/1.1 wire of RFC 9112: the capped line read, the request line, status line, and header field parsers, the framing rule, the three body readers, chunked coding in both directions, and the two head writers. Every reader takes a `*BufReader` and nothing else and every writer takes a `Writer` or a head builder, so the same code reads a socket through `fd_reader`, a string through `string_reader`, and writes into a `StringBuilder` through `sb_writer`; the module never names a descriptor. The functions live in two files, the byte half in `std.net.http.wirebody`, which `std.net.http.wire` imports, so `@import std.net.http.wire` brings all of them, and the client and the server import it for you.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `read_line_capped(b: *BufReader, max: int64) -> (string, error)` | One line without its CR LF or bare LF ending, as a fresh heap string; a line of `max` bytes or more is refused. |
+| `parse_request_line(line: string) -> (*Request, error)`         | `method SP target SP HTTP/1.minor` into a fresh `Request` with empty headers and body. |
+| `parse_status_line(line: string) -> (*Response, error)`         | `HTTP/1.minor SP 3DIGIT [SP reason]` into a fresh `Response` with empty headers and body. |
+| `parse_header_line(line: string, into: *Vector<Header>) -> error` | `name ":" OWS value OWS`, appended to `into`.                 |
+| `read_headers(b: *BufReader, into: *Vector<Header>, max_bytes: int64, max_count: int64) -> error` | Header field lines until the empty line, each parsed into `into`. |
+| `body_framing(h: *Vector<Header>, is_request: bool) -> (int64, int64, error)` | How the body ends: kind `0` none, `1` `Content-Length` with the length, `2` chunked, `3` to the close. |
+| `read_body_fixed(b: *BufReader, n: int64, max: int64) -> (*raw char, error)` | Exactly `n` bytes, with a NUL after them.                      |
+| `read_body_chunked(b: *BufReader, max: int64) -> (*raw char, int64, error)` | A chunked body decoded, its trailer section read and dropped; the bytes and their count. |
+| `read_body_to_close(b: *BufReader, max: int64) -> (*raw char, int64, error)` | Every byte to the end of the stream; the bytes and their count. |
+| `write_chunked(w: Writer, body: *raw char, n: int64, chunk: int64) -> error` | `n` bytes as chunks of at most `chunk` bytes, then the last chunk; `chunk` below 1 reads as 4096. |
+| `write_message(w: Writer, head: *StringBuilder, body: *raw char, n: int64) -> error` | The head and the body staged as one buffer and written in one write. |
+| `write_request_head(head: *StringBuilder, r: *Request) -> void` | Appends the request line, every header, and the empty line.    |
+| `write_response_head(head: *StringBuilder, r: *Response) -> void` | Appends the status line, every header, and the empty line.    |
+| `token_list_has(value: string, token: string) -> bool`          | Whether a comma separated list field holds `token`, case folded, with the whitespace around each element ignored. |
+| `http_date_now() -> string`                                     | The current time as an IMF fixdate, the `Date` field value.    |
+
+Every reader failure is one sentence from a closed set, a value a program may match and the server maps to a status. A read failure keeps the reader's own text after its prefix, so `http: read failed: Connection reset by peer` is one example of that row.
+
+| Error                                              | Cause                                                          |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| `http: line too long`                              | a line reached the cap before its LF                           |
+| `http: bare carriage return`                       | a CR not followed by an LF                                     |
+| `http: control character`                          | a NUL byte in a line                                           |
+| `http: connection closed`                          | the stream ended before the first byte of a line               |
+| `http: truncated line`                             | the stream ended inside a line                                 |
+| `http: timed out`                                  | the reader reported `would block`, a socket's read timeout     |
+| `http: read failed: ` and the reader's text        | any other read failure                                         |
+| `http: bad request line`                           | a missing, doubled, or third space, or a version that is not `HTTP/` at all |
+| `http: bad method`                                 | a method byte outside the token set                            |
+| `http: bad target`                                 | a target byte below 0x21 or above 0x7E, a `#`, the asterisk form on any method but `OPTIONS`, or a target of no known form |
+| `http: version not supported`                      | an `HTTP/` version other than 1.0 and 1.1 on a request, or a major version other than 1 on a response |
+| `http: bad status line`                            | any other malformed status line, a code below 100 or a control byte in the reason among them |
+| `http: obsolete line folding`                      | a header line opening with SP or HTAB                          |
+| `http: bad header name`                            | an empty name, a name byte outside the token set, or whitespace before the colon |
+| `http: bad header value`                           | a control byte other than HTAB, or DEL, in a value             |
+| `http: header section too large`                   | the header section passed `max_bytes`                          |
+| `http: too many headers`                           | the header section passed `max_count`, or a trailer section passed 100 fields |
+| `http: both Content-Length and Transfer-Encoding`  | a message carrying both framing fields                         |
+| `http: bad Content-Length`                         | a length that is not 1 to 18 ASCII digits                      |
+| `http: conflicting Content-Length`                 | two lengths that disagree                                      |
+| `http: unsupported Transfer-Encoding`              | a coding list other than the single element `chunked`          |
+| `http: body too large`                             | a body that would pass its `max`                               |
+| `http: truncated body`                             | the stream ended inside a body                                 |
+| `http: bad chunk size`                             | a chunk size that is not 1 to 16 hex digits, or a size line ended by a bare LF |
+| `http: bad chunk terminator`                       | a chunk's data not followed by CR LF, or a trailer line ended by a bare LF |
+
+`read_line_capped` reads one byte at a time through `bufreader_read_byte` and never past the byte that settles the line. A CR LF ending and a bare LF ending are both accepted, as RFC 9112 lets a recipient do, and neither is ever part of the line, so no parser here strips a trailing `\r`; a CR followed by anything else is refused. The bare LF tolerance belongs to the head alone, the request line, the status line, and the header fields, which every reader here takes through `read_line_capped`. The lines inside a chunked body do not get it: `read_body_chunked` requires CR LF after every chunk size line and every trailer line, so a body cannot be framed one way here and another way by a stricter reader in front. A line that reaches `max` bytes is refused before another byte is read, so the longest line accepted is `max - 1` bytes and a peer sending without end costs `max` bytes and no more. The string beside an error is a real heap string holding the bytes read before the failure, freed like a line: the empty one beside `http: timed out` says the stream went quiet before a byte arrived, the idle connection a server closes cleanly, while a non empty one says a line stalled partway.
+
+`parse_request_line` takes a target in origin form, `/path?query`, in asterisk form, `*`, on an `OPTIONS` request and no other, or in absolute form, `http://authority/path?query`, which it reduces to the path and the query after the authority, `/` when there is no path; the authority, a user information part included, is dropped unread. Dropping it is this module's choice rather than a rule of the RFC: the `Host` field names the origin, so a handler behind a proxy that routes on the absolute target sees `Host` instead. A `#` anywhere in a target is `http: bad target`, since a fragment is never sent and a handler comparing paths would otherwise see one. `parse_status_line` reads a later `HTTP/1.x` minor version as 1, the rule RFC 9110 gives a recipient. `parse_header_line` keeps the name as written and the value with its surrounding SP and HTAB removed, and appends nothing on an error. `read_headers` charges each line its length plus 2 against `max_bytes`, the ending empty line included, and caps each line read at what the section has left, so a section, or a single field, that would pass the budget is refused after reading no more than `max_bytes` bytes. A header line has no cap of its own, only the section budget, and a line that reaches what the section has left is `http: header section too large` rather than `http: line too long`; a field past `max_count` is refused before it is parsed. The parse functions hand back an empty `Request` or `response_new(0)` beside an error, freed like any other.
+
+`body_framing` is where a request smuggling shape would slip through, so it refuses rather than resolves. A message with both a `Content-Length` and a `Transfer-Encoding` field is refused outright. Every `Transfer-Encoding` field read together as one comma separated list must be exactly the one element `chunked`, case folded, so `gzip, chunked`, two `chunked` fields, and `chunked,` are all refused. Every `Content-Length` field, and every comma separated element inside one, must be 1 to 18 ASCII digits with no sign and no space, which keeps the value inside an `int64` with no overflow test, and all of them must name the same length. A message with neither field is a request with no body or a response that runs to the close; the caller applies the status and method rules first, since a `HEAD` response, a 1xx, a 204, and a 304 carry no body whatever the fields say.
+
+Each body reader returns a fresh heap buffer with a NUL after the body bytes, the shape a `Request` or `Response` body holds, and beside an error a one byte empty buffer, so every call pairs with one `free`. The buffer grows only as bytes arrive, so a length a peer claims and never sends costs nothing beyond what did arrive. `read_body_fixed` refuses an `n` above `max` before reading a byte. `read_body_chunked` requires CR LF at the end of every chunk size line and trailer line, a bare LF being `http: bad chunk size` on a size line and `http: bad chunk terminator` on a trailer line, ignores chunk extensions after a `;` without checking their grammar, judges each chunk's size against what the budget has left before reading a byte of it, a size past what an `int64` holds included, caps a chunk size line at 256 bytes and a trailer line at 8192 bytes, and reads and discards at most 100 trailer fields, so a peer streaming trailer lines without end is refused after a bounded read. `read_body_to_close` refuses a body past `max` after reading at most `max + 1` bytes. The chunk size line cap is small on purpose: a chunk extension has only what is left of 256 bytes after the size, so a peer cannot pad each chunk with kilobytes the reader must consume, and a line past the cap is `http: line too long`.
+
+`write_request_head` and `write_response_head` add no field of their own; the client and the server decide `Host`, `Content-Length`, `Transfer-Encoding`, `Date`, and `Connection` before calling them. The request target is rebuilt from the path and the query, `/` for an empty path, and the version written is always `HTTP/1.1`. A control byte other than HTAB, or DEL, anywhere in the text is written as SP, the replacement RFC 9110 names for a CR, LF, or NUL in a field, so a value a program copied from its input can never end a line early and start a header or a message of its own. `write_message` sends the head and the body as one buffer, so a small message leaves in one segment; a chunked body goes out as `write_message` with `n` 0 and then `write_chunked`. A writer failure is the writer's own error, and a writer that reports fewer bytes than it was handed with no error, which no `std.io` writer does, is `http: short write` rather than a silent success.
+
+```text
+@import std.net.http.wire
+
+// Read a request head and a Content-Length body from any stream
+func read_request(b: *BufReader) -> (*Request, error) {
+    line, le := read_line_capped(b, 8192)
+    if le.exists() {
+        free(line)
+        return (request_new("", ""), le)
+    }
+    req, pe := parse_request_line(line)
+    free(line)
+    if pe.exists() {
+        return (req, pe)
+    }
+    he := read_headers(b, (*req).headers, 65536, 100)
+    if he.exists() {
+        return (req, he)
+    }
+    kind, n, fe := body_framing((*req).headers, true)
+    if fe.exists() {
+        return (req, fe)
+    }
+    if kind == 1 {
+        body, be := read_body_fixed(b, n, 1048576)
+        free((*req).body)
+        (*req).body = body
+        (*req).body_len = n
+        if be.exists() {
+            (*req).body_len = 0
+            return (req, be)
+        }
+    }
+    return (req, error {})
+}
+
+text := "POST /submit?x=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\nhello"
+c: *StringReader = alloc(string_reader_new(text))
+b := bufreader_new(string_reader(c), 4096)
+req, e := read_request(b)
+if e.exists() {
+    println(e)
+} else {
+    println((*req).path)                   // /submit
+    println(request_text(req))             // hello
+}
+request_free(req)
+free(req)
+bufreader_free(b)
+free(b)
+free(c)
+
+resp := response_new(200)
+response_set_body(resp, "ok")
+headers_set((*resp).headers, "Content-Length", "2")
+head: *StringBuilder = alloc(sb_new())
+write_response_head(head, resp)
+out: *StringBuilder = alloc(sb_new())
+we := write_message(sb_writer(out), head, (*resp).body, (*resp).body_len)
+we.ignore()
+// out now holds HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok
+sb_free(out)
+free(out)
+sb_free(head)
+free(head)
+response_free(resp)
+free(resp)
+```
+
+### The client
+
+`std.net.http.client` is the HTTP/1.1 client over `std.net`'s blocking sockets. `http_dial` opens a `Conn` to the origin a `Url` names, `conn_send` writes one `Request` on it and reads the `Response` back, and the `Conn` stays open for the next request until either side asks to close. `http_get`, `http_post`, and `http_send` are the one shot forms: each dials, sends with `Connection: close`, and tears the connection down before it returns, so a program that makes one request frees one response and nothing else. Every call blocks the calling thread, bounded by the socket timeouts, and none belongs inside an `async func`. A `Conn` carries one exchange at a time, so two threads that share one take turns through a mutex or each dial their own.
+
+```text
+export struct Conn {
+    fd: int64,
+    r: Reader,
+    w: Writer,
+    rd: *BufReader,
+    host: string,
+    is_open: bool,
+    max_body: int64,
+    timeout_ms: int64,
+}
+```
+
+`fd` is the connected socket, `-1` for a `Conn` that never connected or that `conn_close` closed. `r` and `w` are the two stream halves over it, and `rd` is the buffered reader over `r` that every read goes through, owned by the `Conn`. `host` is the `Host` field value for the connection, `url_host_header`'s text as a fresh heap string the `Conn` owns. `is_open` says whether another request may be sent. `max_body` is the response body ceiling, 8388608 bytes by default, and `timeout_ms` the read and write timeout on the socket, 30000 by default. Read the fields; change them through `conn_set_timeout` and `conn_set_max_body`.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `http_dial(u: *Url) -> (*Conn, error)`                          | Resolve the host, dial each address in order until one connects, set `TCP_NODELAY` and the default timeouts. `https` and any other scheme are refused before any lookup. |
+| `conn_send(c: *Conn, req: *Request) -> (*Response, error)`      | Write `req` with the client's `Host` and framing fields set, read the response, and mark the connection closed when the exchange says so. |
+| `conn_close(c: *Conn) -> error`                                 | Close the socket, set `fd` to `-1`, and free the buffered reader and the host; free the block with `free` after. |
+| `conn_set_timeout(c: *Conn, ms: int64) -> error`                | Set both socket timeouts to `ms` milliseconds and record it; 0 clears them. |
+| `conn_set_max_body(c: *Conn, n: int64) -> void`                 | Set the response body ceiling.                                 |
+| `http_get(url: string) -> (*Response, error)`                   | A `GET` of `url` through `http_send`.                          |
+| `http_post(url: string, content_type: string, body: string) -> (*Response, error)` | A `POST` of `body` with `Content-Type` set, through `http_send`. |
+| `http_send(url: string, req: *Request) -> (*Response, error)`   | Parse `url`, dial it, send `req` to it with `Connection: close`, and close the connection. |
+| `http_read_response(b: *BufReader, method: string, max_body: int64) -> (*Response, error)` | The response reader `conn_send` uses, over any buffered reader. |
+
+Every failure is a value. The wire's sentences come back as they are, `http: timed out`, `http: body too large`, `http: both Content-Length and Transfer-Encoding` and the rest of the closed set, a lookup failure keeps the resolver's text, a dial failure is the last address's OS error, `Connection refused` when nothing listens, and a write failure is the writer's own, `Broken pipe` among them. The client adds six sentences of its own.
+
+| Error                                                                | Cause                                                          |
+| -------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `http: the https scheme needs TLS, which this release does not ship` | a URL with the `https` scheme; no lookup is made and no socket opened |
+| `http: unsupported scheme`                                           | a URL with any scheme but `http` and `https`                   |
+| `http: connection is closed`                                         | a `conn_send` on a connection already marked closed; nothing is written |
+| `http: too many interim responses`                                   | more than 8 interim 1xx responses in a row before the final one |
+| `http: unexpected data on the connection`                            | bytes the server sent past the last response wait in the buffered reader when a send begins; the connection is marked closed and nothing is written |
+| `http: CONNECT is not supported`                                     | a request with the method `CONNECT`, matched case sensitively; nothing is written |
+
+`conn_send` also refuses a request it could not write as one message, with the wire's own sentences and before a byte is written: a method that is not a token is `http: bad method`, a path or query byte below 0x21 or above 0x7E is `http: bad target`, so a program percent encodes such text with `url_encode` first, and a header name that is empty or not a token is `http: bad header name`. Nothing reached the socket, so the connection stays as it was, open when it was open, and the next request may go out on it; `CONNECT` is refused the same way.
+
+Every response comes back as a fresh heap `Response`, and on an error too: beside an error it is a real `response_new(0)`, so every call pairs with `response_free` and `free` whatever happened. A `Conn` is the same, a `Conn` that never connected comes back beside a dial error, closed from the start and holding no socket, so every `http_dial` pairs with one `conn_close` and one `free`. `conn_close` is the one place the socket is closed. `conn_send` marks a connection closed when the server says `Connection: close` and leaves the socket to `conn_close`, and `conn_close` marks it closed too, so a `conn_send` that reaches it before the `free` is refused rather than reading freed memory.
+
+`conn_send` decides the fields that frame the request before it writes the head, with `headers_set`, so sending the same request a second time repeats them rather than doubling them. `Host` is set to the connection's host when the request carries none; a `Host` the request already has is sent as it is, so a program that sends one request on to a second origin removes it first with `headers_remove`. The framing fields belong to the client outright: with `chunked` true the request goes out with `Transfer-Encoding: chunked`, any `Content-Length` removed, and the body follows the head in chunks of 4096 bytes; otherwise any `Transfer-Encoding` is removed and `Content-Length` is set from `body_len` when the body is not empty or the method is `POST`, `PUT`, or `PATCH`, which state an empty body as `Content-Length: 0`, and removed when neither holds. A whole body leaves with the head in one write. An empty query is never written, so a request built from the target `/a?` goes out as `/a`. The request is borrowed and never freed, so it keeps those fields and is yours to free after the send, the same way after `http_send`.
+
+The response is read through `http_read_response` with the connection's `max_body`. Interim 1xx responses before the final one, `100 Continue` and `103 Early Hints` among them, are read whole and dropped, at most 8 in a row; a `101` is final, since it switches the protocol. A response to `HEAD`, a 1xx, a `204`, and a `304` carry no body whatever their fields say. Any other body is framed by `body_framing`: a `Content-Length` body is refused before a byte of it is read when it passes `max_body`, a chunked one arrives decoded with `chunked` set to say so, and a response with neither field, an HTTP/1.0 response among them, runs to the close. The status line is capped at 8192 bytes and the header section at 65536 bytes and 100 fields. `http_read_response` is exported so a program can parse a canned response from a `string_reader` the same way.
+
+The connection is marked closed after a response that says `Connection: close`, after a request that said it, after an HTTP/1.0 response that did not say `keep-alive`, after an HTTP/1.0 response that carried `Transfer-Encoding`, which RFC 9112 has a recipient close after since a 1.0 hop may have framed it differently, after a body read to the close, after a `101`, and after every error, the write path included, so no exchange ever continues on a stream whose framing is unknown. Before it writes, `conn_send` also checks that nothing is waiting in the buffered reader: a server that answered one request with two responses leaves the second there, and the send is `http: unexpected data on the connection` with the connection marked closed, rather than the stray response handed back as the answer. `http_send` sets `Connection: close` on the request, so the server knows the connection ends with the exchange.
+
+A kept connection the server closed while it sat idle, past its own idle timeout, fails the next send with `http: connection closed`, and the connection is marked closed; the program dials again and resends. `conn_close` closes the socket and sets `fd` to `-1`. It is called once per `Conn`: a second `conn_close` on the same `Conn` is the runtime's `use of a freed or stale pointer` fault, since the buffered reader it frees is already gone.
+
+`http_send` takes the destination from the URL and the message from the request: the URL's path and query replace the request's, and the method, headers, and body go out as the request holds them. A `3xx` comes back as it is rather than being followed, since following needs a cap, a rule for the method a `303` rewrites, and a rule for the fields that must not cross to another origin, which are the program's to decide. `Location` may hold a path rather than a whole URL, so the worked client at the end of this section joins one to the origin it came from before it follows.
+
+The read and write timeouts are the socket's, 30 seconds by default, and a read that waits past one is `http: timed out`. They bound each read, not the whole exchange, so a body that keeps arriving never trips them; `conn_set_timeout(c, 0)` waits forever. They start once the dial has connected, so neither the name lookup nor the connect has a timeout of its own, and a resolver or a host that never answers holds `http_dial` and the one shot calls as long as the OS waits. A program that wants a deadline across a whole exchange, the dial included, runs the call on a thread and waits for it with `chan_recv_timeout`.
+
+```text
+@import std.net.http.client
+
+resp, e := http_get("http://127.0.0.1:8080/hello")
+if e.exists() {
+    println(e)
+} else {
+    println(f"{(*resp).status} {response_text(resp)}")
+}
+response_free(resp)
+free(resp)
+
+// One request on a connection of its own
+u, pe := url_parse("http://127.0.0.1:8080/")
+pe.ignore()
+c, de := http_dial(u)
+url_free(u)
+free(u)
+if de.exists() {
+    println(de)
+} else {
+    req := request_new("GET", "/hello")
+    reply, se := conn_send(c, req)
+    if se.exists() {
+        println(se)
+    } else {
+        println(response_text(reply))
+    }
+    response_free(reply)
+    free(reply)
+    request_free(req)
+    free(req)
+}
+ce := conn_close(c)
+ce.ignore()
+free(c)
+```
+
+### The server
+
+`std.net.http.server` is a small HTTP/1.1 server over the blocking sockets of `std.net`. The core is sequential: `http_serve` accepts a connection, serves every request on it, and only then accepts the next, and a program composes parallelism outside the call. A `Server` holds plain settings and owns nothing, so `free` alone releases one.
+
+```text
+export struct Server {
+    lfd: int64,
+    max_body: int64,
+    max_header_bytes: int64,
+    max_header_count: int64,
+    max_line: int64,
+    max_requests: int64,
+    read_timeout_ms: int64,
+    send_date: bool,
+    keep_alive: bool,
+}
+```
+
+`lfd` is the listener from `net_listen`, which stays the program's to stop and close; a server used only through `http_serve_stream` needs none, and `-1` says so. `max_body` is the request body ceiling, 1048576 bytes by default. `max_header_bytes`, 65536, and `max_header_count`, 100, bound the header section. `max_line`, 8192, caps the request line, so the longest line served is 8191 bytes. `max_requests`, 1000, is how many requests one connection carries: the response to the last of them says `Connection: close` and the stream ends cleanly after it, so one client cannot hold a sequential acceptor forever with a stream of quick requests, and 0 means no limit. `read_timeout_ms`, 10000, is how long each read of a request and each write of a response may wait, which bounds a connection sitting idle between requests and a peer that stops reading its response alike; 0 waits forever. `send_date`, true by default, adds a `Date` field to every response, and `keep_alive`, true by default, lets one connection carry more than one request. Write a field to change it before serving.
+
+| Function                                                        | Description                                                    |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `http_server_new(lfd: int64) -> *Server`                        | The defaults above over a listener.                            |
+| `http_serve<C>(s: *Server, ctx: C, handler: (*Request, C) -> *Response) -> error` | The accept loop: accept, serve the connection to its end, accept again, until an accept failure says the listener is stopped or gone; that error. |
+| `http_serve_one<C>(s: *Server, ctx: C, handler: (*Request, C) -> *Response) -> error` | One accept and one connection served to its end; the accept's error or the connection's. |
+| `http_serve_conn<C>(s: *Server, cfd: int64, ctx: C, handler: (*Request, C) -> *Response) -> error` | One accepted descriptor served to its end with `TCP_NODELAY` and both timeouts set, then closed. |
+| `http_serve_stream<C>(s: *Server, r: Reader, w: Writer, ctx: C, handler: (*Request, C) -> *Response) -> (int64, error)` | The request loop over any stream; the count of requests the handler answered and the error that ended it. Closes nothing. |
+| `http_read_request(b: *BufReader, s: *Server) -> (*Request, int64, error)` | One request read under the limits of `s`; the request, the status a failure maps to, and the wire error. |
+
+The handler is a parameter of every serve function and never a field: a named top level function, or a lambda with no captures, of the shape `(*Request, C) -> *Response`. `handler(req, ctx)` borrows `req` for the length of the call and the server frees it afterwards, so nothing from it survives the return except what the handler copied. It returns a fresh `Response` built with `response_new`, which the server finishes, writes, and frees, so the handler never frees it and never keeps it. State lives behind `ctx`, the same value on every call: a scalar, or a managed pointer the program owns and frees once the serve has returned. A stateless handler passes `0`. A closure value cannot cross a `spawn`, while a named function written inside a spawned lambda is a plain reference, so the handler arrives by name and the context carries the state, and the capture rule that refuses `h := handle` captured into a spawned lambda stays in force at the one place a program would reach for it.
+
+After the handler returns, the server writes the fields it owns. `Content-Length` comes from `body_len`; a response the handler marked `chunked` gets `Transfer-Encoding: chunked` and its body in chunks instead, when the client speaks 1.1, while a 1.0 client gets the length. A framing field the handler wrote itself is replaced, so a response never carries both. A 1xx and a 204 carry neither field and no body, and a 304 carries no body and keeps whatever length the handler set. `Date` is added when `send_date` holds and the handler set none. `Connection: close` is set when the stream ends after the response, and a 1.0 client the stream stays open for gets `Connection: keep-alive`, since it assumes a close otherwise. A `HEAD` request runs the handler like a `GET` and gets the head alone, its `Content-Length` kept. A response whose status is below 200 or above 999 is one the wire cannot carry as a final answer, a 0 left unset or an interim 1xx among them, so the server never sends it: it frees the handler's response, answers a 500 with `Connection: close` and the body `http: bad handler status` and an LF, and ends the stream with that error.
+
+A connection stays open after a response while `keep_alive` holds, the request's `Connection` field does not list `close`, a 1.0 request asked for `keep-alive` and carries no `Transfer-Encoding`, the rule RFC 9112 gives for a message a 1.0 hop may have framed differently, the request is not number `max_requests` on the connection, and the handler's response does not say `Connection: close` itself. Requests on a kept connection are read in order through one buffer, so a pipelining client is answered in turn. One empty line before a request line is skipped, the tolerance RFC 9112 asks of a server for the stray CR LF some clients send after a body, and no more than one. A 1.1 request with `Expect: 100-continue` and a body still to come gets `HTTP/1.1 100 Continue` before a byte of the body is read; a `Content-Length` past `max_body` is refused with 413 first, so a client told to go on is never refused for the size it announced, and a 1.0 expectation is ignored. `http_read_request` writes nothing, so it never answers one.
+
+A request that fails is refused by the server itself. Each wire error maps to a status:
+
+| Status                                             | Wire error                                                     |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| `400`                                              | every sentence not below, among them `http: bad request line`, `http: bad header name`, both framings, the two `Content-Length` errors, the chunk errors, `http: missing Host` on a 1.1 request without `Host`, `http: duplicate Host` on any request with two, and `http: bad Host` on a `Host` value that is not host or host:port |
+| `408`                                              | `http: timed out` after the first byte of a request            |
+| `413`                                              | `http: body too large`                                         |
+| `414`                                              | `http: line too long` on the request line                      |
+| `431`                                              | `http: header section too large`, `http: too many headers`     |
+| `501`                                              | `http: unsupported Transfer-Encoding`                          |
+| `505`                                              | `http: version not supported`                                  |
+| none                                               | `http: connection closed` or `http: timed out` before the first byte of a request, and `http: truncated body`, a peer that left inside the body |
+
+The `Host` value of a request is read the way a handler that routes on it would read it, so it must be a host or a host and a port: no SP, HTAB, `@`, or `/` anywhere, a bracketed IPv6 literal of hex digits, colons, and dots that closes its bracket, no bracket in a plain host, and a port of digits alone after the colon. The empty value RFC 9112 names for a target with no authority passes. The rule holds on a 1.0 request that sends a `Host` too, since the handler reads it the same way.
+
+A refusal is the status, a `text/plain` body of the wire sentence and an LF, the fields above with `Connection: close`, and the end of the stream. Nothing past the byte that failed is parsed, so a second request hidden behind a bad frame, a body that carries both `Content-Length` and `Transfer-Encoding` among them, is never seen and never reaches the handler. `http_serve_stream` returns the wire error, `http_serve_conn` and `http_serve_one` pass it up, and `http_serve` drops it and accepts the next connection, since one client's garbage ends its own connection and never the server. The stream closing, or going quiet for `read_timeout_ms`, before the first byte of a request is no failure at all: an idle kept alive connection is closed with no response and an empty error, while a request that stalls partway is a 408. `http_read_request` answers 0 for the cases that owe no response. A `Content-Length` past `max_body` is refused before a byte of the body is read and the connection closed, so a client still writing a large upload may see its own write fail, `Broken pipe` or `Connection reset by peer`, before it ever reads the 413.
+
+An accept failure ends `http_serve` only when it says the listener can never accept again, and `http_serve` returns it: `Invalid argument`, the stop or a socket that is not listening, `Bad file descriptor`, a listener already closed, and `Socket operation on non-socket` or `Operation not supported`, a descriptor that is no stream socket. Every other failure passes, `Too many open files` and the rest of a descriptor or buffer shortage, or a connection the peer aborted before the accept took it: the loop waits 50 milliseconds and accepts again, so a burst of clients that exhausts the descriptor limit slows the server and never stops it. `http_serve_one` returns the accept's error whatever it is.
+
+The stop is the `std.net` recipe unchanged: `net_shutdown_read(lfd)` from another thread makes the pending accept fail with `Invalid argument`, `http_serve` returns that error, then `join` the thread, then `net_close` the listener. A connection being served when the stop lands finishes first, bounded by `read_timeout_ms`; `http_serve_one` needs no stop at all. Two shapes add parallelism. N threads each in `http_serve` over the same listener serve N clients at once, the kernel waking one blocked accept per connection, with any state behind `ctx` made thread safe. A thread per connection is the program's own accept loop spawning `http_serve_conn(s, cfd, ctx, handle)` per client, which captures `s` and `cfd` and names `handle`. Either way a slow client holds only its own connection, and the timeout bounds each read and each write rather than a whole request, so a client that trickles one byte inside every timeout is never cut off.
+
+```text
+@import std.net.http.server
+@import std.concurrent.thread
+
+struct Hits {
+    n: int64,
+}
+
+func hello(req: *Request, hits: *Hits) -> *Response {
+    (*hits).n = (*hits).n + 1
+    resp := response_new(200)
+    headers_set((*resp).headers, "Content-Type", "text/plain")
+    response_set_body(resp, "hello")
+    return resp
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(8080), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    s := http_server_new(lfd)
+    hits: *Hits = alloc(Hits { n: 0 })
+    t, te := spawn(lambda () -> void {
+        e := http_serve(s, hits, hello)
+        if e.exists() {
+            println(e)                     // Invalid argument, once stopped
+        }
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    sleep_ms(60000)                        // serve for a minute
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    println((*hits).n)
+    free(hits)
+    free(s)
+    return 0
+}
+```
+
+`http_serve_stream` runs the same loop over any `Reader` and `Writer`, so a test drives a server with no socket at all, and `http_serve_conn` is the one function that turns a descriptor into a stream and the one that closes it, the place a later TLS stream wraps the accepted descriptor and calls the same loop.
+
+```text
+func echo_path(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    response_set_body(resp, (*req).path)
+    return resp
+}
+
+text := "GET /a HTTP/1.1\r\nHost: h\r\n\r\nGET /b HTTP/1.1\r\nHost: h\r\n\r\n"
+c: *StringReader = alloc(string_reader_new(text))
+out: *StringBuilder = alloc(sb_new())
+srv := http_server_new(-1)
+(*srv).send_date = false
+count, e := http_serve_stream(srv, string_reader(c), sb_writer(out), 0, echo_path)
+println(count)                             // 2
+println(e.exists())                        // false, the string ended between requests
+sb_free(out)
+free(out)
+free(c)
+free(srv)
+```
+
+### Ownership and lifetime
+
+The rules are the ones the rest of the standard library follows. `free` on a parameter is refused, so every `_free` function releases the parts of a value and the block itself is yours to `free` after, and the checker tracks a pointer you bound but never a `string`. Each value this layer hands you has one owner and one way out:
+
+| Value                                                            | Released by                                                    |
+| ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| a `Url` from `url_parse`                                         | `url_free(u)` then `free(u)`, on the error path too            |
+| a `Request` from `request_new`, `parse_request_line`, or `http_read_request` | `request_free(r)` then `free(r)`                       |
+| a `Response` from `response_new`, `http_get`, `http_post`, `http_send`, `conn_send`, `http_read_response`, or `parse_status_line` | `response_free(resp)` then `free(resp)`, on the error path too |
+| a `Conn` from `http_dial`                                        | `conn_close(c)` then `free(c)`, once per dial, on the error path too |
+| a header list from `headers_new` that no message holds          | `headers_free(h)` then `free(h)`                               |
+| a string from `url_host_header`, `url_target`, `url_encode`, `url_decode`, `read_line_capped`, or `http_date_now`, and a body buffer from a body reader | `free`                                      |
+| a `Server`                                                       | `free(s)`, since it owns nothing                               |
+| the listener a `Server` names                                    | `net_close` after the stop, the program's own                  |
+
+A pointer beside an error is real. A call that fails still returns a `Response`, a `Url`, a `Request`, or a `Conn` you release the same way, so no error path needs a branch around the free. A `Conn` from a failed `http_dial` is closed from the start and holds no socket, and it still takes its one `conn_close` and its `free`, whether the dial failed or not, because `conn_close` is where the buffered reader and the host string are freed. One is exactly one: a second `conn_close` on the same `Conn` frees the buffered reader again and is the runtime's `use of a freed or stale pointer` fault. `conn_send` and `conn_close` mark the connection closed, so a `conn_send` that follows either is `http: connection is closed` rather than a read through freed memory.
+
+A request you built is yours through every send. `conn_send` and `http_send` borrow it, set the client's own `Host` and framing fields on it with `headers_set`, and never free it, so one request may go out again on the same connection or another.
+
+Every borrow comes with a lifetime. A value from `headers_get`, a view from `request_text` or `response_text`, and the `body` pointer of a message stay valid until that header is removed, the body is replaced, or the message is freed; `substring` makes a copy that outlives them. The checker does not follow ownership through a `string`, so `free(loc)` on a `Location` value from `headers_get` passes `dusk check`, and the message's own free of that block afterwards is the runtime's `fatal: double free`. The same holds for the request your handler is handed: it is a borrow for the length of the call, the server frees it after the return, and anything the handler wants to keep is copied before it returns.
+
+The response a handler returns belongs to the server from the return on, which writes it and frees it, so the handler neither frees it nor keeps it. A handler never returns a response it also holds anywhere else. The context is yours: it is passed by value on every call, a managed pointer in it is a borrow inside the handler, and the owner outside `http_serve` frees it once the serve has returned and every thread that served has been joined.
+
+### A worked client
+
+A complete program against the server below: a one shot `GET` that follows up to five redirects, a `POST`, and two requests on one kept alive connection. Every response is freed whatever the call returned, the connection takes its one `conn_close`, and the redirect loop copies the next URL out of the response before it frees the response the `Location` value was borrowed from.
+
+```text
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+// The absolute URL a Location value names, joined to the URL it came from when it is a path
+func follow_target(from: string, loc: string) -> string {
+    if !starts_with(loc, "/") {
+        return substring(loc, 0, str_len(loc))
+    }
+    u, e := url_parse(from)
+    e.ignore()
+    host := url_host_header(u)
+    out := format("%s://%s%s", [arg_str((*u).scheme), arg_str(host), arg_str(loc)])
+    free(host)
+    url_free(u)
+    free(u)
+    return out
+}
+
+// A GET that follows up to hops redirects and returns the last response
+func get_following(url: string, hops: int64) -> (*Response, error) {
+    resp, e := http_get(url)
+    if e.exists() || hops == 0 || (*resp).status / 100 != 3 {
+        return (resp, e)
+    }
+    loc, ok := headers_get((*resp).headers, "Location")
+    if !ok {
+        return (resp, e)
+    }
+    // The Location value is a borrow of resp, so the next URL is built before resp is freed
+    next := follow_target(url, loc)
+    response_free(resp)
+    free(resp)
+    out, oe := get_following(next, hops - 1)
+    free(next)
+    return (out, oe)
+}
+
+// Two requests on one kept alive connection, each response freed whatever happened
+func keep_alive(base: string) -> error {
+    u, pe := url_parse(base)
+    if pe.exists() {
+        url_free(u)
+        free(u)
+        return pe
+    }
+    c, de := http_dial(u)
+    url_free(u)
+    free(u)
+    if de.exists() {
+        // A failed dial still hands back a Conn, closed and holding no socket, to close and free
+        dc := conn_close(c)
+        dc.ignore()
+        free(c)
+        return de
+    }
+    mut result: error = error {}
+    for path in ["/hello", "/count"] {
+        req := request_new("GET", path)
+        resp, e := conn_send(c, req)
+        if e.exists() {
+            result = e
+        } else {
+            println(f"{path} -> {(*resp).status} {response_text(resp)}")
+        }
+        response_free(resp)
+        free(resp)
+        request_free(req)
+        free(req)
+    }
+    // Every http_dial pairs with one conn_close, once the requests are done
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    return result
+}
+
+func main() -> int32 {
+    resp, e := get_following("http://127.0.0.1:8080/old", 5)
+    if e.exists() {
+        println(e)
+    } else {
+        println(f"{(*resp).status} {(*resp).reason}")
+        server, has := headers_get((*resp).headers, "Content-Type")
+        if has {
+            println(server)
+        }
+        println(response_text(resp))
+    }
+    response_free(resp)
+    free(resp)
+
+    posted, pe := http_post("http://127.0.0.1:8080/echo", "text/plain", "ping")
+    if pe.exists() {
+        println(pe)
+    } else {
+        println(response_text(posted))
+    }
+    response_free(posted)
+    free(posted)
+
+    ke := keep_alive("http://127.0.0.1:8080/")
+    if ke.exists() {
+        println(ke)
+        return 1
+    }
+    return 0
+}
+```
+
+`follow_target` joins a path `Location` to the scheme and the `Host` value of the URL it came from, which is the whole of what the loop needs; a program that follows redirects across origins decides there which request fields travel with it, `Authorization` first, and whether a `303` turns a `POST` into a `GET`, since the client leaves those rules to the program. Against the worked server below the output is
+
+```text
+200 OK
+text/plain
+hello
+ping
+/hello -> 200 hello
+/count -> 200 5 requests
+```
+
+### A worked server
+
+A complete program: a handler that routes on the method and path, a counter shared through the context, and four threads accepting on one listener. The handler is a named top level function of the shape `(*Request, C) -> *Response`, and the state is a typed context, an `AtomicInt` here, whose handle every thread copies and every copy names one counter. A stateless handler takes an `int64` it never reads and is passed `0` for the context. A lambda with no captures stands where a name would, so `http_serve_stream(s, r, w, 0, lambda (req: *Request, ctx: int64) -> *Response { ... })` is a legal call. A lambda that captures is a closure value, which a spawn refuses to carry, so a handler that will run on a thread of its own is named, and the thread's lambda names it.
+
+```text
+@paradigm procedural
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.concurrent.atomic
+
+// The handler: a named top level function whose state arrives through the typed context
+func route(req: *Request, hits: AtomicInt) -> *Response {
+    n := atomic_add(hits, 1)
+    is_get := (*req).method == "GET"
+    if is_get && (*req).path == "/old" {
+        moved := response_new(301)
+        headers_set((*moved).headers, "Location", "/hello")
+        return moved
+    }
+    if is_get && ((*req).path == "/hello" || (*req).path == "/count") {
+        resp := response_new(200)
+        headers_set((*resp).headers, "Content-Type", "text/plain")
+        if (*req).path == "/hello" {
+            response_set_body(resp, "hello")
+        } else {
+            response_set_body(resp, f"{n} requests")
+        }
+        return resp
+    }
+    if (*req).method == "POST" && (*req).path == "/echo" {
+        echo := response_new(200)
+        // The request body is a borrow, so the response takes a copy of the bytes
+        response_set_body_bytes(echo, (*req).body, (*req).body_len)
+        return echo
+    }
+    missing := response_new(404)
+    response_set_body(missing, "not found")
+    return missing
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(8080), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    s := http_server_new(lfd)
+    hits := atomic_new(0)
+    // Four threads accept on one listener, so four clients are served at once
+    workers: *Vector<thread> = alloc(vec_new())
+    for i in 0..4 {
+        t, te := spawn(lambda () -> void {
+            e := http_serve(s, hits, route)
+            if e.exists() {
+                println(e)
+            }
+        })
+        if te.exists() {
+            printerr(te)
+            return 1
+        }
+        vec_push(workers, t)
+    }
+    sleep_ms(60000)
+    // One shutdown wakes every blocked accept, then each thread is joined and the listener closed
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    for i in 0..vec_len(workers) {
+        je := join(vec_get(workers, i))
+        je.ignore()
+    }
+    lc := net_close(lfd)
+    lc.ignore()
+    println(atomic_load(hits))
+    vec_free(workers)
+    free(workers)
+    atomic_free(hits)
+    free(s)
+    return 0
+}
+```
+
+The four `http_serve` calls block in `net_accept` on the same descriptor, and the kernel wakes one of them per connection. `net_shutdown_read(lfd)` makes every blocked accept fail with `Invalid argument`, each `http_serve` returns that error and its thread ends, the loop joins all four, and the listener is closed last. A connection being served when the stop lands finishes first, bounded by `read_timeout_ms`.
+
+The other shape is a thread per connection, the program's own accept loop spawning `http_serve_conn` for each client. The lambda captures `s`, `cfd`, and `hits` by copy and names `route`, the shape the capture rule allows, and the loop joins every thread it spawned once the listener is gone. The loop follows the rule `http_serve` does: an accept failure that says the listener is stopped or gone ends it, and any other, `Too many open files` among them, is waited out and the accept tried again, so a burst of clients slows the server rather than stopping it. `accept_each` runs on a thread of its own and stops the way the four acceptors do, `net_shutdown_read`, then `join`, then `net_close`, and every client gets a thread, so a slow client holds that thread and never delays another. Every live connection holds a thread and a descriptor until its client leaves or times out, so a program that serves clients it does not trust caps the live connections, counting the threads it has not joined and waiting for one to finish before it accepts past the cap; without a cap a client that opens connections without end exhausts threads and descriptors alike. Keeping one handle for every connection grows without bound on a long running server, so a program that serves for long joins a connection's thread as it finishes, an arrangement it makes for itself.
+
+```text
+// The accept failures that mean the listener is gone, the rule http_serve follows
+func accept_is_final(text: string) -> bool {
+    if text == "Invalid argument" || text == "Bad file descriptor" {
+        return true
+    }
+    return text == "Socket operation on non-socket" || text == "Operation not supported"
+}
+
+// A thread per connection: the program's own accept loop spawns http_serve_conn
+func accept_each(s: *Server, hits: AtomicInt) -> void {
+    conns: *Vector<thread> = alloc(vec_new())
+    while true {
+        cfd, peer, ae := net_accept((*s).lfd)
+        if ae.exists() {
+            if accept_is_final(ae.toString()) {
+                println(ae)                // Invalid argument, once stopped
+                break
+            }
+            // A shortage passes: wait a moment and accept again
+            ae.ignore()
+            sleep_ms(50)
+            continue
+        }
+        who := addr_string(peer)
+        println(who)
+        free(who)
+        // The lambda captures s, cfd, and hits by copy and names route
+        t, te := spawn(lambda () -> void {
+            ce := http_serve_conn(s, cfd, hits, route)
+            ce.ignore()
+        })
+        if te.exists() {
+            printerr(te)
+            nc := net_close(cfd)
+            nc.ignore()
+            continue
+        }
+        vec_push(conns, t)
+    }
+    for i in 0..vec_len(conns) {
+        je := join(vec_get(conns, i))
+        je.ignore()
+    }
+    vec_free(conns)
+    free(conns)
+}
+```
 
 ## std.async.net
 

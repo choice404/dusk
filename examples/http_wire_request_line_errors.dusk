@@ -1,0 +1,36 @@
+// Each malformed request line is refused with its own sentence: a doubled space, an HTTP
+// version other than 1.0 and 1.1, a method byte outside the token set, a third space, and
+// a line with no space at all. The Request beside an error is a real empty one.
+@paradigm procedural
+@import std.net.http.wire
+
+func show(b: *BufReader) -> void {
+    line, le := read_line_capped(b, 8192)
+    if le.exists() {
+        println(le)
+        free(line)
+        return
+    }
+    r, e := parse_request_line(line)
+    free(line)
+    if e.exists() {
+        println(e)
+    } else {
+        println("parsed")
+    }
+    request_free(r)
+    free(r)
+}
+
+func main() -> int32 {
+    text: string = "GET  /x HTTP/1.1\r\nGET /x HTTP/2.0\r\nG@T /x HTTP/1.1\r\nGET /x y HTTP/1.1\r\nGET\r\n"
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    for i in 0..5 {
+        show(b)
+    }
+    bufreader_free(b)
+    free(b)
+    free(c)
+    return 0
+}

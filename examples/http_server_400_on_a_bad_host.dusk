@@ -1,0 +1,50 @@
+// The one Host value a request carries must be host or host:port, so a handler that routes
+// on it never reads a credential, a path, or a half written address there. A user
+// information part, an unclosed IPv6 bracket, and a port that is not all digits are each
+// a 400 with the sentence http: bad Host, and the handler never runs; a bracketed IPv6
+// literal with a port and the empty value pass.
+@paradigm procedural
+@import std.net.http.server
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    host, ok := headers_get((*req).headers, "Host")
+    if ok {
+        response_set_body(resp, host)
+    }
+    return resp
+}
+
+func serve(host: string) -> void {
+    text: string = format("GET / HTTP/1.1\r\nHost: %s\r\n\r\n", [arg_str(host)])
+    s := http_server_new(-1)
+    (*s).send_date = false
+    c: *StringReader = alloc(string_reader_new(text))
+    out: *StringBuilder = alloc(sb_new())
+    count, e := http_serve_stream(s, string_reader(c), sb_writer(out), 0, handle)
+    print(count)
+    print(" ")
+    if e.exists() {
+        println(e)
+    } else {
+        println("ok")
+    }
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    sb_free(out)
+    free(out)
+    free(c)
+    free(s)
+    free(text)
+}
+
+func main() -> int32 {
+    serve("u@h")
+    serve("[::1")
+    serve("h:80x")
+    serve("[::1]:8080")
+    serve("")
+    return 0
+}

@@ -1,0 +1,734 @@
+/** std.net.http.server: a small HTTP/1.1 server over the blocking sockets of std.net. A
+ *  Server holds plain settings and owns nothing; http_serve accepts a connection, serves
+ *  every request on it, and only then accepts the next, so the core is sequential and a
+ *  program composes parallelism outside the call, N threads in http_serve over one
+ *  listener or a thread per connection through http_serve_conn.
+ *
+ *  The handler is a parameter of every serve function and never a field. It is a named top
+ *  level function, or a lambda with no captures, of the shape (*Request, C) -> *Response,
+ *  and its state lives behind ctx, a scalar or a managed pointer the program owns, passed
+ *  by value on every call; a stateless handler passes 0. A closure value cannot cross a
+ *  spawn, while a named function inside a spawned lambda is a plain reference, so this is
+ *  the shape that lets a server run on its own thread. The handler borrows the request for
+ *  the call and returns a response built with response_new, which the server finishes,
+ *  writes, and frees.
+ *
+ *  Every request failure the server answers itself goes out as the status the wire error
+ *  maps to, a text/plain body of the sentence and an LF, and Connection: close, and the
+ *  stream ends there: nothing past the byte that failed is parsed, so a second request
+ *  hidden behind a bad frame is never seen. http_serve_conn is the one function that
+ *  turns a descriptor into a stream and the one that closes it; http_serve_stream runs the
+ *  same loop over any Reader and Writer and closes nothing. */
+
+@paradigm procedural
+
+@import std.net.http.wire
+@import std.net
+@import std.io
+@import std.bufio
+@import std.string
+@import std.concurrent.thread
+
+/** The settings of a server, plain values with nothing owned, so free alone releases one.
+ *  lfd is the listener from net_listen, which stays the program's to stop and close; a
+ *  server used only through http_serve_stream needs none, and -1 says so. max_body is the
+ *  request body ceiling, 1048576 by default, 413 past it; max_header_bytes the header
+ *  section budget, 65536, and max_header_count the field count, 100, 431 past either;
+ *  max_line the request line cap, 8192, 414 at it, so the longest line served is one byte
+ *  shorter. max_requests, 1000, is how many requests one connection carries: the response
+ *  to the last of them says Connection: close and the stream ends cleanly after it, and 0
+ *  means no limit. read_timeout_ms, 10000, is how long a connection may sit idle between
+ *  requests and how long each read of a request or each write of a response may wait, 0 to
+ *  wait forever. send_date adds a Date field to every response, true by default; keep_alive
+ *  lets a connection carry more than one request, true by default. Write a field to change
+ *  it before serving. */
+export struct Server {
+    lfd: int64,
+    max_body: int64,
+    max_header_bytes: int64,
+    max_header_count: int64,
+    max_line: int64,
+    max_requests: int64,
+    read_timeout_ms: int64,
+    send_date: bool,
+    keep_alive: bool,
+}
+
+// The buffer a connection's requests are read through
+func srv_buffer() -> int64 {
+    return 8192
+}
+
+// The largest chunk a chunked response body goes out in
+func srv_chunk() -> int64 {
+    return 4096
+}
+
+// How long the accept loop waits after an accept failure that passes, a descriptor
+// shortage among them, before it accepts again
+func srv_retry_ms() -> int64 {
+    return 50
+}
+
+func srv_fail(msg: string) -> error {
+    return error { message: msg }
+}
+
+// The status a request line read failure answers with, 0 for the clean end of a
+// connection: the stream closing, or going quiet, before the first byte of a request. The
+// partial line beside a timeout tells the two apart, empty when no byte arrived
+func srv_line_status(text: string, partial: int64) -> int64 {
+    if text == "http: connection closed" {
+        return 0
+    }
+    if text == "http: timed out" {
+        if partial == 0 {
+            return 0
+        }
+        return 408
+    }
+    if text == "http: line too long" {
+        return 414
+    }
+    return 400
+}
+
+// The status a header section read failure answers with. read_headers reports a field
+// line past the budget as the section passing it, and a line too long is mapped the same
+// way so that a cap on a single field line reads as 431 too
+func srv_head_status(text: string) -> int64 {
+    if text == "http: header section too large" || text == "http: too many headers" {
+        return 431
+    }
+    if text == "http: line too long" {
+        return 431
+    }
+    if text == "http: timed out" {
+        return 408
+    }
+    return 400
+}
+
+// The status a body read failure answers with, 0 for a peer that left inside the body,
+// to whom no response is owed
+func srv_body_status(text: string) -> int64 {
+    if text == "http: body too large" {
+        return 413
+    }
+    if text == "http: timed out" {
+        return 408
+    }
+    if text == "http: truncated body" {
+        return 0
+    }
+    return 400
+}
+
+// The offset of the first byte c in s[lo, hi), or -1
+func srv_find(s: string, lo: int64, hi: int64, c: int64) -> int64 {
+    for i in lo..hi {
+        if int64(s[i]) == c {
+            return i
+        }
+    }
+    return -1
+}
+
+// Whether s[lo, hi) is an IPv6 literal's text: hex digits, colons, and dots alone, with
+// at least one colon
+func srv_is_ip6_text(s: string, lo: int64, hi: int64) -> bool {
+    mut colons: int64 = 0
+    for i in lo..hi {
+        c: int64 = int64(s[i])
+        is_hex: bool = (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+        if c == 58 {
+            colons++
+        } else if c != 46 && !is_hex {
+            return false
+        }
+    }
+    return colons > 0
+}
+
+// The offset of the colon before the port in a Host value v of n bytes, n when there is no
+// port, or -1 when the host part is malformed: a bracketed IPv6 literal must close and be
+// followed by nothing or a colon, and a plain host holds no bracket
+func srv_host_port_at(v: string, n: int64) -> int64 {
+    if n > 0 && v[0] == 91 {
+        close: int64 = srv_find(v, 1, n, 93)
+        if close < 0 || !srv_is_ip6_text(v, 1, close) {
+            return -1
+        }
+        if close + 1 < n && v[close + 1] != 58 {
+            return -1
+        }
+        return close + 1
+    }
+    if srv_find(v, 0, n, 91) >= 0 || srv_find(v, 0, n, 93) >= 0 {
+        return -1
+    }
+    colon: int64 = srv_find(v, 0, n, 58)
+    if colon < 0 {
+        return n
+    }
+    return colon
+}
+
+// Whether a Host value is host or host:port: no SP, HTAB, @, or /, the host part as
+// srv_host_port_at reads it, and a port of digits alone. The empty value RFC 9112 names
+// for a target with no authority passes
+func srv_host_is_valid(v: string) -> bool {
+    n: int64 = str_len(v)
+    for i in 0..n {
+        c: int64 = int64(v[i])
+        if c == 32 || c == 9 || c == 64 || c == 47 {
+            return false
+        }
+    }
+    at: int64 = srv_host_port_at(v, n)
+    if at < 0 {
+        return false
+    }
+    for i in at + 1..n {
+        if v[i] < 48 || v[i] > 57 {
+            return false
+        }
+    }
+    return true
+}
+
+// The Host rule of RFC 9112: one Host field on every request, which a 1.0 request may
+// leave out, and never two; the one value present must be host or host:port, so a handler
+// that routes on it never reads a path, a credential, or a second authority there
+func srv_host_check(req: *Request) -> error {
+    mut count: int64 = 0
+    n: int64 = vec_len((*req).headers)
+    for i in 0..n {
+        f: Header = vec_get((*req).headers, i)
+        if header_name_eq(f.name, "Host") {
+            count++
+        }
+    }
+    if count > 1 {
+        return srv_fail("http: duplicate Host")
+    }
+    if count == 0 && (*req).minor == 1 {
+        return srv_fail("http: missing Host")
+    }
+    v, ok := headers_get((*req).headers, "Host")
+    if ok && !srv_host_is_valid(v) {
+        return srv_fail("http: bad Host")
+    }
+    return error {}
+}
+
+// The request line, past at most one empty line before it. RFC 9112 2.2 asks a server to
+// ignore at least one, the CRLF a client may leave after a body on a kept alive
+// connection; a second empty line is read as the request line and refused
+func srv_read_request_line(b: *BufReader, max: int64) -> (string, error) {
+    line, le := read_line_capped(b, max)
+    if le.exists() || str_len(line) > 0 {
+        return (line, le)
+    }
+    free(line)
+    next, ne := read_line_capped(b, max)
+    return (next, ne)
+}
+
+// The request line and the header section with the Host rule applied, and the status a
+// failure answers with beside it; the request is a real one to free either way
+func srv_read_head(b: *BufReader, s: *Server) -> (*Request, int64, error) {
+    line, le := srv_read_request_line(b, (*s).max_line)
+    if le.exists() {
+        status: int64 = srv_line_status(le.toString(), str_len(line))
+        free(line)
+        return (request_new("", ""), status, le)
+    }
+    req, pe := parse_request_line(line)
+    free(line)
+    if pe.exists() {
+        mut ps: int64 = 400
+        if pe.toString() == "http: version not supported" {
+            ps = 505
+        }
+        return (req, ps, pe)
+    }
+    he := read_headers(b, (*req).headers, (*s).max_header_bytes, (*s).max_header_count)
+    if he.exists() {
+        return (req, srv_head_status(he.toString()), he)
+    }
+    ce := srv_host_check(req)
+    if ce.exists() {
+        return (req, 400, ce)
+    }
+    return (req, 0, error {})
+}
+
+// Whether a request asked for a 100 Continue before its body: a 1.1 request, since a 1.0
+// expectation is ignored, with a body still to come and Expect listing 100-continue
+func srv_wants_continue(req: *Request, kind: int64, n: int64) -> bool {
+    if (*req).minor != 1 || kind == 0 || (kind == 1 && n == 0) {
+        return false
+    }
+    v, ok := headers_get((*req).headers, "Expect")
+    return ok && token_list_has(v, "100-continue")
+}
+
+// Reads the body the framing names into req, kind 1 by Content-Length and kind 2 chunked,
+// and answers the status a failure maps to beside the wire error
+func srv_read_body(b: *BufReader, s: *Server, req: *Request, kind: int64, n: int64) -> (int64, error) {
+    if kind == 1 {
+        body, fe := read_body_fixed(b, n, (*s).max_body)
+        free((*req).body)
+        (*req).body = body
+        if fe.exists() {
+            return (srv_body_status(fe.toString()), fe)
+        }
+        (*req).body_len = n
+        return (0, error {})
+    }
+    if kind == 2 {
+        body, count, ce := read_body_chunked(b, (*s).max_body)
+        free((*req).body)
+        (*req).body = body
+        if ce.exists() {
+            return (srv_body_status(ce.toString()), ce)
+        }
+        (*req).body_len = count
+        (*req).chunked = true
+    }
+    return (0, error {})
+}
+
+// A whole request, the head, the framing, and the body, and between the framing and the
+// body the 100 Continue a client that asked for one waits on, written to w when answer is
+// set. A Content-Length past max_body is refused before the interim response, so a client
+// told to go on is never refused for the size it announced
+func srv_read_request(b: *BufReader, s: *Server, w: Writer, answer: bool) -> (*Request, int64, error) {
+    req, hs, he := srv_read_head(b, s)
+    if he.exists() {
+        return (req, hs, he)
+    }
+    kind, n, fe := body_framing((*req).headers, true)
+    if fe.exists() {
+        mut fs: int64 = 400
+        if fe.toString() == "http: unsupported Transfer-Encoding" {
+            fs = 501
+        }
+        return (req, fs, fe)
+    }
+    if kind == 1 && n > (*s).max_body {
+        return (req, 413, srv_fail("http: body too large"))
+    }
+    if answer && srv_wants_continue(req, kind, n) {
+        we := write_string(w, "HTTP/1.1 100 Continue\r\n\r\n")
+        if we.exists() {
+            return (req, 0, we)
+        }
+    }
+    bs, be := srv_read_body(b, s, req, kind, n)
+    return (req, bs, be)
+}
+
+/** A server over the listener lfd with the default settings: a 1048576 byte body ceiling,
+ *  a 65536 byte header section of at most 100 fields, an 8192 byte request line, at most
+ *  1000 requests on one connection, a 10000 millisecond read timeout, a Date field on every
+ *  response, and keep alive on. Write a field of the result to change a setting before
+ *  serving.
+ *  @param lfd the listening descriptor from net_listen, still the caller's to close
+ *  @return a fresh heap Server the caller releases with free once every serve returned
+ *  @example
+ *  lfd, le := net_listen(addr_loopback(8080), 0)
+ *  if le.exists() {
+ *      return le
+ *  }
+ *  s := http_server_new(lfd)
+ *  (*s).max_body = 65536 */
+export func http_server_new(lfd: int64) -> *Server {
+    return alloc(Server { lfd: lfd, max_body: 1048576, max_header_bytes: 65536, max_header_count: 100, max_line: 8192, max_requests: 1000, read_timeout_ms: 10000, send_date: true, keep_alive: true })
+}
+
+/** Reads one request the way the serve loop does: the request line capped at max_line, with
+ *  one empty line before it skipped and a second refused as a bad request line, the header
+ *  section under max_header_bytes and max_header_count, the Host rule, the framing, and the
+ *  body under max_body. It writes nothing, so a 100 Continue a client asked for is
+ *  not answered here; the serve loop answers it between the head and the body.
+ *  @param b the buffered reader to read from, borrowed and advanced in place
+ *  @param s the settings to read under, borrowed
+ *  @return the request, a fresh heap Request released with request_free then free, the
+ *  status the failure maps to, and the wire error; on success the status is 0 and the
+ *  error empty. A failure maps to 400, 408 for a timeout inside a request, 413 for a body
+ *  past max_body, 414 for a request line past max_line, 431 for a header section past its
+ *  limits, 501 for an unsupported Transfer-Encoding, or 505 for an HTTP version other
+ *  than 1.0 and 1.1; a status of 0 beside an error means no response is owed, the stream
+ *  closing or going quiet before the first byte of a request, or the peer leaving inside
+ *  the body. The request beside an error is a real one, released the same way */
+export func http_read_request(b: *BufReader, s: *Server) -> (*Request, int64, error) {
+    req, status, e := srv_read_request(b, s, discard_writer(), false)
+    return (req, status, e)
+}
+
+// Whether any Connection field of h lists token
+func srv_conn_has(h: *Vector<Header>, token: string) -> bool {
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, "Connection") && token_list_has(f.value, token) {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether the stream stays open after answering req, the request after served others on
+// it. The last request max_requests allows ends it. A 1.0 request keeps it only by asking
+// with keep-alive, and never with a Transfer-Encoding field, since a 1.0 hop in front may
+// have framed that message differently, the rule of RFC 9112 6.1
+func srv_keep_alive(s: *Server, req: *Request, served: int64) -> bool {
+    if !(*s).keep_alive || srv_conn_has((*req).headers, "close") {
+        return false
+    }
+    limit: int64 = (*s).max_requests
+    if limit > 0 && served + 1 >= limit {
+        return false
+    }
+    if (*req).minor == 1 {
+        return true
+    }
+    if headers_has((*req).headers, "Transfer-Encoding") {
+        return false
+    }
+    return srv_conn_has((*req).headers, "keep-alive")
+}
+
+// Whether a status carries no body whatever its fields say: 1xx, 204, and 304
+func srv_bodiless(status: int64) -> bool {
+    return status < 200 || status == 204 || status == 304
+}
+
+// Sets the one framing field the server owns: Content-Length from body_len, or
+// Transfer-Encoding chunked for a chunked body to a 1.1 client, a 1.0 client getting the
+// length instead. A 1xx and a 204 carry neither, and a 304 keeps what the handler set
+func srv_set_framing(resp: *Response, minor: int64) -> void {
+    status: int64 = (*resp).status
+    if srv_bodiless(status) {
+        (*resp).chunked = false
+        if status != 304 {
+            headers_remove((*resp).headers, "Content-Length")
+            headers_remove((*resp).headers, "Transfer-Encoding")
+        }
+        return
+    }
+    if (*resp).chunked && minor == 1 {
+        headers_remove((*resp).headers, "Content-Length")
+        headers_set((*resp).headers, "Transfer-Encoding", "chunked")
+        return
+    }
+    (*resp).chunked = false
+    headers_remove((*resp).headers, "Transfer-Encoding")
+    length: string = int_to_string((*resp).body_len)
+    headers_set((*resp).headers, "Content-Length", length)
+    free(length)
+}
+
+// Sets the fields the server owns on resp after the handler's own: the framing, a Date
+// when send_date holds and the handler set none, and Connection, close when the stream
+// ends after this response and keep-alive to a 1.0 client it stays open for
+func srv_finish(s: *Server, resp: *Response, keep: bool, minor: int64) -> void {
+    srv_set_framing(resp, minor)
+    if (*s).send_date && !headers_has((*resp).headers, "Date") {
+        date: string = http_date_now()
+        headers_add((*resp).headers, "Date", date)
+        free(date)
+    }
+    if !keep {
+        headers_set((*resp).headers, "Connection", "close")
+    } else if minor == 0 {
+        headers_set((*resp).headers, "Connection", "keep-alive")
+    }
+}
+
+// Writes resp, the head and then the body whole or in chunks; a HEAD request and a status
+// that carries no body get the head alone, its Content-Length kept
+func srv_write(w: Writer, resp: *Response, is_head: bool) -> error {
+    head: *StringBuilder = alloc(sb_new())
+    write_response_head(head, resp)
+    has_body: bool = !is_head && !srv_bodiless((*resp).status)
+    mut n: int64 = 0
+    if has_body && !(*resp).chunked {
+        n = (*resp).body_len
+    }
+    e := write_message(w, head, (*resp).body, n)
+    sb_free(head)
+    free(head)
+    if e.exists() || !has_body || !(*resp).chunked {
+        return e
+    }
+    return write_chunked(w, (*resp).body, (*resp).body_len, srv_chunk())
+}
+
+// Answers a failed request with status itself: the wire sentence and an LF as a
+// text/plain body and Connection: close, since the stream's framing is unknown past the
+// byte that failed
+func srv_refuse(w: Writer, s: *Server, req: *Request, status: int64, text: string) -> error {
+    resp: *Response = response_new(status)
+    headers_add((*resp).headers, "Content-Type", "text/plain")
+    body: string = text + "\n"
+    response_set_body(resp, body)
+    free(body)
+    srv_finish(s, resp, false, (*req).minor)
+    we := srv_write(w, resp, (*req).method == "HEAD")
+    response_free(resp)
+    free(resp)
+    return we
+}
+
+// The error a stream ends with once a request failed: none for a clean end, and otherwise
+// the wire error, after the refusal when a status is owed. A refusal that cannot be
+// written changes nothing, since the stream ends either way and the wire error is the cause
+func srv_end(w: Writer, s: *Server, req: *Request, status: int64, e: error) -> error {
+    text: string = e.toString()
+    if status == 0 && (text == "http: connection closed" || text == "http: timed out") {
+        e.ignore()
+        return error {}
+    }
+    if status == 0 {
+        return e
+    }
+    we := srv_refuse(w, s, req, status, text)
+    we.ignore()
+    return e
+}
+
+// Hands req to the handler and writes the response it returns, finished and then freed;
+// whether the stream stays open beside the write error. A handler's own Connection: close
+// ends the stream after its response. A status the wire cannot carry as a final response,
+// below 200 or past three digits, is answered as a 500 in its place and ends the stream
+func srv_exchange<C>(w: Writer, s: *Server, req: *Request, served: int64, ctx: C, handler: (*Request, C) -> *Response) -> (bool, error) {
+    mut keep: bool = srv_keep_alive(s, req, served)
+    resp: *Response = handler(req, ctx)
+    status: int64 = (*resp).status
+    if status < 200 || status > 999 {
+        response_free(resp)
+        free(resp)
+        // The handler's mistake is the cause, so a 500 that cannot be written changes nothing
+        we := srv_refuse(w, s, req, 500, "http: bad handler status")
+        we.ignore()
+        return (false, srv_fail("http: bad handler status"))
+    }
+    if srv_conn_has((*resp).headers, "close") {
+        keep = false
+    }
+    srv_finish(s, resp, keep, (*req).minor)
+    we := srv_write(w, resp, (*req).method == "HEAD")
+    response_free(resp)
+    free(resp)
+    return (keep, we)
+}
+
+/** Serves requests from r and writes the responses to w until the stream ends: reads a
+ *  request, hands it to handler with ctx, writes the response, and repeats while keep alive
+ *  holds. The server adds Content-Length from body_len, or Transfer-Encoding chunked and the
+ *  chunked body for a response the handler marked chunked to a 1.1 client, a Date field
+ *  when send_date holds and the handler set none, and Connection: close when the stream
+ *  ends after the response; a HEAD request gets the head alone with its Content-Length
+ *  kept. One empty line before a request line is skipped, the stray CRLF a client may leave
+ *  after a body. A request that asked for 100 Continue gets the interim response before
+ *  its body is read. A request that fails is answered with its status, the wire sentence as the
+ *  body, and Connection: close, and the stream ends there with nothing past the byte that
+ *  failed parsed. A handler response whose status is below 200 or above 999 is not sent:
+ *  a 500 with the body http: bad handler status and an LF and Connection: close goes in
+ *  its place, and the stream ends with that error. The response to request number
+ *  max_requests says Connection: close and the stream ends cleanly after it. Nothing is
+ *  closed here; the reader and the writer stay the caller's.
+ *  @param s the settings to serve under, borrowed
+ *  @param r the stream requests arrive on
+ *  @param w the stream responses go out on
+ *  @param ctx the value handed to every handler call, the program's state or 0
+ *  @param handler a named function or a lambda with no captures; it borrows the request
+ *  for the call and returns a fresh Response from response_new, which the server writes
+ *  and frees, so the handler never frees it and never keeps it
+ *  @return the count of requests the handler answered, paired with the error that ended
+ *  the stream: empty when the peer closed or went quiet between requests, or when a
+ *  response ended keep alive, the wire error after a refusal or a peer that left inside a
+ *  request, http: bad handler status after a status the wire cannot carry, and the write
+ *  error when a response could not be written
+ *  @example
+ *  func hello(req: *Request, ctx: int64) -> *Response {
+ *      resp := response_new(200)
+ *      response_set_body(resp, "hello")
+ *      return resp
+ *  }
+ *
+ *  s := http_server_new(-1)
+ *  text := "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"
+ *  c: *StringReader = alloc(string_reader_new(text))
+ *  out: *StringBuilder = alloc(sb_new())
+ *  count, e := http_serve_stream(s, string_reader(c), sb_writer(out), 0, hello)
+ *  e.ignore()
+ *  println(count)
+ *  sb_free(out)
+ *  free(out)
+ *  free(c)
+ *  free(s) */
+export func http_serve_stream<C>(s: *Server, r: Reader, w: Writer, ctx: C, handler: (*Request, C) -> *Response) -> (int64, error) {
+    b: *BufReader = bufreader_new(r, srv_buffer())
+    mut count: int64 = 0
+    mut fail: error = error {}
+    mut going: bool = true
+    while going {
+        req, status, e := srv_read_request(b, s, w, true)
+        if e.exists() {
+            fail = srv_end(w, s, req, status, e)
+            going = false
+        } else {
+            keep, we := srv_exchange(w, s, req, count, ctx, handler)
+            count++
+            if we.exists() {
+                fail = we
+                going = false
+            } else if !keep {
+                going = false
+            }
+        }
+        request_free(req)
+        free(req)
+    }
+    bufreader_free(b)
+    free(b)
+    return (count, fail)
+}
+
+// Sets both socket timeouts to ms, so a peer that stops sending a request or stops
+// reading a response holds the connection no longer than that
+func srv_set_timeouts(fd: int64, ms: int64) -> error {
+    re := net_set_read_timeout(fd, ms)
+    if re.exists() {
+        return re
+    }
+    return net_set_write_timeout(fd, ms)
+}
+
+/** Serves one accepted connection to its end and closes it: sets TCP_NODELAY, sets the
+ *  read and write timeouts to read_timeout_ms, runs http_serve_stream over fd_reader(cfd)
+ *  and fd_writer(cfd), and closes cfd with net_close. This is the one place a descriptor
+ *  becomes a stream, and the entry a thread per connection program spawns into. A socket
+ *  with no TCP_NODELAY, a unix stream socket, is served without it.
+ *  @param s the settings to serve under, borrowed
+ *  @param cfd the connected descriptor from net_accept, closed here on every path
+ *  @param ctx the value handed to every handler call
+ *  @param handler the handler, as http_serve_stream takes it
+ *  @return the error that ended the stream as http_serve_stream reports it, a timeout that
+ *  could not be set, or the close's own failure; empty for a clean end */
+export func http_serve_conn<C>(s: *Server, cfd: int64, ctx: C, handler: (*Request, C) -> *Response) -> error {
+    ne := net_set_nodelay(cfd, true)
+    // TCP_NODELAY only shortens the wait for a small write, so a socket without it serves
+    ne.ignore()
+    te := srv_set_timeouts(cfd, (*s).read_timeout_ms)
+    if te.exists() {
+        tc := net_close(cfd)
+        tc.ignore()
+        return te
+    }
+    count, se := http_serve_stream(s, fd_reader(cfd), fd_writer(cfd), ctx, handler)
+    // The count is http_serve_stream's report; a connection answers only how it ended
+    count.ignore()
+    ce := net_close(cfd)
+    if se.exists() {
+        ce.ignore()
+        return se
+    }
+    return ce
+}
+
+// Whether an accept failure's text says the listener can never accept again: Invalid
+// argument for the stop net_shutdown_read makes and for a socket that is not listening,
+// Bad file descriptor for a listener already closed, and the two a descriptor that is no
+// stream socket answers. Every other failure is a shortage or one connection's, and passes
+func srv_accept_is_final(text: string) -> bool {
+    if text == "Invalid argument" || text == "Bad file descriptor" {
+        return true
+    }
+    return text == "Socket operation on non-socket" || text == "Operation not supported"
+}
+
+// The next connection on the listener. The peer's address plays no part in serving it, so
+// its port is read and let go, the one use the binding gets
+func srv_accept(lfd: int64) -> (int64, error) {
+    cfd, peer, ae := net_accept(lfd)
+    port: int64 = addr_port(peer)
+    port.ignore()
+    if ae.exists() {
+        return (-1, ae)
+    }
+    return (cfd, error {})
+}
+
+/** Accepts one connection on the listener and serves it to its end, for a test and for a
+ *  program that serves a known number of clients; it needs no stop.
+ *  @param s the settings and the listener, borrowed
+ *  @param ctx the value handed to every handler call
+ *  @param handler the handler, as http_serve_stream takes it
+ *  @return the accept's error, or the connection's as http_serve_conn reports it */
+export func http_serve_one<C>(s: *Server, ctx: C, handler: (*Request, C) -> *Response) -> error {
+    cfd, ae := srv_accept((*s).lfd)
+    if ae.exists() {
+        return ae
+    }
+    return http_serve_conn(s, cfd, ctx, handler)
+}
+
+/** The accept loop: accepts a connection, serves it to its end through http_serve_conn,
+ *  and accepts the next, until the listener is stopped or gone. A connection's own failure
+ *  ends that connection and never the loop. An accept failure ends the loop only when it
+ *  says the listener can never accept again: Invalid argument, the stop or a socket that
+ *  is not listening, Bad file descriptor, a listener already closed, Socket operation on
+ *  non-socket, and Operation not supported. Any other failure, Too many open files and
+ *  the rest of a descriptor or buffer shortage, or a connection the peer aborted before
+ *  the accept took it, passes: the loop waits 50 milliseconds and accepts again, so a
+ *  burst of clients that exhausts the descriptor limit slows the server and never stops
+ *  it. The stop is net_shutdown_read on the listener from another thread, which makes the
+ *  pending accept fail with Invalid argument; then join the thread and net_close the
+ *  listener. A connection being served when the stop lands finishes first, bounded by
+ *  read_timeout_ms. Run N threads in http_serve over the same listener to serve N clients
+ *  at once, with any state in ctx made thread safe.
+ *  @param s the settings and the listener, borrowed
+ *  @param ctx the value handed to every handler call
+ *  @param handler the handler, as http_serve_stream takes it
+ *  @return the accept's error that ended the loop
+ *  @example
+ *  s := http_server_new(lfd)
+ *  t, te := spawn(lambda () -> void {
+ *      e := http_serve(s, 0, hello)
+ *      if e.exists() {
+ *          println(e)
+ *      }
+ *  })
+ *  te.ignore()
+ *  // later, to stop it
+ *  se := net_shutdown_read(lfd)
+ *  se.ignore()
+ *  je := join(t)
+ *  je.ignore()
+ *  ce := net_close(lfd)
+ *  ce.ignore()
+ *  free(s) */
+export func http_serve<C>(s: *Server, ctx: C, handler: (*Request, C) -> *Response) -> error {
+    while true {
+        cfd, ae := srv_accept((*s).lfd)
+        if ae.exists() {
+            if srv_accept_is_final(ae.toString()) {
+                return ae
+            }
+            // A shortage or an aborted connection passes, so the loop waits and goes on
+            ae.ignore()
+            sleep_ms(srv_retry_ms())
+        } else {
+            // One client's garbage or early exit ends its own connection, never the loop,
+            // so the connection's error stops here by design
+            ce := http_serve_conn(s, cfd, ctx, handler)
+            ce.ignore()
+        }
+    }
+    return error {}
+}

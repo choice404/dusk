@@ -1,0 +1,40 @@
+// A handler response whose status the wire cannot carry as a final response, below 200 or
+// past three digits, never goes out. The server answers a 500 with the body
+// http: bad handler status and Connection: close in its place and the stream ends with
+// that error, so the pipelined second request is never read. Status 0 and an interim 103
+// are both refused; the handler ran once on each stream.
+@paradigm procedural
+@import std.net.http.server
+@import std.fmt
+
+func answer(req: *Request, status: int64) -> *Response {
+    resp := response_new(status)
+    response_set_body(resp, "body")
+    return resp
+}
+
+func serve(status: int64) -> void {
+    text := "GET /a HTTP/1.1\r\nHost: h\r\n\r\nGET /b HTTP/1.1\r\nHost: h\r\n\r\n"
+    s := http_server_new(-1)
+    (*s).send_date = false
+    c: *StringReader = alloc(string_reader_new(text))
+    out: *StringBuilder = alloc(sb_new())
+    count, e := http_serve_stream(s, string_reader(c), sb_writer(out), status, answer)
+    println(count)
+    if e.exists() {
+        println(e)
+    }
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    sb_free(out)
+    free(out)
+    free(c)
+    free(s)
+}
+
+func main() -> int32 {
+    serve(0)
+    serve(103)
+    return 0
+}

@@ -1,0 +1,82 @@
+// N acceptors over one listener. Two threads each run http_serve on the same Server and
+// listener, the kernel handing each connection to one blocked accept, and the handler
+// counts its calls into an atomic context, the thread safe shared state the shape asks
+// for. The main thread makes two http_get calls in sequence, each checked silently, then
+// one net_shutdown_read wakes both pending accepts, both threads are joined, the listener
+// is closed, and the count of requests answered is printed.
+@paradigm procedural
+@import std.net.http.client
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.concurrent.atomic
+@import std.fmt
+
+func handle(req: *Request, calls: AtomicInt) -> *Response {
+    n: int64 = atomic_add(calls, 1)
+    n.ignore()
+    resp := response_new(200)
+    response_set_body(resp, "ok")
+    return resp
+}
+
+// One acceptor: serves until the shutdown makes its accept fail
+func acceptor(s: *Server, calls: AtomicInt) -> void {
+    e := http_serve(s, calls, handle)
+    if e.exists() && e.toString() != "Invalid argument" {
+        println(e)
+    }
+}
+
+// One GET, silent when it comes back 200 with the body ok
+func fetch(url: string) -> void {
+    resp, e := http_get(url)
+    if e.exists() {
+        println(e)
+    } else if (*resp).status != 200 || response_text(resp) != "ok" {
+        println("unexpected response")
+    }
+    response_free(resp)
+    free(resp)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    calls: AtomicInt = atomic_new(0)
+    first, fe := spawn(lambda () -> void {
+        acceptor(s, calls)
+    })
+    if fe.exists() {
+        printerr(fe)
+        return 1
+    }
+    second, se := spawn(lambda () -> void {
+        acceptor(s, calls)
+    })
+    if se.exists() {
+        printerr(se)
+        return 1
+    }
+    url: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    fetch(url)
+    fetch(url)
+    free(url)
+    he := net_shutdown_read(lfd)
+    he.ignore()
+    j1 := join(first)
+    j1.ignore()
+    j2 := join(second)
+    j2.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    println(atomic_load(calls))
+    atomic_free(calls)
+    free(s)
+    return 0
+}

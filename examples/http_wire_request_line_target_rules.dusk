@@ -1,0 +1,33 @@
+// The asterisk form is a target for OPTIONS alone, matched case sensitively, and a # never
+// belongs in a request target, since a fragment is not sent; each of the others is
+// http: bad target. Each accepted line prints method, path, query, and minor joined by |.
+@paradigm procedural
+@import std.net.http.wire
+
+func show(line: string) -> void {
+    r, e := parse_request_line(line)
+    if e.exists() {
+        println(e)
+    } else {
+        print((*r).method)
+        print("|")
+        print((*r).path)
+        print("|")
+        print((*r).query)
+        print("|")
+        println((*r).minor)
+    }
+    request_free(r)
+    free(r)
+}
+
+func main() -> int32 {
+    show("OPTIONS * HTTP/1.1")
+    show("GET * HTTP/1.1")
+    show("options * HTTP/1.1")
+    show("GET /a#f HTTP/1.1")
+    show("GET /a?q#f HTTP/1.1")
+    show("GET http://h/a#f HTTP/1.1")
+    show("OPTIONS /a HTTP/1.0")
+    return 0
+}

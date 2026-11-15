@@ -1,0 +1,36 @@
+// A dial to a port nothing listens on is an error value, never a fault: the listener is
+// closed before the dial so the port is known to be free, http_dial hands back a Conn
+// that holds no socket beside the error, and conn_close then free release it all the same.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println("error")
+    } else {
+        println((*c).is_open)
+    }
+    ce := conn_close(c)
+    if ce.exists() {
+        println(ce)
+    }
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    return 0
+}

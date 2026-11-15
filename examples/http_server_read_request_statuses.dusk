@@ -1,0 +1,39 @@
+// http_read_request maps every failure to the status the serve loop answers with, and to
+// 0 when no response is owed: the stream ending before a request, or inside its body.
+// Each case reads from its own string_reader and frees the request on every path.
+@paradigm procedural
+@import std.net.http.server
+
+// Reads one request from text under s and prints its status and sentence, or its parts
+func show(s: *Server, text: string) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    req, status, e := http_read_request(b, s)
+    if e.exists() {
+        println(f"{status} {e}")
+    } else {
+        println(f"{(*req).method} {(*req).path} {(*req).minor} {(*req).body_len}")
+    }
+    request_free(req)
+    free(req)
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func main() -> int32 {
+    s := http_server_new(-1)
+    (*s).max_body = 4
+    show(s, "")
+    show(s, "GET / HTTP/1.0\r\n\r\n")
+    show(s, "POST /p HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc")
+    show(s, "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n")
+    show(s, "GET / HTTP/1.1\r\nHost: a\r\nObs: a\r\n b\r\n\r\n")
+    show(s, "GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n")
+    show(s, "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nab")
+    show(s, "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n")
+    show(s, "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")
+    show(s, "GET / HTTP/1.1\r\nHost: a\r")
+    free(s)
+    return 0
+}

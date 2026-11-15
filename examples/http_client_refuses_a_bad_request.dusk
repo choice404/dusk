@@ -1,0 +1,113 @@
+// conn_send refuses a request it could not write as one message before a byte of it is
+// written: a method that is not a token is http: bad method, a path or query byte below
+// 0x21 or above 0x7E is http: bad target, and a header name that is empty or not a token
+// is http: bad header name. Nothing was written, so the connection stays open, and the
+// good request after them is the only one the server reads.
+@paradigm procedural
+@import std.net.http.client
+@import std.concurrent.thread
+@import std.fmt
+
+// Reads requests until the client closes, printing each request line and answering each
+// with ok, then prints how many arrived
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    mut count: int64 = 0
+    mut going: bool = true
+    while going {
+        line, le := read_line_capped(b, 1024)
+        if le.exists() {
+            le.ignore()
+            going = false
+        } else {
+            println(line)
+            h: *Vector<Header> = headers_new()
+            he := read_headers(b, h, 4096, 32)
+            he.ignore()
+            headers_free(h)
+            free(h)
+            count++
+            we := write_string(fd_writer(cfd), "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            we.ignore()
+        }
+        free(line)
+    }
+    println(count)
+    bufreader_free(b)
+    free(b)
+    ce := net_close(cfd)
+    ce.ignore()
+}
+
+// Sends method to the target, with one extra header field named header when with_header
+// is set, and prints the response text or the error and whether the Conn stays open
+func send(c: *Conn, method: string, target: string, header: string, with_header: bool) -> void {
+    req: *Request = request_new(method, target)
+    if with_header {
+        headers_add((*req).headers, header, "v")
+    }
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        print(e)
+    } else {
+        print(response_text(resp))
+    }
+    print(" ")
+    println((*c).is_open)
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    send(c, "G@T", "/", "", false)
+    send(c, "", "/", "", false)
+    send(c, "GET", "/a b", "", false)
+    send(c, "GET", "/caf\u{e9}", "", false)
+    send(c, "GET", "/a?q=\u{7f}", "", false)
+    send(c, "GET", "/", "", true)
+    send(c, "GET", "/", "X Y", true)
+    send(c, "GET", "/", "X:Y", true)
+    send(c, "GET", "/ok?q=1", "", false)
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

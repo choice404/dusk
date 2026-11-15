@@ -1,0 +1,489 @@
+/** std.net.http: the HTTP/1.1 message types. A Request and a Response each carry an
+ *  ordered header list and a body of raw bytes, and every string inside them, the method
+ *  or the reason, the path and the query, and every header name and value, is a fresh heap
+ *  string the message owns. request_free and response_free release all of it and the
+ *  caller frees the block, the vec_free convention. status_text is the reason phrase table.
+ *
+ *  Headers are a *Vector<Header> of owned string pairs rather than a map, since a header
+ *  section is an ordered list that may repeat a name, Set-Cookie among them, and a name
+ *  compares case insensitively. A lookup is a linear scan with a byte wise ASCII case fold,
+ *  header_name_eq, which allocates nothing and is cheaper than a hash over the dozen fields
+ *  a message carries. headers_add and headers_set copy what they are given; headers_get
+ *  hands back a borrow into the list.
+ *
+ *  A body is a *raw char buffer plus body_len rather than a string, because a string ends
+ *  at its first NUL and a binary body would be cut there. The buffer always holds a NUL
+ *  after its body_len bytes and is never null, one byte when the body is empty, so
+ *  request_text and response_text hand back a zero copy text view that stops at the first
+ *  NUL while body_len stays the true count.
+ *
+ *  This module builds and frees messages and nothing more. The parsers, the framing, and
+ *  the chunked coding are std.net.http.wire; the client and the server sit above that. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+
+/** One header field: name and value are fresh heap strings the list owns, the name kept in
+ *  the case it was written and compared case insensitively, the value with no surrounding
+ *  whitespace. */
+export struct Header {
+    name: string,
+    value: string,
+}
+
+/** An HTTP/1.x request. method, path, and query are fresh heap strings the request owns,
+ *  path and query split at the first ? of the target, query empty when there was none;
+ *  minor is the HTTP/1.x minor version, 1 or 0; headers is the ordered field list; body is
+ *  a heap buffer of body_len bytes with a NUL after them, never null; chunked asks a writer
+ *  to send the body in chunked coding, and a parser sets it to say the body arrived so.
+ *  Build one with request_new and release it with request_free then free. */
+export struct Request {
+    method: string,
+    path: string,
+    query: string,
+    minor: int64,
+    headers: *Vector<Header>,
+    body: *raw char,
+    body_len: int64,
+    chunked: bool,
+}
+
+/** An HTTP/1.x response. status is the three digit code; reason is a fresh heap string the
+ *  response owns, possibly empty; minor, headers, body, body_len, and chunked mean what they
+ *  mean on a Request. Build one with response_new and release it with response_free then
+ *  free. */
+export struct Response {
+    status: int64,
+    reason: string,
+    minor: int64,
+    headers: *Vector<Header>,
+    body: *raw char,
+    body_len: int64,
+    chunked: bool,
+}
+
+// A fresh heap copy of all of s
+func http_copy(s: string) -> string {
+    return substring(s, 0, str_len(s))
+}
+
+// The empty body: a one byte heap buffer holding only its NUL
+func http_empty_body() -> *raw char {
+    d: *raw char = alloc_bytes(1)
+    d[0] = 0
+    return d
+}
+
+// A fresh heap buffer of the n bytes at src followed by a NUL
+func http_copy_bytes(src: *raw char, n: int64) -> *raw char {
+    d: *raw char = alloc_bytes(n + 1)
+    for i in 0..n {
+        d[i] = src[i]
+    }
+    d[n] = 0
+    return d
+}
+
+// A fresh heap buffer of the bytes of text up to its NUL followed by a NUL
+func http_text_bytes(text: string, n: int64) -> *raw char {
+    d: *raw char = alloc_bytes(n + 1)
+    for i in 0..n {
+        d[i] = text[i]
+    }
+    d[n] = 0
+    return d
+}
+
+// The byte ASCII lowercased; every other byte unchanged
+func http_fold(c: int64) -> int64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+/** An empty header list on the heap, ready for headers_add. A list handed to no message
+ *  is released with headers_free then free.
+ *  @return a fresh empty header list the caller owns */
+export func headers_new() -> *Vector<Header> {
+    h: *Vector<Header> = alloc(vec_new())
+    return h
+}
+
+/** Appends a field to the end of the list, copying both strings, so what the caller passed
+ *  stays the caller's to free. A name already present is kept and the new field follows it,
+ *  the order a repeated field like Set-Cookie needs.
+ *  @param h the list to append to, borrowed and grown in place
+ *  @param name the field name, copied in
+ *  @param value the field value, copied in */
+export func headers_add(h: *Vector<Header>, name: string, value: string) -> void {
+    n: string = http_copy(name)
+    v: string = http_copy(value)
+    vec_push(h, Header { name: n, value: v })
+}
+
+/** Removes every field named name, compared case insensitively, then appends one field
+ *  with a copy of name and value, so the list holds exactly one field of that name after.
+ *  Both copies are made before any field is freed, so name and value may be borrows of
+ *  the list itself, a value from headers_get among them.
+ *  @param h the list to change, borrowed and changed in place
+ *  @param name the field name, copied in
+ *  @param value the field value, copied in */
+export func headers_set(h: *Vector<Header>, name: string, value: string) -> void {
+    n: string = http_copy(name)
+    v: string = http_copy(value)
+    headers_drop(h, n)
+    vec_push(h, Header { name: n, value: v })
+}
+
+/** The value of the first field named name, compared case insensitively. The value is a
+ *  borrow into the list, valid until that field is removed or the list is freed; copy it
+ *  with substring to keep it longer, and never free it. Every value of a repeated field is
+ *  read by walking the list with vec_len, vec_get, and header_name_eq.
+ *  @param h the list to search, borrowed
+ *  @param name the field name to find, borrowed
+ *  @return the borrowed value paired with true, or the empty literal and false when no field
+ *  has that name
+ *  @example
+ *  ctype, ok := headers_get((*resp).headers, "Content-Type")
+ *  if ok {
+ *      println(ctype)
+ *  } */
+export func headers_get(h: *Vector<Header>, name: string) -> (string, bool) {
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, name) {
+            return (f.value, true)
+        }
+    }
+    return ("", false)
+}
+
+/** Whether a field named name is present, compared case insensitively.
+ *  @param h the list to search, borrowed
+ *  @param name the field name to find, borrowed
+ *  @return true when at least one field has that name */
+export func headers_has(h: *Vector<Header>, name: string) -> bool {
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, name) {
+            return true
+        }
+    }
+    return false
+}
+
+/** Removes every field named name, compared case insensitively, freeing each one's name
+ *  and value. The fields that stay keep their order. The compare runs against a private
+ *  copy of name, so a name borrowed from the list itself still matches every field after
+ *  the one it came from is freed.
+ *  @param h the list to change, borrowed and changed in place
+ *  @param name the field name to remove, borrowed
+ *  @return how many fields went, 0 when none had that name */
+export func headers_remove(h: *Vector<Header>, name: string) -> int64 {
+    own: string = http_copy(name)
+    count: int64 = headers_drop(h, own)
+    free(own)
+    return count
+}
+
+// Removes and frees every field named name, how many went. name must not be a string the
+// list holds, since a field it matched would free it before the next compare
+func headers_drop(h: *Vector<Header>, name: string) -> int64 {
+    mut count: int64 = 0
+    mut i: int64 = vec_len(h)
+    while i > 0 {
+        i--
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, name) {
+            gone := vec_take(h, i)
+            free(gone.name)
+            free(gone.value)
+            count++
+        }
+    }
+    return count
+}
+
+/** Frees every name and value in the list and its backing buffer; free the list block
+ *  itself with free once this returns. A list inside a message is released by
+ *  request_free or response_free instead, never here.
+ *  @param h the list to release, borrowed */
+export func headers_free(h: *Vector<Header>) -> void {
+    while vec_len(h) > 0 {
+        f := vec_take(h, vec_len(h) - 1)
+        free(f.name)
+        free(f.value)
+    }
+    vec_free(h)
+}
+
+/** Whether a and b hold the same bytes with ASCII letters case folded, the rule a header
+ *  field name compares by. Nothing is allocated and neither string is read past its NUL.
+ *  @param a the first name, borrowed
+ *  @param b the second name, borrowed
+ *  @return true when the two names are equal ignoring ASCII case */
+export func header_name_eq(a: string, b: string) -> bool {
+    mut i: int64 = 0
+    while a[i] != 0 {
+        if http_fold(int64(a[i])) != http_fold(int64(b[i])) {
+            return false
+        }
+        i++
+    }
+    return b[i] == 0
+}
+
+/** A request for method and target, ready to send once its headers and body are set. The
+ *  method is copied, the target is split at its first ? into path and query, both copies,
+ *  query empty when there is no ?; minor is 1, the header list is empty, the body is empty,
+ *  and chunked is false. Neither argument is checked against the grammar here; the writer
+ *  sends what the request holds.
+ *  @param method the request method, GET or POST or another token, copied in
+ *  @param target the origin form target, /path?query, copied in
+ *  @return a fresh heap Request the caller releases with request_free then free
+ *  @example
+ *  req := request_new("GET", "/search?q=dusk")
+ *  headers_set((*req).headers, "Accept", "text/plain")
+ *  println((*req).query)
+ *  request_free(req)
+ *  free(req) */
+export func request_new(method: string, target: string) -> *Request {
+    n: int64 = str_len(target)
+    mut q: int64 = n
+    for i in 0..n {
+        if target[i] == 63 {
+            q = i
+            break
+        }
+    }
+    m: string = http_copy(method)
+    path: string = substring(target, 0, q)
+    query: string = substring(target, q + 1, n)
+    h: *Vector<Header> = headers_new()
+    body: *raw char = http_empty_body()
+    return alloc(Request { method: m, path: path, query: query, minor: 1, headers: h, body: body, body_len: 0, chunked: false })
+}
+
+/** The request body as text: a zero copy view of the body bytes up to the first NUL, valid
+ *  until the body is replaced or the request is freed. A binary body reads as the prefix
+ *  before its first NUL here, while body_len stays the true byte count; never free it.
+ *  @param r the request to read, borrowed
+ *  @return a borrowed view of the body bytes */
+export func request_text(r: *Request) -> string {
+    return cstr((*r).body)
+}
+
+/** Replaces the body with a copy of text's bytes up to its NUL, setting body_len to their
+ *  count. The copy is made before the old body is freed, so text may be a view of the
+ *  current body.
+ *  @param r the request to change, borrowed and changed in place
+ *  @param text the new body text, copied in */
+export func request_set_body(r: *Request, text: string) -> void {
+    n: int64 = str_len(text)
+    d: *raw char = http_text_bytes(text, n)
+    free((*r).body)
+    (*r).body = d
+    (*r).body_len = n
+}
+
+/** Replaces the body with a copy of the n bytes at buf, a NUL byte among them kept, and
+ *  sets body_len to n, so a binary body is settable. A NUL is appended after the copy, and
+ *  an n below 0 reads as 0. The copy is made before the old body is freed.
+ *  @param r the request to change, borrowed and changed in place
+ *  @param buf the bytes to copy, at least n of them, borrowed
+ *  @param n the byte count */
+export func request_set_body_bytes(r: *Request, buf: *raw char, n: int64) -> void {
+    mut count: int64 = n
+    if count < 0 {
+        count = 0
+    }
+    d: *raw char = http_copy_bytes(buf, count)
+    free((*r).body)
+    (*r).body = d
+    (*r).body_len = count
+}
+
+/** Frees the method, the path, the query, every header and the header list block, and the
+ *  body; free the Request block itself with free once this returns.
+ *  @param r the request whose parts to release, borrowed */
+export func request_free(r: *Request) -> void {
+    free((*r).method)
+    free((*r).path)
+    free((*r).query)
+    headers_free((*r).headers)
+    free((*r).headers)
+    free((*r).body)
+}
+
+/** A response with status, reason a copy of status_text(status), minor 1, an empty header
+ *  list, an empty body, and chunked false. A status the table does not know gets the
+ *  empty reason, which is legal on the wire.
+ *  @param status the three digit status code
+ *  @return a fresh heap Response the caller releases with response_free then free
+ *  @example
+ *  resp := response_new(200)
+ *  headers_set((*resp).headers, "Content-Type", "text/plain")
+ *  response_set_body(resp, "hello")
+ *  response_free(resp)
+ *  free(resp) */
+export func response_new(status: int64) -> *Response {
+    reason: string = http_copy(status_text(status))
+    h: *Vector<Header> = headers_new()
+    body: *raw char = http_empty_body()
+    return alloc(Response { status: status, reason: reason, minor: 1, headers: h, body: body, body_len: 0, chunked: false })
+}
+
+/** The response body as text, request_text's twin: a zero copy view up to the first NUL,
+ *  valid until the body is replaced or the response is freed; never free it.
+ *  @param r the response to read, borrowed
+ *  @return a borrowed view of the body bytes */
+export func response_text(r: *Response) -> string {
+    return cstr((*r).body)
+}
+
+/** Replaces the body with a copy of text's bytes up to its NUL, request_set_body's twin.
+ *  @param r the response to change, borrowed and changed in place
+ *  @param text the new body text, copied in */
+export func response_set_body(r: *Response, text: string) -> void {
+    n: int64 = str_len(text)
+    d: *raw char = http_text_bytes(text, n)
+    free((*r).body)
+    (*r).body = d
+    (*r).body_len = n
+}
+
+/** Replaces the body with a copy of the n bytes at buf, request_set_body_bytes's twin: a
+ *  NUL byte among them is kept, a NUL is appended, and an n below 0 reads as 0.
+ *  @param r the response to change, borrowed and changed in place
+ *  @param buf the bytes to copy, at least n of them, borrowed
+ *  @param n the byte count */
+export func response_set_body_bytes(r: *Response, buf: *raw char, n: int64) -> void {
+    mut count: int64 = n
+    if count < 0 {
+        count = 0
+    }
+    d: *raw char = http_copy_bytes(buf, count)
+    free((*r).body)
+    (*r).body = d
+    (*r).body_len = count
+}
+
+/** Frees the reason, every header and the header list block, and the body; free the
+ *  Response block itself with free once this returns.
+ *  @param r the response whose parts to release, borrowed */
+export func response_free(r: *Response) -> void {
+    free((*r).reason)
+    headers_free((*r).headers)
+    free((*r).headers)
+    free((*r).body)
+}
+
+// The reason phrases of the informational and success codes
+func status_text_1xx_2xx(code: int64) -> string {
+    if code == 100 { return "Continue" }
+    if code == 101 { return "Switching Protocols" }
+    if code == 102 { return "Processing" }
+    if code == 103 { return "Early Hints" }
+    if code == 200 { return "OK" }
+    if code == 201 { return "Created" }
+    if code == 202 { return "Accepted" }
+    if code == 203 { return "Non-Authoritative Information" }
+    if code == 204 { return "No Content" }
+    if code == 205 { return "Reset Content" }
+    if code == 206 { return "Partial Content" }
+    if code == 207 { return "Multi-Status" }
+    if code == 208 { return "Already Reported" }
+    if code == 226 { return "IM Used" }
+    return ""
+}
+
+// The reason phrases of the redirection codes; 306 is reserved and unused
+func status_text_3xx(code: int64) -> string {
+    if code == 300 { return "Multiple Choices" }
+    if code == 301 { return "Moved Permanently" }
+    if code == 302 { return "Found" }
+    if code == 303 { return "See Other" }
+    if code == 304 { return "Not Modified" }
+    if code == 305 { return "Use Proxy" }
+    if code == 307 { return "Temporary Redirect" }
+    if code == 308 { return "Permanent Redirect" }
+    return ""
+}
+
+// The reason phrases of the client error codes; 418 is reserved and unused
+func status_text_4xx(code: int64) -> string {
+    if code == 400 { return "Bad Request" }
+    if code == 401 { return "Unauthorized" }
+    if code == 402 { return "Payment Required" }
+    if code == 403 { return "Forbidden" }
+    if code == 404 { return "Not Found" }
+    if code == 405 { return "Method Not Allowed" }
+    if code == 406 { return "Not Acceptable" }
+    if code == 407 { return "Proxy Authentication Required" }
+    if code == 408 { return "Request Timeout" }
+    if code == 409 { return "Conflict" }
+    if code == 410 { return "Gone" }
+    if code == 411 { return "Length Required" }
+    if code == 412 { return "Precondition Failed" }
+    if code == 413 { return "Content Too Large" }
+    if code == 414 { return "URI Too Long" }
+    if code == 415 { return "Unsupported Media Type" }
+    if code == 416 { return "Range Not Satisfiable" }
+    if code == 417 { return "Expectation Failed" }
+    if code == 421 { return "Misdirected Request" }
+    if code == 422 { return "Unprocessable Content" }
+    if code == 423 { return "Locked" }
+    if code == 424 { return "Failed Dependency" }
+    if code == 425 { return "Too Early" }
+    if code == 426 { return "Upgrade Required" }
+    if code == 428 { return "Precondition Required" }
+    if code == 429 { return "Too Many Requests" }
+    if code == 431 { return "Request Header Fields Too Large" }
+    if code == 451 { return "Unavailable For Legal Reasons" }
+    return ""
+}
+
+// The reason phrases of the server error codes
+func status_text_5xx(code: int64) -> string {
+    if code == 500 { return "Internal Server Error" }
+    if code == 501 { return "Not Implemented" }
+    if code == 502 { return "Bad Gateway" }
+    if code == 503 { return "Service Unavailable" }
+    if code == 504 { return "Gateway Timeout" }
+    if code == 505 { return "HTTP Version Not Supported" }
+    if code == 506 { return "Variant Also Negotiates" }
+    if code == 507 { return "Insufficient Storage" }
+    if code == 508 { return "Loop Detected" }
+    if code == 510 { return "Not Extended" }
+    if code == 511 { return "Network Authentication Required" }
+    return ""
+}
+
+/** The reason phrase for a status code, the RFC 9110 text for every code it defines, 200
+ *  OK, 404 Not Found, 413 Content Too Large, and the rest of the IANA registry's assigned
+ *  1xx through 5xx codes beside them. A code the table does not know, 299 or 418 among
+ *  them, is the empty string, which is a legal empty reason on the wire. The result is a
+ *  literal: read it or copy it, never free it.
+ *  @param code the three digit status code
+ *  @return the reason phrase as a literal, or the empty literal for an unknown code */
+export func status_text(code: int64) -> string {
+    group: int64 = code / 100
+    if code < 100 || group > 5 {
+        return ""
+    }
+    if group <= 2 {
+        return status_text_1xx_2xx(code)
+    }
+    if group == 3 {
+        return status_text_3xx(code)
+    }
+    if group == 4 {
+        return status_text_4xx(code)
+    }
+    return status_text_5xx(code)
+}

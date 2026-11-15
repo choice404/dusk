@@ -1,0 +1,77 @@
+// http_serve ends only on an accept failure that says the listener can never accept
+// again, and returns it: Invalid argument after net_shutdown_read, Bad file descriptor
+// for a listener already closed, Socket operation on non-socket for a descriptor that is
+// no socket, and Operation not supported for a datagram socket. Any other failure, a
+// descriptor shortage among them, is waited out and the accept tried again, so each call
+// here returning at all proves its failure was taken as final. http_serve_one returns the
+// accept's error whatever it is.
+@paradigm procedural
+@import std.net.http.server
+@import std.net.udp
+@import std.fs
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    response_set_body(resp, "ok")
+    return resp
+}
+
+// Serves on fd until http_serve gives up, and prints the error it gave up with
+func serve_on(fd: int64) -> void {
+    s := http_server_new(fd)
+    e := http_serve(s, 0, handle)
+    if e.exists() {
+        println(e)
+    } else {
+        println("no error")
+    }
+    free(s)
+}
+
+func main() -> int32 {
+    stopped, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    se := net_shutdown_read(stopped)
+    se.ignore()
+    serve_on(stopped)
+    sc := net_close(stopped)
+    sc.ignore()
+
+    closed, ce := net_listen(addr_loopback(0), 0)
+    if ce.exists() {
+        printerr(ce)
+        return 1
+    }
+    cc := net_close(closed)
+    cc.ignore()
+    serve_on(closed)
+
+    file, fe := open_file("/dev/null", 0, 0)
+    if fe.exists() {
+        printerr(fe)
+        return 1
+    }
+    serve_on(int64(file))
+    fc := close_file(file)
+    fc.ignore()
+
+    datagram, ue := udp_bind(addr_loopback(0))
+    if ue.exists() {
+        printerr(ue)
+        return 1
+    }
+    serve_on(datagram)
+    dc := net_close(datagram)
+    dc.ignore()
+
+    one := http_server_new(-1)
+    oe := http_serve_one(one, 0, handle)
+    if oe.exists() {
+        println(oe)
+    }
+    free(one)
+    return 0
+}

@@ -1,0 +1,65 @@
+// Stopping http_serve: the accept loop runs on its own thread until net_accept fails.
+// After one exchange the program calls net_shutdown_read on the listener, the pending
+// accept fails with Invalid argument, http_serve returns that error, the thread prints
+// it, and the program joins the thread and only then closes the listener.
+@paradigm procedural
+@import std.net.http.server
+@import std.concurrent.thread
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    response_set_body(resp, "ok")
+    return resp
+}
+
+// Writes the request bytes and reads the whole reply
+func exchange(a: Addr, request: string) -> string {
+    fd, de := net_dial(a)
+    if de.exists() {
+        printerr(de)
+        return substring("", 0, 0)
+    }
+    we := write_string(fd_writer(fd), request)
+    we.ignore()
+    reply, re := read_to_end(fd_reader(fd))
+    re.ignore()
+    ce := net_close(fd)
+    ce.ignore()
+    return reply
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    (*s).send_date = false
+    t, te := spawn(lambda () -> void {
+        e := http_serve(s, 0, handle)
+        if e.exists() {
+            println(e)
+        }
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    reply := exchange(bound, "GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    if ends_with(reply, "\r\n\r\nok") {
+        println("ok")
+    }
+    free(reply)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    println("joined")
+    free(s)
+    return 0
+}

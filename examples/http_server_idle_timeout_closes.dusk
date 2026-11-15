@@ -1,0 +1,58 @@
+// A client that connects and sends nothing is closed once read_timeout_ms runs out,
+// with no response written: the timeout before the first byte of a request is the clean
+// end of an idle connection, so the handler never runs and the serve returns an empty
+// error, and the client's read reaches the end of the stream with no bytes.
+@paradigm procedural
+@import std.net.http.server
+@import std.concurrent.thread
+
+// The handler's state, behind the context pointer the server passes on every call
+struct Counter {
+    n: int64,
+}
+
+func handle(req: *Request, calls: *Counter) -> *Response {
+    (*calls).n = (*calls).n + 1
+    return response_new(200)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    (*s).send_date = false
+    (*s).read_timeout_ms = 50
+    calls: *Counter = alloc(Counter { n: 0 })
+    t, te := spawn(lambda () -> void {
+        e := http_serve_one(s, calls, handle)
+        println((*calls).n)
+        println(e.exists())
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    reply, re := read_to_end(fd_reader(fd))
+    re.ignore()
+    je := join(t)
+    je.ignore()
+    println(str_len(reply))
+    free(reply)
+    ce := net_close(fd)
+    ce.ignore()
+    free(calls)
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

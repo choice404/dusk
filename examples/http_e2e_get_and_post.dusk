@@ -1,0 +1,70 @@
+// The client against the server in one process. http_serve runs on its own thread with a
+// handler that echoes the method, the path, and the body; the main thread makes one
+// http_get and one http_post, each a connection of its own that the server closes after
+// the response, then stops the server with net_shutdown_read, joins it, and closes the
+// listener.
+@paradigm procedural
+@import std.net.http.client
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    text: string = format("%s %s %s", [arg_str((*req).method), arg_str((*req).path), arg_str(request_text(req))])
+    response_set_body(resp, text)
+    free(text)
+    return resp
+}
+
+// Prints the body and the status of one response, or the error
+func report(resp: *Response, e: error) -> void {
+    if e.exists() {
+        println(e)
+        return
+    }
+    println(response_text(resp))
+    println((*resp).status)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    t, te := spawn(lambda () -> void {
+        e := http_serve(s, 0, handle)
+        if e.exists() && e.toString() != "Invalid argument" {
+            println(e)
+        }
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    port: int64 = addr_port(bound)
+    get_url: string = format("http://127.0.0.1:%d/a", [arg_int(port)])
+    got, ge := http_get(get_url)
+    report(got, ge)
+    response_free(got)
+    free(got)
+    post_url: string = format("http://127.0.0.1:%d/b", [arg_int(port)])
+    posted, pe := http_post(post_url, "text/plain", "hello")
+    report(posted, pe)
+    response_free(posted)
+    free(posted)
+    free(get_url)
+    free(post_url)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

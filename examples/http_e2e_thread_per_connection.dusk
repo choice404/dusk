@@ -1,0 +1,97 @@
+// A thread per connection, composed outside the library. The acceptor thread loops
+// net_accept twice and spawns http_serve_conn for each connection on a thread of its own,
+// the spawned lambda capturing the server, the descriptor, and the atomic context and
+// naming the handler, then joins both. The main thread makes two http_get calls in
+// sequence, each checked silently, stops the acceptor with net_shutdown_read, joins it,
+// closes the listener, and prints how many requests the handler answered.
+@paradigm procedural
+@import std.net.http.client
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.concurrent.atomic
+@import std.fmt
+
+func handle(req: *Request, calls: AtomicInt) -> *Response {
+    n: int64 = atomic_add(calls, 1)
+    n.ignore()
+    resp := response_new(200)
+    response_set_body(resp, "ok")
+    return resp
+}
+
+// Accepts two connections, each served on a thread of its own, and joins both
+func accept_two(s: *Server, calls: AtomicInt) -> void {
+    workers: *Vector<thread> = alloc(vec_new())
+    for i in 0..2 {
+        cfd, peer, ae := net_accept((*s).lfd)
+        if ae.exists() {
+            println(ae)
+            break
+        }
+        if addr_port(peer) == 0 {
+            println("the peer has no port")
+        }
+        t, te := spawn(lambda () -> void {
+            e := http_serve_conn(s, cfd, calls, handle)
+            if e.exists() {
+                println(e)
+            }
+        })
+        if te.exists() {
+            println(te)
+            break
+        }
+        vec_push(workers, t)
+    }
+    for i in 0..vec_len(workers) {
+        je := join(vec_get(workers, i))
+        je.ignore()
+    }
+    vec_free(workers)
+    free(workers)
+}
+
+// One GET, silent when it comes back 200 with the body ok
+func fetch(url: string) -> void {
+    resp, e := http_get(url)
+    if e.exists() {
+        println(e)
+    } else if (*resp).status != 200 || response_text(resp) != "ok" {
+        println("unexpected response")
+    }
+    response_free(resp)
+    free(resp)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    calls: AtomicInt = atomic_new(0)
+    t, te := spawn(lambda () -> void {
+        accept_two(s, calls)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    url: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    fetch(url)
+    fetch(url)
+    free(url)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    println(atomic_load(calls))
+    atomic_free(calls)
+    free(s)
+    return 0
+}

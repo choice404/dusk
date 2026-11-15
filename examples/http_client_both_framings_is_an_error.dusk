@@ -1,0 +1,72 @@
+// A response carrying both Content-Length and Transfer-Encoding is the smuggling shape,
+// refused rather than resolved: the raw server thread answers with both, and http_get
+// reports the wire sentence beside an empty Response.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+// Reads one request head off the connection and drops it
+func drain_head(b: *BufReader) -> void {
+    line, le := read_line_capped(b, 1024)
+    le.ignore()
+    free(line)
+    h: *Vector<Header> = headers_new()
+    he := read_headers(b, h, 4096, 32)
+    he.ignore()
+    headers_free(h)
+    free(h)
+}
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    drain_head(b)
+    we := write_string(fd_writer(cfd), "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")
+    we.ignore()
+    ce := net_close(cfd)
+    ce.ignore()
+    bufreader_free(b)
+    free(b)
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    url: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    resp, e := http_get(url)
+    if e.exists() {
+        println(e)
+    } else {
+        println(response_text(resp))
+    }
+    if (*resp).status != 0 {
+        println("not the empty response")
+    }
+    response_free(resp)
+    free(resp)
+    free(url)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

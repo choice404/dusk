@@ -1,0 +1,22 @@
+// http_serve returns the error that ended its accept loop, and like every error that
+// one must be handled: binding it and never inspecting it is rejected.
+@paradigm procedural
+@import std.net.http.server
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    return response_new(200)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    s := http_server_new(lfd)
+    e := http_serve(s, 0, handle)
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

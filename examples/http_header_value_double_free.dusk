@@ -1,0 +1,19 @@
+// A value from headers_get is a borrow into the list, which owns it and frees it in
+// headers_free. The checker tracks no ownership on a string, so freeing the borrow here
+// passes check; the list's own free of the same block is then the runtime's double free
+// fault, named and aborted rather than corrupting the heap.
+@paradigm procedural
+@import std.net.http
+
+func main() -> int32 {
+    h := headers_new()
+    headers_add(h, "a", "b")
+    v, ok := headers_get(h, "a")
+    if ok {
+        println(v)
+        free(v)
+    }
+    headers_free(h)
+    free(h)
+    return 0
+}

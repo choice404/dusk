@@ -1,0 +1,39 @@
+// A status line carries its code, its reason, and its minor version; the reason may be
+// empty with its space kept, and a major version other than 1 is refused by name.
+@paradigm procedural
+@import std.net.http.wire
+
+func show(b: *BufReader) -> void {
+    line, le := read_line_capped(b, 8192)
+    if le.exists() {
+        println(le)
+        free(line)
+        return
+    }
+    r, e := parse_status_line(line)
+    free(line)
+    if e.exists() {
+        println(e)
+    } else {
+        print((*r).status)
+        print(" ")
+        print((*r).reason)
+        print(" ")
+        println((*r).minor)
+    }
+    response_free(r)
+    free(r)
+}
+
+func main() -> int32 {
+    text: string = "HTTP/1.1 200 OK\r\nHTTP/1.0 404 Not Found\r\nHTTP/1.1 299 \r\nHTTP/2 200 OK\r\n"
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    for i in 0..4 {
+        show(b)
+    }
+    bufreader_free(b)
+    free(b)
+    free(c)
+    return 0
+}

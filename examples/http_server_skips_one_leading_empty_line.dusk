@@ -1,0 +1,42 @@
+// One empty line before a request line is skipped, RFC 9112 2.2: a CRLF before the first
+// request, and an LF a client left after a POST body on a kept alive connection, are both
+// read past. Two empty lines in a row are not: the second is read as the request line and
+// refused with a 400, so the serve answers three requests and ends on the refusal.
+@paradigm procedural
+@import std.net.http.server
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    text: string = format("%s %s %s", [arg_str((*req).method), arg_str((*req).path), arg_str(request_text(req))])
+    response_set_body(resp, text)
+    free(text)
+    return resp
+}
+
+func main() -> int32 {
+    s := http_server_new(-1)
+    (*s).send_date = false
+    wire: *StringBuilder = alloc(sb_new())
+    sb_push(wire, "\r\nGET /a HTTP/1.1\r\nHost: h\r\n\r\n")
+    sb_push(wire, "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nabc")
+    sb_push(wire, "\nGET /b HTTP/1.1\r\nHost: h\r\n\r\n")
+    sb_push(wire, "\r\n\r\nGET /c HTTP/1.1\r\nHost: h\r\n\r\n")
+    c: *StringReader = alloc(string_reader_new(sb_cstr(wire)))
+    out: *StringBuilder = alloc(sb_new())
+    count, e := http_serve_stream(s, string_reader(c), sb_writer(out), 0, handle)
+    println(count)
+    if e.exists() {
+        println(e)
+    }
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    sb_free(out)
+    free(out)
+    free(c)
+    sb_free(wire)
+    free(wire)
+    free(s)
+    return 0
+}

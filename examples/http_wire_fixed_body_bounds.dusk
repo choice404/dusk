@@ -1,0 +1,27 @@
+// read_body_fixed reads exactly the length a Content-Length names and leaves what follows
+// unread, refuses a stream that ends first, and refuses a length past its ceiling before
+// a byte is read.
+@paradigm procedural
+@import std.net.http.wire
+
+func read_n(text: string, n: int64, max: int64) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    body, e := read_body_fixed(b, n, max)
+    if e.exists() {
+        println(e)
+    } else {
+        println(cstr(body))
+    }
+    free(body)
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func main() -> int32 {
+    read_n("hello!", 5, 1048576)
+    read_n("hello", 7, 1048576)
+    read_n("hello", 5, 4)
+    return 0
+}

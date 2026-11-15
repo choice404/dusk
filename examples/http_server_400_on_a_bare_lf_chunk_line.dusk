@@ -1,0 +1,43 @@
+// A chunk size line ended by a lone LF is a 400. Read with the bare LF tolerance a head
+// line gets, the extension after the ; would swallow the LF and the data, and the bytes
+// after the body would read as a second request; refused, the server answers 400 and
+// closes, and the handler never sees either request.
+@paradigm procedural
+@import std.net.http.server
+@import std.fmt
+
+// The handler's state, behind the context pointer the server passes on every call
+struct Counter {
+    n: int64,
+}
+
+func handle(req: *Request, calls: *Counter) -> *Response {
+    (*calls).n = (*calls).n + 1
+    resp := response_new(200)
+    response_set_body(resp, "ok")
+    return resp
+}
+
+func main() -> int32 {
+    text := "POST /a HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n2;a\nXX\r\n0\r\n\r\nGET /smuggled HTTP/1.1\r\nHost: h\r\n\r\n"
+    s := http_server_new(-1)
+    (*s).send_date = false
+    calls: *Counter = alloc(Counter { n: 0 })
+    c: *StringReader = alloc(string_reader_new(text))
+    out: *StringBuilder = alloc(sb_new())
+    count, e := http_serve_stream(s, string_reader(c), sb_writer(out), calls, handle)
+    println(count)
+    if e.exists() {
+        println(e)
+    }
+    println((*calls).n)
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    sb_free(out)
+    free(out)
+    free(c)
+    free(calls)
+    free(s)
+    return 0
+}

@@ -1,0 +1,87 @@
+// The response body ceiling is a wire error: conn_set_max_body lowers it to 4 bytes, the
+// raw server thread answers with a 5 byte Content-Length body, and conn_send refuses it
+// before reading a byte of it and marks the Conn closed.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+// Reads one request head off the connection and drops it
+func drain_head(b: *BufReader) -> void {
+    line, le := read_line_capped(b, 1024)
+    le.ignore()
+    free(line)
+    h: *Vector<Header> = headers_new()
+    he := read_headers(b, h, 4096, 32)
+    he.ignore()
+    headers_free(h)
+    free(h)
+}
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    drain_head(b)
+    we := write_string(fd_writer(cfd), "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+    we.ignore()
+    ce := net_close(cfd)
+    ce.ignore()
+    bufreader_free(b)
+    free(b)
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    conn_set_max_body(c, 4)
+    req: *Request = request_new("GET", "/")
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println(response_text(resp))
+    }
+    if (*c).is_open {
+        println("still open after an error")
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

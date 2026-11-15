@@ -1,0 +1,78 @@
+// Keep alive: two requests on one connection, neither asking for the close, get two
+// replies with no Connection field, then the client's half close ends the stream
+// cleanly. The server thread runs http_serve_stream over the accepted socket so it can
+// print the count of requests answered before it closes.
+@paradigm procedural
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    if (*req).path == "/1" {
+        response_set_body(resp, "a")
+    } else {
+        response_set_body(resp, "b")
+    }
+    return resp
+}
+
+func serve(s: *Server) -> void {
+    cfd, peer, ae := net_accept((*s).lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+    count, e := http_serve_stream(s, fd_reader(cfd), fd_writer(cfd), 0, handle)
+    if e.exists() {
+        println(e)
+    }
+    println(count)
+    ce := net_close(cfd)
+    ce.ignore()
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    (*s).send_date = false
+    t, te := spawn(lambda () -> void {
+        serve(s)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    fd, de := net_dial(bound)
+    if de.exists() {
+        printerr(de)
+        return 1
+    }
+    we := write_string(fd_writer(fd), "GET /1 HTTP/1.1\r\nHost: a\r\n\r\nGET /2 HTTP/1.1\r\nHost: a\r\n\r\n")
+    we.ignore()
+    se := net_shutdown_write(fd)
+    se.ignore()
+    reply, re := read_to_end(fd_reader(fd))
+    re.ignore()
+    je := join(t)
+    je.ignore()
+    q: string = format("%q", [arg_str(reply)])
+    println(q)
+    free(q)
+    free(reply)
+    ce := net_close(fd)
+    ce.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

@@ -1,0 +1,78 @@
+// http_post sends its body with Content-Length and Content-Type. The raw server thread
+// reads the head, reads exactly the Content-Length bytes behind it, prints the two
+// fields and the body, and only then answers 204 No Content, which carries no body.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    line, le := read_line_capped(b, 1024)
+    le.ignore()
+    free(line)
+    h: *Vector<Header> = headers_new()
+    he := read_headers(b, h, 4096, 32)
+    he.ignore()
+    length, has_length := headers_get(h, "Content-Length")
+    if has_length {
+        println(length)
+    }
+    ctype, has_ctype := headers_get(h, "Content-Type")
+    if has_ctype {
+        println(ctype)
+    }
+    kind, n, fe := body_framing(h, true)
+    fe.ignore()
+    body, re := read_body_fixed(b, n, 64)
+    re.ignore()
+    println(cstr(body))
+    we := write_string(fd_writer(cfd), "HTTP/1.1 204 No Content\r\n\r\n")
+    we.ignore()
+    ce := net_close(cfd)
+    ce.ignore()
+    free(body)
+    headers_free(h)
+    free(h)
+    bufreader_free(b)
+    free(b)
+    if kind != 1 || addr_port(peer) == 0 {
+        printerr("unexpected request")
+    }
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    url: string = format("http://127.0.0.1:%d/submit", [arg_int(addr_port(bound))])
+    resp, e := http_post(url, "text/plain", "abc")
+    if e.exists() {
+        println(e)
+    }
+    println((*resp).status)
+    println((*resp).body_len)
+    response_free(resp)
+    free(resp)
+    free(url)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

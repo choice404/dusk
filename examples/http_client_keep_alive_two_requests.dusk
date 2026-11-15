@@ -1,0 +1,111 @@
+// Two requests on one Conn ride one connection. The raw server thread accepts in a loop
+// and answers every request on a connection with a two byte body numbered by its place;
+// the client sends GET /1 and GET /2 through conn_send, the Conn stays open between them,
+// and once the client has closed, net_shutdown_read wakes the accept loop, which prints
+// how many connections it took.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+// Answers every request on one connection until the client closes it
+func serve_conn(cfd: int64) -> void {
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    mut k: int64 = 0
+    mut going: bool = true
+    while going {
+        line, le := read_line_capped(b, 1024)
+        free(line)
+        if le.exists() {
+            le.ignore()
+            going = false
+        } else {
+            h: *Vector<Header> = headers_new()
+            he := read_headers(b, h, 4096, 32)
+            he.ignore()
+            headers_free(h)
+            free(h)
+            k++
+            reply: string = format("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr%d", [arg_int(k)])
+            we := write_string(fd_writer(cfd), reply)
+            we.ignore()
+            free(reply)
+        }
+    }
+    bufreader_free(b)
+    free(b)
+}
+
+func serve(lfd: int64) -> void {
+    mut accepts: int64 = 0
+    mut going: bool = true
+    while going {
+        cfd, peer, ae := net_accept(lfd)
+        if ae.exists() {
+            ae.ignore()
+            going = false
+        } else {
+            accepts++
+            serve_conn(cfd)
+            ce := net_close(cfd)
+            ce.ignore()
+            if addr_port(peer) == 0 {
+                printerr("unexpected peer")
+            }
+        }
+    }
+    println(accepts)
+}
+
+func send(c: *Conn, target: string) -> void {
+    req: *Request = request_new("GET", target)
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println(response_text(resp))
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    send(c, "/1")
+    send(c, "/2")
+    println((*c).is_open)
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

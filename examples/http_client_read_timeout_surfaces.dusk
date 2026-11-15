@@ -1,0 +1,71 @@
+// A server that never answers is bounded by the read timeout: the raw server thread
+// accepts and then only waits for the client to go, conn_set_timeout lowers the timeout
+// to 50ms, and conn_send gives up with the wire error http: timed out. The client's close
+// ends the server's wait.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    text, re := read_to_end(fd_reader(cfd))
+    re.ignore()
+    free(text)
+    ce := net_close(cfd)
+    ce.ignore()
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    se := conn_set_timeout(c, 50)
+    se.ignore()
+    req: *Request = request_new("GET", "/")
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println((*resp).status)
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

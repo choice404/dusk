@@ -1,0 +1,30 @@
+// http_serve_stream runs over any Reader and Writer, so two kept alive requests from a
+// string_reader are answered into a StringBuilder with no socket at all, and the end of
+// the string between requests is a clean end with an empty error.
+@paradigm procedural
+@import std.net.http.server
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    response_set_body(resp, (*req).path)
+    return resp
+}
+
+func main() -> int32 {
+    s := http_server_new(-1)
+    (*s).send_date = false
+    c: *StringReader = alloc(string_reader_new("GET /a HTTP/1.1\r\nHost: h\r\n\r\nGET /b HTTP/1.1\r\nHost: h\r\n\r\n"))
+    out: *StringBuilder = alloc(sb_new())
+    count, e := http_serve_stream(s, string_reader(c), sb_writer(out), 0, handle)
+    println(count)
+    println(e.exists())
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    sb_free(out)
+    free(out)
+    free(c)
+    free(s)
+    return 0
+}

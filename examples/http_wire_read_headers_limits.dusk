@@ -1,0 +1,35 @@
+// read_headers reads a header section to its empty line under two budgets: a field past
+// max_count is refused before it is parsed, and a section past max_bytes is refused after
+// reading no more than max_bytes, even when a single field line is what runs it over.
+@paradigm procedural
+@import std.net.http.wire
+
+func read_section(text: string, max_bytes: int64, max_count: int64) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    h := headers_new()
+    e := read_headers(b, h, max_bytes, max_count)
+    if e.exists() {
+        println(e)
+    } else {
+        println(vec_len(h))
+    }
+    headers_free(h)
+    free(h)
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func main() -> int32 {
+    read_section("A: 1\r\nB: 2\r\nC: 3\r\n\r\n", 65536, 100)
+    read_section("A: 1\r\nB: 2\r\n\r\n", 65536, 1)
+    long: string = repeat("x", 97)
+    field: string = "X: " + long
+    text: string = field + "\r\n\r\n"
+    read_section(text, 50, 100)
+    free(text)
+    free(field)
+    free(long)
+    return 0
+}

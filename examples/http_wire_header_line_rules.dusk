@@ -1,0 +1,40 @@
+// A header field line keeps its name as written and its value without the surrounding
+// whitespace; whitespace before the colon, an empty name, a folded continuation line,
+// and a control byte in the value are each refused by name.
+@paradigm procedural
+@import std.net.http.wire
+
+func show(b: *BufReader, h: *Vector<Header>) -> void {
+    line, le := read_line_capped(b, 8192)
+    if le.exists() {
+        println(le)
+        free(line)
+        return
+    }
+    e := parse_header_line(line, h)
+    free(line)
+    if e.exists() {
+        println(e)
+        return
+    }
+    f: Header = vec_get(h, vec_len(h) - 1)
+    print(f.name)
+    print("=")
+    println(f.value)
+}
+
+func main() -> int32 {
+    text: string = "A: b\r\nA:b  \r\nA :b\r\n cont\r\n: x\r\nA: b\u{1}\r\n"
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    h := headers_new()
+    for i in 0..6 {
+        show(b, h)
+    }
+    headers_free(h)
+    free(h)
+    bufreader_free(b)
+    free(b)
+    free(c)
+    return 0
+}

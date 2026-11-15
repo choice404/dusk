@@ -1,0 +1,125 @@
+// One request sent three times on one Conn. The client sets its own fields with
+// headers_set, so a resend repeats Host and Content-Length rather than doubling them, and
+// it owns the framing outright, so turning chunked on drops the Content-Length the earlier
+// sends left behind. The raw server thread counts the three fields in each request it
+// reads and prints the counts and the body length before it answers, so its lines and the
+// client's interleave in a fixed order.
+@paradigm procedural
+@import std.net.http.client
+@import std.fmt
+
+// How many fields named name h holds
+func count_of(h: *Vector<Header>, name: string) -> int64 {
+    mut n: int64 = 0
+    for i in 0..vec_len(h) {
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, name) {
+            n++
+        }
+    }
+    return n
+}
+
+// Reads one request and its body, prints its field counts, and answers it with a body
+// numbered k
+func answer(cfd: int64, b: *BufReader, k: int64) -> void {
+    line, le := read_line_capped(b, 1024)
+    le.ignore()
+    free(line)
+    h: *Vector<Header> = headers_new()
+    he := read_headers(b, h, 4096, 32)
+    he.ignore()
+    print_fmt("host=%d cl=%d te=%d ", [arg_int(count_of(h, "Host")), arg_int(count_of(h, "Content-Length")), arg_int(count_of(h, "Transfer-Encoding"))])
+    kind, n, fe := body_framing(h, true)
+    fe.ignore()
+    if kind == 2 {
+        body, got, re := read_body_chunked(b, 64)
+        re.ignore()
+        println(got)
+        free(body)
+    } else {
+        body, re := read_body_fixed(b, n, 64)
+        re.ignore()
+        println(n)
+        free(body)
+    }
+    reply: string = format("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nr%d", [arg_int(k)])
+    we := write_string(fd_writer(cfd), reply)
+    we.ignore()
+    free(reply)
+    headers_free(h)
+    free(h)
+}
+
+func serve(lfd: int64) -> void {
+    cfd, peer, ae := net_accept(lfd)
+    if ae.exists() {
+        printerr(ae)
+        return
+    }
+    b: *BufReader = bufreader_new(fd_reader(cfd), 1024)
+    for k in 1..4 {
+        answer(cfd, b, k)
+    }
+    ce := net_close(cfd)
+    ce.ignore()
+    bufreader_free(b)
+    free(b)
+    if addr_port(peer) == 0 {
+        printerr("unexpected peer")
+    }
+}
+
+func send(c: *Conn, req: *Request) -> void {
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println(response_text(resp))
+    }
+    response_free(resp)
+    free(resp)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    t, te := spawn(lambda () -> void {
+        serve(lfd)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    req: *Request = request_new("POST", "/r")
+    request_set_body(req, "abc")
+    send(c, req)
+    send(c, req)
+    (*req).chunked = true
+    send(c, req)
+    request_free(req)
+    free(req)
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    return 0
+}

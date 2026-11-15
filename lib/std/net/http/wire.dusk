@@ -1,0 +1,676 @@
+/** std.net.http.wire: the HTTP/1.1 wire, by RFC 9112. The request line, status line, and
+ *  header field parsers, the header section read, the framing rule that decides how a body
+ *  ends, the two head writers, the list field test, and the Date value live here; the byte
+ *  half, the capped line read, the three body readers, the chunked writer, and write_message,
+ *  lives in std.net.http.wirebody, which this module imports, so @import std.net.http.wire
+ *  brings both halves.
+ *
+ *  Every reader takes a *BufReader and nothing else, and every writer takes a Writer or a
+ *  head builder, so the same code serves a socket through fd_reader and fd_writer, a string
+ *  through string_reader and sb_writer, and a later stream variant with no change here.
+ *  Neither half names a descriptor.
+ *
+ *  A reader fails with one sentence from a closed set, each one a value a program may
+ *  match and a server maps to a status: http: line too long, http: bare carriage return,
+ *  http: control character, http: connection closed, http: truncated line, http: timed
+ *  out, http: read failed: and the reader's own text, http: bad request line, http: bad
+ *  method, http: bad target, http: version not supported, http: bad status line, http:
+ *  obsolete line folding, http: bad header name, http: bad header value, http: header
+ *  section too large, http: too many headers, http: both Content-Length and
+ *  Transfer-Encoding, http: bad Content-Length, http: conflicting Content-Length, http:
+ *  unsupported Transfer-Encoding, http: body too large, http: truncated body, http: bad
+ *  chunk size, and http: bad chunk terminator.
+ *
+ *  Every limit is checked before the bytes it guards are read or stored, and a string
+ *  index is not bounds checked at runtime, so every parser here bounds its indices by a
+ *  length it measured. A value handed back beside an error is a real heap value the caller
+ *  frees exactly as on success. */
+
+@paradigm procedural
+
+@import std.net.http
+@import std.net.http.wirebody
+@import std.bufio
+@import std.string
+@import std.time
+
+func wire_fail(msg: string) -> error {
+    return error { message: msg }
+}
+
+func wire_min(a: int64, b: int64) -> int64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+func wire_is_digit(c: int64) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// SP or HTAB, the optional whitespace RFC 9110 lets surround a field value
+func wire_is_ows(c: int64) -> bool {
+    return c == 32 || c == 9
+}
+
+// A control byte other than HTAB, or DEL: the bytes no field value, reason, or target holds
+func wire_is_ctl(c: int64) -> bool {
+    return (c < 32 && c != 9) || c == 127
+}
+
+func wire_fold(c: int64) -> int64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// A tchar, the bytes RFC 9110 lets a token hold: a letter, a digit, or !#$%&'*+-.^_`|~
+func wire_is_tchar(c: int64) -> bool {
+    if wire_is_digit(c) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+        return true
+    }
+    if c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 {
+        return true
+    }
+    return c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126
+}
+
+// Whether s[lo, hi) is one or more tchar bytes
+func wire_is_token(s: string, lo: int64, hi: int64) -> bool {
+    if lo >= hi {
+        return false
+    }
+    for i in lo..hi {
+        if !wire_is_tchar(int64(s[i])) {
+            return false
+        }
+    }
+    return true
+}
+
+// The offset of the first byte c in s[lo, hi), or -1
+func wire_find(s: string, lo: int64, hi: int64, c: int64) -> int64 {
+    for i in lo..hi {
+        if int64(s[i]) == c {
+            return i
+        }
+    }
+    return -1
+}
+
+// Whether s[lo, hi) holds a control byte other than HTAB, or DEL
+func wire_has_ctl(s: string, lo: int64, hi: int64) -> bool {
+    for i in lo..hi {
+        if wire_is_ctl(int64(s[i])) {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether s[lo, hi) is exactly the bytes of w, ASCII case folded when folded is true
+func wire_span_is(s: string, lo: int64, hi: int64, w: string, folded: bool) -> bool {
+    n: int64 = str_len(w)
+    if hi - lo != n {
+        return false
+    }
+    for i in 0..n {
+        a: int64 = int64(s[lo + i])
+        b: int64 = int64(w[i])
+        if folded && wire_fold(a) != wire_fold(b) {
+            return false
+        }
+        if !folded && a != b {
+            return false
+        }
+    }
+    return true
+}
+
+// Whether s[lo, hi) opens with the bytes of w, ASCII case folded when folded is true
+func wire_opens_with(s: string, lo: int64, hi: int64, w: string, folded: bool) -> bool {
+    n: int64 = str_len(w)
+    if hi - lo < n {
+        return false
+    }
+    return wire_span_is(s, lo, lo + n, w, folded)
+}
+
+// Whether s[lo, hi) with the OWS at both ends removed is w, ASCII case folded
+func wire_trimmed_is(s: string, lo: int64, hi: int64, w: string) -> bool {
+    mut a: int64 = lo
+    mut b: int64 = hi
+    while a < b && wire_is_ows(int64(s[a])) {
+        a++
+    }
+    while b > a && wire_is_ows(int64(s[b - 1])) {
+        b--
+    }
+    return wire_span_is(s, a, b, w, true)
+}
+
+func wire_request_fail(msg: string) -> (*Request, error) {
+    return (request_new("", ""), wire_fail(msg))
+}
+
+// The minor version a request line's version text s[lo, hi) names: exactly HTTP/1.1 or
+// HTTP/1.0, any other HTTP/ version unsupported, and anything else a malformed line
+func wire_request_version(s: string, lo: int64, hi: int64) -> (int64, error) {
+    if wire_span_is(s, lo, hi, "HTTP/1.1", false) {
+        return (1, error {})
+    }
+    if wire_span_is(s, lo, hi, "HTTP/1.0", false) {
+        return (0, error {})
+    }
+    if wire_opens_with(s, lo, hi, "HTTP/", false) {
+        return (0, wire_fail("http: version not supported"))
+    }
+    return (0, wire_fail("http: bad request line"))
+}
+
+// The origin form text of an absolute form target whose authority starts at lo: what
+// follows the authority, which ends at its first / or ?, with a / put in front when the
+// path is empty. The authority is dropped, the Host field names the origin
+func wire_absolute_text(s: string, lo: int64, hi: int64) -> string {
+    mut ae: int64 = lo
+    while ae < hi && s[ae] != 47 && s[ae] != 63 {
+        ae++
+    }
+    if ae < hi && s[ae] == 47 {
+        return substring(s, ae, hi)
+    }
+    sb: *StringBuilder = alloc(sb_new())
+    sb_push_char(sb, 47)
+    for i in ae..hi {
+        sb_push_char(sb, s[i])
+    }
+    out: string = substring(sb_cstr(sb), 0, sb_size(sb))
+    sb_free(sb)
+    free(sb)
+    return out
+}
+
+// The origin form text a non empty target s[lo, hi) stands for, a fresh heap string: an
+// origin form target as written, the asterisk form as * on an OPTIONS request, the one
+// method RFC 9112 gives it, and an absolute form target reduced to what follows its
+// authority; any other target is a bad target
+func wire_target_text(s: string, lo: int64, hi: int64, is_options: bool) -> (string, error) {
+    if s[lo] == 47 || (is_options && hi - lo == 1 && s[lo] == 42) {
+        return (substring(s, lo, hi), error {})
+    }
+    if wire_opens_with(s, lo, hi, "http://", true) {
+        return (wire_absolute_text(s, lo + 7, hi), error {})
+    }
+    if wire_opens_with(s, lo, hi, "https://", true) {
+        return (wire_absolute_text(s, lo + 8, hi), error {})
+    }
+    return (substring("", 0, 0), wire_fail("http: bad target"))
+}
+
+// The Request once the line has passed every test: the method is s[0, sp), the target
+// text already reduced to origin form, split at its first ? by request_new
+func wire_request_build(s: string, sp: int64, target: string, minor: int64) -> *Request {
+    method: string = substring(s, 0, sp)
+    r: *Request = request_new(method, target)
+    free(method)
+    (*r).minor = minor
+    return r
+}
+
+/** Parses a request line, method SP target SP HTTP/1.minor, by RFC 9112. The method is one
+ *  or more token bytes; the target is the origin form /path?query, the asterisk form * on
+ *  an OPTIONS request, or the absolute form http://authority/path?query, reduced to the
+ *  path and the query after its authority, / when it has no path. Dropping the authority
+ *  is this module's choice rather than a rule of the RFC: the Host field names the origin,
+ *  so a handler behind a proxy that routes on the absolute target sees Host instead. The
+ *  version is exactly HTTP/1.1 or HTTP/1.0. The line holds exactly two single spaces. A
+ *  missing, doubled, or third space is http: bad request line, a non token method is http:
+ *  bad method, a target byte below 0x21 or above 0x7E, a # anywhere in the target, the
+ *  asterisk form on any method but OPTIONS, or a target of any other form is http: bad
+ *  target, any other HTTP/x.y version is http: version not supported, and a version text
+ *  that is not HTTP/ at all is http: bad request line. line is borrowed.
+ *  @param line the request line without its line ending, as read_line_capped returns it
+ *  @return a fresh heap Request with the method, path, query, and minor version set, an
+ *  empty header list, and an empty body, released with request_free then free, paired
+ *  with an error; beside an error the Request is an empty one, released the same way */
+export func parse_request_line(line: string) -> (*Request, error) {
+    n: int64 = str_len(line)
+    sp1: int64 = wire_find(line, 0, n, 32)
+    if sp1 <= 0 {
+        return wire_request_fail("http: bad request line")
+    }
+    if !wire_is_token(line, 0, sp1) {
+        return wire_request_fail("http: bad method")
+    }
+    sp2: int64 = wire_find(line, sp1 + 1, n, 32)
+    if sp2 < 0 || sp2 == sp1 + 1 {
+        return wire_request_fail("http: bad request line")
+    }
+    for i in sp1 + 1..sp2 {
+        if line[i] < 33 || line[i] > 126 {
+            return wire_request_fail("http: bad target")
+        }
+    }
+    // A fragment is never part of a request target, so a # is refused rather than kept in
+    // a path a handler would compare against
+    if wire_find(line, sp1 + 1, sp2, 35) >= 0 {
+        return wire_request_fail("http: bad target")
+    }
+    if wire_find(line, sp2 + 1, n, 32) >= 0 {
+        return wire_request_fail("http: bad request line")
+    }
+    minor, ve := wire_request_version(line, sp2 + 1, n)
+    if ve.exists() {
+        return (request_new("", ""), ve)
+    }
+    is_options: bool = wire_span_is(line, 0, sp1, "OPTIONS", false)
+    target, te := wire_target_text(line, sp1 + 1, sp2, is_options)
+    if te.exists() {
+        free(target)
+        return (request_new("", ""), te)
+    }
+    r: *Request = wire_request_build(line, sp1, target, minor)
+    free(target)
+    return (r, error {})
+}
+
+// The minor version of a status line opening HTTP/1.x SP, x one digit: 0 for HTTP/1.0 and
+// 1 for every later 1.x, the highest minor this module speaks, the rule RFC 9110 gives a
+// recipient. A major version other than 1 is unsupported; any other opening is malformed
+func wire_status_version(s: string, n: int64) -> (int64, error) {
+    if !wire_opens_with(s, 0, n, "HTTP/", false) || n < 6 || !wire_is_digit(int64(s[5])) {
+        return (0, wire_fail("http: bad status line"))
+    }
+    if s[5] != 49 || (n > 6 && wire_is_digit(int64(s[6]))) {
+        return (0, wire_fail("http: version not supported"))
+    }
+    if n < 9 || s[6] != 46 || !wire_is_digit(int64(s[7])) || s[8] != 32 {
+        return (0, wire_fail("http: bad status line"))
+    }
+    if s[7] == 48 {
+        return (0, error {})
+    }
+    return (1, error {})
+}
+
+// The three digit status code at s[9, 12), its first digit 1 through 9, or -1
+func wire_status_code(s: string, n: int64) -> int64 {
+    if n < 12 || s[9] < 49 || s[9] > 57 {
+        return -1
+    }
+    if !wire_is_digit(int64(s[10])) || !wire_is_digit(int64(s[11])) {
+        return -1
+    }
+    return (int64(s[9]) - 48) * 100 + (int64(s[10]) - 48) * 10 + (int64(s[11]) - 48)
+}
+
+/** Parses a status line, HTTP/1.minor SP 3DIGIT [SP reason], by RFC 9112. The reason may be
+ *  empty and may be absent with its space; a reason byte that is a control byte other than
+ *  HTAB, or DEL, is refused with the rest of the malformed shapes. A later HTTP/1.x minor
+ *  version reads as 1, the highest this module speaks. A major version other than 1 is http:
+ *  version not supported, and every other malformed line, a status code below 100 among
+ *  them, is http: bad status line. line is borrowed.
+ *  @param line the status line without its line ending, as read_line_capped returns it
+ *  @return a fresh heap Response with the status, reason, and minor version set, an empty
+ *  header list, and an empty body, released with response_free then free, paired with an
+ *  error; beside an error the Response is response_new(0), released the same way */
+export func parse_status_line(line: string) -> (*Response, error) {
+    n: int64 = str_len(line)
+    minor, ve := wire_status_version(line, n)
+    if ve.exists() {
+        return (response_new(0), ve)
+    }
+    status: int64 = wire_status_code(line, n)
+    if status < 0 || (n > 12 && line[12] != 32) {
+        return (response_new(0), wire_fail("http: bad status line"))
+    }
+    rlo: int64 = wire_min(13, n)
+    if wire_has_ctl(line, rlo, n) {
+        return (response_new(0), wire_fail("http: bad status line"))
+    }
+    r: *Response = response_new(status)
+    free((*r).reason)
+    (*r).reason = substring(line, rlo, n)
+    (*r).minor = minor
+    return (r, error {})
+}
+
+/** Parses one header field line, name ":" OWS value OWS, by RFC 9112, and appends the pair
+ *  to into, the name kept as written and the value with its surrounding SP and HTAB
+ *  removed. A line opening with SP or HTAB is http: obsolete line folding, which RFC 9112
+ *  lets a recipient refuse; an empty name, a name byte outside the token set, and any
+ *  whitespace before the colon are http: bad header name; a value byte that is a control
+ *  byte other than HTAB, or DEL, is http: bad header value. Nothing is appended on an error.
+ *  @param line the field line without its line ending, borrowed
+ *  @param into the header list to append to, borrowed and grown in place
+ *  @return an empty error once the field is appended, or the sentence that refused it */
+export func parse_header_line(line: string, into: *Vector<Header>) -> error {
+    n: int64 = str_len(line)
+    if n > 0 && wire_is_ows(int64(line[0])) {
+        return wire_fail("http: obsolete line folding")
+    }
+    colon: int64 = wire_find(line, 0, n, 58)
+    if colon <= 0 || !wire_is_token(line, 0, colon) {
+        return wire_fail("http: bad header name")
+    }
+    mut lo: int64 = colon + 1
+    mut hi: int64 = n
+    while lo < hi && wire_is_ows(int64(line[lo])) {
+        lo++
+    }
+    while hi > lo && wire_is_ows(int64(line[hi - 1])) {
+        hi--
+    }
+    if wire_has_ctl(line, lo, hi) {
+        return wire_fail("http: bad header value")
+    }
+    name: string = substring(line, 0, colon)
+    value: string = substring(line, lo, hi)
+    vec_push(into, Header { name: name, value: value })
+    return error {}
+}
+
+// The line cap that keeps the next header line inside the section's remaining budget: a
+// line of n bytes costs n + 2, so the longest that fits is remaining - 2 and the cap is one
+// past it, never below 1
+func wire_header_cap(remaining: int64) -> int64 {
+    if remaining < 2 {
+        return 1
+    }
+    return remaining - 1
+}
+
+// A header line read failure: a line that reached the section's remaining budget is the
+// section passing max_bytes, and every other sentence stands
+func wire_header_line_fail(e: error) -> error {
+    if e.toString() == "http: line too long" {
+        e.ignore()
+        return wire_fail("http: header section too large")
+    }
+    return e
+}
+
+/** Reads header field lines until the empty line that ends the section, parsing each with
+ *  parse_header_line into into. Each line costs its length plus 2 against max_bytes, the
+ *  ending empty line included, and a line is read with a cap of what the section has left,
+ *  so a section past max_bytes is http: header section too large before more than
+ *  max_bytes bytes are read; a field past max_count is http: too many headers before it is
+ *  parsed. A line read failure and a field parse failure come back as they are.
+ *  @param b the buffered reader to read from, borrowed and advanced in place
+ *  @param into the header list to append to, borrowed and grown in place; on an error it
+ *  holds the fields parsed before it and is freed with its message as usual
+ *  @param max_bytes the header section budget in bytes
+ *  @param max_count the most fields the section may hold
+ *  @return an empty error once the empty line is read, or the sentence that stopped it */
+export func read_headers(b: *BufReader, into: *Vector<Header>, max_bytes: int64, max_count: int64) -> error {
+    mut total: int64 = 0
+    mut count: int64 = 0
+    while true {
+        line, e := read_line_capped(b, wire_header_cap(max_bytes - total))
+        if e.exists() {
+            free(line)
+            return wire_header_line_fail(e)
+        }
+        n: int64 = str_len(line)
+        total = total + n + 2
+        if total > max_bytes {
+            free(line)
+            return wire_fail("http: header section too large")
+        }
+        if n == 0 {
+            free(line)
+            return error {}
+        }
+        count++
+        if count > max_count {
+            free(line)
+            return wire_fail("http: too many headers")
+        }
+        pe := parse_header_line(line, into)
+        free(line)
+        if pe.exists() {
+            return pe
+        }
+    }
+    return error {}
+}
+
+// The element count of the comma separated list v and whether its last element, with its
+// OWS removed, is chunked case folded; the empty value is one empty element
+func wire_te_scan(v: string) -> (int64, bool) {
+    n: int64 = str_len(v)
+    mut count: int64 = 0
+    mut chunked: bool = false
+    mut lo: int64 = 0
+    while lo <= n {
+        mut hi: int64 = wire_find(v, lo, n, 44)
+        if hi < 0 {
+            hi = n
+        }
+        count++
+        chunked = wire_trimmed_is(v, lo, hi, "chunked")
+        lo = hi + 1
+    }
+    return (count, chunked)
+}
+
+// Whether the Transfer-Encoding fields of h, read together as one list, hold exactly one
+// element and it is chunked. Two fields, an empty element, and any other coding all fail
+func wire_te_is_chunked(h: *Vector<Header>) -> bool {
+    mut total: int64 = 0
+    mut chunked: bool = false
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, "Transfer-Encoding") {
+            count, last := wire_te_scan(f.value)
+            total = total + count
+            chunked = last
+        }
+    }
+    return total == 1 && chunked
+}
+
+// The value of s[lo, hi) as 1 to 18 ASCII digits, no sign and no space, or -1; 18 digits
+// stay below 10^18, so the sum never overflows
+func wire_length_digits(s: string, lo: int64, hi: int64) -> int64 {
+    if hi - lo < 1 || hi - lo > 18 {
+        return -1
+    }
+    mut v: int64 = 0
+    for i in lo..hi {
+        c: int64 = int64(s[i])
+        if !wire_is_digit(c) {
+            return -1
+        }
+        v = v * 10 + (c - 48)
+    }
+    return v
+}
+
+// Every comma separated element of one Content-Length value checked and compared: seen and
+// want carry the value the fields before agreed on, and the answer is the agreed value
+func wire_length_list(v: string, seen: bool, want: int64) -> (int64, error) {
+    n: int64 = str_len(v)
+    mut have: bool = seen
+    mut value: int64 = want
+    mut lo: int64 = 0
+    while lo <= n {
+        mut hi: int64 = wire_find(v, lo, n, 44)
+        if hi < 0 {
+            hi = n
+        }
+        x: int64 = wire_length_digits(v, lo, hi)
+        if x < 0 {
+            return (0, wire_fail("http: bad Content-Length"))
+        }
+        if have && x != value {
+            return (0, wire_fail("http: conflicting Content-Length"))
+        }
+        have = true
+        value = x
+        lo = hi + 1
+    }
+    return (value, error {})
+}
+
+// The one length every Content-Length field and every element inside one agrees on
+func wire_content_length(h: *Vector<Header>) -> (int64, error) {
+    mut seen: bool = false
+    mut value: int64 = 0
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        if header_name_eq(f.name, "Content-Length") {
+            x, e := wire_length_list(f.value, seen, value)
+            if e.exists() {
+                return (0, e)
+            }
+            seen = true
+            value = x
+        }
+    }
+    return (value, error {})
+}
+
+/** Decides how a message body ends from its header fields, by RFC 9112. Both a
+ *  Content-Length and a Transfer-Encoding field is http: both Content-Length and
+ *  Transfer-Encoding, the request smuggling shape, refused rather than resolved. Every
+ *  Transfer-Encoding field read together as one comma separated list must be exactly the one
+ *  element chunked, case folded, or it is http: unsupported Transfer-Encoding. Every
+ *  Content-Length field, and every comma separated element inside one, must be 1 to 18
+ *  ASCII digits with no sign and no space, or it is http: bad Content-Length, and all of
+ *  them must name the same length, or it is http: conflicting Content-Length. With neither
+ *  field a request has no body and a response runs to the end of the stream. The caller
+ *  applies the status and method rules first: a HEAD response, a 1xx, a 204, and a 304
+ *  carry no body whatever the fields say.
+ *  @param h the message's header list, borrowed
+ *  @param is_request true for a request, false for a response
+ *  @return the kind, 0 no body, 1 Content-Length, 2 chunked, 3 read until close, and the
+ *  length for kind 1 and 0 otherwise, paired with an error; both are 0 beside an error */
+export func body_framing(h: *Vector<Header>, is_request: bool) -> (int64, int64, error) {
+    has_te: bool = headers_has(h, "Transfer-Encoding")
+    has_cl: bool = headers_has(h, "Content-Length")
+    if has_te && has_cl {
+        return (0, 0, wire_fail("http: both Content-Length and Transfer-Encoding"))
+    }
+    if has_te {
+        if wire_te_is_chunked(h) {
+            return (2, 0, error {})
+        }
+        return (0, 0, wire_fail("http: unsupported Transfer-Encoding"))
+    }
+    if has_cl {
+        n, e := wire_content_length(h)
+        if e.exists() {
+            return (0, 0, e)
+        }
+        return (1, n, error {})
+    }
+    if is_request {
+        return (0, 0, error {})
+    }
+    return (3, 0, error {})
+}
+
+// Appends s with every control byte other than HTAB, and DEL, written as SP, the
+// replacement RFC 9110 names for a CR, LF, or NUL in a field, so text a program copied
+// into a field can never end its line early and start a field or a message of its own
+func wire_push_text(b: *StringBuilder, s: string) -> void {
+    n: int64 = str_len(s)
+    for i in 0..n {
+        if wire_is_ctl(int64(s[i])) {
+            sb_push_char(b, 32)
+        } else {
+            sb_push_char(b, s[i])
+        }
+    }
+}
+
+// Every field as name: value CR LF, then the empty line that ends the head
+func wire_push_fields(b: *StringBuilder, h: *Vector<Header>) -> void {
+    n: int64 = vec_len(h)
+    for i in 0..n {
+        f: Header = vec_get(h, i)
+        wire_push_text(b, f.name)
+        sb_push(b, ": ")
+        wire_push_text(b, f.value)
+        sb_push(b, "\r\n")
+    }
+    sb_push(b, "\r\n")
+}
+
+/** Appends a request head: method SP target SP HTTP/1.1 CR LF, the target rebuilt from the
+ *  path, / when the path is empty, and a ? and the query when the query is non empty, then
+ *  every header in order as name: value CR LF, then the empty line. It adds no field of its
+ *  own; the client decides Host, Content-Length, and Transfer-Encoding before it calls this.
+ *  A control byte other than HTAB, or DEL, anywhere in the text is written as SP, so a CR
+ *  or LF inside a field can never start a field or a request of its own.
+ *  @param head the builder to append to, borrowed and grown in place
+ *  @param r the request to write, borrowed */
+export func write_request_head(head: *StringBuilder, r: *Request) -> void {
+    wire_push_text(head, (*r).method)
+    sb_push_char(head, 32)
+    if str_len((*r).path) == 0 {
+        sb_push_char(head, 47)
+    } else {
+        wire_push_text(head, (*r).path)
+    }
+    if str_len((*r).query) > 0 {
+        sb_push_char(head, 63)
+        wire_push_text(head, (*r).query)
+    }
+    sb_push(head, " HTTP/1.1\r\n")
+    wire_push_fields(head, (*r).headers)
+}
+
+/** Appends a response head: HTTP/1.1 SP status SP reason CR LF, then every header in order
+ *  as name: value CR LF, then the empty line, the space before an empty reason kept as RFC
+ *  9112 asks. It adds no field of its own, the rule write_request_head follows, and writes
+ *  a control byte other than HTAB, or DEL, as SP the same way.
+ *  @param head the builder to append to, borrowed and grown in place
+ *  @param r the response to write, borrowed */
+export func write_response_head(head: *StringBuilder, r: *Response) -> void {
+    sb_push(head, "HTTP/1.1 ")
+    sb_push_int(head, (*r).status)
+    sb_push_char(head, 32)
+    wire_push_text(head, (*r).reason)
+    sb_push(head, "\r\n")
+    wire_push_fields(head, (*r).headers)
+}
+
+/** Whether a comma separated list field value, Connection or Transfer-Encoding, holds
+ *  token as one of its elements, compared case insensitively with the SP and HTAB around
+ *  each element ignored. Nothing is allocated.
+ *  @param value the field value to search, borrowed
+ *  @param token the element to find, borrowed
+ *  @return true when an element equals token
+ *  @example
+ *  v, ok := headers_get((*resp).headers, "Connection")
+ *  if ok && token_list_has(v, "close") {
+ *      println("the server will close")
+ *  } */
+export func token_list_has(value: string, token: string) -> bool {
+    n: int64 = str_len(value)
+    mut lo: int64 = 0
+    while lo <= n {
+        mut hi: int64 = wire_find(value, lo, n, 44)
+        if hi < 0 {
+            hi = n
+        }
+        if wire_trimmed_is(value, lo, hi, token) {
+            return true
+        }
+        lo = hi + 1
+    }
+    return false
+}
+
+/** The current time as an RFC 9110 IMF fixdate, the value a Date field carries, Sun, 06
+ *  Nov 1994 08:49:37 GMT, through format_imf_fixdate.
+ *  @return the date text as a fresh heap string the caller owns and frees */
+export func http_date_now() -> string {
+    return format_imf_fixdate(civil_from_unix(now_unix()))
+}

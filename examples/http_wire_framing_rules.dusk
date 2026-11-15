@@ -1,0 +1,47 @@
+// body_framing reads the framing a header section names: a Content-Length, chunked
+// coding, or neither, which a request reads as no body and a response as a body to the
+// close. Both fields together, two differing lengths, a signed length, and a coding list
+// that is not chunked alone are each refused by name; two equal lengths agree.
+@paradigm procedural
+@import std.net.http.wire
+
+func show(h: *Vector<Header>, is_request: bool) -> void {
+    kind, n, e := body_framing(h, is_request)
+    if e.exists() {
+        println(e)
+        return
+    }
+    print(kind)
+    print(" ")
+    println(n)
+}
+
+func one(name: string, value: string, is_request: bool) -> void {
+    h := headers_new()
+    headers_add(h, name, value)
+    show(h, is_request)
+    headers_free(h)
+    free(h)
+}
+
+func two(n1: string, v1: string, n2: string, v2: string) -> void {
+    h := headers_new()
+    headers_add(h, n1, v1)
+    headers_add(h, n2, v2)
+    show(h, true)
+    headers_free(h)
+    free(h)
+}
+
+func main() -> int32 {
+    one("Content-Length", "5", true)
+    one("Transfer-Encoding", "chunked", true)
+    two("Content-Length", "5", "Transfer-Encoding", "chunked")
+    two("Content-Length", "5", "content-length", "5")
+    two("Content-Length", "5", "Content-Length", "6")
+    one("Content-Length", "+5", true)
+    one("Transfer-Encoding", "gzip, chunked", true)
+    one("Host", "h", true)
+    one("Host", "h", false)
+    return 0
+}

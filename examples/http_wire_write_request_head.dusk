@@ -1,0 +1,29 @@
+// write_request_head writes the request line, the target rebuilt from the path and the
+// query, and every header in order with nothing added; write_message then sends the head
+// through sb_writer, and %q shows every CR LF.
+@paradigm procedural
+@import std.net.http.wire
+@import std.fmt
+
+func main() -> int32 {
+    r := request_new("POST", "/a?b=1")
+    headers_add((*r).headers, "Host", "h")
+    headers_add((*r).headers, "X", "y")
+    head: *StringBuilder = alloc(sb_new())
+    write_request_head(head, r)
+    out: *StringBuilder = alloc(sb_new())
+    e := write_message(sb_writer(out), head, (*r).body, (*r).body_len)
+    if e.exists() {
+        println(e)
+    }
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    sb_free(out)
+    free(out)
+    sb_free(head)
+    free(head)
+    request_free(r)
+    free(r)
+    return 0
+}

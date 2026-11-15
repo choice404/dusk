@@ -1,0 +1,96 @@
+// Two requests on one Conn ride one server connection. The server thread serves through
+// http_serve_one in a loop and counts the connections it served into an atomic until the
+// accept fails; the client dials once and sends GET /r1 and GET /r2 through conn_send, the
+// handler answers each with its path past the slash, and neither side says close, so both
+// exchanges share the socket. Once the client has closed, net_shutdown_read ends the loop
+// and the main thread prints the count after the join.
+@paradigm procedural
+@import std.net.http.client
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.concurrent.atomic
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    path: string = (*req).path
+    tail: string = substring(path, 1, str_len(path))
+    response_set_body(resp, tail)
+    free(tail)
+    return resp
+}
+
+// Serves one connection at a time until the accept fails, counting each one served
+func serve(s: *Server, conns: AtomicInt) -> void {
+    mut going: bool = true
+    while going {
+        e := http_serve_one(s, 0, handle)
+        if e.exists() {
+            if e.toString() != "Invalid argument" {
+                println(e)
+            }
+            going = false
+        } else {
+            n: int64 = atomic_add(conns, 1)
+            n.ignore()
+        }
+    }
+}
+
+func send(c: *Conn, target: string) -> void {
+    req: *Request = request_new("GET", target)
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println(response_text(resp))
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    conns: AtomicInt = atomic_new(0)
+    t, te := spawn(lambda () -> void {
+        serve(s, conns)
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    send(c, "/r1")
+    send(c, "/r2")
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    println(atomic_load(conns))
+    atomic_free(conns)
+    free(s)
+    return 0
+}

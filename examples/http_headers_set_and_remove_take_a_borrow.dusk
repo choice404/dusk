@@ -1,0 +1,35 @@
+// headers_set and headers_remove take a name or a value borrowed from the list they
+// change. headers_set copies both before it frees a field, so setting Host to its own
+// value keeps the value, and headers_remove compares against a private copy, so a name
+// read out of the last field still matches every field after that one is freed.
+@paradigm procedural
+@import std.net.http
+
+func main() -> int32 {
+    h := headers_new()
+    headers_add(h, "Host", "a.io")
+    v, ok := headers_get(h, "Host")
+    if ok {
+        headers_set(h, "Host", v)
+    }
+    kept, has := headers_get(h, "Host")
+    if has {
+        println(kept)
+    }
+    println(vec_len(h))
+    headers_add(h, "X-A", "1")
+    headers_add(h, "x-a", "2")
+    last: Header = vec_get(h, vec_len(h) - 1)
+    println(headers_remove(h, last.name))
+    println(vec_len(h))
+    first: Header = vec_get(h, 0)
+    headers_set(h, first.value, first.name)
+    println(vec_len(h))
+    f: Header = vec_get(h, vec_len(h) - 1)
+    print(f.name)
+    print("=")
+    println(f.value)
+    headers_free(h)
+    free(h)
+    return 0
+}

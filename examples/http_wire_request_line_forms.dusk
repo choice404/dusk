@@ -1,0 +1,43 @@
+// The four request target forms a request line may carry, read through read_line_capped
+// from a string and parsed: the origin form split at its ?, the asterisk form, and the
+// absolute form reduced to its path and query, / when it has no path. Each line prints
+// method, path, query, and minor joined by | so an empty query stays visible.
+@paradigm procedural
+@import std.net.http.wire
+
+func show(b: *BufReader) -> void {
+    line, le := read_line_capped(b, 8192)
+    if le.exists() {
+        println(le)
+        free(line)
+        return
+    }
+    r, e := parse_request_line(line)
+    free(line)
+    if e.exists() {
+        println(e)
+    } else {
+        print((*r).method)
+        print("|")
+        print((*r).path)
+        print("|")
+        print((*r).query)
+        print("|")
+        println((*r).minor)
+    }
+    request_free(r)
+    free(r)
+}
+
+func main() -> int32 {
+    text: string = "GET /a?b=1 HTTP/1.1\r\nOPTIONS * HTTP/1.0\r\nGET http://h:8/p?q HTTP/1.1\r\nGET http://h HTTP/1.0\r\n"
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    for i in 0..4 {
+        show(b)
+    }
+    bufreader_free(b)
+    free(b)
+    free(c)
+    return 0
+}

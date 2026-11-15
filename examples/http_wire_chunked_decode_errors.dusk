@@ -1,0 +1,32 @@
+// Each malformed chunked body is refused by name: a size that is not hex, a chunk whose
+// data is not followed by CR LF, a stream that ends inside a chunk, a size of more than
+// 16 hex digits, and a chunk that would take the body past its ceiling, refused before a
+// byte of it is read.
+@paradigm procedural
+@import std.net.http.wire
+
+func decode(text: string, max: int64) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    body, n, e := read_body_chunked(b, max)
+    if e.exists() {
+        println(e)
+    } else {
+        print(cstr(body))
+        print(" ")
+        println(n)
+    }
+    free(body)
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func main() -> int32 {
+    decode("zz\r\n", 1048576)
+    decode("4\r\nWikiXX", 1048576)
+    decode("5\r\nabc", 1048576)
+    decode("10000000000000000\r\n", 1048576)
+    decode("4\r\nWiki\r\n", 3)
+    return 0
+}

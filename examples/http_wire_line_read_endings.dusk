@@ -1,0 +1,29 @@
+// read_line_capped takes CR LF and a bare LF as a line ending and leaves both out of the
+// line, refuses a bare CR, stops at max bytes without reading further, and reports the
+// end of an empty stream as a clean close.
+@paradigm procedural
+@import std.net.http.wire
+
+func read_lines(text: string, count: int64, max: int64) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    for i in 0..count {
+        line, e := read_line_capped(b, max)
+        if e.exists() {
+            println(e)
+        } else {
+            println(line)
+        }
+        free(line)
+    }
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func main() -> int32 {
+    read_lines("a\r\nb\nc\rd\n", 3, 8192)
+    read_lines("abcdef", 1, 4)
+    read_lines("", 1, 8192)
+    return 0
+}

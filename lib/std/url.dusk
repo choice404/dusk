@@ -1,0 +1,520 @@
+/** std.url: a parsed URL. url_parse reads scheme://host[:port][/path][?query][#fragment]
+ *  into a Url whose every string field is a fresh heap copy the Url owns, so a program
+ *  reads a field, keeps the Url as long as it likes, and releases all of it with url_free
+ *  then free. url_host_header and url_target rebuild the two pieces an HTTP request line
+ *  and its Host field carry, and url_encode and url_decode are the percent coding of RFC
+ *  3986 over raw bytes.
+ *
+ *  A URL is not an HTTP idea, so this module carries no socket and imports nothing but
+ *  std.string: the http client is its first consumer, and anything else that reads the same
+ *  grammar, a redirect target among them, uses it the same way. The parser is byte wise and
+ *  bounds every index by the measured length of its input, since a string index is not
+ *  checked at runtime. The path and the query keep their percent encoding exactly as
+ *  written, because a decoded path would encode back differently and a request target goes
+ *  out as the program wrote it; url_decode undoes the encoding on request.
+ *
+ *  User information before an @ is refused rather than dropped, since RFC 9110 deprecates
+ *  it and silently discarding credentials is the worse surprise. */
+
+@paradigm procedural
+
+@import std.string
+
+/** A parsed URL. scheme is lowercased; host is the bare host, an IPv6 literal without its
+ *  brackets, with its case kept; port is the explicit port, or the scheme's default (80
+ *  for http, 443 for https), or 0 for a scheme with no default; path is the path as written
+ *  with its percent encoding untouched, empty when the URL has none; query and fragment are
+ *  the text after ? and # without the marks. Every string field is a fresh heap string the
+ *  Url owns, an absent part the empty heap string, so a program reads any field without
+ *  testing it and frees them all through url_free. */
+export struct Url {
+    scheme: string,
+    host: string,
+    port: int64,
+    path: string,
+    query: string,
+    fragment: string,
+}
+
+// Where the host and the port sit inside the authority. port_lo is -1 when no port was
+// written; the port text otherwise runs from port_lo to the end of the authority
+struct UrlAuthority {
+    host_lo: int64,
+    host_hi: int64,
+    port_lo: int64,
+}
+
+// The empty heap string an absent part holds, so every field frees alike
+func url_empty_text() -> string {
+    return substring("", 0, 0)
+}
+
+// The Url url_parse hands back beside an error: every field the empty heap string and
+// port 0, freed like any other Url
+func url_blank() -> *Url {
+    return alloc(Url {
+        scheme: url_empty_text(),
+        host: url_empty_text(),
+        port: 0,
+        path: url_empty_text(),
+        query: url_empty_text(),
+        fragment: url_empty_text(),
+    })
+}
+
+func url_fail(msg: string) -> (*Url, error) {
+    return (url_blank(), error { message: msg })
+}
+
+func url_is_alpha(c: int64) -> bool {
+    if c >= 65 && c <= 90 {
+        return true
+    }
+    return c >= 97 && c <= 122
+}
+
+func url_is_digit(c: int64) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// A byte a scheme may hold after its first letter: a letter, a digit, +, -, or .
+func url_is_scheme_byte(c: int64) -> bool {
+    if url_is_alpha(c) || url_is_digit(c) {
+        return true
+    }
+    return c == 43 || c == 45 || c == 46
+}
+
+// The byte ASCII lowercased; every other byte unchanged
+func url_fold(c: int64) -> int64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// The value of a hex digit byte, either case, or -1 when c is not one
+func url_hex_value(c: int64) -> int64 {
+    if url_is_digit(c) {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return -1
+}
+
+// The uppercase hex digit for a nibble in [0, 15]
+func url_hex_digit(v: int64) -> char {
+    if v < 10 {
+        return char(48 + v)
+    }
+    return char(55 + v)
+}
+
+// A byte the unreserved set keeps as itself: a letter, a digit, -, ., _, or ~
+func url_is_unreserved(c: int64) -> bool {
+    if url_is_alpha(c) || url_is_digit(c) {
+        return true
+    }
+    return c == 45 || c == 46 || c == 95 || c == 126
+}
+
+// The offset of the first byte b in s[lo, hi), or -1
+func url_find_byte(s: string, lo: int64, hi: int64, b: int64) -> int64 {
+    for i in lo..hi {
+        if int64(s[i]) == b {
+            return i
+        }
+    }
+    return -1
+}
+
+// Whether s[0, n) holds a byte below 0x21, a space or a control character
+func url_has_control(s: string, n: int64) -> bool {
+    for i in 0..n {
+        if int64(s[i]) < 33 {
+            return true
+        }
+    }
+    return false
+}
+
+// The offset of the : that ends the scheme when it is a letter, then scheme bytes, then
+// ://, or -1 when the text does not open that way
+func url_scheme_end(s: string, n: int64) -> int64 {
+    if n == 0 || !url_is_alpha(int64(s[0])) {
+        return -1
+    }
+    mut i: int64 = 1
+    while i < n && url_is_scheme_byte(int64(s[i])) {
+        i++
+    }
+    if i + 2 >= n {
+        return -1
+    }
+    if s[i] != 58 || s[i + 1] != 47 || s[i + 2] != 47 {
+        return -1
+    }
+    return i
+}
+
+// The offset one past the authority that starts at lo: the first /, ?, or #, or n
+func url_authority_end(s: string, lo: int64, n: int64) -> int64 {
+    for i in lo..n {
+        c: int64 = int64(s[i])
+        if c == 47 || c == 63 || c == 35 {
+            return i
+        }
+    }
+    return n
+}
+
+// The offset of the first ? or # at or after lo, or n
+func url_path_end(s: string, lo: int64, n: int64) -> int64 {
+    for i in lo..n {
+        c: int64 = int64(s[i])
+        if c == 63 || c == 35 {
+            return i
+        }
+    }
+    return n
+}
+
+// Whether s[lo, hi) can be an IPv6 literal: hex digits, colons, and dots alone, the dots
+// for an embedded IPv4 tail, with at least one colon, so a bracketed name or a bracketed
+// IPv4 address is refused rather than handed on as a host
+func url_is_ip6_text(s: string, lo: int64, hi: int64) -> bool {
+    mut colons: int64 = 0
+    for i in lo..hi {
+        c: int64 = int64(s[i])
+        if c == 58 {
+            colons++
+        } else if c != 46 && url_hex_value(c) < 0 {
+            return false
+        }
+    }
+    return colons > 0
+}
+
+// An IPv6 literal authority, [host] then an optional :port, starting at the [ at lo
+func url_split_bracketed(s: string, lo: int64, hi: int64) -> (UrlAuthority, error) {
+    none: UrlAuthority = UrlAuthority { host_lo: 0, host_hi: 0, port_lo: -1 }
+    close: int64 = url_find_byte(s, lo + 1, hi, 93)
+    if close < 0 {
+        return (none, error { message: "url: bad host" })
+    }
+    if close == lo + 1 {
+        return (none, error { message: "url: empty host" })
+    }
+    if !url_is_ip6_text(s, lo + 1, close) {
+        return (none, error { message: "url: bad host" })
+    }
+    after: int64 = close + 1
+    if after == hi {
+        return (UrlAuthority { host_lo: lo + 1, host_hi: close, port_lo: -1 }, error {})
+    }
+    if s[after] != 58 {
+        return (none, error { message: "url: bad host" })
+    }
+    return (UrlAuthority { host_lo: lo + 1, host_hi: close, port_lo: after + 1 }, error {})
+}
+
+// The authority s[lo, hi) split into its host and port, after the @ test has passed
+func url_split_authority(s: string, lo: int64, hi: int64) -> (UrlAuthority, error) {
+    if lo < hi && s[lo] == 91 {
+        return url_split_bracketed(s, lo, hi)
+    }
+    none: UrlAuthority = UrlAuthority { host_lo: 0, host_hi: 0, port_lo: -1 }
+    colon: int64 = url_find_byte(s, lo, hi, 58)
+    mut host_hi: int64 = hi
+    mut port_lo: int64 = -1
+    if colon >= 0 {
+        host_hi = colon
+        port_lo = colon + 1
+    }
+    if host_hi == lo {
+        return (none, error { message: "url: empty host" })
+    }
+    if url_find_byte(s, lo, host_hi, 91) >= 0 || url_find_byte(s, lo, host_hi, 93) >= 0 {
+        return (none, error { message: "url: bad host" })
+    }
+    return (UrlAuthority { host_lo: lo, host_hi: host_hi, port_lo: port_lo }, error {})
+}
+
+// The port written in s[lo, hi) paired with true, -1 for an empty one; false when a byte
+// is not a digit or the value passes 65535, tested per digit so the sum never overflows
+func url_read_port(s: string, lo: int64, hi: int64) -> (int64, bool) {
+    if lo == hi {
+        return (-1, true)
+    }
+    mut v: int64 = 0
+    for i in lo..hi {
+        c: int64 = int64(s[i])
+        if !url_is_digit(c) {
+            return (0, false)
+        }
+        v = v * 10 + (c - 48)
+        if v > 65535 {
+            return (0, false)
+        }
+    }
+    return (v, true)
+}
+
+// A fresh heap copy of s[lo, hi) with every ASCII letter lowercased
+func url_lower_copy(s: string, lo: int64, hi: int64) -> string {
+    count: int64 = hi - lo
+    d: *raw char = alloc_bytes(count + 1)
+    for i in 0..count {
+        d[i] = url_fold(int64(s[lo + i]))
+    }
+    d[count] = 0
+    return cstr(d)
+}
+
+// The Url once every test has passed: the scheme ends at se, the authority at ae, and
+// the explicit port is -1 when none was written. The query runs from after the ? to the
+// first # past it and the fragment from after that # to the end, each empty when absent
+func url_build(s: string, n: int64, se: int64, a: UrlAuthority, ae: int64, explicit: int64) -> *Url {
+    scheme: string = url_lower_copy(s, 0, se)
+    mut port: int64 = url_default_port(scheme)
+    if explicit >= 0 {
+        port = explicit
+    }
+    pe: int64 = url_path_end(s, ae, n)
+    mut qlo: int64 = pe
+    mut qe: int64 = pe
+    if pe < n && s[pe] == 63 {
+        qlo = pe + 1
+        qe = url_find_byte(s, qlo, n, 35)
+        if qe < 0 {
+            qe = n
+        }
+    }
+    mut flo: int64 = n
+    if qe < n {
+        flo = qe + 1
+    }
+    host: string = substring(s, a.host_lo, a.host_hi)
+    path: string = substring(s, ae, pe)
+    query: string = substring(s, qlo, qe)
+    fragment: string = substring(s, flo, n)
+    return alloc(Url { scheme: scheme, host: host, port: port, path: path, query: query, fragment: fragment })
+}
+
+/** Parses scheme://host[:port][/path][?query][#fragment] into a fresh Url. The scheme is an
+ *  ASCII letter then letters, digits, +, -, and ., lowercased in the result; an IPv6 host
+ *  is read between [ and ] and stored without them; the port is the explicit one or the
+ *  scheme's default, an empty port after the colon reading as the default the way RFC 3986
+ *  lets it; the query runs from the first ? to the first # after it, and the fragment from
+ *  that # to the end. The errors are a closed set a program may match: a byte below 0x21
+ *  anywhere is url: control character, a missing :// is url: no scheme, an @ in the
+ *  authority is url: user information is not supported, an empty host is url: empty host,
+ *  an unclosed bracket, a bracket inside a plain host, or a bracketed host that is not hex
+ *  digits, colons, and dots with at least one colon is url: bad host, and a port that is
+ *  not all digits or passes 65535 is url: bad port. text is borrowed.
+ *  @param text the URL text to parse
+ *  @return a fresh heap Url the caller releases with url_free then free, paired with an
+ *  error; on failure the Url has every field the empty heap string and port 0, and is
+ *  released the same way
+ *  @example
+ *  u, e := url_parse("http://example.com:8080/a?x=1")
+ *  if e.exists() {
+ *      println(e)
+ *  } else {
+ *      println((*u).host)
+ *  }
+ *  url_free(u)
+ *  free(u) */
+export func url_parse(text: string) -> (*Url, error) {
+    n: int64 = str_len(text)
+    if url_has_control(text, n) {
+        return url_fail("url: control character")
+    }
+    se: int64 = url_scheme_end(text, n)
+    if se < 0 {
+        return url_fail("url: no scheme")
+    }
+    lo: int64 = se + 3
+    ae: int64 = url_authority_end(text, lo, n)
+    if url_find_byte(text, lo, ae, 64) >= 0 {
+        return url_fail("url: user information is not supported")
+    }
+    a, he := url_split_authority(text, lo, ae)
+    if he.exists() {
+        return (url_blank(), he)
+    }
+    mut explicit: int64 = -1
+    if a.port_lo >= 0 {
+        port, ok := url_read_port(text, a.port_lo, ae)
+        if !ok {
+            return url_fail("url: bad port")
+        }
+        explicit = port
+    }
+    return (url_build(text, n, se, a, ae, explicit), error {})
+}
+
+/** Frees the five strings a Url owns and nothing else; free the Url block itself with free
+ *  once this returns, the convention vec_free and sb_free follow.
+ *  @param u the Url whose strings to release, borrowed */
+export func url_free(u: *Url) -> void {
+    free((*u).scheme)
+    free((*u).host)
+    free((*u).path)
+    free((*u).query)
+    free((*u).fragment)
+}
+
+/** The default port of a scheme: 80 for http, 443 for https, 0 for any other, compared byte
+ *  wise with ASCII case folded, so HTTP and Https answer the same. scheme is borrowed.
+ *  @param scheme the scheme name, without the colon
+ *  @return the scheme's default port, or 0 when it has none */
+export func url_default_port(scheme: string) -> int64 {
+    if url_name_is(scheme, "http") {
+        return 80
+    }
+    if url_name_is(scheme, "https") {
+        return 443
+    }
+    return 0
+}
+
+// Whether s equals the lowercase word w with s ASCII case folded, no allocation
+func url_name_is(s: string, w: string) -> bool {
+    mut i: int64 = 0
+    while w[i] != 0 {
+        if url_fold(int64(s[i])) != int64(w[i]) {
+            return false
+        }
+        i++
+    }
+    return s[i] == 0
+}
+
+/** The Host field value for u as a fresh heap string: the host, in brackets when it holds
+ *  a colon, so an IPv6 literal reads [::1], followed by :port when the port is not the
+ *  scheme's default. https://h/ gives h and http://[::1]:9/ gives [::1]:9.
+ *  @param u the parsed URL, borrowed
+ *  @return the Host value as a fresh heap string the caller frees */
+export func url_host_header(u: *Url) -> string {
+    host: string = (*u).host
+    is_ip6: bool = url_find_byte(host, 0, str_len(host), 58) >= 0
+    b: *StringBuilder = alloc(sb_new())
+    if is_ip6 {
+        sb_push_char(b, 91)
+    }
+    sb_push(b, host)
+    if is_ip6 {
+        sb_push_char(b, 93)
+    }
+    if (*u).port != url_default_port((*u).scheme) {
+        sb_push_char(b, 58)
+        sb_push_int(b, (*u).port)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** The request target in origin form as a fresh heap string: the path, or / when the path
+ *  is empty, then ? and the query when the query is not empty. The fragment is never part
+ *  of a request target and is left out.
+ *  @param u the parsed URL, borrowed
+ *  @return the origin form target as a fresh heap string the caller frees */
+export func url_target(u: *Url) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    if str_len((*u).path) == 0 {
+        sb_push_char(b, 47)
+    } else {
+        sb_push(b, (*u).path)
+    }
+    if str_len((*u).query) > 0 {
+        sb_push_char(b, 63)
+        sb_push(b, (*u).query)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Percent encodes s: every byte outside the unreserved set, letters, digits, -, ., _, and
+ *  ~, becomes %XX in uppercase hex, a space and a slash and a percent sign included, so the
+ *  result is safe inside any one path segment or query value. s is borrowed.
+ *  @param s the text to encode
+ *  @return the encoded text as a fresh heap string the caller frees
+ *  @example
+ *  q := url_encode("a b&c")
+ *  println(q)
+ *  free(q) */
+export func url_encode(s: string) -> string {
+    n: int64 = str_len(s)
+    b: *StringBuilder = alloc(sb_new())
+    for i in 0..n {
+        c: int64 = int64(s[i])
+        if url_is_unreserved(c) {
+            sb_push_char(b, s[i])
+        } else {
+            sb_push_char(b, 37)
+            sb_push_char(b, url_hex_digit(c / 16))
+            sb_push_char(b, url_hex_digit(c % 16))
+        }
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Decodes every %XX in s back to its byte, either hex case accepted. A % not followed by
+ *  two hex digits is url: bad percent escape, and so is %00, since a decoded NUL would end
+ *  the string early and silently drop what followed it. + is left as it is: turning it into
+ *  a space is the form encoding rule, which belongs to a form parser. s is borrowed.
+ *  @param s the text to decode
+ *  @return the decoded text as a fresh heap string the caller frees, paired with an error;
+ *  on failure the string is the empty heap string, freed the same way
+ *  @example
+ *  d, e := url_decode("a%20b")
+ *  if e.exists() {
+ *      println(e)
+ *  } else {
+ *      println(d)
+ *  }
+ *  free(d) */
+export func url_decode(s: string) -> (string, error) {
+    n: int64 = str_len(s)
+    b: *StringBuilder = alloc(sb_new())
+    mut i: int64 = 0
+    while i < n {
+        if s[i] != 37 {
+            sb_push_char(b, s[i])
+            i++
+            continue
+        }
+        mut v: int64 = -1
+        if i + 2 < n {
+            hi: int64 = url_hex_value(int64(s[i + 1]))
+            lo: int64 = url_hex_value(int64(s[i + 2]))
+            if hi >= 0 && lo >= 0 {
+                v = hi * 16 + lo
+            }
+        }
+        if v <= 0 {
+            sb_free(b)
+            free(b)
+            return (url_empty_text(), error { message: "url: bad percent escape" })
+        }
+        sb_push_char(b, char(v))
+        i = i + 3
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return (out, error {})
+}

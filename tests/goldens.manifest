@@ -3495,7 +3495,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.17.1\n
+out dusk 1.17.2\n
 argv version
 code 0
 ---
@@ -8060,4 +8060,550 @@ test net_shutdown_read_wakes_a_blocked_accept
 mode run
 file examples/net_accept_wake.dusk
 out accept ended\njoined\n
+---
+# std.url: a parsed URL. Every field is a fresh heap string the Url owns, the scheme is
+# lowercased, the host keeps its case, and the port falls back to the scheme's default;
+# url_host_header and url_target rebuild the two pieces an HTTP request carries.
+test url_parse_full_form
+mode run
+file examples/url_parse_full_form.dusk
+out http\nexample.com\n8080\n/a/b\nx=1&y=2\nfrag\nexample.com:8080\n/a/b?x=1&y=2\n
+---
+test url_parse_defaults_and_empty_path
+mode run
+file examples/url_parse_defaults_and_empty_path.dusk
+out http\nExample.com\n80\n\n/\nExample.com\n
+---
+test url_parse_ip6_host
+mode run
+file examples/url_parse_ip6_host.dusk
+out ::1\n9\n[::1]:9\n
+---
+test url_parse_https_default_port
+mode run
+file examples/url_parse_https_default_port.dusk
+out 443\nh\n
+---
+# One input per sentence of the closed error set, each Url freed on the error path.
+test url_parse_errors
+mode run
+file examples/url_parse_errors.dusk
+out url: no scheme\nurl: empty host\nurl: user information is not supported\nurl: bad port\nurl: bad host\nurl: control character\n
+---
+test url_encode_and_decode_round_trip
+mode run
+file examples/url_encode_and_decode_round_trip.dusk
+out a%20b%2Fc~d%25\na b/c~d%\nurl: bad percent escape\n
+---
+test url_parse_error_unhandled_is_rejected
+mode check_fail
+file examples/url_parse_error_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# std.net.http: the message types. A header list is ordered, keeps a repeated name, and
+# compares names with ASCII case folded; a message owns every string and its body bytes.
+test http_headers_keep_order_and_case_fold
+mode run
+file examples/http_headers_keep_order_and_case_fold.dusk
+out text/plain\na=1\n3\n2\n1\nfalse\n
+---
+test http_headers_set_replaces_all
+mode run
+file examples/http_headers_set_replaces_all.dusk
+out 1\nc\n
+---
+test http_request_new_splits_the_target
+mode run
+file examples/http_request_new_splits_the_target.dusk
+out GET\n/a\nb=1\n1\n0\n
+---
+test http_response_new_carries_the_reason
+mode run
+file examples/http_response_new_carries_the_reason.dusk
+out Not Found\n\nhi\n2\n
+---
+test http_status_text_table
+mode run
+file examples/http_status_text_table.dusk
+out OK\nNo Content\nMoved Permanently\nBad Request\nNot Found\nContent Too Large\nURI Too Long\nRequest Header Fields Too Large\nInternal Server Error\nNot Implemented\nHTTP Version Not Supported\n
+---
+# A Response read after response_free and free is the runtime's generation fault.
+test http_response_read_after_free_faults
+mode run_raw
+file examples/http_response_read_after_free.dusk
+out 200\n
+ok false
+err_has use of a freed or stale pointer
+---
+# A headers_get value is a borrow into the list. The checker tracks no ownership on a
+# string, so the free of the borrow passes check, and the backstop is the runtime: the
+# list's own free of the same block in headers_free is a named double free.
+test http_header_value_free_faults_as_a_double_free
+mode run_raw
+file examples/http_header_value_double_free.dusk
+out b\n
+ok false
+err_has fatal: double free
+---
+# std.time's IMF fixdate, pinned on the instant RFC 9110 uses as its example.
+test time_imf_fixdate_rfc_example
+mode run
+file examples/time_imf_fixdate_rfc_example.dusk
+out Sun, 06 Nov 1994 08:49:37 GMT\nThu, 01 Jan 1970 00:00:00 GMT\n
+---
+# std.net.http.wire: the HTTP/1.1 wire over a string_reader and an sb_writer, no socket.
+# Every reader refuses a malformed shape with its own sentence from the closed set.
+test http_wire_request_line_forms
+mode run
+file examples/http_wire_request_line_forms.dusk
+out GET|/a|b=1|1\nOPTIONS|*||0\nGET|/p|q|1\nGET|/||0\n
+---
+test http_wire_request_line_errors
+mode run
+file examples/http_wire_request_line_errors.dusk
+out http: bad request line\nhttp: version not supported\nhttp: bad method\nhttp: bad request line\nhttp: bad request line\n
+---
+test http_wire_status_line_forms
+mode run
+file examples/http_wire_status_line_forms.dusk
+out 200 OK 1\n404 Not Found 0\n299  1\nhttp: version not supported\n
+---
+test http_wire_header_line_rules
+mode run
+file examples/http_wire_header_line_rules.dusk
+out A=b\nA=b\nhttp: bad header name\nhttp: obsolete line folding\nhttp: bad header name\nhttp: bad header value\n
+---
+test http_wire_read_headers_limits
+mode run
+file examples/http_wire_read_headers_limits.dusk
+out 3\nhttp: too many headers\nhttp: header section too large\n
+---
+test http_wire_line_read_endings
+mode run
+file examples/http_wire_line_read_endings.dusk
+out a\nb\nhttp: bare carriage return\nhttp: line too long\nhttp: connection closed\n
+---
+# The framing rule refuses both framings together, two differing lengths, a signed
+# length, and any coding list but chunked alone: the request smuggling shapes.
+test http_wire_framing_rules
+mode run
+file examples/http_wire_framing_rules.dusk
+out 1 5\n2 0\nhttp: both Content-Length and Transfer-Encoding\n1 5\nhttp: conflicting Content-Length\nhttp: bad Content-Length\nhttp: unsupported Transfer-Encoding\n0 0\n3 0\n
+---
+test http_wire_chunked_decode
+mode run
+file examples/http_wire_chunked_decode.dusk
+out Wikipedia 9\nabc 3\n
+---
+test http_wire_chunked_decode_errors
+mode run
+file examples/http_wire_chunked_decode_errors.dusk
+out http: bad chunk size\nhttp: bad chunk terminator\nhttp: truncated body\nhttp: bad chunk size\nhttp: body too large\n
+---
+test http_wire_chunked_encode
+mode run
+file examples/http_wire_chunked_encode.dusk
+out "4\\r\\nhell\\r\\n4\\r\\no wo\\r\\n3\\r\\nrld\\r\\n0\\r\\n\\r\\n"\n
+---
+test http_wire_fixed_body_bounds
+mode run
+file examples/http_wire_fixed_body_bounds.dusk
+out hello\nhttp: truncated body\nhttp: body too large\n
+---
+test http_wire_write_request_head
+mode run
+file examples/http_wire_write_request_head.dusk
+out "POST /a?b=1 HTTP/1.1\\r\\nHost: h\\r\\nX: y\\r\\n\\r\\n"\n
+---
+test http_wire_token_list_has
+mode run
+file examples/http_wire_token_list_has.dusk
+out true\nfalse\n
+---
+test http_wire_read_error_unhandled_is_rejected
+mode check_fail
+file examples/http_wire_read_error_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# std.net.http.client: the client against a raw server thread in the same process. Every
+# row binds port 0 on loopback and reads the port back, the thread accepts, reads the
+# request, prints what it checks before it answers, writes fixed bytes, and closes.
+test http_client_get_with_content_length
+mode run
+file examples/http_client_get_with_content_length.dusk
+out GET /x HTTP/1.1\ntrue\ntrue\n200\ntext/plain\nhello\n5\n
+---
+test http_client_post_sends_the_body
+mode run
+file examples/http_client_post_sends_the_body.dusk
+out 3\ntext/plain\nabc\n204\n0\n
+---
+test http_client_chunked_response_decode
+mode run
+file examples/http_client_chunked_response_decode.dusk
+out 200\nWikipedia\n9\ntrue\n
+---
+test http_client_chunked_request_encode
+mode run
+file examples/http_client_chunked_request_encode.dusk
+out "b\\r\\nhello world\\r\\n0\\r\\n\\r\\n"\n200\n
+---
+test http_client_keep_alive_two_requests
+mode run
+file examples/http_client_keep_alive_two_requests.dusk
+out r1\nr2\ntrue\n1\n
+---
+test http_client_connection_close_marks_closed
+mode run
+file examples/http_client_connection_close_marks_closed.dusk
+out ok\nfalse\nhttp: connection is closed\n
+---
+test http_client_head_reads_no_body
+mode run
+file examples/http_client_head_reads_no_body.dusk
+out 200\n99\n0\n
+---
+test http_client_tolerates_a_1_0_response
+mode run
+file examples/http_client_tolerates_a_1_0_response.dusk
+out 200\n0\nraw bytes\nfalse\n
+---
+# A 100 Continue and a 103 Early Hints before the final response are both dropped.
+test http_client_skips_100_continue
+mode run
+file examples/http_client_skips_100_continue.dusk
+out 200\nok\n
+---
+test http_client_returns_a_redirect
+mode run
+file examples/http_client_returns_a_redirect.dusk
+out 302\n/other\n
+---
+test http_client_refuses_https
+mode run
+file examples/http_client_refuses_https.dusk
+out http: the https scheme needs TLS, which this release does not ship\n
+---
+# The listener is closed before the dial; another process binding the freed port in
+# the gap would connect instead of failing, so a rare failure here reads as that.
+test http_client_refused_port_is_an_error
+mode run
+file examples/http_client_refused_port_is_an_error.dusk
+out error\n
+---
+test http_client_read_timeout_surfaces
+mode run
+file examples/http_client_read_timeout_surfaces.dusk
+out http: timed out\n
+---
+test http_client_body_too_large_is_an_error
+mode run
+file examples/http_client_body_too_large_is_an_error.dusk
+out http: body too large\n
+---
+test http_client_both_framings_is_an_error
+mode run
+file examples/http_client_both_framings_is_an_error.dusk
+out http: both Content-Length and Transfer-Encoding\n
+---
+# The interim skip is bounded at 8 in a row; a 101 is final and carries no body. Over a
+# string_reader, no socket.
+test http_client_too_many_interim_responses
+mode run
+file examples/http_client_too_many_interim_responses.dusk
+out 200 2 "ok"\nhttp: too many interim responses\n101 0 ""\n
+---
+# The client's own write side is shut down first, so the request write fails with
+# Broken pipe, and the Conn is marked closed on the write path like every other error.
+test http_client_write_failure_marks_closed
+mode run
+file examples/http_client_write_failure_marks_closed.dusk
+out Broken pipe\n0\nfalse\n
+---
+# The client's fields are set with headers_set, so a resend repeats them rather than
+# doubling them, and turning chunked on drops the Content-Length an earlier send left.
+test http_client_resend_sets_fields_once
+mode run
+file examples/http_client_resend_sets_fields_once.dusk
+out host=1 cl=1 te=0 3\nr1\nhost=1 cl=1 te=0 3\nr2\nhost=1 cl=0 te=1 3\nr3\n
+---
+test http_client_response_error_unhandled_is_rejected
+mode check_fail
+file examples/http_client_response_error_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# A Response read after response_free and free is the runtime's generation fault.
+test http_client_response_used_after_free_faults
+mode run_raw
+file examples/http_client_response_used_after_free.dusk
+out hello\n
+ok false
+err_has use of a freed or stale pointer
+---
+# std.net.http.server: a sequential HTTP/1.1 server. Each socket record runs the server on a
+# spawned thread with send_date false and a raw client in main that writes fixed bytes and
+# prints the whole reply with %q; a refusal the server writes itself carries the wire
+# sentence as a text/plain body and Connection: close, and http_serve_one returns it.
+test http_server_answers_a_get
+mode run
+file examples/http_server_answers_a_get.dusk
+out /p\nq=1\n"HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nhi"\n
+---
+test http_server_404_from_the_handler
+mode run
+file examples/http_server_404_from_the_handler.dusk
+out "HTTP/1.1 404 Not Found\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"\n
+---
+test http_server_400_on_a_bad_request_line
+mode run
+file examples/http_server_400_on_a_bad_request_line.dusk
+out http: bad request line\n"HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 23\\r\\nConnection: close\\r\\n\\r\\nhttp: bad request line\\n"\n
+---
+test http_server_431_on_oversized_headers
+mode run
+file examples/http_server_431_on_oversized_headers.dusk
+out http: header section too large\n"HTTP/1.1 431 Request Header Fields Too Large\\r\\nContent-Type: text/plain\\r\\nContent-Length: 31\\r\\nConnection: close\\r\\n\\r\\nhttp: header section too large\\n"\n
+---
+test http_server_414_on_a_long_request_line
+mode run
+file examples/http_server_414_on_a_long_request_line.dusk
+out http: line too long\n"HTTP/1.1 414 URI Too Long\\r\\nContent-Type: text/plain\\r\\nContent-Length: 20\\r\\nConnection: close\\r\\n\\r\\nhttp: line too long\\n"\n
+---
+test http_server_413_on_a_large_body
+mode run
+file examples/http_server_413_on_a_large_body.dusk
+out http: body too large\n"HTTP/1.1 413 Content Too Large\\r\\nContent-Type: text/plain\\r\\nContent-Length: 21\\r\\nConnection: close\\r\\n\\r\\nhttp: body too large\\n"\n
+---
+# Both framings is the request smuggling shape: refused before the body, so the request
+# hidden in it is never parsed and the handler count stays 0.
+test http_server_400_on_both_framings
+mode run
+file examples/http_server_400_on_both_framings.dusk
+out http: both Content-Length and Transfer-Encoding\n"HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 48\\r\\nConnection: close\\r\\n\\r\\nhttp: both Content-Length and Transfer-Encoding\\n"\n0\n
+---
+test http_server_501_on_unknown_transfer_encoding
+mode run
+file examples/http_server_501_on_unknown_transfer_encoding.dusk
+out http: unsupported Transfer-Encoding\n"HTTP/1.1 501 Not Implemented\\r\\nContent-Type: text/plain\\r\\nContent-Length: 36\\r\\nConnection: close\\r\\n\\r\\nhttp: unsupported Transfer-Encoding\\n"\n
+---
+test http_server_505_on_http_2
+mode run
+file examples/http_server_505_on_http_2.dusk
+out http: version not supported\n"HTTP/1.1 505 HTTP Version Not Supported\\r\\nContent-Type: text/plain\\r\\nContent-Length: 28\\r\\nConnection: close\\r\\n\\r\\nhttp: version not supported\\n"\n
+---
+test http_server_400_without_host
+mode run
+file examples/http_server_400_without_host.dusk
+out http: missing Host\n"HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 19\\r\\nConnection: close\\r\\n\\r\\nhttp: missing Host\\n"\n
+---
+test http_server_head_drops_the_body
+mode run
+file examples/http_server_head_drops_the_body.dusk
+out "HTTP/1.1 200 OK\\r\\nContent-Length: 5\\r\\nConnection: close\\r\\n\\r\\n"\n
+---
+test http_server_keep_alive_two_requests
+mode run
+file examples/http_server_keep_alive_two_requests.dusk
+out 2\n"HTTP/1.1 200 OK\\r\\nContent-Length: 1\\r\\n\\r\\naHTTP/1.1 200 OK\\r\\nContent-Length: 1\\r\\n\\r\\nb"\n
+---
+test http_server_1_0_closes_by_default
+mode run
+file examples/http_server_1_0_closes_by_default.dusk
+out "HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nok"\n1\n
+---
+test http_server_chunked_request_decoded
+mode run
+file examples/http_server_chunked_request_decoded.dusk
+out abcde\n5\ntrue\n"HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"\n
+---
+test http_server_chunked_response_written
+mode run
+file examples/http_server_chunked_response_written.dusk
+out "HTTP/1.1 200 OK\\r\\nTransfer-Encoding: chunked\\r\\nConnection: close\\r\\n\\r\\nb\\r\\nhello world\\r\\n0\\r\\n\\r\\n"\n
+---
+test http_server_expect_100_continue
+mode run
+file examples/http_server_expect_100_continue.dusk
+out HTTP/1.1 100 Continue\n"HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nab"\n59\n
+---
+test http_server_date_present_by_default
+mode run
+file examples/http_server_date_present_by_default.dusk
+out true\n
+---
+test http_server_stream_over_strings
+mode run
+file examples/http_server_stream_over_strings.dusk
+out 2\nfalse\n"HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\n/aHTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\n/b"\n
+---
+test http_server_context_carries_state
+mode run
+file examples/http_server_context_carries_state.dusk
+out 3\n
+---
+test http_server_stops_on_shutdown_read
+mode run
+file examples/http_server_stops_on_shutdown_read.dusk
+out ok\nInvalid argument\njoined\n
+---
+# A read timeout before the first byte of a request is the clean end of an idle
+# connection, no response and an empty error; partway through a request it is 408.
+test http_server_idle_timeout_closes
+mode run
+file examples/http_server_idle_timeout_closes.dusk
+out 0\nfalse\n0\n
+---
+test http_server_408_on_a_stalled_request
+mode run
+file examples/http_server_408_on_a_stalled_request.dusk
+out http: timed out\n"HTTP/1.1 408 Request Timeout\\r\\nContent-Type: text/plain\\r\\nContent-Length: 16\\r\\nConnection: close\\r\\n\\r\\nhttp: timed out\\n"\n
+---
+# The status map and the fields the server owns, over strings with no socket.
+test http_server_read_request_statuses
+mode run
+file examples/http_server_read_request_statuses.dusk
+out 0 http: connection closed\nGET / 0 0\nPOST /p 1 3\n400 http: duplicate Host\n400 http: obsolete line folding\n400 http: conflicting Content-Length\n0 http: truncated body\n400 http: bad chunk size\n413 http: body too large\n400 http: bare carriage return\n
+---
+test http_server_handler_date_and_close_kept
+mode run
+file examples/http_server_handler_date_and_close_kept.dusk
+out 1\nfalse\n"HTTP/1.1 200 OK\\r\\nDate: Sun, 06 Nov 1994 08:49:37 GMT\\r\\nContent-Length: 1\\r\\nConnection: close\\r\\n\\r\\nx"\n
+---
+test http_server_1_0_keep_alive_asked
+mode run
+file examples/http_server_1_0_keep_alive_asked.dusk
+out 2\nfalse\n"HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: keep-alive\\r\\n\\r\\nokHTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nok"\n
+---
+test http_server_no_body_statuses
+mode run
+file examples/http_server_no_body_statuses.dusk
+out 3\nfalse\n"HTTP/1.1 204 No Content\\r\\n\\r\\nHTTP/1.1 304 Not Modified\\r\\nContent-Length: 7\\r\\n\\r\\nHTTP/1.1 200 OK\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\n"\n
+---
+# The handler crosses into a server thread by name; a function valued local is a closure
+# value, which a spawn cannot capture.
+test http_server_handler_capture_is_rejected
+mode check_fail
+file examples/http_server_handler_capture_fail.dusk
+err_has spawn cannot capture 'h'; a slice, closure, or interface value may view the spawning frame, so move the data to the heap or send it through a channel
+---
+test http_server_serve_error_unhandled_is_rejected
+mode check_fail
+file examples/http_server_serve_error_unhandled_fail.dusk
+err_has the error 'e' is never handled; inspect it with exists, handle it with check, or discard it with ignore
+---
+# The client against the server in one process: an http_get and an http_post against
+# http_serve, each echoed by the handler and each a connection the server closes.
+test http_e2e_get_and_post
+mode run
+file examples/http_e2e_get_and_post.dusk
+out GET /a \n200\nPOST /b hello\n200\n
+---
+test http_e2e_keep_alive_two_requests
+mode run
+file examples/http_e2e_keep_alive_two_requests.dusk
+out r1\nr2\n1\n
+---
+test http_e2e_chunked_both_ways
+mode run
+file examples/http_e2e_chunked_both_ways.dusk
+out abcde\nABCDE\ntrue\n
+---
+test http_e2e_head
+mode run
+file examples/http_e2e_head.dusk
+out 200\n5\n0\n
+---
+# The two parallel shapes composed outside the library: a thread per connection
+# through http_serve_conn, and N threads in http_serve over one listener.
+test http_e2e_thread_per_connection
+mode run
+file examples/http_e2e_thread_per_connection.dusk
+out 2\n
+---
+test http_e2e_n_acceptors
+mode run
+file examples/http_e2e_n_acceptors.dusk
+out 2\n
+---
+# One empty line before a request line is skipped, a second is a 400.
+test http_server_skips_one_leading_empty_line
+mode run
+file examples/http_server_skips_one_leading_empty_line.dusk
+out 3\nhttp: bad request line\n"HTTP/1.1 200 OK\\r\\nContent-Length: 7\\r\\n\\r\\nGET /a HTTP/1.1 200 OK\\r\\nContent-Length: 11\\r\\n\\r\\nPOST /p abcHTTP/1.1 200 OK\\r\\nContent-Length: 7\\r\\n\\r\\nGET /b HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 23\\r\\nConnection: close\\r\\n\\r\\nhttp: bad request line\\n"\n
+---
+# http_serve ends only on an accept failure that leaves the listener dead, one per class,
+# and returns it; a call that did not return would hang the record. http_serve_one returns
+# the accept's error as it is.
+test http_server_serve_ends_on_a_dead_listener
+mode run
+file examples/http_server_serve_ends_on_a_dead_listener.dusk
+out Invalid argument\nBad file descriptor\nSocket operation on non-socket\nOperation not supported\nBad file descriptor\n
+---
+# Chunk size and trailer lines need CR LF while the head keeps its bare LF tolerance; over
+# the server the bytes a bare LF would have hidden never reach the handler.
+test http_wire_chunked_lines_need_crlf
+mode run
+file examples/http_wire_chunked_lines_need_crlf.dusk
+out http: bad chunk size\nhttp: bad chunk size\nhttp: bad chunk terminator\nhttp: bad chunk terminator\nabc 3\n2\n
+---
+test http_server_400_on_a_bare_lf_chunk_line
+mode run
+file examples/http_server_400_on_a_bare_lf_chunk_line.dusk
+out 0\nhttp: bad chunk size\n0\n"HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 21\\r\\nConnection: close\\r\\n\\r\\nhttp: bad chunk size\\n"\n
+---
+# A name or value borrowed from the list is safe to pass to headers_set and headers_remove.
+test http_headers_set_and_remove_take_a_borrow
+mode run
+file examples/http_headers_set_and_remove_take_a_borrow.dusk
+out a.io\n1\n2\n1\n2\na.io=Host\n
+---
+# The client refuses a request it cannot write as one message, and bytes waiting past the
+# last response, before it writes.
+test http_client_extra_response_is_an_error
+mode run
+file examples/http_client_extra_response_is_an_error.dusk
+out ok\nhttp: unexpected data on the connection\nfalse\n1\n
+---
+test http_client_refuses_a_bad_request
+mode run
+file examples/http_client_refuses_a_bad_request.dusk
+out http: bad method true\nhttp: bad method true\nhttp: bad target true\nhttp: bad target true\nhttp: bad target true\nhttp: bad header name true\nhttp: bad header name true\nhttp: bad header name true\nGET /ok?q=1 HTTP/1.1\nok true\n1\n
+---
+test http_client_refuses_connect
+mode run
+file examples/http_client_refuses_connect.dusk
+out http: CONNECT is not supported true\nconnect / HTTP/1.1\nok true\n1\n-1\n
+---
+test http_client_1_0_transfer_encoding_closes
+mode run
+file examples/http_client_1_0_transfer_encoding_closes.dusk
+out hi\nfalse\nhttp: connection is closed\n
+---
+# A handler status the wire cannot carry is answered as a 500, a Host value that is not
+# host or host:port is a 400, and max_requests ends a stream cleanly.
+test http_server_bad_handler_status_is_a_500
+mode run
+file examples/http_server_bad_handler_status_is_a_500.dusk
+out 1\nhttp: bad handler status\n"HTTP/1.1 500 Internal Server Error\\r\\nContent-Type: text/plain\\r\\nContent-Length: 25\\r\\nConnection: close\\r\\n\\r\\nhttp: bad handler status\\n"\n1\nhttp: bad handler status\n"HTTP/1.1 500 Internal Server Error\\r\\nContent-Type: text/plain\\r\\nContent-Length: 25\\r\\nConnection: close\\r\\n\\r\\nhttp: bad handler status\\n"\n
+---
+test http_server_400_on_a_bad_host
+mode run
+file examples/http_server_400_on_a_bad_host.dusk
+out 0 http: bad Host\n"HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 15\\r\\nConnection: close\\r\\n\\r\\nhttp: bad Host\\n"\n0 http: bad Host\n"HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 15\\r\\nConnection: close\\r\\n\\r\\nhttp: bad Host\\n"\n0 http: bad Host\n"HTTP/1.1 400 Bad Request\\r\\nContent-Type: text/plain\\r\\nContent-Length: 15\\r\\nConnection: close\\r\\n\\r\\nhttp: bad Host\\n"\n1 ok\n"HTTP/1.1 200 OK\\r\\nContent-Length: 10\\r\\n\\r\\n[::1]:8080"\n1 ok\n"HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\n\\r\\n"\n
+---
+test http_server_max_requests_closes_the_stream
+mode run
+file examples/http_server_max_requests_closes_the_stream.dusk
+out 1000\n2\nfalse\n2\n"HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\n/1HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\n/2"\n3\nfalse\n3\n"HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\n/1HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\n/2HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\n/3"\n
+---
+# A bracketed host is an IPv6 literal, and the asterisk form and a # are target rules.
+test url_parse_bracketed_host_rules
+mode run
+file examples/url_parse_bracketed_host_rules.dusk
+out url: bad host\nurl: bad host\nurl: bad host\nurl: empty host\n[::ffff:127.0.0.1]:8\n[2001:DB8::a]\n
+---
+test http_wire_request_line_target_rules
+mode run
+file examples/http_wire_request_line_target_rules.dusk
+out OPTIONS|*||1\nhttp: bad target\nhttp: bad target\nhttp: bad target\nhttp: bad target\nhttp: bad target\nOPTIONS|/a||0\n
 ---

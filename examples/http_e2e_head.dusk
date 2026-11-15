@@ -1,0 +1,94 @@
+// A HEAD exchange between the client and the server. The handler answers every request
+// with the body hello; for HEAD the server drops the body and keeps Content-Length: 5, and
+// the client reads no body for it. A GET on the same Conn afterwards gets the whole body,
+// proving the HEAD left the stream in step: it prints only when that check fails.
+@paradigm procedural
+@import std.net.http.client
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    resp := response_new(200)
+    response_set_body(resp, "hello")
+    return resp
+}
+
+// The HEAD: its status, its Content-Length, and the body length the client read
+func send_head(c: *Conn) -> void {
+    req: *Request = request_new("HEAD", "/")
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println((*resp).status)
+        length, ok := headers_get((*resp).headers, "Content-Length")
+        if ok {
+            println(length)
+        }
+        println((*resp).body_len)
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+}
+
+// The GET that follows on the same connection, silent when its body arrives whole
+func check_get(c: *Conn) -> void {
+    req: *Request = request_new("GET", "/")
+    resp, e := conn_send(c, req)
+    if e.exists() {
+        println(e)
+    } else if response_text(resp) != "hello" {
+        println("the GET after HEAD lost its body")
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    t, te := spawn(lambda () -> void {
+        e := http_serve(s, 0, handle)
+        if e.exists() && e.toString() != "Invalid argument" {
+            println(e)
+        }
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    text: string = format("http://127.0.0.1:%d/", [arg_int(addr_port(bound))])
+    u, pe := url_parse(text)
+    pe.ignore()
+    c, de := http_dial(u)
+    if de.exists() {
+        println(de)
+    }
+    send_head(c)
+    check_get(c)
+    ce := conn_close(c)
+    ce.ignore()
+    free(c)
+    url_free(u)
+    free(u)
+    free(text)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

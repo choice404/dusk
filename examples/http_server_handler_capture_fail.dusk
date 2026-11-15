@@ -1,0 +1,33 @@
+// The handler crosses into a server thread by name, never as a value: a function valued
+// local is a closure value, which a spawn cannot capture, so the lambda below that
+// captures h to pass it to http_serve is rejected. Name the function inside the lambda.
+@paradigm procedural
+@import std.net.http.server
+@import std.concurrent.thread
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    return response_new(200)
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    s := http_server_new(lfd)
+    h := handle
+    t, te := spawn(lambda () -> void {
+        e := http_serve(s, 0, h)
+        if e.exists() {
+            println(e)
+        }
+    })
+    te.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

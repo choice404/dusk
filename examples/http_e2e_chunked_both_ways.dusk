@@ -1,0 +1,70 @@
+// Chunked transfer coding in both directions between the client and the server. The
+// client sends a POST with chunked set through http_send, so the body leaves as chunks;
+// the server decodes it, and the handler prints the text, checks that it arrived chunked,
+// and answers with the body uppercased and chunked set, which the server writes as chunks
+// and the client decodes, recording that the response arrived chunked. The server is
+// stopped with net_shutdown_read, joined, and its listener closed.
+@paradigm procedural
+@import std.net.http.client
+@import std.net.http.server
+@import std.concurrent.thread
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    text: string = request_text(req)
+    println(text)
+    if !(*req).chunked {
+        println("the request did not arrive chunked")
+    }
+    resp := response_new(200)
+    upper: string = to_upper(text)
+    response_set_body(resp, upper)
+    free(upper)
+    (*resp).chunked = true
+    return resp
+}
+
+func main() -> int32 {
+    lfd, le := net_listen(addr_loopback(0), 0)
+    if le.exists() {
+        printerr(le)
+        return 1
+    }
+    bound, be := net_local_addr(lfd)
+    be.ignore()
+    s := http_server_new(lfd)
+    t, te := spawn(lambda () -> void {
+        e := http_serve(s, 0, handle)
+        if e.exists() && e.toString() != "Invalid argument" {
+            println(e)
+        }
+    })
+    if te.exists() {
+        printerr(te)
+        return 1
+    }
+    url: string = format("http://127.0.0.1:%d/u", [arg_int(addr_port(bound))])
+    req: *Request = request_new("POST", "/")
+    request_set_body(req, "abcde")
+    (*req).chunked = true
+    resp, e := http_send(url, req)
+    if e.exists() {
+        println(e)
+    } else {
+        println(response_text(resp))
+        println((*resp).chunked)
+    }
+    response_free(resp)
+    free(resp)
+    request_free(req)
+    free(req)
+    free(url)
+    se := net_shutdown_read(lfd)
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    lc := net_close(lfd)
+    lc.ignore()
+    free(s)
+    return 0
+}

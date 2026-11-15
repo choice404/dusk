@@ -1,0 +1,50 @@
+// A chunk size line and a trailer line must end in CR LF. A size line ended by a lone LF
+// is http: bad chunk size and a trailer line ended by one is http: bad chunk terminator,
+// so a body cannot be framed one way here and another way by a stricter reader. The head
+// keeps its bare LF tolerance: a header section ended by bare LFs still reads.
+@paradigm procedural
+@import std.net.http.wire
+
+func decode(text: string) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    body, n, e := read_body_chunked(b, 1048576)
+    if e.exists() {
+        println(e)
+    } else {
+        print(cstr(body))
+        print(" ")
+        println(n)
+    }
+    free(body)
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func head(text: string) -> void {
+    c: *StringReader = alloc(string_reader_new(text))
+    b: *BufReader = bufreader_new(string_reader(c), 64)
+    h: *Vector<Header> = headers_new()
+    e := read_headers(b, h, 4096, 32)
+    if e.exists() {
+        println(e)
+    } else {
+        println(vec_len(h))
+    }
+    headers_free(h)
+    free(h)
+    bufreader_free(b)
+    free(b)
+    free(c)
+}
+
+func main() -> int32 {
+    decode("2;a\nXX\r\n0\r\n\r\n")
+    decode("5\nhello\r\n0\r\n\r\n")
+    decode("0\r\nTrailer: x\n\r\n")
+    decode("0\r\n\n")
+    decode("3\r\nabc\r\n0\r\nTrailer: x\r\n\r\n")
+    head("A: b\nC: d\n\n")
+    return 0
+}

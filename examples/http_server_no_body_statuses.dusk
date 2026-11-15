@@ -1,0 +1,42 @@
+// A 204 and a 304 carry no body whatever the handler put in it, and a 204 carries no
+// Content-Length either, while a 304 keeps the one the handler set; a HEAD request
+// answered with a chunked response gets the Transfer-Encoding field and no chunks.
+@paradigm procedural
+@import std.net.http.server
+@import std.fmt
+
+func handle(req: *Request, ctx: int64) -> *Response {
+    if (*req).path == "/a" {
+        resp := response_new(204)
+        response_set_body(resp, "dropped")
+        return resp
+    }
+    if (*req).path == "/b" {
+        resp := response_new(304)
+        headers_set((*resp).headers, "Content-Length", "7")
+        response_set_body(resp, "dropped")
+        return resp
+    }
+    resp := response_new(200)
+    response_set_body(resp, "dropped")
+    (*resp).chunked = true
+    return resp
+}
+
+func main() -> int32 {
+    s := http_server_new(-1)
+    (*s).send_date = false
+    c: *StringReader = alloc(string_reader_new("GET /a HTTP/1.1\r\nHost: h\r\n\r\nGET /b HTTP/1.1\r\nHost: h\r\n\r\nHEAD /c HTTP/1.1\r\nHost: h\r\n\r\n"))
+    out: *StringBuilder = alloc(sb_new())
+    count, e := http_serve_stream(s, string_reader(c), sb_writer(out), 0, handle)
+    println(count)
+    println(e.exists())
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    sb_free(out)
+    free(out)
+    free(c)
+    free(s)
+    return 0
+}

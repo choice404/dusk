@@ -1,0 +1,22 @@
+// write_chunked writes a body as chunks of at most the given size, each its size in
+// lowercase hex, CR LF, the bytes, and CR LF, then the last chunk; written through
+// sb_writer and rendered with %q so every CR LF is visible.
+@paradigm procedural
+@import std.net.http.wire
+@import std.fmt
+
+func main() -> int32 {
+    out: *StringBuilder = alloc(sb_new())
+    body: *raw char = cbuf("hello world")
+    e := write_chunked(sb_writer(out), body, 11, 4)
+    if e.exists() {
+        println(e)
+    }
+    q: string = format("%q", [arg_str(sb_cstr(out))])
+    println(q)
+    free(q)
+    free(body)
+    sb_free(out)
+    free(out)
+    return 0
+}
