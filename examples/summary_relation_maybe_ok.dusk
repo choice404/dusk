@@ -1,0 +1,44 @@
+// A Maybe that is None on one path and wraps a frame-owned sink on another, a second
+// Maybe that wraps the caller's holder, and arms that name payload free variants. A
+// None is no value at all, so the two Maybes stay apart and the store through the
+// frame-owned sink is legal
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+enum Mode { Quiet, Loud(level: int64) }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    mut mine: Maybe<*Sink> = Maybe.None
+    if local[0] > 0 { mine = Maybe.Some(s) }
+    mut theirs: Maybe<*Holder> = Maybe.None
+    if local[1] > 0 { theirs = Maybe.Some(h) }
+    s.keep(local[0..4])
+    match mine { Some(x) => { println((*(*x).h).rows[1]) }, None => { println(0) } }
+    match theirs { Some(y) => { println((*y).rows[0]) }, None => { println(0) } }
+    println(is_some(mine))
+    m: Mode = Mode.Quiet
+    n: int64 = match m { Quiet => 1, Loud(k) => k }
+    println(n)
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

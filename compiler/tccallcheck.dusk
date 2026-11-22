@@ -69,7 +69,45 @@ func ptr_reaches_collector_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, 
     return false
 }
 
-func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+// Whether a pointer's target reaches a value that can come to view a frame: a slice,
+// a function value, or an interface value, through struct fields, enum payloads,
+// tuples, arrays, nested pointers, and collector elements. Either thread may store a
+// view of its own frame into such a field after the capture is judged, so the type
+// alone decides. Generic arguments are erased here, so channel elements are opaque;
+// mono preserves that boundary while checking concrete fields. Futures are refused
+// separately by spawn_capturable_ty
+func ptr_reaches_view_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+    n: TyNode = ty_get((*tc).ty, tyid)
+    if n.kind == tyk_slice() || n.kind == tyk_func() { return true }
+    if n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_array() || n.kind == tyk_collector() {
+        return ptr_reaches_view_ty(tc, n.a, seen)
+    }
+    if n.kind == tyk_tuple() {
+        for i in 0..n.len {
+            if ptr_reaches_view_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return true }
+        }
+    } else if n.kind == tyk_named() {
+        name: string = ty_name((*tc).ty, tyid)
+        ifaces: *Map<string, int64> = (*tc).ifaces
+        if map_has(ifaces, name) { return true }
+        if map_has(seen, name) { return false }
+        map_put(seen, name, 1)
+        embeds: *Map<string, TyList> = (*tc).embed_fields
+        if map_has(embeds, name) {
+            list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
+            for j in 0..list.len {
+                if ptr_reaches_view_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return true }
+            }
+        }
+    }
+    return false
+}
+
+// Whether a value of this type may be captured by a spawn or submit lambda. With
+// ban_ptr_view set, a pointer whose target reaches a slice, closure, or interface
+// value is refused too; check_task_lambda asks once without it to tell that case
+// apart for its own sentence.
+func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>, ban_ptr_view: bool) -> bool {
     n: TyNode = ty_get((*tc).ty, tyid)
     if n.kind == tyk_future() || n.kind == tyk_collector() || n.kind == tyk_slice() || n.kind == tyk_func() {
         return false
@@ -77,12 +115,15 @@ func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64
     if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
         fseen: *Map<string, int64> = alloc(map_new())
         cseen: *Map<string, int64> = alloc(map_new())
-        return !ptr_reaches_future_ty(tc, n.a, fseen) && !ptr_reaches_collector_ty(tc, n.a, cseen)
+        if ptr_reaches_future_ty(tc, n.a, fseen) || ptr_reaches_collector_ty(tc, n.a, cseen) { return false }
+        if !ban_ptr_view { return true }
+        vseen: *Map<string, int64> = alloc(map_new())
+        return !ptr_reaches_view_ty(tc, n.a, vseen)
     }
-    if n.kind == tyk_array() { return spawn_capturable_ty(tc, n.a, seen) }
+    if n.kind == tyk_array() { return spawn_capturable_ty(tc, n.a, seen, ban_ptr_view) }
     if n.kind == tyk_tuple() {
         for i in 0..n.len {
-            if !spawn_capturable_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen) { return false }
+            if !spawn_capturable_ty(tc, vec_get((*(*tc).ty).kids, n.off + i), seen, ban_ptr_view) { return false }
         }
     } else if n.kind == tyk_named() {
         name: string = ty_name((*tc).ty, tyid)
@@ -94,11 +135,25 @@ func spawn_capturable_ty(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64
         if map_has(embeds, name) {
             list: TyList = unwrap_or(map_get(embeds, name), empty_tylist())
             for j in 0..list.len {
-                if !spawn_capturable_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen) { return false }
+                if !spawn_capturable_ty(tc, sig_ty_at((*tc).sigtab, list, j), seen, ban_ptr_view) { return false }
             }
         }
     }
     return true
+}
+
+// The sentence for a capture refused only because it points at a value that holds a
+// slice, closure, or interface value
+func task_ptr_view_msg(name: string, cap: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, cap)
+    sb_push(b, "'; it points at a value that holds a slice, closure, or interface value, which may come to view a thread's frame, so share plain data or send it through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
@@ -127,6 +182,7 @@ export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, ar
     for cap in caps {
         t: int64 = lookup(tc, cap)
         seen: *Map<string, int64> = alloc(map_new())
+        pseen: *Map<string, int64> = alloc(map_new())
         fseen: *Map<string, int64> = alloc(map_new())
         cseen: *Map<string, int64> = alloc(map_new())
         reaches_collector: bool = ptr_reaches_collector_ty(tc, t, cseen)
@@ -134,8 +190,10 @@ export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, ar
             tc_emit(tc, task_future_msg(name, cap), arg.lo, arg.hi)
         } else if reaches_collector {
             tc_emit(tc, task_collector_msg(name, cap), arg.lo, arg.hi)
-        } else if !spawn_capturable_ty(tc, t, seen) || str_len(iface_bind_name(tc, cap)) > 0 {
+        } else if !spawn_capturable_ty(tc, t, seen, false) || str_len(iface_bind_name(tc, cap)) > 0 {
             tc_emit(tc, task_view_msg(name, cap), arg.lo, arg.hi)
+        } else if !spawn_capturable_ty(tc, t, pseen, true) {
+            tc_emit(tc, task_ptr_view_msg(name, cap), arg.lo, arg.hi)
         } else if is_esc_slice(tc, cap) || is_esc_closure(tc, cap) {
             fp: *Map<string, FlowProv> = (*tc).flow_prov
             if map_has(fp, cap) {
@@ -146,11 +204,12 @@ export func check_task_lambda(tc: *TypeChecker, name: string, arg_off: int64, ar
             }
         }
         // A borrowed managed capture is re-declared a borrow inside the task lambda so
-        // freeing or moving it there rejects. A bare type-parameter capture is treated
-        // the same: at some instantiation T is a managed pointer the enclosing frame
-        // owns, and the concrete twin already rejects the free inside the lambda. T lowers
-        // to a hole, so the capture's declared AST type is consulted through its name.
-        if is_managed_or_typaram_name(tc, t, cap) && own_of(tc, cap) != own_moved() {
+        // freeing or moving it there rejects. A string capture is the same borrow: the
+        // spawning frame still holds the text and frees it. A bare type-parameter capture
+        // is treated the same: at some instantiation T is a managed pointer the enclosing
+        // frame owns, and the concrete twin already rejects the free inside the lambda. T
+        // lowers to a hole, so the capture's declared AST type is consulted through its name.
+        if (is_managed_or_typaram_name(tc, t, cap) || is_str_ty(tc, t)) && own_of(tc, cap) != own_moved() {
             vec_push(borrowed, cap)
         }
     }

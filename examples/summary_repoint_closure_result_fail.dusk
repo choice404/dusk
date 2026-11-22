@@ -1,0 +1,32 @@
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+// A helper that repoints a local's pointer field at whatever a closure returns makes
+// the local reach the closure's captures. `redirect` stores `f()` into `(*s).h`, the
+// closure returns the parameter `h`, so the later store of a frame slice through `s`
+// lands in the caller's holder and is refused.
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+func store_rows(s: *Sink, xs: int64[]) -> void { (*(*s).h).rows = xs }
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+func redirect(s: *Sink, f: () -> *Holder) -> void { (*s).h = f() }
+func fillit(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: [] }) })
+    redirect(s, lambda () -> *Holder { return h })
+    store_rows(s, local[0..4])
+    free(s)
+}
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fillit(h)
+    println((*h).rows[0])
+    return 0
+}

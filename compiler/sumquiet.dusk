@@ -1,0 +1,263 @@
+// sumquiet: what a call through a function value returns, read off the value's
+// declared type. A callback whose declared result can hold no reference returns
+// nothing its captures reach, so the call's result carries none of them. A generic
+// helper calling a parameter whose result names one of its own type parameters cannot
+// tell on its own, so its quiet summary is computed with each such call returning
+// only its arguments, and a call site whose callbacks all declare a result that holds
+// no reference reads the quiet summary in place of the ordinary one.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import tcstate
+@import summary
+@import sumwalk
+@import sumscope
+@import sumplace
+@import sumtype
+
+/** Whether no value of a written type can carry anything the escape walk tracks: a
+ *  scalar, an error, a string outside alias mode, or a tuple, struct, or enum built of
+ *  those alone, its type arguments included. A pointer, a slice, a fixed array, a
+ *  function, an interface, an unknown type, and a type parameter of the walk each may
+ *  hold one
+ *  @params t - The surface tables
+ *  @params type_id - The written type
+ *  @params gens - The walk's own type parameters, each of which may stand for any type
+ *  @returns {bool} - True only when the type holds no reference at any depth */
+export func sum_carries_nothing(t: *SumTables, type_id: int64, gens: *Map<string, int64>) -> bool {
+    leaves: *Map<string, int64> = alloc(map_new())
+    seen: *Map<string, int64> = alloc(map_new())
+    return nothing_within(t, type_id, gens, leaves, seen, 0)
+}
+
+// A name the declaration around the member takes as a type parameter is a leaf: the
+// argument it stands for was judged before the members were
+func nothing_within(t: *SumTables, type_id: int64, gens: *Map<string, int64>, leaves: *Map<string, int64>, seen: *Map<string, int64>, depth: int64) -> bool {
+    if type_id < 0 || depth > 64 { return false }
+    a: *Ast = (*t).ast
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_unit() { return true }
+    if node.kind == tk_tuple() {
+        for i in 0..node.b {
+            if !nothing_within(t, vec_get((*a).kids, node.a + i), gens, leaves, seen, depth + 1) { return false }
+        }
+        return true
+    }
+    if node.kind != tk_named() { return false }
+    name: string = ast_name(a, node.a)
+    if map_has(gens, name) { return false }
+    if node.c == 0 && map_has(leaves, name) { return true }
+    // A type read off a field or a result outside its own declaration may name that
+    // declaration's type parameter, which a declared type spelled the same cannot
+    // stand for
+    if map_has((*t).type_param_names, name) { return false }
+    if map_has((*t).struct_idx, name) || map_has((*t).enum_idx, name) {
+        return aggregate_nothing(t, node, name, gens, leaves, seen, depth)
+    }
+    if node.c != 0 || map_has((*t).ifaces, name) { return false }
+    return plain_value_name(t, name)
+}
+
+// A struct or enum holds nothing when each type argument holds nothing and each member,
+// read in the declaration's own scope, does too. A type written with fewer arguments
+// than the declaration takes leaves its parameters unknown, so it may hold anything
+func aggregate_nothing(t: *SumTables, node: TypeNode, name: string, gens: *Map<string, int64>, leaves: *Map<string, int64>, seen: *Map<string, int64>, depth: int64) -> bool {
+    a: *Ast = (*t).ast
+    for i in 0..node.c {
+        if !nothing_within(t, vec_get((*a).kids, node.b + i), gens, leaves, seen, depth + 1) { return false }
+    }
+    declared, members := declaration_members(t, name)
+    if map_len(declared) != node.c { return false }
+    if map_has(seen, name) { return true }
+    map_put(seen, name, 1)
+    no_gens: *Map<string, int64> = alloc(map_new())
+    for member in members {
+        if !nothing_within(t, member, no_gens, declared, seen, depth + 1) { return false }
+    }
+    return true
+}
+
+// The type parameters a struct or enum declares and the written type of each of its
+// fields, every variant's payload included
+func declaration_members(t: *SumTables, name: string) -> (*Map<string, int64>, *Vector<int64>) {
+    a: *Ast = (*t).ast
+    members: *Vector<int64> = alloc(vec_new())
+    struct_index: int64 = unwrap_or(map_get((*t).struct_idx, name), -1)
+    if struct_index >= 0 {
+        record: StructNode = vec_get((*a).structs, struct_index)
+        for i in 0..record.fields_len {
+            field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, record.fields_off + i))
+            vec_push(members, field.ty)
+        }
+        return (sum_gens_of(a, record.generics_off, record.generics_len), members)
+    }
+    enumeration: EnumNode = vec_get((*a).enums, unwrap_or(map_get((*t).enum_idx, name), 0))
+    for i in 0..enumeration.variants_len {
+        variant: VariantNode = vec_get((*a).variants, vec_get((*a).kids, enumeration.variants_off + i))
+        for j in 0..variant.fields_len {
+            field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, variant.fields_off + j))
+            vec_push(members, field.ty)
+        }
+    }
+    return (sum_gens_of(a, enumeration.generics_off, enumeration.generics_len), members)
+}
+
+// The builtin types a value of which is plain data. A string is a pointer to bytes
+// some value may own, which the alias walk counts and the escape walk never does, and
+// an error carries its message string
+func plain_value_name(t: *SumTables, name: string) -> bool {
+    if str_eq(name, "string") || str_eq(name, "error") { return !(*t).alias_mode }
+    if str_eq(name, "bool") || str_eq(name, "char") || str_eq(name, "rune") { return true }
+    if str_eq(name, "int8") || str_eq(name, "int16") || str_eq(name, "int32") || str_eq(name, "int64") { return true }
+    if str_eq(name, "uint8") || str_eq(name, "uint16") || str_eq(name, "uint32") || str_eq(name, "uint64") { return true }
+    return str_eq(name, "float32") || str_eq(name, "float64")
+}
+
+/** Whether a call through a function value returns nothing at all the walk tracks,
+ *  read off the value's declared type
+ *  @params c - The current walk
+ *  @params callee_id - The called expression
+ *  @returns {bool} - True when the value's type is a function whose result holds no
+ *  reference; false for an unknown type */
+export func callee_result_carries_nothing(c: *SumCtx, callee_id: int64) -> bool {
+    t: *SumTables = (*c).t
+    node: TypeNode = vec_get((*(*t).ast).types, sum_chain_ty(c, callee_id))
+    return node.kind == tk_func() && sum_carries_nothing(t, node.c, (*c).gens)
+}
+
+/** The key the quiet summary of a function is kept under, beside its ordinary one in
+ *  the same table. No name a program declares holds the separator
+ *  @params name - The function's name
+ *  @returns {string} - The quiet key */
+export func quiet_key(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, "%quiet")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Whether a summary table key names a quiet summary
+ *  @params key - A table key
+ *  @returns {bool} - True for a key quiet_key built */
+export func is_quiet_key(key: string) -> bool {
+    n: int64 = str_len(key)
+    if n < 6 { return false }
+    return str_eq(substring(key, n - 6, n), "%quiet")
+}
+
+/** The parameters of a generic function whose declared type is a function returning a
+ *  type built over one of the function's own type parameters, each by its index
+ *  @params t - The surface tables
+ *  @params f - The function
+ *  @returns {int64} - The parameter set, empty for a function with none */
+export func function_quiet_mask(t: *SumTables, f: FuncNode) -> int64 {
+    if f.generics_len == 0 || f.params_len == 0 || f.params_len > 63 { return 0 }
+    a: *Ast = (*t).ast
+    gens: *Map<string, int64> = sum_gens_of(a, f.generics_off, f.generics_len)
+    mut mask: int64 = 0
+    for i in 0..f.params_len {
+        param: ParamNode = vec_get((*a).params, vec_get((*a).kids, f.params_off + i))
+        node: TypeNode = vec_get((*a).types, param.ty)
+        if node.kind == tk_func() && type_mentions_any(a, gens, node.c) { mask = mask | ps_single(i) }
+    }
+    return mask
+}
+
+/** The quiet parameter set of a module function named at a call
+ *  @params t - The surface tables
+ *  @params name - The function's name
+ *  @returns {int64} - The parameter set, empty for any other name */
+export func quiet_mask_of(t: *SumTables, name: string) -> int64 {
+    function_id: int64 = unwrap_or(map_get((*t).module_fns, name), -1)
+    if function_id < 0 { return 0 }
+    return function_quiet_mask(t, vec_get((*(*t).ast).funcs, function_id))
+}
+
+/** The summary a call to a module function applies: the quiet one when the function
+ *  has it and every callback the call hands it returns nothing its captures reach,
+ *  else the ordinary one
+ *  @params c - The current walk
+ *  @params name - The function's name
+ *  @params arg_off - The first argument's kid offset
+ *  @params arg_len - The written argument count
+ *  @params argvals - Each argument's abstract value
+ *  @returns {SummaryHandle} - The summary to apply */
+export func call_summary(c: *SumCtx, name: string, arg_off: int64, arg_len: int64, argvals: *Vector<SumVal>) -> SummaryHandle {
+    sums: *Map<string, SummaryHandle> = (*c).summaries
+    normal: SummaryHandle = unwrap_or(map_get(sums, name), empty_summary())
+    mask: int64 = quiet_mask_of((*c).t, name)
+    if mask == 0 { return normal }
+    key: string = quiet_key(name)
+    if !map_has(sums, key) || !quiet_call_eligible(c, mask, arg_off, arg_len, argvals) { return normal }
+    return unwrap_or(map_get(sums, key), normal)
+}
+
+// Each argument in a quiet position captures nothing, is a callback of the walked
+// helper's own that its quiet summary already takes as quiet, or declares a result
+// that holds no reference
+func quiet_call_eligible(c: *SumCtx, mask: int64, arg_off: int64, arg_len: int64, argvals: *Vector<SumVal>) -> bool {
+    a: *Ast = (*(*c).t).ast
+    for i in 0..arg_len {
+        if !ps_has(mask, i) { continue }
+        arg_id: int64 = vec_get((*a).kids, arg_off + i)
+        if !callback_is_quiet(c, arg_id, vec_get(argvals, i)) { return false }
+    }
+    return true
+}
+
+func callback_is_quiet(c: *SumCtx, arg_id: int64, value: SumVal) -> bool {
+    a: *Ast = (*(*c).t).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind == xk_lambda() && is_bottom(value) { return true }
+    if arg.kind == xk_ident() {
+        name: string = ast_name(a, arg.a)
+        if !sum_name_bound(c, name) || is_quiet_callback(c, name) { return true }
+    }
+    return callee_result_carries_nothing(c, arg_id)
+}
+
+func is_bottom(value: SumVal) -> bool {
+    return value.origins == 0 && value.reads == 0 && value.captures == 0 && !value.frame
+}
+
+/** Whether a name called in a quiet walk is one of the walked function's quiet
+ *  parameters, unshadowed and holding only the value it was handed
+ *  @params c - The current walk
+ *  @params name - The called name
+ *  @returns {bool} - True when the call returns only what its arguments reach */
+export func is_quiet_callback(c: *SumCtx, name: string) -> bool {
+    if (*c).quiet == 0 || !sum_names_parameter(c, name) { return false }
+    index: int64 = unwrap_or(map_get((*c).param_index, name), -1)
+    if !ps_has((*c).quiet, index) { return false }
+    value: SumVal = unwrap_or(map_get((*c).env, name), val_none())
+    return value.origins == ps_single(index) && value.reads == 0 && value.captures == 0 && !value.frame
+}
+
+/** The function type a lambda literal declares, one node per literal
+ *  @params c - The current walk
+ *  @params e - The lambda
+ *  @params id - Its expression id
+ *  @returns {int64} - The function type over its parameter types and declared result */
+export func lambda_fn_type(c: *SumCtx, e: ExprNode, id: int64) -> int64 {
+    t: *SumTables = (*c).t
+    cache: *Map<int64, int64> = (*t).lam_fn_types
+    if map_has(cache, id) { return unwrap_or(map_get(cache, id), (*t).infer_ty) }
+    a: *Ast = (*t).ast
+    params: *Vector<int64> = alloc(vec_new())
+    for i in 0..e.b {
+        param: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
+        vec_push(params, param.ty)
+    }
+    off, len := ast_kids(a, params)
+    fn_type: int64 = ast_type(a, tk_func(), off, len, e.c)
+    map_put(cache, id, fn_type)
+    return fn_type
+}

@@ -1,0 +1,43 @@
+// Compile-fail: a view of a frame array is written into a holder that a Maybe built
+// earlier still carries, and the function returns the holder out of a match on it.
+// The binder the match returns is declared after the store, so the store itself is
+// refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func outer() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = fresh()
+    m: Maybe<*Holder> = Maybe.Some((*s).h)
+    (*(*s).h).rows = local[0..4]
+    match m {
+        Some(x) => { return x }
+        None => { return alloc(Holder { rows: heap_rows() }) }
+    }
+}
+
+func main() -> int32 {
+    r: *Holder = outer()
+    println((*r).rows[0])
+    return 0
+}

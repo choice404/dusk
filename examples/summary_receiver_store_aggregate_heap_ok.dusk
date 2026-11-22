@@ -1,0 +1,39 @@
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { holder: *Holder }
+interface Keeper { keep(rows: int64[]) -> void }
+impl Keeper for Sink {
+    func keep(rows: int64[]) -> void { (*self.holder).rows = rows }
+}
+impl Sink {
+    func keep2(rows: int64[]) -> void { (*self.holder).rows = rows }
+    func me() -> Sink { return Sink { holder: self.holder } }
+}
+struct KeeperBox { keeper: Keeper }
+func make_sink(holder: *Holder) -> Sink { return Sink { holder: holder } }
+func pick<T>(first: T, second: T) -> T { return first }
+func keep_value(sink: Sink, rows: int64[]) -> void { (*sink.holder).rows = rows }
+func via(keeper: Keeper, rows: int64[]) -> void { keeper.keep(rows) }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [111, 222, 333, 444]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fill(holder: *Holder) -> void {
+    local: int64[] = heap_rows()
+    keep_value(Sink { holder: holder }, local[0..4])
+}
+
+func main() -> int32 {
+    holder: *Holder = alloc(Holder { rows: [] })
+    fill(holder)
+    println((*holder).rows[0])
+    free(holder)
+    return 0
+}

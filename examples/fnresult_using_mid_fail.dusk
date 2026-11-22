@@ -1,0 +1,44 @@
+// Compile-fail: a generic helper takes a `using` allocator between a plain parameter
+// and its type parameter. The allocator is written at the call like any other
+// argument, so the helper's result is the sink built over the caller's holder, and
+// the sink's stash keeps the frame slice in the holder
+@paradigm procedural
+@paradigm oop
+interface Allocator {
+    alloc(size: int64, align: int64) -> *void
+    free(p: *void) -> void
+}
+struct Bump { base: *raw int8, used: int64 }
+impl Allocator for Bump {
+    func alloc(size: int64, align: int64) -> *void {
+        off := self.used
+        p := ptr_add(self.base, off)
+        self.used = off + size
+        return p
+    }
+    func free(p: *void) -> void { }
+}
+impl Bump {
+    func stash(xs: int64[]) -> void { }
+}
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func stash(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+func pass<T>(n: int64, using a: Bump, x: T) -> T { return x }
+func keep(h: *Holder, xs: int64[]) -> void {
+    buf: *raw int8 = alloc_bytes(64)
+    mut b := Bump { base: buf, used: 0 }
+    pass(1, b, Sink { h: h }).stash(xs)
+}
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    keep(h, local[0..4])
+}
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: [1, 2] })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

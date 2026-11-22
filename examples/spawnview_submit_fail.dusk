@@ -1,0 +1,21 @@
+// Compile-fail: the submit twin of the spawn capture rule. A pool worker is
+// another thread, so a pointer to a struct with a function field is refused.
+@paradigm procedural
+@import std.concurrent.pool
+
+struct Srv { handler: (int64) -> int64, hits: int64 }
+
+func twice(x: int64) -> int64 { return x * 2 }
+
+func main() -> int32 {
+    pe := pool_start(1)
+    if pe.exists() { return 1 }
+    s: *Srv = alloc(Srv { handler: twice, hits: 0 })
+    se := submit(lambda () -> void {
+        println((*s).hits)
+    })
+    se.ignore()
+    pool_shutdown()
+    free(s)
+    return 0
+}

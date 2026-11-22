@@ -18,6 +18,9 @@
 @import tcesccap
 @import tcesc3
 @import tcfor
+@import tccallcheck
+@import tccall
+@import tcescquiet
 
 func lit_hex_val(b: int64) -> int64 {
     if b >= 48 && b <= 57 { return b - 48 }
@@ -355,10 +358,39 @@ func tuple_has_error(tc: *TypeChecker, tyid: int64) -> bool {
     return false
 }
 
+// The borrow record a single binding takes when no managed rule spoke for it. A `ref`
+// string borrows, and so does a string bound from a call whose verdict borrows. The
+// rider recovers a generic result's borrow type before consulting both summaries, so
+// a scalar container read never receives a borrow record. A string with no verdict writes an
+// empty record when an outer binding of its name holds one, so a fresh string never
+// reads as the borrow it shadows.
+func record_str_borrow(tc: *TypeChecker, name: string, stmt: StmtNode, value: ExprNode, tyid: int64) -> void {
+    if (*tc).types_only { return }
+    mut own: int64 = 0
+    mut resolved: int64 = tyid
+    if value.kind == xk_call() { resolved = borrow_call_ty(tc, value, tyid) }
+    if is_str_ty(tc, resolved) {
+        if (stmt.d & 2) != 0 {
+            own = own_borrow()
+        } else if value.kind == xk_call() {
+            own = str_call_verdict(tc, value)
+        }
+    } else if ty_get((*tc).ty, tyid).kind == tyk_unknown() && value.kind == xk_call() {
+        if !is_scalar_borrow_ty(tc, resolved) {
+            if free_call_arg_aliases(tc, value) || str_call_verdict(tc, value) == own_borrow() { own = own_borrow() }
+        }
+    }
+    if own == 0 && (!is_str_ty(tc, resolved) || own_of(tc, name) == 0) { return }
+    declare_own(tc, name, own)
+}
+
 func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     a: *Ast = (*tc).ast
     b: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a))
     value: ExprNode = vec_get((*a).exprs, stmt.c)
+    // Read the initializer before its name shadows an outer binding
+    mut borrow_ast: int64 = -1
+    if !(*tc).types_only { borrow_ast = borrow_expr_ast(tc, stmt.c) }
     mut tyid: int64 = vt
     if b.ty >= 0 {
         reject_iface_targ_annot(tc, b.ty, value.lo, value.hi)
@@ -395,6 +427,7 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         tyid = harden((*tc).ty, vt)
     }
     declare_one(tc, b, tyid, (stmt.d & 1) != 0, value.lo, value.hi)
+    if !(*tc).types_only { declare_borrow_ast(tc, ast_name(a, b.name), borrow_ast) }
     // A match or if value bound with an inferred type carries only the surface wildcard
     // here, so is_managed_ty cannot see it is managed; consult the ownership verdict the
     // branch walk stored so a borrowed result recorded under the binding rejects a later
@@ -420,6 +453,8 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     }
     if want_own {
         declare_own(tc, ast_name(a, b.name), binding_own(tc, stmt, value, vt, tyid))
+    } else {
+        record_str_borrow(tc, ast_name(a, b.name), stmt, value, tyid)
     }
     record_enum_bind(tc, ast_name(a, b.name), stmt.c, (stmt.d & 1) != 0)
     record_mut_tuple(tc, stmt, b, tyid)
@@ -428,7 +463,9 @@ func single_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
     // of t reads a borrow rather than the owner default.
     if (stmt.d & 2) != 0 { record_ref_member_borrows(tc, ast_name(a, b.name), tyid) }
     link_binding_aliases(tc, ast_name(a, b.name), stmt.c, false)
-    esc: EscPair = value_escape(tc, stmt.c)
+    mut esc: EscPair = value_escape(tc, stmt.c)
+    // A binding annotated with a type that holds no reference keeps no view
+    if written_carries_nothing(tc, b.ty) { esc = EscPair { slice: false, closure: false } }
     set_esc(tc, ast_name(a, b.name), esc.slice, esc.closure)
     record_lambda_let(tc, ast_name(a, b.name), stmt.c)
     record_ptr_borrows(tc, ast_name(a, b.name), stmt.c, tyid)
@@ -453,6 +490,11 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             vec_push(parts, ty_unknown((*tc).ty))
         }
     }
+    // Every string binder of a destructured call takes the call's one verdict: the
+    // summary joins the members of a returned tuple, so it cannot say which member was
+    // read out of an argument.
+    mut call_own: int64 = 0
+    if value.kind == xk_call() { call_own = str_call_verdict(tc, value) }
     for m in 0..stmt.b {
         b: BindNode = vec_get((*a).binds, vec_get((*a).kids, stmt.a + m))
         mut tyid: int64 = vec_get(parts, m)
@@ -522,9 +564,10 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
         // pointer the source still owns. A binder with no ownership to track, a scalar
         // among them, stays inert exactly as `ref n := 7` does: the borrow is written
         // only where this walk would have written a record anyway.
+        if own_member < 0 && call_own != 0 && is_str_ty(tc, tyid) { own_member = call_own }
         mut own_tag: int64 = own_member
         if (stmt.d & 2) != 0 {
-            if is_managed_ty(tc, tyid) || own_member >= 0 { own_tag = own_borrow() }
+            if is_borrowable_ty(tc, tyid) || own_member >= 0 { own_tag = own_borrow() }
         }
         if is_managed_ty(tc, tyid) {
             mut own_v: int64 = own_owner()
@@ -532,6 +575,9 @@ func destructure_bind(tc: *TypeChecker, stmt: StmtNode, vt: int64) -> void {
             declare_own(tc, ast_name(a, b.name), own_v)
         } else if own_tag >= 0 {
             declare_own(tc, ast_name(a, b.name), own_tag)
+        } else if is_str_ty(tc, tyid) && own_of(tc, binder_name) != 0 {
+            // A fresh string binder shadows the record an outer name of its spelling holds
+            declare_own(tc, binder_name, 0)
         }
         if (stmt.d & 2) != 0 { record_ref_member_borrows(tc, binder_name, tyid) }
     }

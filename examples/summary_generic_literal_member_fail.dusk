@@ -1,0 +1,45 @@
+// Compile-fail: a generic helper stores its view through a fresh sink, then points
+// the value of its type parameter at the sink's holder through an argument no binding
+// roots, a member of a struct literal. The value is the caller's sink, so a view of
+// a frame array is refused at the call
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+@import std.vector
+@import std.map
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+struct Cell<T> { item: T }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func gpoint<S>(q: S, h: *Holder) -> void { q.point(h) }
+
+func keepvia<S>(q: S, xs: int64[]) -> void {
+    inner: *Holder = alloc(Holder { rows: heap_rows() })
+    s: *Sink = alloc(Sink { h: inner })
+    s.keep(xs)
+    gpoint(Cell { item: q }.item, inner)
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    q: *Sink = alloc(Sink { h: h })
+    keepvia(q, local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

@@ -1,0 +1,35 @@
+// Compile-fail, wider than the program: the step helper pushes only integers computed
+// from the slice into the output vector, but a helper that pushes into a vector the
+// context holds reads as storing the context into itself, and the vector the function
+// returns shares the context's class with the slice. Passing the output vector to the
+// helper apart from the context, as summary_context_split_output_ok does, is accepted
+@paradigm procedural
+@import std.vector
+
+struct Lexer { src: int64[], pos: int64, out: *Vector<int64> }
+
+func step(lx: *Lexer) -> void {
+    vec_push((*lx).out, (*lx).src[(*lx).pos] * 2)
+    (*lx).pos = (*lx).pos + 1
+}
+
+func tokenize(xs: int64[]) -> *Vector<int64> {
+    o: *Vector<int64> = alloc(vec_new())
+    p: *Lexer = alloc(Lexer { src: xs, pos: 0, out: o })
+    while (*p).pos < 4 { step(p) }
+    free(p)
+    return o
+}
+
+func run() -> *Vector<int64> {
+    buf: int64[4] = [10, 20, 30, 40]
+    return tokenize(buf[0..4])
+}
+
+func main() -> int32 {
+    v: *Vector<int64> = run()
+    println(vec_get(v, 2))
+    vec_free(v)
+    free(v)
+    return 0
+}

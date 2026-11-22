@@ -1,0 +1,34 @@
+@paradigm procedural
+@paradigm functional
+@import std.functional.maybe
+
+struct Rows { rows: int64[] }
+struct Count { n: int64 }
+
+func fresh(xs: int64[]) -> int64[] { return map(xs, lambda (x: int64) -> int64 { return x + 1 }) }
+func rows_after_loop(value: Rows, counts: Count[]) -> int64[] {
+    for value in counts { println(value.n) }
+    return value.rows
+}
+func rows_after_match(value: Rows, count: Maybe<int64>) -> int64[] {
+    match count {
+        Some(value) => { println(value) }
+        None => { }
+    }
+    return value.rows
+}
+// A straight bind still resolves, so a frame view argument may pass through
+func bound_copy(xs: int64[]) -> int64[] {
+    twin := fresh
+    return twin(xs)
+}
+func main() -> int32 {
+    seed: int64[2] = [111, 222]
+    rows: Rows = Rows { rows: fresh(seed[0..2]) }
+    counts: Count[] = map([7], lambda (n: int64) -> Count { return Count { n: n } })
+    println(rows_after_loop(rows, counts)[0])
+    println(rows_after_match(rows, Maybe.Some(8))[1])
+    local: int64[2] = [5, 6]
+    println(bound_copy(local[0..2])[1])
+    return 0
+}

@@ -1,0 +1,20 @@
+// The runtime remembers how far it has measured a string, and a freed block can be
+// handed out again for a shorter string at the same address. Freeing a block makes
+// the runtime measure it afresh, so the shorter string's own end is what an index
+// is held to and the read past it faults.
+@paradigm procedural
+
+@import std.string
+
+func main() -> int32 {
+    src: string = repeat("abcdefghij", 10)
+    s: string = substring(src, 0, 100)
+    println(int64(s[99]))
+    free(s)
+    t: string = substring(src, 0, 97)
+    println(int64(t[96]))
+    println(int64(t[99]))
+    free(t)
+    free(src)
+    return 0
+}

@@ -1,0 +1,36 @@
+// Calls in range and slice bounds that only read run like any other expression and
+// tie nothing to the sink, so the sink stays frame-owned and the view stored through
+// it is legal
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func first_row(s: *Sink) -> int64 { return (*(*s).h).rows[0] - 1 }
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    for i in first_row(s)..2 { println(i) }
+    head: int64[] = local[first_row(s)..2]
+    println(head[0])
+    s.keep(local[0..4])
+    println((*(*s).h).rows[3])
+    println((*h).rows[1])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    return 0
+}

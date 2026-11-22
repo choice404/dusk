@@ -1,0 +1,51 @@
+// Generic helpers whose callbacks push, fold, or put each element of a frame array
+// built from their own parameters into a parameter's container. The elements are the
+// caller's values, never a view of the helper's frame, so it runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+@import std.vector
+@import std.map
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+struct Cell<T> { item: T }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func gpoint<S>(q: S, h: *Holder) -> void { q.point(h) }
+
+func push_all<T>(out: *Vector<T>, a: T, b: T) -> void {
+    both: T[2] = [a, b]
+    foreach(both[0..2], lambda (x: T) -> void { vec_push(out, x) })
+}
+
+func count_into<T>(out: *Vector<T>, a: T, b: T) -> int64 {
+    both: T[2] = [a, b]
+    return fold(both[0..2], 0, lambda (acc: int64, x: T) -> int64 { vec_push(out, x); return acc + 1 })
+}
+
+func put_all<T>(m: *Map<string, T>, a: T, b: T) -> void {
+    both: T[2] = [a, b]
+    foreach(both[0..2], lambda (x: T) -> void { map_put(m, "k", x) })
+}
+
+func main() -> int32 {
+    rows: *Vector<int64[]> = alloc(vec_new())
+    push_all(rows, heap_rows(), heap_rows())
+    println(count_into(rows, heap_rows(), heap_rows()))
+    m: *Map<string, int64[]> = alloc(map_new())
+    put_all(m, heap_rows(), heap_rows())
+    println(vec_len(rows))
+    println(vec_get(rows, 2)[3])
+    println(map_len(m))
+    return 0
+}

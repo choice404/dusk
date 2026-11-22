@@ -1,0 +1,18 @@
+// Compile-fail: a callback returns a Maybe holding a lambda that captures a local
+// array. A function type may hold a view, so a Maybe of one may too, and the helper's
+// call returns the closure that would outlive the array it reads
+@paradigm procedural
+@paradigm functional
+@import std.functional.maybe
+func apply<T>(f: () -> T) -> T { return f() }
+func leak() -> Maybe<() -> int64> {
+    local: int64[4] = [1, 2, 3, 4]
+    return apply(lambda () -> Maybe<() -> int64> { return Maybe.Some(lambda () -> int64 { return local[0] }) })
+}
+func main() -> int32 {
+    match leak() {
+        Some(f) => { println(f()) }
+        None => { println(0) }
+    }
+    return 0
+}

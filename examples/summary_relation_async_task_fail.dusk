@@ -1,0 +1,45 @@
+// Compile-fail: calling an async function makes a task that holds its arguments
+// until the task runs, which may be after the caller returns. The sink handed to the
+// task is given a view of a frame array afterward, so the task may read that view
+// once the frame is gone
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.async.future
+@import std.async.loop
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+async func first_row(s: *Sink) -> int64 { return (*(*s).h).rows[0] }
+
+func start() -> Future<int64> {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    task: Future<int64> = first_row(s)
+    s.keep(local[0..4])
+    return task
+}
+
+async func amain() -> int64 {
+    task: Future<int64> = start()
+    value := await task
+    return value
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    result := async_run(amain())
+    loop_free()
+    println(result)
+    return 0
+}

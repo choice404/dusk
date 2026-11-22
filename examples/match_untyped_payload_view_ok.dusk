@@ -1,0 +1,42 @@
+// The same options over a holder of a slice the heap owns: the binders carry no view
+// of any frame, so returning them is accepted and runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+struct Box<T> { m: Maybe<T> }
+
+func direct() -> *Holder {
+    s: *Holder = alloc(Holder { rows: heap_rows() })
+    m := Maybe.Some(s)
+    match m { Some(y) => { return y } None => { } }
+    return alloc(Holder { rows: heap_rows() })
+}
+
+func boxed() -> *Holder {
+    s: *Holder = alloc(Holder { rows: heap_rows() })
+    b := Box { m: Maybe.Some(s) }
+    match b.m { Some(y) => { return y } None => { } }
+    return alloc(Holder { rows: heap_rows() })
+}
+
+func main() -> int32 {
+    println((*direct()).rows[0])
+    println((*boxed()).rows[1])
+    return 0
+}

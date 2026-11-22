@@ -1,0 +1,32 @@
+// Compile-fail: one branch points the returned sink at the holder of a second sink,
+// and a view of a frame array is then written straight into that holder. Whichever
+// branch runs, the returned sink may view the dead frame, so the return is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func make(tie: bool) -> *Sink {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    t: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    if tie { (*t).h = (*s).h }
+    (*(*s).h).rows = local[0..4]
+    return t
+}
+
+func main() -> int32 {
+    t: *Sink = make(true)
+    println((*(*t).h).rows[0])
+    return 0
+}

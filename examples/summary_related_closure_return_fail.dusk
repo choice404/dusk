@@ -1,0 +1,37 @@
+// Compile-fail: a view of a frame array is written into a sink's holder, and the
+// function returns that holder through a closure it calls on the way out
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func outer() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = fresh()
+    get := lambda () -> *Holder { return (*s).h }
+    (*(*s).h).rows = local[0..4]
+    return get()
+}
+
+func main() -> int32 {
+    r: *Holder = outer()
+    println((*r).rows[0])
+    return 0
+}

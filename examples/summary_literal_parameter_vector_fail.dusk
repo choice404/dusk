@@ -1,0 +1,21 @@
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+// A local built from a struct literal that embeds a parameter's vector reaches that
+// vector, so a helper pushing the local's frame slice into it is refused even though
+// the call names only the local.
+struct Lexer { src: int64[], toks: *Vector<int64[]> }
+func keep(lx: *Lexer) -> void { vec_push((*lx).toks, (*lx).src) }
+func fillit(toks: *Vector<int64[]>) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    lx: *Lexer = alloc(Lexer { src: local[0..4], toks: toks })
+    keep(lx)
+    free(lx)
+}
+func main() -> int32 {
+    toks: *Vector<int64[]> = alloc(vec_new())
+    fillit(toks)
+    println(vec_get(toks, 0)[0])
+    return 0
+}

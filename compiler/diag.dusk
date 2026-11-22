@@ -495,7 +495,8 @@ func render_local_in(src: string, n: int64, t: *LineTable, d: SpanDiagnostic, lo
     return render_at(src, n, loc_in(src, n, local, t), d, local)
 }
 
-// The `path: ` header in front of a rendered file-local diagnostic.
+// The `path: ` header in front of a rendered file-local diagnostic. Both strings
+// are only read; the caller frees the rendered local text it passed.
 func with_path(path: string, local: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, path)
@@ -504,17 +505,22 @@ func with_path(path: string, local: string) -> string {
     out: string = substring(sb_cstr(b), 0, sb_size(b))
     sb_free(b)
     free(b)
-    free(local)
     return out
 }
 
 func render_file_diag(path: string, src: string, n: int64, d: SpanDiagnostic) -> string {
-    return with_path(path, render_local(src, n, d, d.lo))
+    local: string = render_local(src, n, d, d.lo)
+    out: string = with_path(path, local)
+    free(local)
+    return out
 }
 
 // The same render through the declaring file's line table.
 func render_file_diag_in(path: string, src: string, n: int64, t: *LineTable, d: SpanDiagnostic) -> string {
-    return with_path(path, render_local_in(src, n, t, d, d.lo))
+    local: string = render_local_in(src, n, t, d, d.lo)
+    out: string = with_path(path, local)
+    free(local)
+    return out
 }
 
 // Renders a program-wide span against the loaded file whose base is greatest but
@@ -525,7 +531,10 @@ export func render_diag(files: *Vector<FileSrc>, d: SpanDiagnostic) -> string {
         f: FileSrc = vec_get(files, i)
         if d.lo >= f.base {
             local_d: SpanDiagnostic = span_diag(d.lo, d.hi, d.msg)
-            return with_path(f.path, render_local_in(f.src, f.len, f.lines, local_d, d.lo - f.base))
+            local: string = render_local_in(f.src, f.len, f.lines, local_d, d.lo - f.base)
+            out: string = with_path(f.path, local)
+            free(local)
+            return out
         }
         i--
     }

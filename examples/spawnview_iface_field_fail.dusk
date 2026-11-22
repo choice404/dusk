@@ -1,0 +1,30 @@
+// Compile-fail: a spawned lambda captures a pointer to a struct with an
+// interface field. An interface value may view the frame that built it, so a
+// pointer that reaches one cannot cross to another thread.
+@paradigm procedural
+@paradigm oop
+
+interface Shape {
+    area() -> int64
+}
+
+struct Square { side: int64 }
+
+impl Shape for Square {
+    func area() -> int64 { return self.side * self.side }
+}
+
+struct Slot { shape: Shape, tag: int64 }
+
+func main() -> int32 {
+    sq: Square = Square { side: 4 }
+    p: *Slot = alloc(Slot { shape: sq, tag: 1 })
+    t, e := spawn(lambda () -> void {
+        println((*p).tag)
+    })
+    if e.exists() { return 1 }
+    je := join(t)
+    je.ignore()
+    free(p)
+    return 0
+}

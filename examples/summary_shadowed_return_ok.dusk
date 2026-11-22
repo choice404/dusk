@@ -1,0 +1,39 @@
+// The same shadowing arm with a heap slice stored: the returned holder carries
+// nothing of the frame, so it is accepted and runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func outer() -> *Holder {
+    s: *Sink = fresh()
+    x: int64 = 4
+    println(x)
+    m: Maybe<*Holder> = Maybe.Some((*s).h)
+    (*(*s).h).rows = heap_rows()
+    match m {
+        Some(x) => { return x }
+        None => { return alloc(Holder { rows: heap_rows() }) }
+    }
+}
+
+func main() -> int32 {
+    r: *Holder = outer()
+    println((*r).rows[0])
+    return 0
+}

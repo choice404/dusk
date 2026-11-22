@@ -3495,7 +3495,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.17.2\n
+out dusk 1.17.3\n
 argv version
 code 0
 ---
@@ -3607,7 +3607,7 @@ err_has expected at least 2 argument(s), found 1
 # 1.4.0 stdlib: std.os errno bridge (cool_errno + strerror), std.math (libm
 # scalar bindings plus pi/e/is_nan/is_inf), and std.rand (xoshiro256** seeded
 # through splitmix64, plus a getrandom backed OS seed). See docs/stdlib.md.
-
+---
 test errno_read_reports_errno_and_strerror
 mode run
 file examples/errno_read.dusk
@@ -4549,13 +4549,6 @@ test launder_borrow
 mode run_raw
 file examples/launder_borrow.dusk
 out 42\n
-ok false
-err_has fatal: use of a freed or stale pointer at
----
-test holeb_unannot_runtime
-mode run_raw
-file examples/holeb_unannot_runtime.dusk
-out 5\n
 ok false
 err_has fatal: use of a freed or stale pointer at
 ---
@@ -8135,16 +8128,6 @@ out 200\n
 ok false
 err_has use of a freed or stale pointer
 ---
-# A headers_get value is a borrow into the list. The checker tracks no ownership on a
-# string, so the free of the borrow passes check, and the backstop is the runtime: the
-# list's own free of the same block in headers_free is a named double free.
-test http_header_value_free_faults_as_a_double_free
-mode run_raw
-file examples/http_header_value_double_free.dusk
-out b\n
-ok false
-err_has fatal: double free
----
 # std.time's IMF fixdate, pinned on the instant RFC 9110 uses as its example.
 test time_imf_fixdate_rfc_example
 mode run
@@ -8607,3 +8590,2288 @@ mode run
 file examples/http_wire_request_line_target_rules.dusk
 out OPTIONS|*||1\nhttp: bad target\nhttp: bad target\nhttp: bad target\nhttp: bad target\nhttp: bad target\nOPTIONS|/a||0\n
 ---
+# A string index is held to the string's length, the offset of its first NUL, and
+# an index past it faults by name and line.
+test a_string_index_past_the_end_faults
+mode run_raw
+file examples/strindex_oob.dusk
+out 99\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_oob.dusk:9
+---
+test a_negative_string_index_faults
+mode run_raw
+file examples/strindex_negative.dusk
+out 99\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_negative.dusk:12
+---
+test a_literal_string_index_past_the_end_faults
+mode run_raw
+file examples/strindex_literal.dusk
+out 100\n117\n115\n107\n0\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_literal.dusk:9
+---
+test a_string_index_past_an_embedded_nul_faults
+mode run_raw
+file examples/strindex_nul.dusk
+out 0\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_nul.dusk:9
+---
+test a_string_index_at_its_length_reads_the_nul
+mode run
+file examples/strindex_at_len.dusk
+out 0\n5\n0\n
+---
+# A walk over a long string costs one pass in total, so four MiB walked three ways
+# finishes far inside the per record cap.
+test a_long_string_walk_is_linear
+mode run
+file examples/strindex_long_walk.dusk
+out 4194304\n4194304\n421527552\n
+---
+test two_long_strings_walked_together
+mode run
+file examples/strindex_two_walks.dusk
+out true\ntrue\n0\n0\nfalse\n-1\n
+---
+# A freed block handed out again for a shorter string is measured afresh.
+test a_recycled_block_is_measured_again
+mode run_raw
+file examples/strindex_recycled.dusk
+out 106\n103\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_recycled.dusk:16
+---
+test a_view_that_grew_does_not_fault
+mode run
+file examples/strindex_view_grew.dusk
+out 65\n0\n66\n67\n0\n
+---
+test a_raw_char_index_is_not_a_string_index
+mode run
+file examples/strindex_raw.dusk
+out 1160\n80\n
+---
+test a_null_string_index_faults_by_name
+mode run_raw
+file examples/strindex_null.dusk
+out 
+ok false
+err_has fatal: dereference of a null pointer at examples/strindex_null.dusk:15
+---
+test a_source_with_a_nul_byte_is_refused
+mode check_fail
+file examples/strindex_nulsrc.dusk
+err_has examples/strindex_nulsrc.dusk: read error: source contains a NUL byte
+err_absent unexpected character
+---
+# A headers_get value is a borrow into the list, which frees it in headers_free, so
+# freeing it is refused at check rather than faulting as a double free at run time.
+test http_header_value_free_is_rejected
+mode check_fail
+file examples/http_header_value_double_free.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+# An unannotated binding of a call that reads its result back out of a container is a
+# borrow even while its surface type is still open, so the free is refused at check.
+test free_of_an_unannotated_container_read_is_rejected
+mode check_fail
+file examples/holeb_unannot_runtime.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+# A string parameter, a copy of one, and a string a spawned lambda captures are borrows:
+# the caller or the spawning frame still holds the text and frees it.
+test free_of_a_string_parameter_is_rejected
+mode check_fail
+file examples/strborrow_free_param_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test move_of_a_string_parameter_is_rejected
+mode check_fail
+file examples/strborrow_move_param_fail.dusk
+err_has cannot move a borrowed string; only its owner can be moved
+---
+test free_of_an_alias_of_a_string_parameter_is_rejected
+mode check_fail
+file examples/strborrow_free_alias_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test free_of_a_string_captured_by_a_spawn_is_rejected
+mode check_fail
+file examples/strborrow_spawn_capture_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+# A string a call reads out of an argument, or hands back as a borrowed argument, is a
+# borrow of what that argument holds: a field read through a pointer, a passthrough of a
+# borrowed parameter, a builder's view of its buffer, and a request's view of its body.
+test free_of_a_string_read_out_of_a_struct_by_a_call_is_rejected
+mode check_fail
+file examples/strborrow_field_call_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test free_of_a_passthrough_of_a_borrowed_string_is_rejected
+mode check_fail
+file examples/strborrow_passthrough_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test free_of_a_builder_view_is_rejected
+mode check_fail
+file examples/strborrow_builder_view_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test free_of_a_request_text_view_is_rejected
+mode check_fail
+file examples/strborrow_request_text_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+# Fresh text still frees: a substring, a concatenation, an f-string, a vec_take, a
+# passthrough of the caller's own string, a field freed through a parameter, and a mut
+# string that began as a literal and was reassigned.
+test fresh_strings_still_free
+mode run
+file examples/strborrow_fresh_ok.dusk
+out hello\nhello!\nn is 7\ntaken\nmine\nreassigned\n
+---
+# A call through a closure value has no summary, so its borrowed result passes check;
+# the runtime still names the second free.
+test a_string_through_a_closure_still_faults_at_run_time
+mode run_raw
+file examples/strborrow_closure_residual.dusk
+out hello\n
+ok false
+err_has fatal: double free
+---
+# The size classed heap. A freed block serves any later request of its class, so retained
+# memory is bounded per class; a stale pointer still faults after a reuse at another size, and
+# the collector scans the size a reused block's current tenant asked for.
+test freed_blocks_of_every_size_do_not_accumulate
+mode run
+file examples/heapclass_grow.dusk
+out 2146467960\n
+---
+test a_stale_pointer_faults_after_its_block_is_reused_at_another_size
+mode run_raw
+file examples/heapclass_stale.dusk
+out 4\n50\n
+ok false
+err_has fatal: use of a freed or stale pointer at examples/heapclass_stale.dusk:30
+---
+test a_collected_reference_in_a_reused_block_survives_a_collection
+mode run
+file examples/heapclass_gcroot.dusk
+out 0\n100\n
+---
+# A spawn or submit lambda cannot capture a pointer whose target reaches a slice, a
+# closure, or an interface value, through fields, payloads, nested and raw pointers, and
+# generic arguments: either thread could store a view of its own frame there after the
+# capture was judged, so the type decides, not what the field holds today.
+test spawn_capture_of_a_pointer_to_a_function_field_is_rejected
+mode check_fail
+file examples/spawnview_func_field_fail.dusk
+err_has spawn cannot capture 's'; it points at a value that holds a slice, closure, or interface value, which may come to view a thread's frame, so share plain data or send it through a channel
+---
+test spawn_capture_of_a_pointer_to_a_slice_field_is_rejected
+mode check_fail
+file examples/spawnview_slice_field_fail.dusk
+err_has spawn cannot capture 'r'; it points at a value that holds a slice, closure, or interface value
+---
+test spawn_capture_of_a_pointer_to_an_interface_field_is_rejected
+mode check_fail
+file examples/spawnview_iface_field_fail.dusk
+err_has spawn cannot capture 'p'; it points at a value that holds a slice, closure, or interface value
+---
+test submit_capture_of_a_pointer_to_a_function_field_is_rejected
+mode check_fail
+file examples/spawnview_submit_fail.dusk
+err_has submit cannot capture 's'; it points at a value that holds a slice, closure, or interface value, which may come to view a thread's frame, so share plain data or send it through a channel
+---
+test spawn_capture_of_a_pointer_behind_a_pointer_is_rejected
+mode check_fail
+file examples/spawnview_nested_ptr_fail.dusk
+err_has spawn cannot capture 'l'; it points at a value that holds a slice, closure, or interface value
+---
+test spawn_capture_of_a_raw_pointer_to_a_function_field_is_rejected
+mode check_fail
+file examples/spawnview_raw_ptr_fail.dusk
+err_has spawn cannot capture 'rp'; it points at a value that holds a slice, closure, or interface value
+---
+test spawn_capture_of_a_vector_of_closures_is_rejected
+mode check_fail
+file examples/spawnview_generic_fail.dusk
+err_has spawn cannot capture 'fs'; it points at a value that holds a slice, closure, or interface value
+---
+test spawn_capture_of_plain_shared_data_still_runs
+mode run
+file examples/spawnview_plain_ok.dusk
+out 4\nbeta\ngamma\n3\n
+---
+# A lambda cannot store a view of its own frame, a closure it builds or a slice of its own
+# array, into memory a captured binding reaches: the capture outlives the lambda's frame
+# the way a caller's object outlives a callee's. A closure built inside the lambda keeps
+# its environment on the lambda's frame even when it captures only enclosing names.
+test a_lambda_storing_its_own_closure_through_a_capture_is_rejected
+mode check_fail
+file examples/lamstore_closure_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 's'
+---
+test a_lambda_storing_a_slice_of_its_local_through_a_capture_is_rejected
+mode check_fail
+file examples/lamstore_slice_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 'c'
+---
+test a_lambda_storing_a_closure_it_builds_over_a_capture_is_rejected
+mode check_fail
+file examples/lamstore_capture_closure_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 's'
+---
+test a_lambda_storing_heap_data_through_a_capture_still_runs
+mode run
+file examples/lamstore_heap_ok.dusk
+out 50\n80\n101\n9\n
+---
+
+---
+test capture_alias_frame_fail
+mode check_fail
+file examples/capture_alias_frame_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 'cell'
+---
+test capture_alias_heap_ok
+mode run
+file examples/capture_alias_heap_ok.dusk
+out 7\n110\n220\n
+---
+test capture_call_frame_fail
+mode check_fail
+file examples/capture_call_frame_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 'cells'
+---
+test capture_projection_frame_fail
+mode check_fail
+file examples/capture_projection_frame_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 'outer'
+---
+test capture_tuple_frame_fail
+mode check_fail
+file examples/capture_tuple_frame_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 'holders'
+---
+test parameter_projection_frame_fail
+mode check_fail
+file examples/parameter_projection_frame_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_carriers_ok
+mode run
+file examples/summary_carriers_ok.dusk
+out hello\n7\n110\n220\nhello\n
+---
+test summary_enum_frame_fail
+mode check_fail
+file examples/summary_enum_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_map_borrow_fail
+mode check_fail
+file examples/summary_map_borrow_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test summary_map_bound_fail
+mode check_fail
+file examples/summary_map_bound_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test summary_map_frame_fail
+mode check_fail
+file examples/summary_map_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_map_inferred_fail
+mode check_fail
+file examples/summary_map_inferred_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test summary_method_borrow_fail
+mode check_fail
+file examples/summary_method_borrow_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test summary_method_direct_fail
+mode check_fail
+file examples/summary_method_direct_fail.dusk
+err_has cannot free a call result that may alias its arguments; vec_take or map_take removes an element as its owner
+---
+test summary_method_frame_fail
+mode check_fail
+file examples/summary_method_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_method_wrapper_fail
+mode check_fail
+file examples/summary_method_wrapper_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_struct_borrow_fail
+mode check_fail
+file examples/summary_struct_borrow_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test summary_tuple_borrow_fail
+mode check_fail
+file examples/summary_tuple_borrow_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_generic_fail
+mode check_fail
+file examples/strborrow_generic_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_generic_annotated_fail
+mode check_fail
+file examples/strborrow_generic_annotated_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_generic_direct_fail
+mode check_fail
+file examples/strborrow_generic_direct_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_generic_nested_fail
+mode check_fail
+file examples/strborrow_generic_nested_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_generic_alias_fail
+mode check_fail
+file examples/strborrow_generic_alias_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_aggregate_struct_fail
+mode check_fail
+file examples/strborrow_aggregate_struct_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_aggregate_array_fail
+mode check_fail
+file examples/strborrow_aggregate_array_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_aggregate_slice_fail
+mode check_fail
+file examples/strborrow_aggregate_slice_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_aggregate_tuple_fail
+mode check_fail
+file examples/strborrow_aggregate_tuple_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_aggregate_enum_fail
+mode check_fail
+file examples/strborrow_aggregate_enum_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_aggregate_maybe_fail
+mode check_fail
+file examples/strborrow_aggregate_maybe_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test borrow_generic_managed_fail
+mode check_fail
+file examples/borrow_generic_managed_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test strborrow_generic_ok
+mode run
+file examples/strborrow_generic_ok.dusk
+out hello\nhello\nfresh\ntaken\n
+---
+test strborrow_aggregate_ok
+mode run
+file examples/strborrow_aggregate_ok.dusk
+out held\nheld\nheld\nheld\nheld\nfresh\n
+---
+test borrow_scalar_move_ok
+mode run
+file examples/borrow_scalar_move_ok.dusk
+out 42\n40\n40\n7\n9\n
+---
+test strborrow_generic_rebind_fail
+mode check_fail
+file examples/strborrow_generic_rebind_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+# A string that a method, an interface method, a function typed field, or a map,
+# filter, or fold callback returns keeps its string type on the ground pass, so an
+# index over it is a string index and the program builds.
+test a_method_string_result_indexes_as_a_string
+mode run
+file examples/strindex_method.dusk
+out 98\n0\n
+---
+test a_pointer_receiver_method_string_result_indexes_as_a_string
+mode run
+file examples/strindex_method_ptr.dusk
+out 98\n99\n
+---
+test a_destructured_method_tuple_string_indexes_as_a_string
+mode run
+file examples/strindex_method_tuple.dusk
+out 98\n
+---
+test a_method_string_result_through_an_alias_indexes_as_a_string
+mode run
+file examples/strindex_method_alias.dusk
+out 98\n98\n
+---
+test a_method_string_result_on_any_receiver_indexes_as_a_string
+mode run
+file examples/strindex_method_receiver.dusk
+out 99\n120\n101\n105\n106\n98\n
+---
+test an_interface_method_string_result_indexes_as_a_string
+mode run
+file examples/strindex_iface_method.dusk
+out 98\n99\n97\n
+---
+test a_function_field_string_result_indexes_as_a_string
+mode run
+file examples/strindex_field_call.dusk
+out 98\n
+---
+test a_map_result_string_element_indexes_as_a_string
+mode run
+file examples/strindex_map_result.dusk
+out 98\n101\n102\n97\n
+---
+test a_filter_result_string_element_indexes_as_a_string
+mode run
+file examples/strindex_filter_result.dusk
+out 101\n102\n99\n
+---
+test a_fold_string_result_indexes_as_a_string
+mode run
+file examples/strindex_fold_result.dusk
+out 105\n
+---
+test a_reduce_string_result_indexes_as_a_string
+mode run
+file examples/strindex_reduce_result.dusk
+out 104\n
+---
+# Past its end, a string a call returns faults by name and line like any string.
+test a_method_string_result_index_past_the_end_faults
+mode run_raw
+file examples/strindex_method_oob.dusk
+out 99\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_method_oob.dusk:19
+---
+test an_interface_method_string_result_index_past_the_end_faults
+mode run_raw
+file examples/strindex_iface_method_oob.dusk
+out 97\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_iface_method_oob.dusk:18
+---
+test a_map_result_string_element_index_past_the_end_faults
+mode run_raw
+file examples/strindex_map_result_oob.dusk
+out 103\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_map_result_oob.dusk:13
+---
+# A *raw char that a call returns is a pointer with no length, so an index through it
+# stays unchecked.
+test a_raw_char_call_result_is_not_a_string_index
+mode run
+file examples/strindex_call_raw.dusk
+out 90\n90\n90\n90\n90\n90\n90\n
+---
+test spawn_capture_of_a_channel_with_pointer_to_slice_record_runs
+mode run
+file examples/spawnview_channel_worker.dusk
+out 42\n
+---
+test spawn_capture_of_the_channel_element_pointer_is_still_rejected
+mode check_fail
+file examples/spawnview_channel_element_direct_fail.dusk
+err_has spawn cannot capture 'j'; it points at a value that holds a slice, closure, or interface value, which may come to view a thread's frame, so share plain data or send it through a channel
+---
+test spawn_capture_of_a_pointer_to_a_channel_with_slice_record_runs
+mode run
+file examples/spawnview_channel_pointer_worker.dusk
+out 42\n
+---
+test a_recycled_block_discards_a_post_free_measurement
+mode run_raw
+file examples/strindex_recycled_poison.dusk
+out 106\n105\n103\n
+ok false
+err_has fatal: index out of bounds at examples/strindex_recycled_poison.dusk:15
+---
+test strborrow_generic_field_fail
+mode check_fail
+file examples/strborrow_generic_field_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_shadow_string_fail
+mode check_fail
+file examples/strborrow_shadow_string_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test strborrow_shadow_parameter_fail
+mode check_fail
+file examples/strborrow_shadow_parameter_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test borrow_shadow_pointer_fail
+mode check_fail
+file examples/borrow_shadow_pointer_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test strborrow_function_method_name_fail
+mode check_fail
+file examples/strborrow_function_method_name_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test borrow_aggregate_move_fail
+mode check_fail
+file examples/borrow_aggregate_move_fail.dusk
+err_has cannot move a call result that may alias its arguments; vec_take or map_take removes an element as its owner
+---
+test borrow_shadow_pointer_ok
+mode run
+file examples/borrow_shadow_pointer_ok.dusk
+out 7\n
+---
+test borrow_shadow_scalar_ok
+mode run
+file examples/borrow_shadow_scalar_ok.dusk
+out 42\n42\n
+---
+test borrow_function_method_name_ok
+mode run
+file examples/borrow_function_method_name_ok.dusk
+out 7\n7\n
+---
+test strborrow_generic_field_ok
+mode run
+file examples/strborrow_generic_field_ok.dusk
+out held\n42\n42\n
+---
+test strborrow_shadow_read_ok
+mode run
+file examples/strborrow_shadow_read_ok.dusk
+out held\nheld\n42\n
+---
+test borrow_aggregate_move_ok
+mode run
+file examples/borrow_aggregate_move_ok.dusk
+out owned\n7\n
+---
+test strborrow_local_callee_fail
+mode check_fail
+file examples/strborrow_local_callee_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test strborrow_local_callee_ok
+mode run
+file examples/strborrow_local_callee_ok.dusk
+out held\n
+---
+test summary_chain_frame_fail
+mode check_fail
+file examples/summary_chain_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_vector_receiver_frame_fail
+mode check_fail
+file examples/summary_vector_receiver_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_generic_receiver_frame_fail
+mode check_fail
+file examples/summary_generic_receiver_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_conditional_receiver_frame_fail
+mode check_fail
+file examples/summary_conditional_receiver_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_interface_receiver_frame_fail
+mode check_fail
+file examples/summary_interface_receiver_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_interface_parameter_frame_fail
+mode check_fail
+file examples/summary_interface_parameter_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_tuple_parameter_frame_fail
+mode check_fail
+file examples/summary_tuple_parameter_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_shadow_method_frame_fail
+mode check_fail
+file examples/summary_shadow_method_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_shadow_field_frame_fail
+mode check_fail
+file examples/summary_shadow_field_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_chain_borrow_fail
+mode check_fail
+file examples/summary_chain_borrow_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test summary_vector_receiver_borrow_fail
+mode check_fail
+file examples/summary_vector_receiver_borrow_fail.dusk
+err_has cannot free a borrowed pointer; only its owner frees it
+---
+test summary_constructor_borrow_fail
+mode check_fail
+file examples/summary_constructor_borrow_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test summary_receiver_paths_ok
+mode run
+file examples/summary_receiver_paths_ok.dusk
+out 11\n11\n11\n11\n11\n11\n11\n11\n
+---
+test summary_shadow_scope_ok
+mode run
+file examples/summary_shadow_scope_ok.dusk
+out 7\n111\n8\n111\n
+---
+test summary_unwrap_fresh_ok
+mode run
+file examples/summary_unwrap_fresh_ok.dusk
+out abc\n3\nd\nfresh\n
+---
+test summary_receiver_borrow_ok
+mode run
+file examples/summary_receiver_borrow_ok.dusk
+out hello\nhello\nhello\n
+---
+test summary_shadow_loop_frame_fail
+mode check_fail
+file examples/summary_shadow_loop_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_shadow_arm_frame_fail
+mode check_fail
+file examples/summary_shadow_arm_frame_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_shadow_bind_frame_fail
+mode check_fail
+file examples/summary_shadow_bind_frame_fail.dusk
+err_has 'apply' sends 'local' across a channel, but it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data
+---
+test summary_shadow_function_frame_fail
+mode check_fail
+file examples/summary_shadow_function_frame_fail.dusk
+err_has 'apply' sends 'local' across a channel, but it holds a view of the sending frame, which the receiver outlives; move the backing to the heap or send heap owned data
+---
+test summary_shadow_binder_ok
+mode run
+file examples/summary_shadow_binder_ok.dusk
+out 7\n112\n8\n223\n7\n
+---
+test summary_interface_store_frame_fail
+mode check_fail
+file examples/summary_interface_store_frame_fail.dusk
+err_has argument 1's view is stored into argument 2 and may outlive this frame
+---
+test summary_chain_store_frame_fail
+mode check_fail
+file examples/summary_chain_store_frame_fail.dusk
+err_has argument 1's view is stored into argument 2 and may outlive this frame
+---
+test summary_interface_borrow_fail
+mode check_fail
+file examples/summary_interface_borrow_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test summary_conditional_borrow_fail
+mode check_fail
+file examples/summary_conditional_borrow_fail.dusk
+err_has cannot free a borrowed string; only its owner frees it
+---
+test summary_interface_receiver_ok
+mode run
+file examples/summary_interface_receiver_ok.dusk
+out 222\n111\n333\nabc\nx\n
+---
+test strindex_receiver_vecderef
+mode run
+file examples/strindex_receiver_vecderef.dusk
+out 98\n
+---
+test strindex_receiver_vecderef_oob
+mode run_raw
+file examples/strindex_receiver_vecderef_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_vecderef_oob.dusk:
+---
+test strindex_receiver_derefcall
+mode run
+file examples/strindex_receiver_derefcall.dusk
+out 98\n
+---
+test strindex_receiver_derefcall_oob
+mode run_raw
+file examples/strindex_receiver_derefcall_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_derefcall_oob.dusk:
+---
+test strindex_receiver_callfield
+mode run
+file examples/strindex_receiver_callfield.dusk
+out 98\n
+---
+test strindex_receiver_callfield_oob
+mode run_raw
+file examples/strindex_receiver_callfield_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_callfield_oob.dusk:
+---
+test strindex_receiver_vecfield
+mode run
+file examples/strindex_receiver_vecfield.dusk
+out 98\n
+---
+test strindex_receiver_vecfield_oob
+mode run_raw
+file examples/strindex_receiver_vecfield_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_vecfield_oob.dusk:
+---
+test strindex_receiver_conditional
+mode run
+file examples/strindex_receiver_conditional.dusk
+out 98\n
+---
+test strindex_receiver_conditional_oob
+mode run_raw
+file examples/strindex_receiver_conditional_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_conditional_oob.dusk:
+---
+test strindex_receiver_iface_conditional
+mode run
+file examples/strindex_receiver_iface_conditional.dusk
+out 98\n
+---
+test strindex_receiver_iface_conditional_oob
+mode run_raw
+file examples/strindex_receiver_iface_conditional_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_iface_conditional_oob.dusk:
+---
+test strindex_receiver_match
+mode run
+file examples/strindex_receiver_match.dusk
+out 98\n
+---
+test strindex_receiver_match_oob
+mode run_raw
+file examples/strindex_receiver_match_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_match_oob.dusk:
+---
+test strindex_receiver_if
+mode run
+file examples/strindex_receiver_if.dusk
+out 98\n
+---
+test strindex_receiver_if_oob
+mode run_raw
+file examples/strindex_receiver_if_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_if_oob.dusk:
+---
+test strindex_receiver_iface_if
+mode run
+file examples/strindex_receiver_iface_if.dusk
+out 98\n
+---
+test strindex_receiver_iface_if_oob
+mode run_raw
+file examples/strindex_receiver_iface_if_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_iface_if_oob.dusk:
+---
+test strindex_receiver_index
+mode run
+file examples/strindex_receiver_index.dusk
+out 98\n
+---
+test strindex_receiver_index_oob
+mode run_raw
+file examples/strindex_receiver_index_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_index_oob.dusk:
+---
+test strindex_receiver_iface_index
+mode run
+file examples/strindex_receiver_iface_index.dusk
+out 98\n
+---
+test strindex_receiver_iface_index_oob
+mode run_raw
+file examples/strindex_receiver_iface_index_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_iface_index_oob.dusk:
+---
+test strindex_receiver_pointer_index
+mode run
+file examples/strindex_receiver_pointer_index.dusk
+out 98\n
+---
+test strindex_receiver_pointer_index_oob
+mode run_raw
+file examples/strindex_receiver_pointer_index_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_pointer_index_oob.dusk:
+---
+test strindex_receiver_iface_match
+mode run
+file examples/strindex_receiver_iface_match.dusk
+out 98\n
+---
+test strindex_receiver_iface_match_oob
+mode run_raw
+file examples/strindex_receiver_iface_match_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_iface_match_oob.dusk:
+---
+test strindex_receiver_collector
+mode run
+file examples/strindex_receiver_collector.dusk
+out 98\n
+---
+test strindex_receiver_collector_oob
+mode run_raw
+file examples/strindex_receiver_collector_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_collector_oob.dusk:
+---
+test strindex_receiver_derefcall_raw
+mode run
+file examples/strindex_receiver_derefcall_raw.dusk
+out 99\n
+---
+test strindex_receiver_callfield_raw
+mode run
+file examples/strindex_receiver_callfield_raw.dusk
+out 99\n
+---
+test strindex_receiver_conditional_raw
+mode run
+file examples/strindex_receiver_conditional_raw.dusk
+out 99\n
+---
+test strindex_receiver_iface_conditional_raw
+mode run
+file examples/strindex_receiver_iface_conditional_raw.dusk
+out 99\n
+---
+test strindex_receiver_pointer_index_raw
+mode run
+file examples/strindex_receiver_pointer_index_raw.dusk
+out 99\n
+
+---
+test strindex_receiver_mixed_conditional
+mode run
+file examples/strindex_receiver_mixed_conditional.dusk
+out 98\n
+---
+test strindex_receiver_mixed_conditional_oob
+mode run_raw
+file examples/strindex_receiver_mixed_conditional_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_mixed_conditional_oob.dusk:
+---
+test strindex_receiver_mixed_conditional_raw
+mode run
+file examples/strindex_receiver_mixed_conditional_raw.dusk
+out 99\n
+---
+test strindex_receiver_mixed_if
+mode run
+file examples/strindex_receiver_mixed_if.dusk
+out 98\n
+---
+test strindex_receiver_mixed_if_oob
+mode run_raw
+file examples/strindex_receiver_mixed_if_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_mixed_if_oob.dusk:
+---
+test strindex_receiver_mixed_if_raw
+mode run
+file examples/strindex_receiver_mixed_if_raw.dusk
+out 99\n
+---
+test strindex_receiver_mixed_match
+mode run
+file examples/strindex_receiver_mixed_match.dusk
+out 98\n
+---
+test strindex_receiver_mixed_match_oob
+mode run_raw
+file examples/strindex_receiver_mixed_match_oob.dusk
+ok false
+err_has fatal: index out of bounds at examples/strindex_receiver_mixed_match_oob.dusk:
+---
+test strindex_receiver_mixed_match_raw
+mode run
+file examples/strindex_receiver_mixed_match_raw.dusk
+out 99\n
+---
+test interface_impl_return_type_must_match
+mode check_fail
+file examples/interface_impl_return_mismatch_fail.dusk
+err_has method 'n' of impl Num for Record returns string but the interface declares int64
+---
+test interface_impl_parameter_type_must_match
+mode check_fail
+file examples/interface_impl_parameter_mismatch_fail.dusk
+err_has parameter 1 of method 'n' in impl Num for Record has type string but the interface declares int64
+---
+test interface_impl_raw_pointer_return_must_match
+mode check_fail
+file examples/interface_impl_raw_string_mismatch_fail.dusk
+err_has method 'name' of impl RawName for Record returns string but the interface declares *raw char
+---
+test matching_interface_impl_signature_runs
+mode run
+file examples/interface_impl_signature_ok.dusk
+out 42\n
+---
+test summary_receiver_store_interface_fail
+mode check_fail
+file examples/summary_receiver_store_interface_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_interface_call_fail
+mode check_fail
+file examples/summary_receiver_store_interface_call_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_interface_field_fail
+mode check_fail
+file examples/summary_receiver_store_interface_field_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_interface_helper_fail
+mode check_fail
+file examples/summary_receiver_store_interface_helper_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_call_fail
+mode check_fail
+file examples/summary_receiver_store_call_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_chain_fail
+mode check_fail
+file examples/summary_receiver_store_chain_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_vector_fail
+mode check_fail
+file examples/summary_receiver_store_vector_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_conditional_fail
+mode check_fail
+file examples/summary_receiver_store_conditional_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_aggregate_fail
+mode check_fail
+file examples/summary_receiver_store_aggregate_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_aggregate_bind_fail
+mode check_fail
+file examples/summary_receiver_store_aggregate_bind_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_concrete_fail
+mode check_fail
+file examples/summary_receiver_store_concrete_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_pointer_fail
+mode check_fail
+file examples/summary_receiver_store_pointer_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_generic_fail
+mode check_fail
+file examples/summary_receiver_store_generic_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_maybe_fail
+mode check_fail
+file examples/summary_receiver_store_maybe_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_store_interface_heap_ok
+mode run
+file examples/summary_receiver_store_interface_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_interface_call_heap_ok
+mode run
+file examples/summary_receiver_store_interface_call_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_interface_field_heap_ok
+mode run
+file examples/summary_receiver_store_interface_field_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_interface_helper_heap_ok
+mode run
+file examples/summary_receiver_store_interface_helper_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_call_heap_ok
+mode run
+file examples/summary_receiver_store_call_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_chain_heap_ok
+mode run
+file examples/summary_receiver_store_chain_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_vector_heap_ok
+mode run
+file examples/summary_receiver_store_vector_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_conditional_heap_ok
+mode run
+file examples/summary_receiver_store_conditional_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_aggregate_heap_ok
+mode run
+file examples/summary_receiver_store_aggregate_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_aggregate_bind_heap_ok
+mode run
+file examples/summary_receiver_store_aggregate_bind_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_concrete_heap_ok
+mode run
+file examples/summary_receiver_store_concrete_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_pointer_heap_ok
+mode run
+file examples/summary_receiver_store_pointer_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_generic_heap_ok
+mode run
+file examples/summary_receiver_store_generic_heap_ok.dusk
+out 111\n
+---
+test summary_receiver_store_maybe_heap_ok
+mode run
+file examples/summary_receiver_store_maybe_heap_ok.dusk
+out 111\n
+---
+test summary_inferred_receiver_vecget_lit_ok
+mode run
+file examples/summary_inferred_receiver_vecget_lit_ok.dusk
+out 4\n
+---
+test summary_inferred_receiver_mut_ok
+mode run
+file examples/summary_inferred_receiver_mut_ok.dusk
+out 4\n
+---
+test summary_inferred_receiver_mapget_ok
+mode run
+file examples/summary_inferred_receiver_mapget_ok.dusk
+out 5\n5\n
+---
+test summary_inferred_receiver_pick_ok
+mode run
+file examples/summary_inferred_receiver_pick_ok.dusk
+out 5\n
+---
+test summary_inferred_receiver_ignore_ok
+mode run
+file examples/summary_inferred_receiver_ignore_ok.dusk
+out 2\n
+---
+test summary_inferred_receiver_vecget_local_ok
+mode run
+file examples/summary_inferred_receiver_vecget_local_ok.dusk
+out 6\n7\n
+---
+test summary_receiver_read_arguments_ok
+mode run
+file examples/summary_receiver_read_arguments_ok.dusk
+out 25\n
+---
+test summary_receiver_custom_ignore_fail
+mode check_fail
+file examples/summary_receiver_custom_ignore_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_inferred_receiver_scope_ok
+mode run
+file examples/summary_inferred_receiver_scope_ok.dusk
+out 2\n9\n2\n2\n
+---
+test summary_store_helper_call_fail
+mode check_fail
+file examples/summary_store_helper_call_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_store_helper_call_heap_ok
+mode run
+file examples/summary_store_helper_call_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_chain_fail
+mode check_fail
+file examples/summary_store_helper_chain_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_store_helper_chain_heap_ok
+mode run
+file examples/summary_store_helper_chain_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_conditional_fail
+mode check_fail
+file examples/summary_store_helper_conditional_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_store_helper_conditional_heap_ok
+mode run
+file examples/summary_store_helper_conditional_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_container_fail
+mode check_fail
+file examples/summary_store_helper_container_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_store_helper_container_heap_ok
+mode run
+file examples/summary_store_helper_container_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_interface_helper_fail
+mode check_fail
+file examples/summary_store_helper_interface_helper_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_store_helper_interface_helper_heap_ok
+mode run
+file examples/summary_store_helper_interface_helper_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_method_wrapper_fail
+mode check_fail
+file examples/summary_store_helper_method_wrapper_fail.dusk
+err_has argument 3's view is stored into argument 2 and may outlive this frame
+---
+test summary_store_helper_method_wrapper_heap_ok
+mode run
+file examples/summary_store_helper_method_wrapper_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_pointer_method_wrapper_fail
+mode check_fail
+file examples/summary_store_helper_pointer_method_wrapper_fail.dusk
+err_has argument 3's view is stored into argument 2 and may outlive this frame
+---
+test summary_store_helper_pointer_method_wrapper_heap_ok
+mode run
+file examples/summary_store_helper_pointer_method_wrapper_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_lambda_wrapper_fail
+mode check_fail
+file examples/summary_store_helper_lambda_wrapper_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test summary_store_helper_lambda_wrapper_heap_ok
+mode run
+file examples/summary_store_helper_lambda_wrapper_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_plain_call_fail
+mode check_fail
+file examples/summary_store_helper_plain_call_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_store_helper_plain_call_heap_ok
+mode run
+file examples/summary_store_helper_plain_call_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_lambda_aggregate_fail
+mode check_fail
+file examples/summary_store_helper_lambda_aggregate_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_store_helper_lambda_aggregate_heap_ok
+mode run
+file examples/summary_store_helper_lambda_aggregate_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_lambda_capture_fail
+mode check_fail
+file examples/summary_store_helper_lambda_capture_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test summary_store_helper_lambda_capture_heap_ok
+mode run
+file examples/summary_store_helper_lambda_capture_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_local_pointer_fail
+mode check_fail
+file examples/summary_store_helper_local_pointer_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_store_helper_local_pointer_heap_ok
+mode run
+file examples/summary_store_helper_local_pointer_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_container_pointer_fail
+mode check_fail
+file examples/summary_store_helper_container_pointer_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_store_helper_container_pointer_heap_ok
+mode run
+file examples/summary_store_helper_container_pointer_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_generic_name_fail
+mode check_fail
+file examples/summary_store_helper_generic_name_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_store_helper_generic_name_heap_ok
+mode run
+file examples/summary_store_helper_generic_name_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_helper_self_store_fail
+mode check_fail
+file examples/summary_store_helper_self_store_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_receiver_branch_if_ok
+mode run
+file examples/summary_receiver_branch_if_ok.dusk
+out 4\n
+---
+test summary_receiver_branch_conditional_ok
+mode run
+file examples/summary_receiver_branch_conditional_ok.dusk
+out 4\n
+---
+test summary_receiver_branch_match_ok
+mode run
+file examples/summary_receiver_branch_match_ok.dusk
+out 4\n
+---
+test summary_receiver_generic_wrapper_ok
+mode run
+file examples/summary_receiver_generic_wrapper_ok.dusk
+out 4\n
+---
+test summary_receiver_branch_conditional_names_ok
+mode run
+file examples/summary_receiver_branch_conditional_names_ok.dusk
+out 4\n
+---
+test summary_receiver_branch_if_names_ok
+mode run
+file examples/summary_receiver_branch_if_names_ok.dusk
+out 4\n
+---
+test summary_receiver_tuple_member_ok
+mode run
+file examples/summary_receiver_tuple_member_ok.dusk
+out 6\n
+---
+test summary_receiver_pointer_receiver_ok
+mode run
+file examples/summary_receiver_pointer_receiver_ok.dusk
+out 1\n
+---
+test summary_receiver_local_mixed_ok
+mode run
+file examples/summary_receiver_local_mixed_ok.dusk
+out 8\n
+---
+test summary_receiver_local_vector_method_ok
+mode run
+file examples/summary_receiver_local_vector_method_ok.dusk
+out 1\n
+---
+test summary_receiver_local_vector_function_ok
+mode run
+file examples/summary_receiver_local_vector_function_ok.dusk
+out 1\n
+---
+test summary_receiver_scalar_lexer_value_ok
+mode run
+file examples/summary_receiver_scalar_lexer_value_ok.dusk
+out 8\n
+---
+test summary_receiver_scalar_lexer_pointer_ok
+mode run
+file examples/summary_receiver_scalar_lexer_pointer_ok.dusk
+out 8\n
+---
+test summary_receiver_scalar_lexer_function_ok
+mode run
+file examples/summary_receiver_scalar_lexer_function_ok.dusk
+out 8\n
+---
+test summary_receiver_branch_slice_ok
+mode run
+file examples/summary_receiver_branch_slice_ok.dusk
+out 6\n
+---
+test summary_receiver_branch_string_slice_ok
+mode run
+file examples/summary_receiver_branch_string_slice_ok.dusk
+out 6\n
+---
+test summary_receiver_local_alloc_ok
+mode run
+file examples/summary_receiver_local_alloc_ok.dusk
+out 1\n
+---
+test summary_receiver_local_literal_ok
+mode run
+file examples/summary_receiver_local_literal_ok.dusk
+out 1\n
+---
+test summary_receiver_local_deref_ok
+mode run
+file examples/summary_receiver_local_deref_ok.dusk
+out 1\n
+---
+test summary_store_nested_alias_field_fail
+mode check_fail
+file examples/summary_store_nested_alias_field_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_store_nested_alias_field_heap_ok
+mode run
+file examples/summary_store_nested_alias_field_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_nested_call_fail
+mode check_fail
+file examples/summary_store_nested_call_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_store_nested_call_heap_ok
+mode run
+file examples/summary_store_nested_call_heap_ok.dusk
+out 12\n111\n
+---
+test summary_store_nested_field_fail
+mode check_fail
+file examples/summary_store_nested_field_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_store_nested_field_heap_ok
+mode run
+file examples/summary_store_nested_field_heap_ok.dusk
+out 12\n111\n
+---
+test summary_repoint_closure_result_fail
+mode check_fail
+file examples/summary_repoint_closure_result_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_repoint_closure_result_method_fail
+mode check_fail
+file examples/summary_repoint_closure_result_method_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_repoint_direct_field_fail
+mode check_fail
+file examples/summary_repoint_direct_field_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_repoint_owner_local_ok
+mode run
+file examples/summary_repoint_owner_local_ok.dusk
+out 222\n333\n1\n
+---
+test summary_repoint_struct_vector_ok
+mode run
+file examples/summary_repoint_struct_vector_ok.dusk
+out 1\n4\n
+---
+test summary_literal_parameter_vector_fail
+mode check_fail
+file examples/summary_literal_parameter_vector_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_lambda_capture_call_fail
+mode check_fail
+file examples/summary_lambda_capture_call_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 's'
+---
+test summary_lambda_capture_handler_fail
+mode check_fail
+file examples/summary_lambda_capture_handler_fail.dusk
+err_has a view of the lambda's frame is stored into a place reachable through the captured 's'
+---
+test summary_repoint_vector_header_fail
+mode check_fail
+file examples/summary_repoint_vector_header_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test defer_fallthrough_basic
+mode run
+file examples/defer_fallthrough_basic.dusk
+out 1\n7\n
+
+---
+test defer_fallthrough_nested_control
+mode run
+file examples/defer_fallthrough_control.dusk
+out if 1\nif done 7\nwhile 2\nwhile done 8\nfor 3\nfor done 9\n
+
+---
+test defer_fallthrough_free_multiple_using
+mode run
+file examples/defer_fallthrough_free.dusk
+out first\nlast\nleaks 0\n
+
+---
+test defer_fallthrough_lambda_method
+mode run
+file examples/defer_fallthrough_callable.dusk
+out 4\nmethod done\nmethod cleanup 4\nleaks 0\n5\nlambda done 5\n
+
+---
+test defer_fallthrough_async_void
+mode run
+file examples/defer_fallthrough_async.dusk
+out async body\nasync resumed\nasync cleanup\nasync done 7\nasync free 7\nleaks 0\n
+
+---
+test defer_fallthrough_return_or_branch
+mode run
+file examples/defer_fallthrough_branch.dusk
+out shadow 1\nreturn\ndone 7\nfallthrough\ndone 7\nboth return done\nboth return done\nfirst\nboth fallthrough done\nsecond\nboth fallthrough done\n
+
+---
+test defer_fallthrough_infinite_loop_ir
+mode run
+file examples/defer_fallthrough_infinite.dusk
+out IR only\nmain done\n
+
+---
+test defer_fallthrough_main
+mode run
+file examples/defer_fallthrough_main.dusk
+out main body\nmain done\n
+---
+test summary_relation_branch_relink_fail
+mode check_fail
+file examples/summary_relation_branch_relink_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_loop_order_fail
+mode check_fail
+file examples/summary_relation_loop_order_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_defer_fail
+mode check_fail
+file examples/summary_relation_defer_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_shadow_fail
+mode check_fail
+file examples/summary_relation_shadow_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_lambda_fail
+mode check_fail
+file examples/summary_relation_lambda_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_returned_fail
+mode check_fail
+file examples/summary_relation_returned_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_direct_store_fail
+mode check_fail
+file examples/summary_relation_direct_store_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_relation_for_binder_fail
+mode check_fail
+file examples/summary_relation_for_binder_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_relation_header_copy_fail
+mode check_fail
+file examples/summary_relation_header_copy_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_relation_header_return_fail
+mode check_fail
+file examples/summary_relation_header_return_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_relation_branch_local_ok
+mode run
+file examples/summary_relation_branch_local_ok.dusk
+out 444\n
+---
+test summary_relation_byval_ctor_ok
+mode run
+file examples/summary_relation_byval_ctor_ok.dusk
+out 444\n
+---
+test summary_relation_byval_method_ok
+mode run
+file examples/summary_relation_byval_method_ok.dusk
+out 4\n
+---
+test summary_relation_closure_owner_ok
+mode run
+file examples/summary_relation_closure_owner_ok.dusk
+out 444\n
+---
+test summary_relation_raw_buffer_ok
+mode run
+file examples/summary_relation_raw_buffer_ok.dusk
+out 222\n
+---
+test summary_relation_sibling_lambda_ok
+mode run
+file examples/summary_relation_sibling_lambda_ok.dusk
+out 111\n
+---
+test summary_relation_range_bound_fail
+mode check_fail
+file examples/summary_relation_range_bound_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_range_bound_ok
+mode run
+file examples/summary_relation_range_bound_ok.dusk
+out 0\n1\n111\n444\n2\n
+---
+test summary_relation_slice_bound_fail
+mode check_fail
+file examples/summary_relation_slice_bound_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_slice_destination_fail
+mode check_fail
+file examples/summary_relation_slice_destination_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_nested_capture_fail
+mode check_fail
+file examples/summary_relation_nested_capture_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test summary_relation_lambda_parameter_fail
+mode check_fail
+file examples/summary_relation_lambda_parameter_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_relation_lambda_local_ok
+mode run
+file examples/summary_relation_lambda_local_ok.dusk
+out 112\n224\n
+---
+test summary_relation_async_task_fail
+mode check_fail
+file examples/summary_relation_async_task_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_async_task_ok
+mode run
+file examples/summary_relation_async_task_ok.dusk
+out 222\n1\n
+---
+test summary_relation_generic_name_fail
+mode check_fail
+file examples/summary_relation_generic_name_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_generic_name_ok
+mode run
+file examples/summary_relation_generic_name_ok.dusk
+out 333\n7\n
+---
+test summary_relation_function_name_fail
+mode check_fail
+file examples/summary_relation_function_name_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_function_name_ok
+mode run
+file examples/summary_relation_function_name_ok.dusk
+out 1\n111\n
+---
+test summary_relation_error_methods_ok
+mode run
+file examples/summary_relation_error_methods_ok.dusk
+out 222\n333\n444\n113\n
+---
+test summary_relation_maybe_ok
+mode run
+file examples/summary_relation_maybe_ok.dusk
+out 222\n1\ntrue\n1\n1\n
+---
+test summary_relation_variant_binder_fail
+mode check_fail
+file examples/summary_relation_variant_binder_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_sibling_scopes_ok
+mode run
+file examples/summary_relation_sibling_scopes_ok.dusk
+out 222\n333\n111\n222\n1\n
+---
+test summary_relation_recursion_ok
+mode run
+file examples/summary_relation_recursion_ok.dusk
+out 2\n1110\n111\n
+---
+test summary_relation_mutual_recursion_fail
+mode check_fail
+file examples/summary_relation_mutual_recursion_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_relation_many_stores_ok
+mode run
+file examples/summary_relation_many_stores_ok.dusk
+out 555\n
+---
+test summary_relation_returned_store_fail
+mode check_fail
+file examples/summary_relation_returned_store_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test summary_relation_returned_store_ok
+mode run
+file examples/summary_relation_returned_store_ok.dusk
+out 222\n1\n
+---
+test summary_relation_many_direct_stores_ok
+mode run
+file examples/summary_relation_many_direct_stores_ok.dusk
+out 555\n
+---
+test summary_related_alias_fail
+mode check_fail
+file examples/summary_related_alias_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_related_alias_ok
+mode run
+file examples/summary_related_alias_ok.dusk
+out 1\n
+---
+test summary_related_defer_fail
+mode check_fail
+file examples/summary_related_defer_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_related_binder_fail
+mode check_fail
+file examples/summary_related_binder_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_related_passthrough_fail
+mode check_fail
+file examples/summary_related_passthrough_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_related_bound_lambda_fail
+mode check_fail
+file examples/summary_related_bound_lambda_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_related_attach_fail
+mode check_fail
+file examples/summary_related_attach_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_related_returned_fail
+mode check_fail
+file examples/summary_related_returned_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test summary_related_returned_root_ok
+mode run
+file examples/summary_related_returned_root_ok.dusk
+out 6\n1\n
+---
+test summary_related_channel_fail
+mode check_fail
+file examples/summary_related_channel_fail.dusk
+err_has 'send_it' sends 'local' across a channel, but it holds a view of the sending frame, which the receiver outlives
+---
+test summary_related_lambda_fail
+mode check_fail
+file examples/summary_related_lambda_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test summary_related_lambda_ok
+mode run
+file examples/summary_related_lambda_ok.dusk
+out 6\n
+---
+test summary_related_push_ok
+mode run
+file examples/summary_related_push_ok.dusk
+out 8\n
+---
+test summary_related_outside_return_fail
+mode check_fail
+file examples/summary_related_outside_return_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_related_outside_return_ok
+mode run
+file examples/summary_related_outside_return_ok.dusk
+out 444\n1\n
+---
+test summary_related_recursion_fail
+mode check_fail
+file examples/summary_related_recursion_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_related_recursion_lambda_fail
+mode check_fail
+file examples/summary_related_recursion_lambda_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test summary_related_recursion_ok
+mode run
+file examples/summary_related_recursion_ok.dusk
+out 222\n333\n1\n
+---
+test summary_related_type_parameter_fail
+mode check_fail
+file examples/summary_related_type_parameter_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_related_type_parameter_ok
+mode run
+file examples/summary_related_type_parameter_ok.dusk
+out 333\n1\n
+---
+test summary_related_variant_name_fail
+mode check_fail
+file examples/summary_related_variant_name_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_related_variant_name_ok
+mode run
+file examples/summary_related_variant_name_ok.dusk
+out 118\n1\n
+---
+test summary_related_match_return_fail
+mode check_fail
+file examples/summary_related_match_return_fail.dusk
+err_has this assignment stores a view of the current frame into memory the function returns; put the backing on the heap
+---
+test summary_related_closure_return_fail
+mode check_fail
+file examples/summary_related_closure_return_fail.dusk
+err_has this assignment stores a view of the current frame into memory the function returns; put the backing on the heap
+---
+test summary_related_match_return_ok
+mode run
+file examples/summary_related_match_return_ok.dusk
+out 222\n1\n
+---
+test summary_tagged_return_fail
+mode check_fail
+file examples/summary_tagged_return_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test summary_tagged_return_ok
+mode run
+file examples/summary_tagged_return_ok.dusk
+out 1\n
+---
+test summary_closure_relink_fail
+mode check_fail
+file examples/summary_closure_relink_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_closure_relink_ok
+mode run
+file examples/summary_closure_relink_ok.dusk
+out 1\n
+---
+test summary_lambda_store_attach_fail
+mode check_fail
+file examples/summary_lambda_store_attach_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_lambda_store_attach_ok
+mode run
+file examples/summary_lambda_store_attach_ok.dusk
+out 222\n1\n
+---
+test summary_call_rooted_store_fail
+mode check_fail
+file examples/summary_call_rooted_store_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_call_rooted_store_ok
+mode run
+file examples/summary_call_rooted_store_ok.dusk
+out 1\n
+---
+test summary_shadowed_return_fail
+mode check_fail
+file examples/summary_shadowed_return_fail.dusk
+err_has this assignment stores a view of the current frame into memory the function returns; put the backing on the heap
+---
+test summary_shadowed_return_ok
+mode run
+file examples/summary_shadowed_return_ok.dusk
+out 4\n1\n
+---
+test match_generic_payload_view_fail
+mode check_fail
+file examples/match_generic_payload_view_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test match_generic_payload_view_ok
+mode run
+file examples/match_generic_payload_view_ok.dusk
+out 3\n
+---
+test summary_closure_fan_ok
+mode run
+file examples/summary_closure_fan_ok.dusk
+out 4\n1\n
+---
+test summary_returned_field_fail
+mode check_fail
+file examples/summary_returned_field_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test summary_returned_field_ok
+mode run
+file examples/summary_returned_field_ok.dusk
+out 222\n
+---
+test summary_callback_param_store_fail
+mode check_fail
+file examples/summary_callback_param_store_fail.dusk
+err_has this call may store a view of the current frame beyond it; put the backing on the heap
+---
+test summary_callback_param_store_ok
+mode run
+file examples/summary_callback_param_store_ok.dusk
+out 1\n
+---
+test summary_generic_param_store_fail
+mode check_fail
+file examples/summary_generic_param_store_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_generic_param_stash_ok
+mode run
+file examples/summary_generic_param_stash_ok.dusk
+out 1\n
+---
+test summary_shadowed_binder_return_fail
+mode check_fail
+file examples/summary_shadowed_binder_return_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test summary_shadowed_binder_return_ok
+mode run
+file examples/summary_shadowed_binder_return_ok.dusk
+out 111\n1\n
+---
+test summary_binder_shadows_param_fail
+mode check_fail
+file examples/summary_binder_shadows_param_fail.dusk
+err_has argument 3's view is stored into argument 1 and may outlive this frame
+---
+test summary_binder_shadows_param_ok
+mode run
+file examples/summary_binder_shadows_param_ok.dusk
+out 118\n1\n
+---
+test match_untyped_payload_view_fail
+mode check_fail
+file examples/match_untyped_payload_view_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test match_untyped_payload_view_ok
+mode run
+file examples/match_untyped_payload_view_ok.dusk
+out 1\n2\n
+---
+test match_untyped_payload_send_fail
+mode check_fail
+file examples/match_untyped_payload_send_fail.dusk
+err_has chan_send cannot send 'y': it holds a view of the sending frame
+---
+test summary_context_self_store_fail
+mode check_fail
+file examples/summary_context_self_store_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test summary_context_push_fail
+mode check_fail
+file examples/summary_context_push_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test summary_context_split_output_ok
+mode run
+file examples/summary_context_split_output_ok.dusk
+out 60\n
+---
+test summary_lambda_param_shadows_param_fail
+mode check_fail
+file examples/summary_lambda_param_shadows_param_fail.dusk
+err_has argument 3's view is stored into argument 1 and may outlive this frame
+---
+test summary_lambda_param_shadows_param_ok
+mode run
+file examples/summary_lambda_param_shadows_param_ok.dusk
+out 7\n1\n
+---
+test summary_generic_lambda_param_fail
+mode check_fail
+file examples/summary_generic_lambda_param_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_generic_run_helper_fail
+mode check_fail
+file examples/summary_generic_run_helper_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_generic_run_helper_ok
+mode run
+file examples/summary_generic_run_helper_ok.dusk
+out 223\n335\n1\n
+---
+test summary_concrete_lambda_param_fail
+mode check_fail
+file examples/summary_concrete_lambda_param_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_generic_cell_readback_fail
+mode check_fail
+file examples/summary_generic_cell_readback_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_heap_literal_readback_fail
+mode check_fail
+file examples/summary_heap_literal_readback_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_heap_copy_out_fail
+mode check_fail
+file examples/summary_heap_copy_out_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_heap_literal_readback_ok
+mode run
+file examples/summary_heap_literal_readback_ok.dusk
+out 333\n4\n
+---
+test payload_binder_field_fail
+mode check_fail
+file examples/payload_binder_field_fail.dusk
+err_has a slice into a local array escapes its frame; put the backing on the heap
+---
+test payload_binder_field_untyped_fail
+mode check_fail
+file examples/payload_binder_field_untyped_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test payload_binder_field_ok
+mode run
+file examples/payload_binder_field_ok.dusk
+out 3\n118\n
+---
+test callback_capture_element_fail
+mode check_fail
+file examples/callback_capture_element_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test callback_capture_fold_fail
+mode check_fail
+file examples/callback_capture_fold_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test callback_capture_element_ok
+mode run
+file examples/callback_capture_element_ok.dusk
+out 111\n222\n333\n1\n
+---
+test summary_generic_literal_member_fail
+mode check_fail
+file examples/summary_generic_literal_member_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_generic_conditional_arg_fail
+mode check_fail
+file examples/summary_generic_conditional_arg_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_fresh_readback_fail
+mode check_fail
+file examples/summary_fresh_readback_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_generic_literal_member_ok
+mode run
+file examples/summary_generic_literal_member_ok.dusk
+out 1\n
+---
+test callback_generic_element_ok
+mode run
+file examples/callback_generic_element_ok.dusk
+out 2\n4\n4\n1\n
+---
+test callback_generic_element_fail
+mode check_fail
+file examples/callback_generic_element_fail.dusk
+err_has this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test escforeach_stash_reports_the_store_once
+mode check_fail
+file examples/escforeach_stash.dusk
+err_has stored into a place reachable through parameter 1
+err_absent this call stores a view of the current frame into a place that outlives it; put the backing on the heap
+---
+test summary_generic_call_member_fail
+mode check_fail
+file examples/summary_generic_call_member_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_generic_call_member_ok
+mode run
+file examples/summary_generic_call_member_ok.dusk
+out 1\n
+---
+test summary_shadowed_struct_parameter_fail
+mode check_fail
+file examples/summary_shadowed_struct_parameter_fail.dusk
+err_has this call may return a view of argument 2, which views the current frame
+---
+test summary_shadowed_struct_parameter_ok
+mode run
+file examples/summary_shadowed_struct_parameter_ok.dusk
+out 1\n
+---
+test summary_typeparam_string_fail
+mode check_fail
+file examples/summary_typeparam_string_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_typeparam_future_fail
+mode check_fail
+file examples/summary_typeparam_future_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_typeparam_struct_fail
+mode check_fail
+file examples/summary_typeparam_struct_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_typeparam_interface_fail
+mode check_fail
+file examples/summary_typeparam_interface_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_typeparam_result_fail
+mode check_fail
+file examples/summary_typeparam_result_fail.dusk
+err_has a frame view is stored through a pointer that borrows argument 1 and may outlive this frame
+---
+test summary_typeparam_scalar_fail
+mode check_fail
+file examples/summary_typeparam_scalar_fail.dusk
+err_has argument 1's view is stored into argument 2 and may outlive this frame
+---
+test summary_typeparam_spelled_ok
+mode run
+file examples/summary_typeparam_spelled_ok.dusk
+out 1\n2\n3\n4\n5\n6\n
+---
+test summary_member_named_type_fail
+mode check_fail
+file examples/summary_member_named_type_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test summary_member_named_type_ok
+mode run
+file examples/summary_member_named_type_ok.dusk
+out 7\n
+---
+test summary_raw_slot_call_fail
+mode check_fail
+file examples/summary_raw_slot_call_fail.dusk
+err_has a view of the current frame is stored into a place reachable through parameter 1, which outlives it; put the backing on the heap
+---
+test summary_raw_slot_tie_fail
+mode check_fail
+file examples/summary_raw_slot_tie_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_raw_slot_element
+mode run
+file examples/summary_raw_slot_element.dusk
+out 9\n
+---
+test summary_raw_slot_element_flows
+mode tool
+argv esc examples/summary_raw_slot_element.dusk
+out fn main returns_alias=0x0 reads_through=0x0 sinks=0x0 collect_sinks=0x0 flows=[]\nfn push_one returns_alias=0x0 reads_through=0x0 sinks=0x0 collect_sinks=0x0 flows=[(0,0),(1,0)]\n
+code 0
+---
+test summary_scalar_destination_ok
+mode run
+file examples/summary_scalar_destination_ok.dusk
+out 1554\n
+---
+test summary_error_sibling_ok
+mode run
+file examples/summary_error_sibling_ok.dusk
+out 7\n
+---
+test summary_error_sibling_flows
+mode tool
+argv esc examples/summary_error_sibling_ok.dusk
+out fn first_after_zeros returns_alias=0x0 reads_through=0x0 sinks=0x0 collect_sinks=0x0 flows=[]\nfn main returns_alias=0x0 reads_through=0x0 sinks=0x0 collect_sinks=0x0 flows=[]\nfn skip_zeros returns_alias=0x1 reads_through=0x0 sinks=0x0 collect_sinks=0x0 flows=[]\n
+code 0
+---
+test summary_error_check_store_fail
+mode check_fail
+file examples/summary_error_check_store_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_erased_tuple_member_ok
+mode run
+file examples/summary_erased_tuple_member_ok.dusk
+out 115\n
+---
+test summary_erased_tuple_member_fail
+mode check_fail
+file examples/summary_erased_tuple_member_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_erased_node_result_ok
+mode run
+file examples/summary_erased_node_result_ok.dusk
+out 225\n
+---
+test summary_erased_node_item_fail
+mode check_fail
+file examples/summary_erased_node_item_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_using_generic_fail
+mode check_fail
+file examples/summary_using_generic_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+test summary_using_generic_ok
+mode run
+file examples/summary_using_generic_ok.dusk
+out 555\n
+---
+test fnresult_do_param_ok
+mode run
+file examples/fnresult_do_param_ok.dusk
+out 6\n-1\n8\nodd\n
+---
+test fnresult_maybe_map_ok
+mode run
+file examples/fnresult_maybe_map_ok.dusk
+out 7\n8\n3\n0\n9\n42\n42\n
+---
+test fnresult_fold_param_ok
+mode run
+file examples/fnresult_fold_param_ok.dusk
+out 24\n36\n
+---
+test fnresult_apply_store_ok
+mode run
+file examples/fnresult_apply_store_ok.dusk
+out 5\n12\n7\n
+---
+test fnresult_slice_fail
+mode check_fail
+file examples/fnresult_slice_fail.dusk
+err_has a slice into a local array escapes its frame; put the backing on the heap
+---
+test fnresult_do_view_fail
+mode check_fail
+file examples/fnresult_do_view_fail.dusk
+err_has this call may return a view of argument 2, which views the current frame
+---
+test fnresult_ptr_fail
+mode check_fail
+file examples/fnresult_ptr_fail.dusk
+err_has this returns a pointer to an object that stores a view of the current frame
+---
+test fnresult_maybe_closure_fail
+mode check_fail
+file examples/fnresult_maybe_closure_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test fnresult_quiet_ident_fail
+mode check_fail
+file examples/fnresult_quiet_ident_fail.dusk
+err_has this call may return a view of argument 1, which views the current frame
+---
+test fnresult_using_mid_fail
+mode check_fail
+file examples/fnresult_using_mid_fail.dusk
+err_has argument 2's view is stored into argument 1 and may outlive this frame

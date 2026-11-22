@@ -1,0 +1,69 @@
+@paradigm procedural
+@import std.memory.collector
+
+// A collected reference in a reused block survives a collection. A freed block
+// is reused by any later request of its size class, so blocks first minted for
+// 25 byte requests serve 40 byte holders next, and each holder's collector sits
+// in bytes past the 25 its block was minted for. The collector scans every live
+// generational block as a root region, and it has to scan the size the block's
+// current tenant asked for: a scan bounded by the size at mint would miss every
+// reference here, sweep blocks that are still reachable, and the reads after the
+// collection would fault on a stale pointer instead of printing.
+struct Cell {
+    v: int64,
+}
+
+struct Holder {
+    a: int64,
+    b: int64,
+    c: int64,
+    cell: collector<Cell>,
+}
+
+// Mints the collected cell inside this frame, so once it returns the holder's
+// block is the only place the reference lives.
+func make_holder(v: int64) -> *Holder {
+    return alloc(Holder { a: v, b: v, c: v, cell: collector<Cell>(Cell { v: v * 10 }) })
+}
+
+// Parks four blocks minted for 25 byte requests, all live at once so they are
+// four distinct blocks, for the four holders to reuse.
+func park_small_blocks() -> void {
+    p1: *raw char = alloc_bytes(25)
+    p2: *raw char = alloc_bytes(25)
+    p3: *raw char = alloc_bytes(25)
+    p4: *raw char = alloc_bytes(25)
+    free(p1)
+    free(p2)
+    free(p3)
+    free(p4)
+}
+
+// Overwrites the stack below the caller with plain integers, so no copy of a
+// reference a returned frame held lingers where the collector scans the stack.
+func scrub(depth: int64) -> int64 {
+    if depth == 0 {
+        return 0
+    }
+    a: int64 = depth
+    b: int64 = depth * 2
+    c: int64 = depth * 3
+    return scrub(depth - 1) + a + b + c - 6 * depth
+}
+
+func main() -> int32 {
+    park_small_blocks()
+    h1: *Holder = make_holder(1)
+    h2: *Holder = make_holder(2)
+    h3: *Holder = make_holder(3)
+    h4: *Holder = make_holder(4)
+    println(scrub(256))
+    gc_collect()
+    gc_collect()
+    println((*(*h1).cell).v + (*(*h2).cell).v + (*(*h3).cell).v + (*(*h4).cell).v)
+    free(h1)
+    free(h2)
+    free(h3)
+    free(h4)
+    return 0
+}

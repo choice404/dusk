@@ -1,0 +1,44 @@
+// A method's string result is typed whatever the receiver is: another call's
+// result, a struct literal, an array element, a container read, or an element of an
+// array of interface values.
+@paradigm procedural
+@paradigm oop
+
+@import std.vector
+
+interface Named { nm() -> string }
+
+struct R { name: string }
+
+impl R {
+    func copy() -> R { return R { name: self.name } }
+}
+
+impl Named for R {
+    func nm() -> string { return self.name }
+}
+
+func make() -> R { return R { name: "xyz" } }
+
+func main() -> int32 {
+    r: R = R { name: "abc" }
+    a := r.copy().nm()
+    println(int64(a[2]))
+    b := make().nm()
+    println(int64(b[0]))
+    c := R { name: "def" }.nm()
+    println(int64(c[1]))
+    arr: R[1] = [R { name: "ghi" }]
+    d := arr[0].nm()
+    println(int64(d[2]))
+    v: *Vector<R> = alloc(vec_new())
+    vec_push(v, R { name: "jkl" })
+    e := vec_get(v, 0).nm()
+    println(int64(e[0]))
+    names: Named[1] = [r]
+    f := names[0].nm()
+    println(int64(f[1]))
+    vec_free(v)
+    free(v)
+    return 0
+}

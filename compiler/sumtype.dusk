@@ -1,0 +1,378 @@
+// Surface result types used to resolve receivers in the summary walk
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import summary
+@import sumwalk
+@import sumplace
+@import sumscope
+@import tcescrepoint
+
+/** Recognize scalar receivers that cannot carry an aggregate sibling's aliases
+ *  @params t - The surface type tables
+ *  @params tyid - The receiver's recovered type
+ *  @returns {bool} - Whether the value carries no alias or pointer reach */
+export func sum_scalar_type(t: *SumTables, tyid: int64) -> bool {
+    a: *Ast = (*t).ast
+    node: TypeNode = vec_get((*a).types, tyid)
+    if node.kind == tk_unit() { return true }
+    if node.kind != tk_named() || node.c != 0 { return false }
+    name: string = ast_name(a, node.a)
+    if str_eq(name, "bool") || str_eq(name, "char") || str_eq(name, "rune") { return true }
+    if str_eq(name, "int8") || str_eq(name, "int16") || str_eq(name, "int32") || str_eq(name, "int64") { return true }
+    if str_eq(name, "uint8") || str_eq(name, "uint16") || str_eq(name, "uint32") || str_eq(name, "uint64") { return true }
+    return str_eq(name, "float32") || str_eq(name, "float64")
+}
+
+/** Whether a field type stands for a type parameter of its declaring struct: the bare
+ *  parameter itself, or a pointer, slice, array, tuple, or type argument built over a
+ *  parameter spelled like a declared type or a builtin, which nothing on the surface
+ *  tells apart from that type
+ *  @params t - The surface type tables
+ *  @params sname - The declaring struct
+ *  @params type_id - The field's declared type
+ *  @returns {bool} - Whether the field's type must be read as unknown */
+export func names_struct_parameter(t: *SumTables, sname: string, type_id: int64) -> bool {
+    a: *Ast = (*t).ast
+    match map_get((*t).struct_gens, sname) {
+        Some(gens) => {
+            node: TypeNode = vec_get((*a).types, type_id)
+            if node.kind == tk_named() && node.c == 0 && map_has(gens, ast_name(a, node.a)) { return true }
+            return mentions_shadowing_parameter(t, gens, type_id)
+        }
+        None => { return false }
+    }
+}
+
+// Whether a type is built over a type parameter spelled like a declared type or a builtin
+func mentions_shadowing_parameter(t: *SumTables, gens: *Map<string, int64>, type_id: int64) -> bool {
+    a: *Ast = (*t).ast
+    if type_id < 0 { return false }
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_slice() || node.kind == tk_array() || node.kind == tk_collector() {
+        return mentions_shadowing_parameter(t, gens, node.a)
+    }
+    if node.kind == tk_tuple() {
+        for i in 0..node.b {
+            if mentions_shadowing_parameter(t, gens, vec_get((*a).kids, node.a + i)) { return true }
+        }
+        return false
+    }
+    if node.kind != tk_named() { return false }
+    name: string = ast_name(a, node.a)
+    if map_has(gens, name) && names_declared_type(t, name) { return true }
+    for i in 0..node.c {
+        if mentions_shadowing_parameter(t, gens, vec_get((*a).kids, node.b + i)) { return true }
+    }
+    return false
+}
+
+// Whether a name is a declared struct, enum, or interface, or a builtin type
+func names_declared_type(t: *SumTables, name: string) -> bool {
+    if map_has((*t).struct_idx, name) || map_has((*t).enum_idx, name) || map_has((*t).ifaces, name) { return true }
+    if str_eq(name, "string") || str_eq(name, "bool") || str_eq(name, "char") || str_eq(name, "rune") { return true }
+    if str_eq(name, "int8") || str_eq(name, "int16") || str_eq(name, "int32") || str_eq(name, "int64") { return true }
+    if str_eq(name, "uint8") || str_eq(name, "uint16") || str_eq(name, "uint32") || str_eq(name, "uint64") { return true }
+    return str_eq(name, "float32") || str_eq(name, "float64")
+}
+
+/** Recover a bare generic return parameter from the corresponding argument type
+ *  @params c - The current summary walk
+ *  @params name - The resolved module function name
+ *  @params call - The call whose result supplies a receiver
+ *  @returns {int64} - The surface result type, or the inference placeholder */
+export func sum_function_ty(c: *SumCtx, name: string, call: ExprNode) -> int64 {
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
+    function_id: int64 = unwrap_or(map_get((*t).module_fns, name), -1)
+    if function_id < 0 { return (*t).infer_ty }
+    function: FuncNode = vec_get((*a).funcs, function_id)
+    if function.generics_len == 0 { return function.ret }
+    result: TypeNode = vec_get((*a).types, function.ret)
+    gens: *Map<string, int64> = sum_gens_of(a, function.generics_off, function.generics_len)
+    // A result built over the callee's own type parameters, `*Q` or `Box<Q>`, names
+    // them in the callee's terms, and read in the caller's a `Q` there is whatever
+    // type or type parameter the caller spells the same, so each such position is
+    // unknown here while the members around it keep their types
+    if result.kind != tk_named() || result.c != 0 { return erased_result(t, function_id, gens) }
+    if !map_has(gens, ast_name(a, result.a)) { return function.ret }
+    // A `using` allocator is written at the call like any other argument, so the
+    // argument at a parameter's position is that parameter's
+    for i in 0..function.params_len {
+        if i >= call.c { break }
+        param: ParamNode = vec_get((*a).params, vec_get((*a).kids, function.params_off + i))
+        actual: int64 = sum_chain_ty(c, vec_get((*a).kids, call.b + i))
+        found: int64 = sum_type_arg(a, param.ty, actual, result.a)
+        if found >= 0 { return found }
+    }
+    return (*t).infer_ty
+}
+
+/** A generic function's result type with every position that names one of its own
+ *  type parameters read as unknown, so `-> (T, Stats)` is `(infer, Stats)` and
+ *  `-> *Node<T>` is `*Node<infer>` in the caller. One copy per function, shared by
+ *  every call to it
+ *  @params t - The surface type tables
+ *  @params function_id - The generic function
+ *  @params gens - The function's own type parameters
+ *  @returns {int64} - The result type, the written one when it names no parameter */
+func erased_result(t: *SumTables, function_id: int64, gens: *Map<string, int64>) -> int64 {
+    cache: *Map<int64, int64> = (*t).erased_returns
+    if map_has(cache, function_id) { return unwrap_or(map_get(cache, function_id), (*t).infer_ty) }
+    a: *Ast = (*t).ast
+    function: FuncNode = vec_get((*a).funcs, function_id)
+    erased: int64 = erase_parameters(t, gens, function.ret)
+    map_put(cache, function_id, erased)
+    return erased
+}
+
+// A copy of a written type with each position naming one of the type parameters
+// replaced by the unknown type; a type that names none of them is returned as it is
+func erase_parameters(t: *SumTables, gens: *Map<string, int64>, type_id: int64) -> int64 {
+    a: *Ast = (*t).ast
+    if !type_mentions_any(a, gens, type_id) { return type_id }
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_named() && node.c == 0 { return (*t).infer_ty }
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_slice() || node.kind == tk_array() || node.kind == tk_collector() {
+        return ast_type(a, node.kind, erase_parameters(t, gens, node.a), node.b, node.c)
+    }
+    if node.kind == tk_tuple() { return ast_type(a, tk_tuple(), erase_run(t, gens, node.a, node.b), node.b, node.c) }
+    if node.kind == tk_func() {
+        params: int64 = erase_run(t, gens, node.a, node.b)
+        return ast_type(a, tk_func(), params, node.b, erase_parameters(t, gens, node.c))
+    }
+    return ast_type(a, tk_named(), node.a, erase_run(t, gens, node.b, node.c), node.c)
+}
+
+// Erases a run of member types and lays the copies out as one fresh run of kids
+func erase_run(t: *SumTables, gens: *Map<string, int64>, off: int64, len: int64) -> int64 {
+    a: *Ast = (*t).ast
+    members: *Vector<int64> = alloc(vec_new())
+    for i in 0..len { vec_push(members, erase_parameters(t, gens, vec_get((*a).kids, off + i))) }
+    offset: int64 = vec_len((*a).kids)
+    for member in members { vec_push((*a).kids, member) }
+    return offset
+}
+
+// Whether a written type names any of the given type parameters, at any depth
+export func type_mentions_any(a: *Ast, gens: *Map<string, int64>, type_id: int64) -> bool {
+    if type_id < 0 { return false }
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_slice() || node.kind == tk_array() || node.kind == tk_collector() {
+        return type_mentions_any(a, gens, node.a)
+    }
+    if node.kind == tk_tuple() || node.kind == tk_func() {
+        for i in 0..node.b {
+            if type_mentions_any(a, gens, vec_get((*a).kids, node.a + i)) { return true }
+        }
+        return node.kind == tk_func() && type_mentions_any(a, gens, node.c)
+    }
+    if node.kind != tk_named() { return false }
+    if map_has(gens, ast_name(a, node.a)) { return true }
+    for i in 0..node.c {
+        if type_mentions_any(a, gens, vec_get((*a).kids, node.b + i)) { return true }
+    }
+    return false
+}
+
+func sum_type_arg(a: *Ast, pattern_id: int64, actual_id: int64, name: int64) -> int64 {
+    pattern: TypeNode = vec_get((*a).types, pattern_id)
+    actual: TypeNode = vec_get((*a).types, actual_id)
+    if pattern.kind == tk_named() && pattern.c == 0 && pattern.a == name { return actual_id }
+    if pattern.kind != actual.kind { return -1 }
+    if pattern.kind == tk_ptr() || pattern.kind == tk_rawptr() || pattern.kind == tk_slice() || pattern.kind == tk_array() {
+        return sum_type_arg(a, pattern.a, actual.a, name)
+    }
+    if pattern.kind == tk_named() && pattern.a == actual.a && pattern.c == actual.c {
+        for i in 0..pattern.c {
+            found: int64 = sum_type_arg(a, vec_get((*a).kids, pattern.b + i), vec_get((*a).kids, actual.b + i), name)
+            if found >= 0 { return found }
+        }
+    }
+    if pattern.kind == tk_tuple() && pattern.b == actual.b {
+        for i in 0..pattern.b {
+            found: int64 = sum_type_arg(a, vec_get((*a).kids, pattern.a + i), vec_get((*a).kids, actual.a + i), name)
+            if found >= 0 { return found }
+        }
+    }
+    return -1
+}
+
+/** Recover the types of a tuple literal's members
+ *  @params c - The current summary walk
+ *  @params expr - The tuple expression
+ *  @returns {int64} - A tuple type for destructuring */
+export func sum_tuple_ty(c: *SumCtx, expr: ExprNode) -> int64 {
+    a: *Ast = (*(*c).t).ast
+    members: *Vector<int64> = alloc(vec_new())
+    for i in 0..expr.b { vec_push(members, sum_chain_ty(c, vec_get((*a).kids, expr.a + i))) }
+    offset: int64 = vec_len((*a).kids)
+    for member in members { vec_push((*a).kids, member) }
+    return ast_type(a, tk_tuple(), offset, expr.b, 0)
+}
+
+/** Keep a conditional receiver's type when both simple branches agree
+ *  @params c - The current summary walk
+ *  @params expr - The conditional expression
+ *  @returns {int64} - The shared type, or the inference placeholder */
+export func sum_branch_ty(c: *SumCtx, expr: ExprNode) -> int64 {
+    t: *SumTables = (*c).t
+    first: int64 = sum_tail_ty(c, expr.b)
+    second: int64 = sum_tail_ty(c, expr.c)
+    if sum_same_type((*t).ast, first, second) { return first }
+    return (*t).infer_ty
+}
+
+func sum_tail_ty(c: *SumCtx, block_id: int64) -> int64 {
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
+    block: BlockNode = vec_get((*a).blocks, block_id)
+    if block.len != 1 { return (*t).infer_ty }
+    tail: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, block.off))
+    if tail.kind != sk_expr() { return (*t).infer_ty }
+    return sum_chain_ty(c, tail.a)
+}
+
+func sum_same_type(a: *Ast, first_id: int64, second_id: int64) -> bool {
+    if first_id == second_id { return true }
+    first: TypeNode = vec_get((*a).types, first_id)
+    second: TypeNode = vec_get((*a).types, second_id)
+    if first.kind != second.kind { return false }
+    if first.kind == tk_named() { return first.a == second.a && first.c == 0 && second.c == 0 }
+    if first.kind == tk_ptr() || first.kind == tk_rawptr() || first.kind == tk_slice() {
+        return sum_same_type(a, first.a, second.a)
+    }
+    return false
+}
+
+// Method resolution reads surface types without running the type checker
+export func sum_method_key(c: *SumCtx, callee: ExprNode) -> string {
+    a: *Ast = (*(*c).t).ast
+    receiver: string = sum_receiver_type_name(c, callee)
+    if str_len(receiver) == 0 { return "" }
+    return sum_variant_key(receiver, ast_name(a, callee.b))
+}
+
+/** The type a method call's receiver is named by, through any pointers
+ *  @params c - The current summary walk
+ *  @params callee - The method selection
+ *  @returns {string} - The type's name, or empty for an unnamed receiver and for one
+ *  typed by a type parameter of the walked function, which may stand for any type
+ *  whatever declared type or interface it is spelled like */
+export func sum_receiver_type_name(c: *SumCtx, callee: ExprNode) -> string {
+    a: *Ast = (*(*c).t).ast
+    mut receiver: TypeNode = vec_get((*a).types, sum_chain_ty(c, callee.a))
+    while receiver.kind == tk_ptr() || receiver.kind == tk_rawptr() {
+        receiver = vec_get((*a).types, receiver.a)
+    }
+    if receiver.kind != tk_named() { return "" }
+    name: string = ast_name(a, receiver.a)
+    if map_has((*c).gens, name) { return "" }
+    return name
+}
+
+// The surface result type of a call a projection chain or a receiver starts from
+export func sum_call_ty(c: *SumCtx, call: ExprNode) -> int64 {
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    if callee.kind == xk_field() {
+        return unwrap_or(map_get((*t).fn_returns, sum_method_key(c, callee)), (*t).infer_ty)
+    }
+    if callee.kind != xk_ident() { return (*t).infer_ty }
+    name: string = ast_name(a, callee.a)
+    if str_eq(name, "alloc") && call.c == 1 {
+        inner: int64 = sum_chain_ty(c, vec_get((*a).kids, call.b))
+        return ast_type(a, tk_ptr(), inner, 0, 0)
+    }
+    if str_eq(name, "move") && call.c == 1 { return sum_chain_ty(c, vec_get((*a).kids, call.b)) }
+    if sum_name_bound(c, name) {
+        target: string = sum_bound_target(c, name)
+        if str_len(target) == 0 { return (*t).infer_ty }
+        return sum_function_ty(c, target, call)
+    }
+    return sum_function_ty(c, name, call)
+}
+
+// A field's type parameters belong to its declaring struct, including after an
+// index projects an element out of a generic field
+export func sum_projection_gens(c: *SumCtx, id: int64) -> *Map<string, int64> {
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_index() { return sum_projection_gens(c, e.a) }
+    if e.kind != xk_field() { return (*c).gens }
+    mut base: TypeNode = vec_get((*a).types, sum_chain_ty(c, e.a))
+    if base.kind == tk_ptr() || base.kind == tk_rawptr() { base = vec_get((*a).types, base.a) }
+    if base.kind != tk_named() { return (*c).gens }
+    name: string = ast_name(a, base.a)
+    return unwrap_or(map_get((*t).struct_gens, name), (*c).gens)
+}
+
+// Whether a value of this type can hold a view, directly or behind a managed or raw
+// pointer, however deeply a struct, enum, tuple, or array buries it. A generic type
+// argument counts by its own shape, so an aggregate's members are read with no type
+// parameters in scope and a vector of plain data holds none
+export func view_within(t: *SumTables, type_id: int64, gens: *Map<string, int64>, seen: *Map<string, int64>) -> bool {
+    a: *Ast = (*t).ast
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_slice() || node.kind == tk_func() || node.kind == tk_infer() { return true }
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_array() { return view_within(t, node.a, gens, seen) }
+    if node.kind == tk_tuple() {
+        for i in 0..node.b {
+            if view_within(t, vec_get((*a).kids, node.a + i), gens, seen) { return true }
+        }
+        return false
+    }
+    if node.kind != tk_named() { return false }
+    name: string = ast_name(a, node.a)
+    if map_has(gens, name) || map_has((*t).ifaces, name) { return true }
+    for i in 0..node.c {
+        if view_within(t, vec_get((*a).kids, node.b + i), gens, seen) { return true }
+    }
+    if map_has(seen, name) { return false }
+    map_put(seen, name, 1)
+    no_generics: *Map<string, int64> = alloc(map_new())
+    for member in aggregate_member_types(t, name) {
+        if view_within(t, member, no_generics, seen) { return true }
+    }
+    return false
+}
+
+// Whether a raw pointer is reachable through a value of this type, however deeply a
+// struct, enum, tuple, or array buries it. A generic type argument counts by its own
+// shape; an unknown type, which is the inference hole, does not, since it already
+// seeds origins as a view
+export func reaches_raw(t: *SumTables, type_id: int64) -> bool {
+    seen: *Map<string, int64> = alloc(map_new())
+    return raw_within(t, type_id, seen)
+}
+
+func raw_within(t: *SumTables, type_id: int64, seen: *Map<string, int64>) -> bool {
+    a: *Ast = (*t).ast
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_rawptr() { return true }
+    if node.kind == tk_slice() || node.kind == tk_array() { return raw_within(t, node.a, seen) }
+    if node.kind == tk_tuple() {
+        for i in 0..node.b {
+            if raw_within(t, vec_get((*a).kids, node.a + i), seen) { return true }
+        }
+        return false
+    }
+    if node.kind != tk_named() { return false }
+    for i in 0..node.c {
+        if raw_within(t, vec_get((*a).kids, node.b + i), seen) { return true }
+    }
+    name: string = ast_name(a, node.a)
+    if map_has(seen, name) { return false }
+    map_put(seen, name, 1)
+    for member in aggregate_member_types(t, name) {
+        if raw_within(t, member, seen) { return true }
+    }
+    return false
+}

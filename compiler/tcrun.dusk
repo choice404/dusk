@@ -28,6 +28,18 @@ func frame_store_msg(j: int64) -> string {
     return out
 }
 
+// A lambda stored a view of its own frame through a binding it captures
+func capture_store_msg(name: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "a view of the lambda's frame is stored into a place reachable through the captured '")
+    sb_push(b, name)
+    sb_push_char(b, 39)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
 func unknown_type_msg(name: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "unknown type '")
@@ -137,14 +149,15 @@ func param_setup(tc: *TypeChecker, f: FuncNode) -> void {
         map_put((*tc).cur_param_index, ast_name(a, p.name), i)
         set_esc(tc, ast_name(a, p.name), false, false)
         // A managed pointer parameter is a borrow the caller still owns, so freeing or
-        // moving it rejects. A bare type-parameter parameter (T on the surface pass) is
-        // treated the same: inside a generic body T may be a managed pointer at some
-        // instantiation, and the concrete twin already rejects, so the discipline must
-        // hold on the un-ground surface. Marking it a borrow only restricts free/move
-        // and reassignment, never a scalar copy, so a T = int64 instantiation is
-        // untouched. Mono grounds T before the ground pass, where is_managed_ty judges
-        // the concrete type directly.
-        if is_managed_ty(tc, tyid) || is_typaram_ast(tc, p.ty) {
+        // moving it rejects. A string parameter is the same borrow: the caller's string
+        // is still the caller's to free. A bare type-parameter parameter (T on the
+        // surface pass) is treated the same: inside a generic body T may be a managed
+        // pointer at some instantiation, and the concrete twin already rejects, so the
+        // discipline must hold on the un-ground surface. Marking it a borrow only
+        // restricts free/move and reassignment, never a scalar copy, so a T = int64
+        // instantiation is untouched. Mono grounds T before the ground pass, where
+        // is_managed_ty judges the concrete type directly.
+        if is_borrowable_ty(tc, tyid) || is_typaram_ast(tc, p.ty) {
             declare_own(tc, ast_name(a, p.name), own_borrow())
         }
         n: TyNode = ty_get((*tc).ty, tyid)
@@ -375,16 +388,23 @@ export func typeck_run_with_info(a: *Ast, info: EscapeInfo) -> *TypeChecker {
     tc: *TypeChecker = tc_new(a, false, empty_future)
     (*tc).summaries = info.summaries
     (*tc).method_summaries = info.method_summaries
+    (*tc).alias_summaries = info.alias_summaries
+    (*tc).alias_method_summaries = info.alias_method_summaries
     (*tc).lambda_returns = info.lambda_returns
     (*tc).lambda_sinks = info.lambda_sinks
     (*tc).lambda_collect_sinks = info.lambda_collect_sinks
     (*tc).lambda_capture_flows = info.lambda_capture_flows
     (*tc).resolvable_fn_binds = info.resolvable_fn_binds
+    (*tc).relation_memo = info.relation_memo
     mut i: int64 = 0
     stores: *Vector<FlowProv> = info.frame_stores
     while i < vec_len(stores) {
         fs: FlowProv = vec_get(stores, i)
-        tc_emit(tc, frame_store_msg(fs.dst), fs.lo, fs.hi)
+        if fs.dst < 0 {
+            tc_emit(tc, capture_store_msg(ast_name(a, fs.src)), fs.lo, fs.hi)
+        } else {
+            tc_emit(tc, frame_store_msg(fs.dst), fs.lo, fs.hi)
+        }
         i++
     }
     tc_run(tc)

@@ -1,0 +1,50 @@
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+
+struct Rows { values: int64[] }
+interface Viewer { view() -> int64[] }
+impl Viewer for Rows {
+    func view() -> int64[] { return self.values }
+}
+impl Rows {
+    func rows_of() -> int64[] { return self.values }
+    func me() -> Rows { return Rows { values: self.values } }
+    func copied() -> int64[] {
+        return map(self.values, lambda (value: int64) -> int64 { return value })
+    }
+}
+func choose<T>(value: T) -> T { return value }
+func through_viewer(value: Viewer) -> int64[] { return value.view() }
+func through_pair(value: (Rows, int64)) -> int64[] {
+    rows, count := value
+    count.ignore()
+    return rows.rows_of()
+}
+func fresh_copy() -> int64[] {
+    local: int64[2] = [11, 22]
+    rows: Rows = Rows { values: local[0..2] }
+    return rows.me().copied()
+}
+func main() -> int32 {
+    local: int64[2] = [11, 22]
+    pair: (Rows, int64) = (Rows { values: local[0..2] }, 1)
+    println(through_pair(pair)[0])
+    values: int64[] = fresh_copy()
+    rows: Rows = Rows { values: values }
+    other: Rows = choose(rows)
+    entries: *Vector<Rows> = alloc(vec_new())
+    vec_push(entries, rows)
+    println(rows.me().rows_of()[0])
+    println(vec_get(entries, 0).rows_of()[0])
+    println(other.rows_of()[0])
+    println((true ? rows : other).rows_of()[0])
+    viewer: Viewer = rows
+    println(viewer.view()[0])
+    println(through_viewer(rows)[0])
+    println(through_pair((rows, 1))[0])
+    vec_free(entries)
+    free(entries)
+    return 0
+}

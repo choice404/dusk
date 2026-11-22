@@ -1,0 +1,70 @@
+// Functions that call themselves or each other only read and count through the
+// parser they are given, so a view of a frame array stored into that parser stays
+// legal. Their summaries are computed together until they settle, and nothing in
+// them reaches past the frame
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+struct Parser { toks: int64[], pos: int64 }
+
+func expr(p: *Parser, n: int64) -> int64 {
+    if n == 0 { return (*p).pos }
+    (*p).pos = (*p).pos + 1
+    return term(p, n - 1)
+}
+
+func term(p: *Parser, n: int64) -> int64 {
+    if n == 0 { return (*p).pos }
+    return expr(p, n - 1)
+}
+
+func peek(p: *Parser) -> int64 { return (*p).toks[(*p).pos] }
+
+func sum_expr(p: *Parser) -> int64 {
+    v: int64 = sum_term(p)
+    if (*p).pos < 3 {
+        (*p).pos = (*p).pos + 1
+        return v + sum_expr(p)
+    }
+    return v
+}
+
+func sum_term(p: *Parser) -> int64 {
+    if peek(p) > 300 && (*p).pos < 2 {
+        (*p).pos = (*p).pos + 1
+        return sum_expr(p)
+    }
+    return peek(p)
+}
+
+func ping(s: *Sink, n: int64) -> int64 {
+    if n == 0 { return (*(*s).h).rows[0] }
+    return pong(s, n - 1)
+}
+
+func pong(s: *Sink, n: int64) -> int64 { return ping(s, n) }
+
+func main() -> int32 {
+    toks: int64[4] = [111, 222, 333, 444]
+    p: *Parser = alloc(Parser { toks: heap_rows(), pos: 0 })
+    (*p).toks = toks[0..4]
+    println(expr(p, 3))
+    (*p).pos = 0
+    println(sum_expr(p))
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    s.keep(toks[0..4])
+    println(pong(s, 3))
+    return 0
+}

@@ -9,6 +9,7 @@
 @import ast
 @import ty
 @import tysigs
+@import summary
 @import tcstate
 @import tcscope
 @import tcfit
@@ -17,6 +18,209 @@
 @import tcesccap
 @import tccallshape
 @import tccallcheck
+
+// The free sentence for a name with a borrow record, chosen by the operand's type: a
+// string is borrowed text, everything else the pointer the record was first made for.
+func borrowed_free_msg(tc: *TypeChecker, ty: int64) -> string {
+    if is_str_ty(tc, ty) { return "cannot free a borrowed string; only its owner frees it" }
+    return "cannot free a borrowed pointer; only its owner frees it"
+}
+
+func borrowed_move_msg(tc: *TypeChecker, ty: int64) -> string {
+    if is_str_ty(tc, ty) { return "cannot move a borrowed string; only its owner can be moved" }
+    return "cannot move a borrowed pointer; only its owner can be moved"
+}
+
+// Whether free or move of a call result hands over a value an argument still holds: a
+// result read back out of a container, or a string result whose alias verdict borrows.
+func call_result_borrows(tc: *TypeChecker, call: ExprNode, ty: int64) -> bool {
+    resolved: int64 = borrow_call_ty(tc, call, ty)
+    if is_scalar_borrow_ty(tc, resolved) { return false }
+    if free_call_arg_aliases(tc, call) { return true }
+    return (is_str_ty(tc, ty) || ty_get((*tc).ty, ty).kind == tyk_unknown()) && str_call_verdict(tc, call) == own_borrow()
+}
+
+/** Whether a recovered result is a scalar that cannot carry a borrow record
+ *  @params tc - The checker holding the type arena
+ *  @params tyid - The recovered result type
+ *  @returns {bool} - Whether free and move need no borrow verdict */
+export func is_scalar_borrow_ty(tc: *TypeChecker, tyid: int64) -> bool {
+    kind: int64 = ty_get((*tc).ty, tyid).kind
+    return kind == tyk_int() || kind == tyk_float() || kind == tyk_bool() || kind == tyk_char() || kind == tyk_rune() || kind == tyk_unit()
+}
+
+// Recover the part of a generic argument that instantiates a bare result parameter
+// without changing inference or the ground AST used by code generation
+func borrow_type_arg(tc: *TypeChecker, pattern_id: int64, actual_id: int64, name: string) -> int64 {
+    if pattern_id < 0 || actual_id < 0 { return -1 }
+    a: *Ast = (*tc).ast
+    pattern: TypeNode = vec_get((*a).types, pattern_id)
+    actual: TypeNode = vec_get((*a).types, actual_id)
+    if pattern.kind == tk_named() && pattern.c == 0 && str_eq(ast_name(a, pattern.a), name) { return actual_id }
+    if pattern.kind != actual.kind { return -1 }
+    if pattern.kind == tk_ptr() || pattern.kind == tk_rawptr() || pattern.kind == tk_slice() || pattern.kind == tk_array() {
+        return borrow_type_arg(tc, pattern.a, actual.a, name)
+    }
+    if pattern.kind == tk_named() && str_eq(ast_name(a, pattern.a), ast_name(a, actual.a)) && pattern.c == actual.c {
+        for i in 0..pattern.c {
+            found: int64 = borrow_type_arg(tc, vec_get((*a).kids, pattern.b + i), vec_get((*a).kids, actual.b + i), name)
+            if found >= 0 { return found }
+        }
+    }
+    if pattern.kind == tk_tuple() && pattern.b == actual.b {
+        for i in 0..pattern.b {
+            found: int64 = borrow_type_arg(tc, vec_get((*a).kids, pattern.a + i), vec_get((*a).kids, actual.a + i), name)
+            if found >= 0 { return found }
+        }
+    }
+    return -1
+}
+
+// Substitute a field's written type without altering the declaration or ground AST
+func borrow_subst_ast(a: *Ast, type_id: int64, substitutions: *Map<string, int64>) -> int64 {
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_named() && node.c == 0 {
+        return unwrap_or(map_get(substitutions, ast_name(a, node.a)), type_id)
+    }
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_slice() || node.kind == tk_array() || node.kind == tk_collector() {
+        inner: int64 = borrow_subst_ast(a, node.a, substitutions)
+        if inner < 0 { return -1 }
+        return ast_type(a, node.kind, inner, node.b, node.c)
+    }
+    if node.kind == tk_named() { return borrow_subst_parts(a, node, node.b, node.c, substitutions) }
+    if node.kind == tk_tuple() || node.kind == tk_func() {
+        return borrow_subst_parts(a, node, node.a, node.b, substitutions)
+    }
+    if node.kind == tk_unit() { return type_id }
+    return -1
+}
+
+func borrow_subst_parts(a: *Ast, node: TypeNode, offset: int64, count: int64, substitutions: *Map<string, int64>) -> int64 {
+    parts: *Vector<int64> = alloc(vec_new())
+    for i in 0..count {
+        part: int64 = borrow_subst_ast(a, vec_get((*a).kids, offset + i), substitutions)
+        if part < 0 { return -1 }
+        vec_push(parts, part)
+    }
+    mut result: int64 = node.c
+    if node.kind == tk_func() {
+        result = borrow_subst_ast(a, node.c, substitutions)
+        if result < 0 { return -1 }
+    }
+    off, len := ast_kids(a, parts)
+    if node.kind == tk_named() { return ast_type(a, node.kind, node.a, off, len) }
+    return ast_type(a, node.kind, off, len, result)
+}
+
+func borrow_field_ast(tc: *TypeChecker, base: int64, field_name: int64) -> int64 {
+    if base < 0 { return -1 }
+    a: *Ast = (*tc).ast
+    node: TypeNode = vec_get((*a).types, base)
+    if node.kind != tk_named() { return -1 }
+    tables: *SumTables = (*tc).sum_tables
+    struct_id: int64 = unwrap_or(map_get((*tables).struct_idx, ast_name(a, node.a)), -1)
+    if struct_id < 0 { return -1 }
+    record: StructNode = vec_get((*a).structs, struct_id)
+    if record.generics_len != node.c { return -1 }
+    substitutions: *Map<string, int64> = alloc(map_new())
+    for i in 0..record.generics_len {
+        name: string = ast_name(a, vec_get((*a).kids, record.generics_off + i))
+        map_put(substitutions, name, vec_get((*a).kids, node.b + i))
+    }
+    for i in 0..record.fields_len {
+        field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, record.fields_off + i))
+        if field.name == field_name { return borrow_subst_ast(a, field.ty, substitutions) }
+    }
+    return -1
+}
+
+func borrow_name_ast(tc: *TypeChecker, name: string) -> int64 {
+    declared: int64 = binding_ast_of(tc, name)
+    if declared >= 0 { return declared }
+    recovered: int64 = borrow_ast_of(tc, name)
+    if recovered >= 0 { return recovered }
+    inferred: int64 = lookup(tc, name)
+    if !is_str_ty(tc, inferred) && !is_scalar_borrow_ty(tc, inferred) { return -1 }
+    a: *Ast = (*tc).ast
+    return ast_type(a, tk_named(), ast_intern(a, ty_render((*tc).ty, harden((*tc).ty, inferred))), 0, 0)
+}
+
+/** Reads an expression's un-erased type for borrow classification alone
+ *  @params tc - The checker holding declarations and borrow metadata
+ *  @params expr_id - The expression before its binding is introduced
+ *  @returns {int64} - A recovered AST type, or -1 when uncertain */
+export func borrow_expr_ast(tc: *TypeChecker, expr_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    expr: ExprNode = vec_get((*a).exprs, expr_id)
+    if expr.kind == xk_ident() { return borrow_name_ast(tc, ast_name(a, expr.a)) }
+    if expr.kind == xk_call() { return borrow_call_ast(tc, expr) }
+    if expr.kind == xk_field() { return borrow_field_ast(tc, borrow_expr_ast(tc, expr.a), expr.b) }
+    if expr.kind == xk_unary() && expr.a == uop_deref() {
+        base: int64 = borrow_expr_ast(tc, expr.b)
+        if base < 0 { return -1 }
+        node: TypeNode = vec_get((*a).types, base)
+        if node.kind == tk_ptr() || node.kind == tk_rawptr() { return node.a }
+    }
+    return -1
+}
+
+func borrow_function_ast(tc: *TypeChecker, call: ExprNode, function: FuncNode) -> int64 {
+    if function.generics_len == 0 { return function.ret }
+    a: *Ast = (*tc).ast
+    result: TypeNode = vec_get((*a).types, function.ret)
+    if result.kind != tk_named() || result.c != 0 { return -1 }
+    mut is_parameter: bool = false
+    for i in 0..function.generics_len {
+        if vec_get((*a).kids, function.generics_off + i) == result.a { is_parameter = true }
+    }
+    if !is_parameter { return function.ret }
+    // A `using` allocator is written at the call like any other argument, so the
+    // argument at a parameter's position is that parameter's
+    for i in 0..function.params_len {
+        if i >= call.c { break }
+        param: ParamNode = vec_get((*a).params, vec_get((*a).kids, function.params_off + i))
+        actual: int64 = borrow_expr_ast(tc, vec_get((*a).kids, call.b + i))
+        found: int64 = borrow_type_arg(tc, param.ty, actual, ast_name(a, result.a))
+        if found >= 0 { return found }
+    }
+    return -1
+}
+
+func borrow_call_ast(tc: *TypeChecker, call: ExprNode) -> int64 {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    if callee.kind != xk_ident() { return -1 }
+    name: string = ast_name(a, callee.a)
+    if is_local(tc, name) || !sig_has_fn((*tc).sigtab, name) { return -1 }
+    if sig_fn((*tc).sigtab, name).is_async { return -1 }
+    // Only free function items supply the signature's un-erased parameter types
+    items: *Vector<ItemNode> = (*a).items
+    for item in items {
+        if item.kind != ik_func() { continue }
+        function: FuncNode = vec_get((*a).funcs, item.id)
+        if function.name == callee.a { return borrow_function_ast(tc, call, function) }
+    }
+    return -1
+}
+
+func borrow_operand_ty(tc: *TypeChecker, name: string, inferred: int64) -> int64 {
+    if ty_get((*tc).ty, inferred).kind != tyk_unknown() { return inferred }
+    recovered: int64 = borrow_name_ast(tc, name)
+    if recovered >= 0 { return tc_type(tc, recovered) }
+    return inferred
+}
+
+/** Recovers a call's concrete borrow type when the surface result is still open
+ *  @params tc - The checker holding the un-erased parameter and binding types
+ *  @params call - The call whose result is classified
+ *  @params inferred - The existing inferred type
+ *  @returns {int64} - The recovered type, or the original open type */
+export func borrow_call_ty(tc: *TypeChecker, call: ExprNode, inferred: int64) -> int64 {
+    if ty_get((*tc).ty, inferred).kind != tyk_unknown() { return inferred }
+    declared: int64 = borrow_call_ast(tc, call)
+    if declared >= 0 { return tc_type(tc, declared) }
+    return inferred
+}
 
 export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> int64 {
     a: *Ast = (*tc).ast
@@ -259,12 +463,16 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                     if arg0.kind == xk_ident() {
                         src: string = ast_name(a, arg0.a)
                         if !(*tc).types_only && own_of(tc, src) == own_borrow() {
-                            tc_emit(tc, "cannot move a borrowed pointer; only its owner can be moved", arg0.lo, arg0.hi)
+                            tc_emit(tc, borrowed_move_msg(tc, borrow_operand_ty(tc, src, mt)), arg0.lo, arg0.hi)
                         }
                         set_moved(tc, src)
                     } else if arg0.kind == xk_call() {
-                        if !(*tc).types_only && free_call_arg_aliases(tc, arg0) {
-                            tc_emit(tc, alias_result_msg("move"), arg0.lo, arg0.hi)
+                        if !(*tc).types_only && call_result_borrows(tc, arg0, mt) {
+                            if mn.kind == tyk_unknown() && is_str_ty(tc, borrow_call_ty(tc, arg0, mt)) {
+                                tc_emit(tc, borrowed_move_msg(tc, ty_str((*tc).ty)), arg0.lo, arg0.hi)
+                            } else {
+                                tc_emit(tc, alias_result_msg("move"), arg0.lo, arg0.hi)
+                            }
                         }
                     } else if arg0.kind == xk_match() || arg0.kind == xk_ifexpr() {
                         // Moving a branching expression whose branches borrow moves a pointer
@@ -312,11 +520,15 @@ export func infer_call(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_l
                         // its borrow classification is recorded and must reject.
                         pname: string = ast_name(a, farg.a)
                         if !(*tc).types_only && own_of(tc, pname) == own_borrow() {
-                            tc_emit(tc, "cannot free a borrowed pointer; only its owner frees it", farg.lo, farg.hi)
+                            tc_emit(tc, borrowed_free_msg(tc, borrow_operand_ty(tc, pname, ft)), farg.lo, farg.hi)
                         }
                     } else if farg.kind == xk_call() {
-                        if !(*tc).types_only && free_call_arg_aliases(tc, farg) {
-                            tc_emit(tc, alias_result_msg("free"), farg.lo, farg.hi)
+                        if !(*tc).types_only && call_result_borrows(tc, farg, ft) {
+                            if fnode.kind == tyk_unknown() && is_str_ty(tc, borrow_call_ty(tc, farg, ft)) {
+                                tc_emit(tc, borrowed_free_msg(tc, ty_str((*tc).ty)), farg.lo, farg.hi)
+                            } else {
+                                tc_emit(tc, alias_result_msg("free"), farg.lo, farg.hi)
+                            }
                         }
                     } else if farg.kind == xk_match() || farg.kind == xk_ifexpr() {
                         // Freeing a branching expression whose branches borrow frees a

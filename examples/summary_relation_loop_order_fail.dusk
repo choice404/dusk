@@ -1,0 +1,37 @@
+// Compile-fail: inside a loop the store comes first and the relink after it, so the
+// second pass stores the frame view into the caller's holder. The relation ignores
+// statement order, so the store is refused on the first line of the body already
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    mut i: int64 = 0
+    while i < 2 {
+        s.keep(local[0..4])
+        relink(s, h)
+        i++
+    }
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

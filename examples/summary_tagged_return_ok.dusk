@@ -1,0 +1,33 @@
+// The same tagged sink handed a heap slice: the returned holder carries nothing of
+// a frame, so it is accepted and runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder, tag: int64[] }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func make(xs: int64[]) -> *Holder {
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }), tag: xs })
+    held: *Holder = (*s).h
+    s.keep(xs)
+    return held
+}
+
+func outer() -> *Holder {
+    return make(heap_rows())
+}
+
+func main() -> int32 {
+    r: *Holder = outer()
+    println((*r).rows[0])
+    return 0
+}

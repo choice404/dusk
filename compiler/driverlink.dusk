@@ -82,6 +82,17 @@ export func opt_flag(release: bool) -> string {
     return ""
 }
 
+// The optimization flag every runtime C source compiles at, whatever the build asked
+// for. The runtime is the same C under every program and is not the code a person
+// steps through, while its hot paths, the string index check, the allocator, and the
+// collector, run inside every program: at clang's default -O0 one cached string index
+// check costs more than twice what it costs at -O2. The module and every @csource
+// keep the build's own level from opt_flag. Only a link whose runtime cache could not
+// be used hands clang the sources on the module's own line, at the module's level.
+export func runtime_opt_flag() -> string {
+    return "-O2"
+}
+
 // Whether a @link value names a file to hand clang verbatim rather than a library
 // to resolve through -l. A value with a path separator, or one ending in .a, .o,
 // or .so, is a file; a bare name like "m" or "curl" becomes -lm or -lcurl.
@@ -142,9 +153,10 @@ export func runtime_sources() -> *Vector<string> {
 // and -lm for the math intrinsics. rt_inputs is what the runtime contributes, one
 // cached object per source or the sources themselves, resolved by the caller;
 // either way clang is handed the same runtime. opt is the optimization flag, empty
-// for the default build, and it applies to the module, the runtime, and every
-// @csource on the line at once. A clang failure reports a diagnostic and returns
-// its code.
+// for the default build, and it applies to the module and every @csource on the
+// line; cached runtime objects were already compiled at runtime_opt_flag, and only a
+// fallback runtime source on this line takes opt. A clang failure reports a
+// diagnostic and returns its code.
 export func link_only(ll: string, bin: string, rt_inputs: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, opt: string) -> int64 {
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "clang")

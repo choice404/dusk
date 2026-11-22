@@ -1,0 +1,47 @@
+// Compile-fail: an option built with no annotation leaves its payload's type unknown,
+// so the arm's binder carries the scrutinee's view of the frame array and aliases it,
+// and returning the binder hands that view to a caller whose frame outlives it, and is
+// refused, for a payload read straight off the option and through a generic struct
+// literal's field alike
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+struct Box<T> { m: Maybe<T> }
+
+func direct() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Holder = alloc(Holder { rows: local[0..4] })
+    m := Maybe.Some(s)
+    match m { Some(y) => { return y } None => { } }
+    return alloc(Holder { rows: heap_rows() })
+}
+
+func boxed() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Holder = alloc(Holder { rows: local[0..4] })
+    b := Box { m: Maybe.Some(s) }
+    match b.m { Some(y) => { return y } None => { } }
+    return alloc(Holder { rows: heap_rows() })
+}
+
+func main() -> int32 {
+    println((*direct()).rows[0])
+    println((*boxed()).rows[0])
+    return 0
+}

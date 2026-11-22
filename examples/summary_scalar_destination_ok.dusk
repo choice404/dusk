@@ -1,0 +1,56 @@
+// A generic helper keeps a scalar or string key beside a frame slice in a struct of
+// its own, so its summary may route the slice into the key. A key no stored view can
+// land in, a literal, an operator's result, or a number or string binding, takes no
+// such store, so each call below builds and runs over the caller's frame array
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+
+struct Tagged<T> { tag: T, rows: int64[] }
+struct Entry<K> { key: K, rows: int64[] }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func mk<T>(tag: T, xs: int64[]) -> int64 {
+    t: *Tagged<T> = alloc(Tagged { tag: tag, rows: heap_rows() })
+    (*t).rows = xs
+    n: int64 = (*t).rows[0]
+    free(t)
+    return n
+}
+
+func lookup<K>(key: K, rows: int64[]) -> int64 {
+    e: Entry<K> = Entry { key: key, rows: rows }
+    es: *Vector<Entry<K>> = alloc(vec_new())
+    vec_push(es, e)
+    n: int64 = vec_get(es, 0).rows[1]
+    vec_free(es)
+    free(es)
+    return n
+}
+
+func wrap(xs: int64[]) -> int64 { return mk(7, xs) }
+
+func caller(n: int64, s: string) -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    mut total: int64 = mk(7, local[0..4])
+    total = total + mk(true, local[0..4])
+    total = total + mk(n + 1, local[0..4])
+    total = total + mk(n, local[0..4])
+    total = total + mk(s, local[0..4])
+    total = total + lookup("key", local[0..4])
+    total = total + lookup(-n, local[0..4])
+    total = total + lookup(n, local[0..4])
+    total = total + lookup(s, local[0..4])
+    total = total + wrap(local[0..4])
+    return total
+}
+
+func main() -> int32 {
+    println(caller(1, "name"))
+    return 0
+}

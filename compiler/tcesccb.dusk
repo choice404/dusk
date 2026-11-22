@@ -1,0 +1,140 @@
+// Capture flows judged where a callback runs: a direct call of a lambda bound local,
+// or a higher order builtin handed a lambda literal or a lambda bound local. Each
+// edge says a callback parameter's view is stored into a binding the callback
+// captured, so the view escapes when that binding outlives the frame the call is
+// written in, and otherwise raises the binding's own flag for its later egress check
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import diag
+@import ty
+@import tcstate
+@import tcscope
+@import tciface
+@import tcesc
+@import summary
+@import tcesc3
+@import tcesc4
+
+/** Applies a lambda bound local's capture edges at a direct call of that local, each
+ *  parameter taking the escape of the argument written in its position
+ *  @params tc - The checker
+ *  @params callee_id - The callee expression
+ *  @params arg_off - The first argument's kid offset
+ *  @params arg_len - The argument count
+ *  @params lo - The call's span start
+ *  @params hi - The call's span end
+ *  @returns {void} - Emits a refusal or raises a captured binding's flag */
+export func apply_lambda_capture_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return }
+    cl: CapLookup = lambda_capture_bind_lookup(tc, ast_name(a, callee.a))
+    if !cl.found { return }
+    for edge in capture_edges(cl.edges) {
+        if edge.idx < arg_len {
+            esc: EscPair = value_escape(tc, vec_get((*a).kids, arg_off + edge.idx))
+            judge_capture_edge(tc, callee_id, edge.name, esc, false, lo, hi)
+        }
+    }
+}
+
+/** Applies a callback's capture edges at a higher order builtin call: the callback's
+ *  element parameter takes the escape an element of the collection carries, and a
+ *  fold's accumulator the seed's escape as well
+ *  @params tc - The checker
+ *  @params callee_id - The callee expression
+ *  @params arg_off - The first argument's kid offset
+ *  @params arg_len - The argument count
+ *  @params lo - The call's span start
+ *  @params hi - The call's span end
+ *  @returns {void} - Emits a refusal or raises a captured binding's flag */
+export func apply_callback_capture_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return }
+    name: string = ast_name(a, callee.a)
+    callback: int64 = builtin_callback_position(name, arg_len)
+    if callback < 0 || is_local(tc, name) || map_has((*tc).summaries, name) { return }
+    edges: string = callback_capture_edges(tc, vec_get((*a).kids, arg_off + callback))
+    if str_len(edges) == 0 { return }
+    element: EscPair = element_escape(tc, vec_get((*a).kids, arg_off))
+    mut seed: EscPair = element
+    if str_eq(name, "fold") { seed = escape_join(element, value_escape(tc, vec_get((*a).kids, arg_off + 1))) }
+    // A store the callback's own body already reported is not reported again here
+    is_quiet: bool = has_error_within(tc, lo, hi)
+    for edge in capture_edges(edges) {
+        if edge.idx == 0 { judge_capture_edge(tc, callee_id, edge.name, seed, is_quiet, lo, hi) }
+        if edge.idx == 1 && (callback == 2 || str_eq(name, "reduce")) {
+            judge_capture_edge(tc, callee_id, edge.name, element, is_quiet, lo, hi)
+        }
+    }
+}
+
+// The argument position of a higher order builtin's callback, or -1 for any other call
+func builtin_callback_position(name: string, arg_len: int64) -> int64 {
+    if arg_len == 2 && (str_eq(name, "map") || str_eq(name, "filter") || str_eq(name, "foreach") || str_eq(name, "reduce")) { return 1 }
+    if arg_len == 3 && str_eq(name, "fold") { return 2 }
+    return -1
+}
+
+// The serialized capture edges of a callback written as a lambda literal or named by
+// a lambda bound local, or the empty string for any other function value
+func callback_capture_edges(tc: *TypeChecker, callback_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    e: ExprNode = vec_get((*a).exprs, callback_id)
+    if e.kind == xk_lambda() { return unwrap_or(map_get((*tc).lambda_capture_flows, span_key(e.lo, e.hi)), "") }
+    if e.kind != xk_ident() { return "" }
+    cl: CapLookup = lambda_capture_bind_lookup(tc, ast_name(a, e.a))
+    if !cl.found { return "" }
+    return cl.edges
+}
+
+func escape_join(x: EscPair, y: EscPair) -> EscPair {
+    return EscPair { slice: x.slice || y.slice, closure: x.closure || y.closure }
+}
+
+// A frame view stored into a captured binding escapes at the call when the binding is
+// a parameter or reaches past the frame, and otherwise marks the binding as holding it.
+// A quiet judgment refuses nothing more, an earlier error having refused the call
+func judge_capture_edge(tc: *TypeChecker, callee_id: int64, binding: string, esc: EscPair, is_quiet: bool, lo: int64, hi: int64) -> void {
+    if !esc.slice && !esc.closure { return }
+    if map_has((*tc).cur_params, binding) || capture_outlives_call(tc, callee_id, binding) {
+        if !is_quiet { tc_emit(tc, "this call stores a view of the current frame into a place that outlives it; put the backing on the heap", lo, hi) }
+        return
+    }
+    raise_esc(tc, binding, esc.slice, esc.closure)
+}
+
+// Whether an error was already reported at or inside a span
+func has_error_within(tc: *TypeChecker, lo: int64, hi: int64) -> bool {
+    for d in (*tc).errors {
+        if d.lo >= lo && d.hi <= hi { return true }
+    }
+    return false
+}
+
+// Parses serialized capture edges, `index,name;` each, in order
+func capture_edges(caps: string) -> *Vector<CapFlow> {
+    out: *Vector<CapFlow> = alloc(vec_new())
+    mut p: int64 = 0
+    while caps[p] != 0 {
+        mut idx: int64 = 0
+        while caps[p] != 44 {
+            digit: int64 = caps[p]
+            idx = idx * 10 + (digit - 48)
+            p++
+        }
+        p++
+        start: int64 = p
+        while caps[p] != 59 { p++ }
+        vec_push(out, CapFlow { idx: idx, name: substring(caps, start, p) })
+        p++
+    }
+    return out
+}

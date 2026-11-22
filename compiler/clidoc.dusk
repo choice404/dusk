@@ -33,20 +33,6 @@
 // parsed module and its source, ready for either renderer.
 struct DocCheckResult { ok: bool, code: int32, a: *Ast, src: string, n: int64, stem: string }
 
-func read_error_line(path: string, e: error) -> string {
-    if !e.exists() {
-        return path
-    }
-    b: *StringBuilder = alloc(sb_new())
-    sb_push(b, path)
-    sb_push(b, ": read error: ")
-    sb_push(b, e.toString())
-    out: string = substring(sb_cstr(b), 0, sb_size(b))
-    sb_free(b)
-    free(b)
-    return out
-}
-
 // Whether the parameter set kids[off, off+len) binds a parameter named name.
 func params_have(a: *Ast, off: int64, len: int64, name: string) -> bool {
     for i in 0..len {
@@ -244,7 +230,14 @@ func collect_doc_errors(a: *Ast, docs: *Vector<DocBlock>, src: string, n: int64,
 func doc_check(path: string) -> DocCheckResult {
     s, e := source_load(path)
     if e.exists() {
-        line: string = read_error_line(path, e)
+        // The read fault line, "<path>: read error: <why>", built here and freed here
+        b: *StringBuilder = alloc(sb_new())
+        sb_push(b, path)
+        sb_push(b, ": read error: ")
+        sb_push(b, e.toString())
+        line: string = substring(sb_cstr(b), 0, sb_size(b))
+        sb_free(b)
+        free(b)
         printerr(line)
         free(line)
         return DocCheckResult { ok: false, code: 1, a: ast_new(), src: "", n: 0, stem: "" }

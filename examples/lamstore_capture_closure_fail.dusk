@@ -1,0 +1,20 @@
+// Compile-fail: the stored closure captures only the enclosing function's k,
+// yet its environment is still built on the lambda's frame, the frame that
+// evaluates the closure literal, so it dangles once the lambda returns.
+@paradigm procedural
+
+struct Srv { handler: (int64) -> int64, hits: int64 }
+
+func twice(x: int64) -> int64 { return x * 2 }
+
+func main() -> int32 {
+    s: *Srv = alloc(Srv { handler: twice, hits: 0 })
+    k: int64 = 41
+    f := lambda () -> void {
+        (*s).handler = lambda (x: int64) -> int64 { return x + k }
+    }
+    f()
+    println((*s).handler(1))
+    free(s)
+    return 0
+}

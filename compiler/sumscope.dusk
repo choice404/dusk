@@ -1,0 +1,134 @@
+// Lexical scopes for the summary walk: a block, a loop, or a match arm restores the
+// surface types it shadowed when it ends, and a pattern or loop binder also restores
+// the abstract value of the enclosing binding it shadowed
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import summary
+@import sumwalk
+
+export struct SumTypeBinding { name: string, previous: int64, is_value: bool, had_value: bool, value: SumVal }
+
+/** Record a binding's surface type until its scope ends
+ *  @params c - The walk holding the type environment
+ *  @params name - The binding being introduced
+ *  @params tyid - Its surface type
+ *  @returns {void} - Records the binding until its scope ends */
+export func sum_bind_type(c: *SumCtx, name: string, tyid: int64) -> void {
+    previous: int64 = unwrap_or(map_get((*c).local_types, name), -1)
+    push_binding(c, SumTypeBinding { name: name, previous: previous, is_value: false, had_value: false, value: val_none() })
+    map_put((*c).local_types, name, tyid)
+}
+
+/** Bind a pattern or loop name to its own value, shadowing any enclosing binding
+ *  of that name until the scope ends rather than overwriting it for good
+ *  @params c - The walk holding the type and value environments
+ *  @params name - The binder being introduced
+ *  @params tyid - Its surface type
+ *  @params value - The abstract value the binder holds
+ *  @returns {void} - Records both until the scope ends */
+export func sum_bind_value(c: *SumCtx, name: string, tyid: int64, value: SumVal) -> void {
+    // Saved before the binder lands, so the restore finds the enclosing binding
+    previous: int64 = unwrap_or(map_get((*c).local_types, name), -1)
+    had_value: bool = map_has((*c).env, name)
+    saved: SumVal = unwrap_or(map_get((*c).env, name), val_none())
+    push_binding(c, SumTypeBinding { name: name, previous: previous, is_value: true, had_value: had_value, value: saved })
+    map_put((*c).local_types, name, tyid)
+    map_put((*c).env, name, value)
+}
+
+func push_binding(c: *SumCtx, saved: SumTypeBinding) -> void {
+    bindings: *Vector<SumTypeBinding> = (*c).type_bindings
+    if (*c).type_depth < vec_len(bindings) {
+        vec_set(bindings, (*c).type_depth, saved)
+    } else {
+        vec_push(bindings, saved)
+    }
+    (*c).type_depth++
+}
+
+/** Restore the bindings a scope shadowed. Facts that flowed out of a binder into
+ *  other places stay recorded there, so only the binder's own entry is dropped
+ *  @params c - The current walk
+ *  @params depth - The stack depth at scope entry
+ *  @returns {void} - Restores the enclosing bindings */
+export func sum_restore_types(c: *SumCtx, depth: int64) -> void {
+    while (*c).type_depth > depth {
+        (*c).type_depth--
+        saved: SumTypeBinding = vec_get((*c).type_bindings, (*c).type_depth)
+        if saved.previous >= 0 {
+            map_put((*c).local_types, saved.name, saved.previous)
+        } else {
+            map_remove((*c).local_types, saved.name).ignore()
+        }
+        if saved.is_value { restore_value(c, saved) }
+    }
+}
+
+// The binder's last value is kept aside, so a later store through a binding the
+// frame relation ties to it still finds what the binder reached
+func restore_value(c: *SumCtx, saved: SumTypeBinding) -> void {
+    ending: SumVal = unwrap_or(map_get((*c).env, saved.name), val_none())
+    kept: SumVal = unwrap_or(map_get((*c).retired, saved.name), val_none())
+    map_put((*c).retired, saved.name, val_join(kept, ending))
+    if saved.had_value {
+        map_put((*c).env, saved.name, saved.value)
+        return
+    }
+    map_remove((*c).env, saved.name).ignore()
+}
+
+/** Whether a callee name is bound by the walked body or an enclosing one, so a module
+ *  function or builtin of the same name is not what the call reaches. The local set
+ *  only grows, so a name a sibling block bound reads as bound here too
+ *  @params c - The current walk
+ *  @params name - The callee name
+ *  @returns {bool} - Whether a local, a parameter, or a capture owns the name */
+export func sum_name_bound(c: *SumCtx, name: string) -> bool {
+    return map_has((*c).locals, name) || map_has((*c).param_index, name) || outer_has(c, name)
+}
+
+/** The module function a bound callee resolves to through a straight `name := g`
+ *  @params c - The current walk
+ *  @params name - The bound callee name
+ *  @returns {string} - The target, or "" when the call stays opaque */
+export func sum_bound_target(c: *SumCtx, name: string) -> string {
+    if !map_has((*c).fn_binds, name) { return "" }
+    // A parameter or capture of that name is the callee outside the binding's block
+    if map_has((*c).param_index, name) || outer_has(c, name) { return "" }
+    return unwrap_or(map_get((*c).fn_binds, name), "")
+}
+
+/** Whether a name read at this point of the walk is the walked frame's own parameter
+ *  rather than a binder, a local, or an inline lambda's parameter spelled the same,
+ *  which each shadow it until their scope ends
+ *  @params c - The current walk
+ *  @params name - A binding name
+ *  @returns {bool} - True when the innermost binding of the name is the parameter */
+export func sum_names_parameter(c: *SumCtx, name: string) -> bool {
+    if !map_has((*c).param_index, name) { return false }
+    bindings: *Vector<SumTypeBinding> = (*c).type_bindings
+    for i in 0..(*c).type_depth {
+        saved: SumTypeBinding = vec_get(bindings, i)
+        if str_eq(saved.name, name) { return false }
+    }
+    return true
+}
+
+/** The type a parameter was declared with, whatever binding spelled the same shadows
+ *  it at this point of the walk
+ *  @params c - The current walk
+ *  @params name - A parameter's name
+ *  @returns {int64} - The declared type, or -1 when the walk has none */
+export func sum_parameter_type(c: *SumCtx, name: string) -> int64 {
+    bindings: *Vector<SumTypeBinding> = (*c).type_bindings
+    for i in 0..(*c).type_depth {
+        saved: SumTypeBinding = vec_get(bindings, i)
+        if str_eq(saved.name, name) { return saved.previous }
+    }
+    return unwrap_or(map_get((*c).local_types, name), -1)
+}

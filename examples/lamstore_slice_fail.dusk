@@ -1,0 +1,18 @@
+// Compile-fail: a lambda stores a slice of its own local array through a
+// captured pointer. The array dies with the lambda's frame while the struct the
+// pointer reaches keeps the slice.
+@paradigm procedural
+
+struct Cell { rows: int64[] }
+
+func main() -> int32 {
+    c: *Cell = alloc(Cell { rows: [] })
+    f := lambda () -> void {
+        local: int64[4] = [111, 222, 333, 444]
+        (*c).rows = local[0..4]
+    }
+    f()
+    println((*c).rows[0])
+    free(c)
+    return 0
+}

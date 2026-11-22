@@ -1,0 +1,678 @@
+// tcescunify: the frame relation behind the store follow rule. One walk over a whole
+// function, every lambda body inside it included, unifies the names a pointer can
+// travel between, whatever scope declares them, whatever order the statements run in,
+// and whichever branch is taken (tcescwalk holds the walk). Since nothing is ever
+// removed, a store destination whose class holds no parameter, no lambda parameter or
+// capture of an enclosing frame, no returned value, and nothing an opaque call touched
+// is memory the frame owns alone. A relation is built once per function and asked
+// from the frame of each expression a query names
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import summary
+@import resolveexpr
+@import tcescrepoint
+@import tcescwalk
+
+export struct NameDecl { name: string, frame: int64, is_param: bool, index: int64, operand: int64, ty: int64, carries: bool }
+
+export struct FrameRelation {
+    t: *SumTables,
+    cache: *RelationCache,
+    function_id: int64,
+    target: int64,
+    found: bool,
+    target_frame: int64,
+    collecting: bool,
+    frame: int64,
+    lambda_node: int64,
+    returns_carry: bool,
+    self_result: int64,
+    parent: *Vector<int64>,
+    flags: *Vector<int64>,
+    returned: *Vector<int64>,
+    plain_returns: *Vector<int64>,
+    reported: *Vector<int64>,
+    kinds: *Vector<int64>,
+    owner: *Vector<int64>,
+    names: *Vector<string>,
+    nodes: *Map<string, int64>,
+    decls: *Vector<NameDecl>,
+    name_decls: *Map<string, *Vector<int64>>,
+    decl_count: *Map<string, int64>,
+    no_decls: *Vector<int64>,
+    operand_decls: *Map<int64, int64>,
+    frame_parent: *Vector<int64>,
+    frame_cursor: int64,
+    refs: *Vector<*Vector<int64>>,
+    node_frames: *Vector<int64>,
+    frame_decls: *Map<string, int64>,
+    depth: int64,
+    versions: *Map<string, int64>,
+    function_names: *Map<string, int64>,
+    shared_names: *Map<string, int64>,
+    expr_frames: *Map<int64, int64>,
+    carry_memo: *Map<string, int64>,
+    type_memo: *Map<string, int64>,
+    members: *Map<int64, *Vector<int64>>,
+    edge_from: *Vector<int64>,
+    edge_to: *Vector<int64>,
+    edge_frames: *Vector<int64>,
+    direct_marks: *Map<int64, int64>,
+    lambda_frames: *Map<int64, int64>,
+    frame_returns: *Vector<int64>,
+    frame_return_frames: *Vector<int64>,
+    frame_return_names: *Vector<bool>,
+    frame_edges: *Map<int64, *Vector<int64>>,
+    adjacency: *Map<int64, *Map<int64, *Vector<int64>>>,
+    frame_classes: *Map<int64, *Map<int64, *Vector<int64>>>,
+}
+
+/** The callee summaries every relation of one checker or one summary walk shares, the
+ *  relation of each function asked about, built once, and the functions sorted by the
+ *  position each starts at, so a query finds its function by a binary search */
+export struct RelationMemo { caches: *Vector<*RelationCache>, built: *Map<int64, *FrameRelation>, starts: *Vector<int64>, views: *Map<int64, *FrameRelation> }
+
+// Node kinds: a named binding, a lambda's environment, an anonymous value, and the
+// two marks a value can carry instead of a class of its own: memory outside the frame
+// an opaque call may reach, and the function's returned values. A class a mark is
+// tied to carries it as a flag rather than merging with every other marked class, so
+// a parameter is named only when the class itself reaches it
+export func relation_kind_name() -> int64 { return 0 }
+export func relation_kind_lambda() -> int64 { return 2 }
+func nk_mark() -> int64 { return 3 }
+export func relation_kind_temp() -> int64 { return 5 }
+
+func flag_outside() -> int64 { return 1 }
+func flag_returned() -> int64 { return 2 }
+
+/** The node standing for memory outside the frame
+ *  @returns {int64} - Always node 0 */
+export func relation_outside() -> int64 { return 0 }
+
+/** The node standing for the walked function's returned values
+ *  @returns {int64} - Always node 1 */
+export func relation_return() -> int64 { return 1 }
+
+func is_mark(id: int64) -> bool { return id == 0 || id == 1 }
+
+func mark_flag(id: int64) -> int64 {
+    if id == relation_outside() { return flag_outside() }
+    return flag_returned()
+}
+
+/** An empty memo for one checker or one set of summary tables
+ *  @returns {*RelationMemo} - No cache and no relation yet */
+export func relation_memo_new() -> *RelationMemo {
+    caches: *Vector<*RelationCache> = alloc(vec_new())
+    built: *Map<int64, *FrameRelation> = alloc(map_new())
+    starts: *Vector<int64> = alloc(vec_new())
+    views: *Map<int64, *FrameRelation> = alloc(map_new())
+    return alloc(RelationMemo { caches: caches, built: built, starts: starts, views: views })
+}
+
+/** The relation of the function holding an expression, asked from the expression's
+ *  frame, built once per function and kept for every later query. A relation reads
+ *  only the module and the callee relations, which a built relation never changes
+ *  @params memo - The checker's or the summary tables' memo
+ *  @params t - The surface tables
+ *  @params target - The expression a query is asked from
+ *  @returns {*FrameRelation} - The relation, found false when no walked frame holds it */
+export func memo_relation(memo: *RelationMemo, t: *SumTables, target: int64) -> *FrameRelation {
+    views: *Map<int64, *FrameRelation> = (*memo).views
+    match map_get(views, target) {
+        Some(seen) => { return seen }
+        None => {}
+    }
+    view: *FrameRelation = relation_view(memo_function_relation(memo, t, target), target)
+    map_put(views, target, view)
+    return view
+}
+
+func memo_function_relation(memo: *RelationMemo, t: *SumTables, target: int64) -> *FrameRelation {
+    function_id: int64 = memo_function(memo, t, target)
+    built: *Map<int64, *FrameRelation> = (*memo).built
+    match map_get(built, function_id) {
+        Some(kept) => { return kept }
+        None => {}
+    }
+    cache: *RelationCache = memo_cache(memo, t)
+    match map_get((*cache).relations, function_id) {
+        Some(settled) => {
+            map_put(built, function_id, settled)
+            return settled
+        }
+        None => {}
+    }
+    fresh: *FrameRelation = function_frame_relation(t, cache, function_id)
+    map_put(built, function_id, fresh)
+    return fresh
+}
+
+// A function's span covers only its name, so the function holding a position is the
+// one named nearest before it. Only the module's items count: the arena also keeps
+// the bodies the loader copied them from. A binary search over every function's start,
+// each packed with its id in the low bits, finds it
+func memo_function(memo: *RelationMemo, t: *SumTables, target: int64) -> int64 {
+    a: *Ast = (*t).ast
+    if target < 0 || target >= vec_len((*a).exprs) { return -1 }
+    starts: *Vector<int64> = memo_starts(memo, a)
+    key: int64 = vec_get((*a).exprs, target).lo * start_scale() + start_scale() - 1
+    mut low: int64 = 0
+    mut high: int64 = vec_len(starts)
+    while low < high {
+        middle: int64 = (low + high) / 2
+        if vec_get(starts, middle) <= key { low = middle + 1 } else { high = middle }
+    }
+    if low == 0 { return -1 }
+    return vec_get(starts, low - 1) % start_scale()
+}
+
+func start_scale() -> int64 { return 1048576 }
+
+func memo_starts(memo: *RelationMemo, a: *Ast) -> *Vector<int64> {
+    starts: *Vector<int64> = (*memo).starts
+    if vec_len(starts) > 0 { return starts }
+    for item in (*a).items {
+        if item.kind == ik_func() {
+            note_start(a, starts, item.id)
+        } else if item.kind == ik_impl() {
+            implementation: ImplNode = vec_get((*a).impls, item.id)
+            for i in 0..implementation.methods_len { note_start(a, starts, vec_get((*a).kids, implementation.methods_off + i)) }
+        }
+    }
+    vec_sort(starts, lambda (first: int64, second: int64) -> int32 { return compare_starts(first, second) })
+    return starts
+}
+
+func note_start(a: *Ast, starts: *Vector<int64>, function_id: int64) -> void {
+    function: FuncNode = vec_get((*a).funcs, function_id)
+    if function.body >= 0 { vec_push(starts, function.lo * start_scale() + function_id) }
+}
+
+func compare_starts(first: int64, second: int64) -> int32 {
+    if first < second { return int32(-1) }
+    if first > second { return int32(1) }
+    return int32(0)
+}
+
+func memo_cache(memo: *RelationMemo, t: *SumTables) -> *RelationCache {
+    caches: *Vector<*RelationCache> = (*memo).caches
+    if vec_len(caches) == 0 { vec_push(caches, relation_cache_new(t)) }
+    return vec_get(caches, 0)
+}
+
+/** Builds the relation of a whole function, asked from the function's own frame
+ *  @params t - The surface tables holding the module AST
+ *  @params cache - The callee relations already computed
+ *  @params function_id - The function node
+ *  @returns {*FrameRelation} - The relation, found false for no function */
+export func function_frame_relation(t: *SumTables, cache: *RelationCache, function_id: int64) -> *FrameRelation {
+    rel: *FrameRelation = relation_new(t, cache, function_id)
+    if function_id < 0 { return rel }
+    relation_walk_twice(rel)
+    (*rel).found = true
+    return rel
+}
+
+/** The same relation asked from the frame an expression is written in
+ *  @params base - A built relation
+ *  @params target - The expression, or -1 for the function's own frame
+ *  @returns {*FrameRelation} - A view sharing every node, found false when the walk
+ *  never reached the expression */
+export func relation_view(base: *FrameRelation, target: int64) -> *FrameRelation {
+    mut view: FrameRelation = *base
+    view.target = target
+    view.found = (*base).found && target >= 0 && map_has((*base).expr_frames, target)
+    view.target_frame = unwrap_or(map_get((*base).expr_frames, target), -1)
+    return alloc(view)
+}
+
+func relation_new(t: *SumTables, cache: *RelationCache, function_id: int64) -> *FrameRelation {
+    parent: *Vector<int64> = alloc(vec_new())
+    flags: *Vector<int64> = alloc(vec_new())
+    returned: *Vector<int64> = alloc(vec_new())
+    plain_returns: *Vector<int64> = alloc(vec_new())
+    reported: *Vector<int64> = alloc(vec_new())
+    kinds: *Vector<int64> = alloc(vec_new())
+    owner: *Vector<int64> = alloc(vec_new())
+    names: *Vector<string> = alloc(vec_new())
+    nodes: *Map<string, int64> = alloc(map_new())
+    decls: *Vector<NameDecl> = alloc(vec_new())
+    name_decls: *Map<string, *Vector<int64>> = alloc(map_new())
+    decl_count: *Map<string, int64> = alloc(map_new())
+    no_decls: *Vector<int64> = alloc(vec_new())
+    operand_decls: *Map<int64, int64> = alloc(map_new())
+    frame_parent: *Vector<int64> = alloc(vec_new())
+    refs: *Vector<*Vector<int64>> = alloc(vec_new())
+    node_frames: *Vector<int64> = alloc(vec_new())
+    frame_decls: *Map<string, int64> = alloc(map_new())
+    versions: *Map<string, int64> = alloc(map_new())
+    function_names: *Map<string, int64> = alloc(map_new())
+    shared_names: *Map<string, int64> = alloc(map_new())
+    expr_frames: *Map<int64, int64> = alloc(map_new())
+    carry_memo: *Map<string, int64> = alloc(map_new())
+    type_memo: *Map<string, int64> = alloc(map_new())
+    members: *Map<int64, *Vector<int64>> = alloc(map_new())
+    edge_from: *Vector<int64> = alloc(vec_new())
+    edge_to: *Vector<int64> = alloc(vec_new())
+    edge_frames: *Vector<int64> = alloc(vec_new())
+    frame_edges: *Map<int64, *Vector<int64>> = alloc(map_new())
+    direct_marks: *Map<int64, int64> = alloc(map_new())
+    lambda_frames: *Map<int64, int64> = alloc(map_new())
+    frame_returns: *Vector<int64> = alloc(vec_new())
+    frame_return_frames: *Vector<int64> = alloc(vec_new())
+    frame_return_names: *Vector<bool> = alloc(vec_new())
+    adjacency: *Map<int64, *Map<int64, *Vector<int64>>> = alloc(map_new())
+    frame_classes: *Map<int64, *Map<int64, *Vector<int64>>> = alloc(map_new())
+    rel: *FrameRelation = alloc(FrameRelation {
+        t: t, cache: cache, function_id: function_id, target: -1, found: false,
+        target_frame: -1, collecting: true, frame: -1, lambda_node: -1, returns_carry: true, self_result: -1,
+        parent: parent, flags: flags, returned: returned, plain_returns: plain_returns, reported: reported, kinds: kinds, owner: owner, names: names, nodes: nodes,
+        decls: decls, name_decls: name_decls, decl_count: decl_count, no_decls: no_decls,
+        operand_decls: operand_decls, frame_parent: frame_parent,
+        frame_cursor: 0, refs: refs, node_frames: node_frames, frame_decls: frame_decls, depth: 0,
+        versions: versions, function_names: function_names, shared_names: shared_names,
+        expr_frames: expr_frames, carry_memo: carry_memo, type_memo: type_memo, members: members,
+        edge_from: edge_from, edge_to: edge_to, edge_frames: edge_frames, frame_edges: frame_edges,
+        direct_marks: direct_marks, lambda_frames: lambda_frames,
+        frame_returns: frame_returns, frame_return_frames: frame_return_frames,
+        frame_return_names: frame_return_names, adjacency: adjacency,
+        frame_classes: frame_classes,
+    })
+    relation_new_node(rel, nk_mark(), -1, "")
+    relation_new_node(rel, nk_mark(), -1, "")
+    return rel
+}
+
+/** Adds a node of its own class
+ *  @params rel - The relation being built
+ *  @params kind - The node kind
+ *  @params owner - The lambda frame an environment node belongs to, else -1
+ *  @params name - The binding a name node stands for, else empty
+ *  @returns {int64} - The node */
+export func relation_new_node(rel: *FrameRelation, kind: int64, owner: int64, name: string) -> int64 {
+    id: int64 = vec_len((*rel).parent)
+    vec_push((*rel).parent, id)
+    vec_push((*rel).flags, 0)
+    vec_push((*rel).kinds, kind)
+    vec_push((*rel).owner, owner)
+    vec_push((*rel).names, name)
+    vec_push((*rel).node_frames, -1)
+    return id
+}
+
+// A lambda's declarations of a name are their own binding when no frame enclosing the
+// lambda declares the name too, so two sibling lambdas' parameters of one name stay
+// apart; every declaration along one chain of nested frames shares the outermost's
+// node, since a read inside a lambda may come before the lambda's own declaration
+func node_key(name: string, frame: int64) -> string {
+    if frame < 0 { return name }
+    return f"{name}@{frame}"
+}
+
+func name_node(rel: *FrameRelation, name: string, frame: int64) -> int64 {
+    key: string = node_key(name, frame)
+    known: int64 = unwrap_or(map_get((*rel).nodes, key), -1)
+    if known >= 0 { return known }
+    id: int64 = relation_new_node(rel, relation_kind_name(), -1, name)
+    vec_set((*rel).node_frames, id, frame)
+    map_put((*rel).nodes, key, id)
+    return id
+}
+
+// The outermost frame, from a given one outward, declaring a name, or -1
+func resolve_frame(rel: *FrameRelation, name: string, frame: int64) -> int64 {
+    if map_has((*rel).frame_decls, name) { return -1 }
+    mut outermost: int64 = -1
+    mut current: int64 = frame
+    while current >= 0 {
+        if map_has((*rel).frame_decls, node_key(name, current)) { outermost = current }
+        current = vec_get((*rel).frame_parent, current)
+    }
+    return outermost
+}
+
+/** The node a name read in the current frame lives in
+ *  @params rel - The relation being built
+ *  @params name - A binding name
+ *  @returns {int64} - The node, or -1 when every declaration of it holds no reference */
+export func relation_name_value(rel: *FrameRelation, name: string) -> int64 {
+    if !(*rel).collecting && !relation_name_may_carry(rel, name) { return -1 }
+    frame: int64 = resolve_frame(rel, name, (*rel).frame)
+    if frame < 0 && map_has((*rel).versions, name) { return unwrap_or(map_get((*rel).versions, name), -1) }
+    return name_node(rel, name, frame)
+}
+
+/** The node a store destination's root names, read from the frame the query is asked
+ *  from
+ *  @params rel - A built relation
+ *  @params root - The root binding
+ *  @returns {int64} - The node, or -1 when the walk never read it */
+export func relation_root_node(rel: *FrameRelation, root: string) -> int64 {
+    return relation_node_of(rel, root, (*rel).target_frame)
+}
+
+/** The node of a name as a given frame declares it
+ *  @params rel - A built relation
+ *  @params name - The name
+ *  @params frame - The declaring frame, -1 for the function's own
+ *  @returns {int64} - The node, or -1 */
+export func relation_node_of(rel: *FrameRelation, name: string, frame: int64) -> int64 {
+    return unwrap_or(map_get((*rel).nodes, node_key(name, resolve_frame(rel, name, frame))), -1)
+}
+
+/** The representative of a node's class, halving the path walked
+ *  @params rel - The relation
+ *  @params id - Any node
+ *  @returns {int64} - The class representative */
+export func relation_class(rel: *FrameRelation, id: int64) -> int64 {
+    parent: *Vector<int64> = (*rel).parent
+    mut current: int64 = id
+    while vec_get(parent, current) != current {
+        grand: int64 = vec_get(parent, vec_get(parent, current))
+        vec_set(parent, current, grand)
+        current = grand
+    }
+    return current
+}
+
+/** Ties two values into one class, or marks a class with what a mark stands for
+ *  @params rel - The relation being built
+ *  @params first - A node, a mark, or -1 for a value that holds no reference
+ *  @params second - Another node, a mark, or -1
+ *  @returns {void} - Nothing while declarations are still being collected */
+export func relation_unite(rel: *FrameRelation, first: int64, second: int64) -> void {
+    if (*rel).collecting || first < 0 || second < 0 { return }
+    if is_mark(first) || is_mark(second) {
+        mark_class(rel, first, second)
+        return
+    }
+    vec_push((*rel).edge_from, first)
+    vec_push((*rel).edge_to, second)
+    vec_push((*rel).edge_frames, (*rel).frame)
+    x: int64 = relation_class(rel, first)
+    y: int64 = relation_class(rel, second)
+    if x == y { return }
+    joined: int64 = vec_get((*rel).flags, x) | vec_get((*rel).flags, y)
+    if x < y {
+        vec_set((*rel).parent, y, x)
+        vec_set((*rel).flags, x, joined)
+    } else {
+        vec_set((*rel).parent, x, y)
+        vec_set((*rel).flags, y, joined)
+    }
+}
+
+// Two marks tied together meet in a node of their own, so a function that returns
+// what an opaque call handed it still reads as returning memory outside its frame
+func mark_class(rel: *FrameRelation, first: int64, second: int64) -> void {
+    if first == second { return }
+    if is_mark(first) && is_mark(second) {
+        both: int64 = relation_new_node(rel, relation_kind_temp(), -1, "")
+        relation_unite(rel, both, first)
+        relation_unite(rel, both, second)
+        return
+    }
+    mut mark: int64 = first
+    mut node: int64 = second
+    if is_mark(second) {
+        mark = second
+        node = first
+    }
+    class: int64 = relation_class(rel, node)
+    vec_set((*rel).flags, class, vec_get((*rel).flags, class) | mark_flag(mark))
+    marks: *Map<int64, int64> = (*rel).direct_marks
+    map_put(marks, node, unwrap_or(map_get(marks, node), 0) | mark_flag(mark))
+    if mark == relation_return() { vec_push((*rel).returned, node) }
+}
+
+/** Whether a node's class carries a mark
+ *  @params rel - The relation
+ *  @params id - A node, or a mark, which carries itself
+ *  @params mark - The mark asked about
+ *  @returns {bool} - True when the class is tied to the mark */
+export func relation_marked(rel: *FrameRelation, id: int64, mark: int64) -> bool {
+    if id < 0 { return false }
+    if is_mark(id) { return id == mark }
+    return (vec_get((*rel).flags, relation_class(rel, id)) & mark_flag(mark)) != 0
+}
+
+/** A value reaching either of two values
+ *  @params rel - The relation being built
+ *  @params first - A node, a mark, or -1
+ *  @params second - Another node, a mark, or -1
+ *  @returns {int64} - The joined node, or -1 when neither holds a reference */
+export func relation_join(rel: *FrameRelation, first: int64, second: int64) -> int64 {
+    if first < 0 || first == second { return second }
+    if second < 0 { return first }
+    if is_mark(first) && is_mark(second) {
+        both: int64 = relation_new_node(rel, relation_kind_temp(), -1, "")
+        relation_unite(rel, both, first)
+        relation_unite(rel, both, second)
+        return both
+    }
+    relation_unite(rel, first, second)
+    if is_mark(first) { return second }
+    return first
+}
+
+/** A value reaching every value of a list
+ *  @params rel - The relation being built
+ *  @params values - Nodes, any of them -1
+ *  @returns {int64} - The joined node, or -1 */
+export func relation_join_all(rel: *FrameRelation, values: *Vector<int64>) -> int64 {
+    mut joined: int64 = -1
+    for value in values { joined = relation_join(rel, joined, value) }
+    return joined
+}
+
+/** Records a declaration while the first walk collects them, indexed by name and, for
+ *  a parameter of the function itself, by operand slot
+ *  @params rel - The relation being built
+ *  @params record - The declaration
+ *  @returns {void} - Nothing once the walk unifies */
+export func relation_note_decl(rel: *FrameRelation, record: NameDecl) -> void {
+    if !(*rel).collecting { return }
+    index: int64 = vec_len((*rel).decls)
+    vec_push((*rel).decls, record)
+    if !map_has((*rel).name_decls, record.name) {
+        fresh: *Vector<int64> = alloc(vec_new())
+        map_put((*rel).name_decls, record.name, fresh)
+    }
+    vec_push(relation_decls_of(rel, record.name), index)
+    map_put((*rel).decl_count, record.name, relation_decl_count(rel, record.name) + 1)
+    if record.is_param && record.frame < 0 && !map_has((*rel).operand_decls, record.operand) { map_put((*rel).operand_decls, record.operand, index) }
+    map_put((*rel).frame_decls, node_key(record.name, record.frame), 1)
+}
+
+/** The declarations of one name, as indexes into the relation's list
+ *  @params rel - The relation
+ *  @params name - A binding name
+ *  @returns {*Vector<int64>} - The indexes, empty for a name declared nowhere */
+export func relation_decls_of(rel: *FrameRelation, name: string) -> *Vector<int64> {
+    return unwrap_or(map_get((*rel).name_decls, name), (*rel).no_decls)
+}
+
+/** How many times the walked function declares a name
+ *  @params rel - The relation
+ *  @params name - A binding name
+ *  @returns {int64} - Zero for a module item or a name declared nowhere */
+export func relation_decl_count(rel: *FrameRelation, name: string) -> int64 {
+    return unwrap_or(map_get((*rel).decl_count, name), 0)
+}
+
+/** The declaration of the walked function's parameter at an operand slot
+ *  @params rel - The relation
+ *  @params operand - The slot, a method receiver at 0
+ *  @returns {int64} - The index into the declarations, or -1 */
+export func relation_operand_decl(rel: *FrameRelation, operand: int64) -> int64 {
+    return unwrap_or(map_get((*rel).operand_decls, operand), -1)
+}
+
+/** Whether any declaration of a name may hold a pointer, slice, or closure. A name
+ *  declared nowhere in the function is conservatively a carrier
+ *  @params rel - A relation past its first walk
+ *  @params name - A binding name
+ *  @returns {bool} - False only when every declaration's type holds no reference */
+export func relation_name_may_carry(rel: *FrameRelation, name: string) -> bool {
+    if map_has((*rel).carry_memo, name) { return unwrap_or(map_get((*rel).carry_memo, name), 1) != 0 }
+    mut carries: int64 = 0
+    if relation_decl_count(rel, name) == 0 { carries = 1 }
+    for index in relation_decls_of(rel, name) {
+        record: NameDecl = vec_get((*rel).decls, index)
+        if record.ty < 0 || type_carries((*rel).t, (*rel).cache, record.ty) { carries = 1 }
+    }
+    map_put((*rel).carry_memo, name, carries)
+    return carries != 0
+}
+
+/** Finishes a built relation: every node points straight at its class, and each class
+ *  lists its members, so a query reads them without searching every node
+ *  @params rel - A relation past its second walk
+ *  @returns {void} */
+export func relation_seal(rel: *FrameRelation) -> void {
+    for i in 0..vec_len((*rel).parent) {
+        class: int64 = relation_class(rel, i)
+        vec_set((*rel).parent, i, class)
+        if !map_has((*rel).members, class) {
+            fresh: *Vector<int64> = alloc(vec_new())
+            map_put((*rel).members, class, fresh)
+        }
+        vec_push(relation_class_members(rel, class), i)
+    }
+}
+
+/** Every node of a node's class
+ *  @params rel - A sealed relation
+ *  @params id - Any node
+ *  @returns {*Vector<int64>} - The members, the node among them */
+export func relation_class_members(rel: *FrameRelation, id: int64) -> *Vector<int64> {
+    class: int64 = relation_class(rel, id)
+    if map_has((*rel).members, class) { return unwrap_or(map_get((*rel).members, class), (*rel).no_decls) }
+    alone: *Vector<int64> = alloc(vec_new())
+    vec_push(alone, id)
+    return alone
+}
+
+/** Whether a frame is the given frame or nested inside it
+ *  @params rel - The relation
+ *  @params frame - A lambda frame, or -1 for the function's own
+ *  @params outer - The frame asked about, every frame being inside -1
+ *  @returns {bool} - True when frame lies within outer */
+export func relation_frame_within(rel: *FrameRelation, frame: int64, outer: int64) -> bool {
+    if outer < 0 { return true }
+    mut current: int64 = frame
+    while current >= 0 {
+        if current == outer { return true }
+        current = vec_get((*rel).frame_parent, current)
+    }
+    return false
+}
+
+/** Whether a name is declared by some frame of the walk
+ *  @params rel - The relation
+ *  @params name - The name
+ *  @params frame - The declaring frame
+ *  @returns {bool} - True when that frame declares it */
+export func relation_frame_declares(rel: *FrameRelation, name: string, frame: int64) -> bool {
+    return map_has((*rel).frame_decls, node_key(name, frame))
+}
+
+/** A name the module declares, a function, a type, a variant, or a builtin, which no
+ *  frame owns and which holds no memory of its own
+ *  @params rel - The relation
+ *  @params name - The name
+ *  @returns {bool} - True for a module item */
+export func relation_is_module_item(rel: *FrameRelation, name: string) -> bool {
+    t: *SumTables = (*rel).t
+    if map_has((*t).module_fns, name) || relation_is_type_item(rel, name) { return true }
+    return is_builtin_name(name)
+}
+
+/** A type, an interface, or a variant of any enum, payload or not, which names no value
+ *  that holds memory
+ *  @params rel - The relation
+ *  @params name - The name
+ *  @returns {bool} - True for a type or variant name */
+export func relation_is_type_item(rel: *FrameRelation, name: string) -> bool {
+    t: *SumTables = (*rel).t
+    if map_has((*t).struct_idx, name) || map_has((*t).enum_idx, name) || map_has((*t).ifaces, name) { return true }
+    return relation_is_variant(rel, name)
+}
+
+/** Whether a name is a variant of some enum, a payloadless one included
+ *  @params rel - The relation
+ *  @params name - The name
+ *  @returns {bool} - True for a variant */
+export func relation_is_variant(rel: *FrameRelation, name: string) -> bool {
+    return map_has((*(*rel).t).variant_idx, name) || map_has((*(*rel).cache).variants, name)
+}
+
+/** What a call back into the function being walked returns: one node every value the
+ *  function returns joins, made when the first walk meets such a call, so the result
+ *  shares a class with each of them rather than standing for the returned mark alone
+ *  @params rel - The relation being built
+ *  @returns {int64} - The node, or -1 when the result holds no reference */
+export func relation_returned(rel: *FrameRelation) -> int64 {
+    if !(*rel).returns_carry { return -1 }
+    if (*rel).self_result < 0 { (*rel).self_result = relation_new_node(rel, relation_kind_temp(), -1, "") }
+    return (*rel).self_result
+}
+
+/** Ties a value the walked function returns to the returned mark and to the result a
+ *  call back into the function stands for
+ *  @params rel - The relation being built
+ *  @params value - The returned value's node, or -1
+ *  @returns {void} */
+export func relation_note_return(rel: *FrameRelation, value: int64) -> void {
+    relation_unite(rel, relation_return(), value)
+    relation_unite(rel, (*rel).self_result, value)
+}
+
+/** Whether a member of a class leads outside the frame the query is asked from: the
+ *  environment of the querying lambda or of one enclosing it, a parameter of that
+ *  frame or of one enclosing it, or a name some declaration of which lies outside it
+ *  @params rel - The relation
+ *  @params id - A node
+ *  @returns {bool} - False for an anonymous value and a mark */
+export func relation_member_outside(rel: *FrameRelation, id: int64) -> bool {
+    kind: int64 = vec_get((*rel).kinds, id)
+    if kind == nk_mark() || kind == relation_kind_temp() { return false }
+    query: int64 = (*rel).target_frame
+    if kind == relation_kind_lambda() {
+        owner: int64 = vec_get((*rel).owner, id)
+        return owner == query || !relation_frame_within(rel, owner, query)
+    }
+    name: string = vec_get((*rel).names, id)
+    declared: int64 = vec_get((*rel).node_frames, id)
+    if !relation_frame_declares(rel, name, declared) { return !relation_is_module_item(rel, name) }
+    for index in relation_decls_of(rel, name) {
+        record: NameDecl = vec_get((*rel).decls, index)
+        if resolve_frame(rel, name, record.frame) != declared { continue }
+        if !relation_frame_within(rel, record.frame, query) { return true }
+        if record.is_param && (record.frame < 0 || record.frame == query) { return true }
+    }
+    return false
+}
+
+/** Whether a class carries the outside or the returned mark
+ *  @params rel - The relation
+ *  @params id - Any node of the class
+ *  @returns {bool} - True when the class reaches either */
+export func relation_class_marked(rel: *FrameRelation, id: int64) -> bool {
+    return (vec_get((*rel).flags, relation_class(rel, id)) & (flag_outside() | flag_returned())) != 0
+}
+
+/** Whether a node is a named binding's
+ *  @params rel - The relation
+ *  @params id - A node
+ *  @returns {bool} - False for a lambda environment, an anonymous value, and a mark */
+export func relation_is_name(rel: *FrameRelation, id: int64) -> bool {
+    return vec_get((*rel).kinds, id) == relation_kind_name()
+}

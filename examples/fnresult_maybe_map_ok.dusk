@@ -1,0 +1,46 @@
+// The Maybe and Result helpers take a lambda that captures a parameter, and each
+// lambda declares a result that holds no reference. The helper's call then returns
+// only what its own arguments reach, so the result may be returned and stored, and a
+// generic helper that passes the lambda on to maybe_map is read the same way
+@paradigm procedural
+@paradigm functional
+@import std.functional.maybe
+@import std.functional.result
+@import std.vector
+func pass_map<T>(m: Maybe<T>, f: (T) -> T) -> Maybe<T> { return maybe_map(m, f) }
+func bump(m: Maybe<int64>, k: int64) -> Maybe<int64> {
+    return maybe_map(m, lambda (x: int64) -> int64 { return x + k })
+}
+func rbump(r: Result<int64, string>, k: int64) -> Result<int64, string> {
+    return result_map(r, lambda (x: int64) -> int64 { return x + k })
+}
+func drop_below(m: Maybe<int64>, k: int64) -> Maybe<int64> {
+    return maybe_and_then(m, lambda (x: int64) -> Maybe<int64> {
+        if x > k { return Maybe.Some(x - k) }
+        return Maybe.None
+    })
+}
+func or_k(m: Maybe<int64>, k: int64) -> Maybe<int64> {
+    return maybe_or_else(m, lambda () -> Maybe<int64> { return Maybe.Some(k) })
+}
+func scaled(m: Maybe<int64>, k: int64) -> Maybe<int64> {
+    return pass_map(m, lambda (x: int64) -> int64 { return x * k })
+}
+func keep(out: *Vector<Maybe<int64>>, m: Maybe<int64>, k: int64) -> void {
+    vec_push(out, bump(m, k))
+}
+func main() -> int32 {
+    println(unwrap_or(bump(Maybe.Some(5), 2), 0))
+    match rbump(Result.Ok(5), 3) {
+        Ok(v) => { println(v) }
+        Err(e) => { println(e) }
+    }
+    println(unwrap_or(drop_below(Maybe.Some(5), 2), 0))
+    println(unwrap_or(drop_below(Maybe.Some(1), 2), 0))
+    println(unwrap_or(or_k(Maybe.None, 9), 0))
+    println(unwrap_or(scaled(Maybe.Some(6), 7), 0))
+    out: *Vector<Maybe<int64>> = alloc(vec_new())
+    keep(out, Maybe.Some(40), 2)
+    println(unwrap_or(vec_get(out, 0), 0))
+    return 0
+}

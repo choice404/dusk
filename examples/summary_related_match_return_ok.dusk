@@ -1,0 +1,43 @@
+// The view of the frame array goes into a sink the returned Maybe never carries, so
+// the holder returned out of the match holds heap rows only
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func outer() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = fresh()
+    kept: *Sink = fresh()
+    m: Maybe<*Holder> = Maybe.Some((*kept).h)
+    (*(*s).h).rows = local[0..4]
+    println((*(*s).h).rows[1])
+    match m {
+        Some(x) => { return x }
+        None => { return alloc(Holder { rows: heap_rows() }) }
+    }
+}
+
+func main() -> int32 {
+    r: *Holder = outer()
+    println((*r).rows[0])
+    return 0
+}

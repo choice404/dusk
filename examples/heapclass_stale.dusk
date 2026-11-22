@@ -1,0 +1,33 @@
+@paradigm procedural
+
+// A stale pointer faults after its block is reused at another size. A freed
+// block is reused by any later request of its size class, so the block a 32 byte
+// struct is freed from serves the 40 byte struct allocated next. A block's
+// generation never resets, so the first pointer, still holding the generation it
+// was minted with, faults at its next dereference rather than reading the new
+// tenant's bytes.
+struct Four {
+    a: int64,
+    b: int64,
+    c: int64,
+    d: int64,
+}
+
+struct Five {
+    a: int64,
+    b: int64,
+    c: int64,
+    d: int64,
+    e: int64,
+}
+
+func main() -> int32 {
+    p: *Four = alloc(Four { a: 1, b: 2, c: 3, d: 4 })
+    println((*p).d)
+    free(p)
+    q: *Five = alloc(Five { a: 10, b: 20, c: 30, d: 40, e: 50 })
+    println((*q).e)
+    println((*p).d)
+    free(q)
+    return 0
+}

@@ -20,8 +20,8 @@
 /** The abstract value of a place during the walk: whether it may hold a
  *  frame-local view (frame), which parameters' views it may alias (origins), and
  *  which parameters it was read back through or that it is (reads). origins and
- *  reads are int64 bitmasks over parameter indices. */
-export struct SumVal { origins: int64, reads: int64, frame: bool }
+ *  reads use parameter indices; captures uses a separate set of lambda capture indices */
+export struct SumVal { origins: int64, reads: int64, captures: int64, frame: bool }
 
 /** One unique lambda literal span, kept in recording order (first-wins per span)
  *  so the dump can order lambda lines by (lo, hi) numerically. */
@@ -32,7 +32,7 @@ export struct SpanKey { lo: int64, hi: int64 }
 export struct CapFlow { idx: int64, name: string }
 
 /** The immutable tables the summary walk reads: interface names, struct and enum
- *  and variant node indices by name, and the module function name set. A variant is
+ *  and variant node indices by name, and the module function indices by name. A variant is
  *  indexed twice: by its bare name, which two enums may share, and by its enum and
  *  name together, which the constructor walk reads so one enum's payload is never
  *  read out of another's slot. Field and
@@ -40,7 +40,8 @@ export struct CapFlow { idx: int64, name: string }
  *  fn_bind_cache memoizes the resolvable function binds of one body id, a purely
  *  lexical read of the AST that the fixpoint would otherwise recompute on every
  *  reanalysis of the same function; fn_bind_empty is the shared read-only fallback
- *  a cache read names, never handed out and never written.
+ *  a cache read names, never handed out and never written. fn_bodies maps a body
+ *  block to its function's node index, so the bind walk can rule out parameter names.
  *  lam_used_cache memoizes one lambda's free identifiers on its expression id, the
  *  same purely lexical read, with lam_used_empty as its read-only fallback.
  *  lam_sum_cache and lam_caps_cache memoize one lambda's standalone summary and its
@@ -49,24 +50,55 @@ export struct CapFlow { idx: int64, name: string }
  *  lam_sum_gen and only counts as a hit at the current lam_cache_gen. One transfer of a
  *  function is one generation, and the summary table is never written during a transfer,
  *  so a hit inside a transfer is the value that transfer would have recomputed, and a
- *  summary that grew between transfers can never be read back stale. */
+ *  summary that grew between transfers can never be read back stale. lam_store_cache
+ *  holds the capture store sites of the same transfer under the same generation, with
+ *  lam_store_empty as its read-only fallback.
+ *  alias_mode widens what counts as a view to a string, a managed pointer, and a raw
+ *  pointer, so a second fixpoint can tell which arguments a string result was read out
+ *  of. Only the alias tables built by sum_tables_alias set it; the ordinary summaries,
+ *  the lambda tables, and the escape dump never read a walk made under it. byte_ty is
+ *  the element a string index reads under alias_mode, a type no view is read out of. */
 export struct SumTables {
     ast: *Ast,
     ifaces: *Map<string, int64>,
     struct_idx: *Map<string, int64>,
+    struct_gens: *Map<string, *Map<string, int64>>,
     enum_idx: *Map<string, int64>,
     variant_idx: *Map<string, int64>,
     variant_by_enum: *Map<string, int64>,
     module_fns: *Map<string, int64>,
+    method_funcs: *Map<string, int64>,
+    method_receivers: *Map<string, string>,
+    method_names: *Map<string, *Vector<string>>,
+    fn_returns: *Map<string, int64>,
+    variant_gens: *Map<int64, *Map<string, int64>>,
     fn_bind_cache: *Map<int64, *Map<string, string>>,
     fn_bind_empty: *Map<string, string>,
+    fn_bodies: *Map<int64, int64>,
     lam_used_cache: *Map<int64, *Vector<string>>,
     lam_used_empty: *Vector<string>,
     lam_cache_gen: int64,
     lam_sum_gen: *Map<int64, int64>,
     lam_sum_cache: *Map<int64, SummaryHandle>,
     lam_caps_cache: *Map<int64, string>,
+    lam_store_cache: *Map<int64, *Vector<FlowProv>>,
+    lam_store_empty: *Vector<FlowProv>,
     infer_ty: int64,
+    alias_mode: bool,
+    byte_ty: int64,
+    view_cache: *Map<int64, bool>,
+    // The frame relation of the function a direct store sits in, built once per function
+    relation_memo: *RelationMemo,
+    managed_cache: *Map<int64, bool>,
+    // A generic function's result with its own type parameters read as unknown, by function
+    erased_returns: *Map<int64, int64>,
+    // Every field name a struct of the module declares, since a call spelled like a
+    // method may read a closure out of a field of that name
+    field_names: *Map<string, bool>,
+    // The function type each lambda literal declares, by expression id
+    lam_fn_types: *Map<int64, int64>,
+    // Every name some declaration of the module takes as a type parameter
+    type_param_names: *Map<string, int64>,
 }
 
 /** Opens a new lambda-summary generation, retiring every cached standalone summary.
@@ -83,10 +115,14 @@ export func sum_lambda_cache_reset(t: *SumTables) -> void {
  *  the per-function and per-method fixpoint results; the lambda tables are keyed by
  *  the "lo:hi" span string; lambda_spans keeps the unique spans in first-seen order
  *  for deterministic rendering; frame_stores lists direct frame-view stores through
- *  a parameter for outright diagnostics. */
+ *  a parameter for outright diagnostics. alias_summaries and alias_method_summaries
+ *  are the same fixpoint run under alias_mode, read only by the borrowed string rule
+ *  and never rendered. */
 export struct EscapeInfo {
     summaries: *Map<string, SummaryHandle>,
     method_summaries: *Map<string, SummaryHandle>,
+    alias_summaries: *Map<string, SummaryHandle>,
+    alias_method_summaries: *Map<string, SummaryHandle>,
     lambda_returns: *Map<string, int64>,
     lambda_sinks: *Map<string, int64>,
     lambda_collect_sinks: *Map<string, int64>,
@@ -94,6 +130,7 @@ export struct EscapeInfo {
     lambda_spans: *Vector<SpanKey>,
     frame_stores: *Vector<FlowProv>,
     resolvable_fn_binds: *Map<string, string>,
+    relation_memo: *RelationMemo,
 }
 
 /** A small set of parameter indices backed by an int64 bitmask. A function with
@@ -115,14 +152,14 @@ export func ps_has(mask: int64, i: int64) -> bool {
 /** The bottom abstract value: no origins, no reads, and not a frame view, the lattice
  *  identity the dataflow join starts from.
  *  @return an empty SumVal */
-export func val_none() -> SumVal { return SumVal { origins: 0, reads: 0, frame: false } }
+export func val_none() -> SumVal { return SumVal { origins: 0, reads: 0, captures: 0, frame: false } }
 /** The join of two abstract values, unioning their origins and reads and taking the
  *  frame-view flag if either has it, the merge at a control-flow confluence.
  *  @param a the first value
  *  @param b the second value
  *  @return the least upper bound of a and b */
 export func val_join(a: SumVal, b: SumVal) -> SumVal {
-    return SumVal { origins: a.origins | b.origins, reads: a.reads | b.reads, frame: a.frame || b.frame }
+    return SumVal { origins: a.origins | b.origins, reads: a.reads | b.reads, captures: a.captures | b.captures, frame: a.frame || b.frame }
 }
 
 /** A base summary for a recognized function that neither aliases a parameter nor reads
@@ -135,6 +172,22 @@ export func empty_summary() -> SummaryHandle {
  *  summary table, a constructor, a resolvable bind, or the opaque TOP. */
 func not_builtin() -> SummaryHandle {
     return SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() }
+}
+
+/** Whether a call operand is a value no stored reference can land in, whatever the
+ *  callee's parameter is typed: a literal, an f-string, a size, an increment, or what
+ *  an operator other than a dereference yields, each a number, a bool, or a string. A
+ *  store edge a callee's summary routes into such an operand writes nowhere the
+ *  caller holds
+ *  @params a - The AST
+ *  @params id - The operand
+ *  @returns {bool} - True when the operand is such a value */
+export func operand_holds_no_place(a: *Ast, id: int64) -> bool {
+    if id < 0 { return false }
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_int() || e.kind == xk_float() || e.kind == xk_str() || e.kind == xk_char() || e.kind == xk_rune() || e.kind == xk_bool() { return true }
+    if e.kind == xk_fstr() || e.kind == xk_sizeof_type() || e.kind == xk_incdec() || e.kind == xk_binary() { return true }
+    return e.kind == xk_unary() && e.a != uop_deref()
 }
 
 /** The key of one enum's variant in the enum keyed variant table. A bare variant
@@ -219,10 +272,17 @@ func is_neutral_builtin(name: string) -> bool {
 export func sum_tables_new(a: *Ast) -> *SumTables {
     ifaces: *Map<string, int64> = alloc(map_new())
     struct_idx: *Map<string, int64> = alloc(map_new())
+    struct_gens: *Map<string, *Map<string, int64>> = alloc(map_new())
     enum_idx: *Map<string, int64> = alloc(map_new())
     variant_idx: *Map<string, int64> = alloc(map_new())
     variant_by_enum: *Map<string, int64> = alloc(map_new())
     module_fns: *Map<string, int64> = alloc(map_new())
+    method_funcs: *Map<string, int64> = alloc(map_new())
+    method_receivers: *Map<string, string> = alloc(map_new())
+    method_names: *Map<string, *Vector<string>> = alloc(map_new())
+    fn_returns: *Map<string, int64> = alloc(map_new())
+    variant_gens: *Map<int64, *Map<string, int64>> = alloc(map_new())
+    empty_names: *Vector<string> = alloc(vec_new())
     items: *Vector<ItemNode> = (*a).items
     for it in items {
         if it.kind == ik_interface() {
@@ -231,13 +291,16 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
         } else if it.kind == ik_struct() {
             st: StructNode = vec_get((*a).structs, it.id)
             map_put(struct_idx, ast_name(a, st.name), it.id)
+            map_put(struct_gens, ast_name(a, st.name), sum_gens_of(a, st.generics_off, st.generics_len))
         } else if it.kind == ik_enum() {
             en: EnumNode = vec_get((*a).enums, it.id)
             map_put(enum_idx, ast_name(a, en.name), it.id)
             ename: string = ast_name(a, en.name)
+            gens: *Map<string, int64> = sum_gens_of(a, en.generics_off, en.generics_len)
             for k in 0..en.variants_len {
                 vid: int64 = vec_get((*a).kids, en.variants_off + k)
                 v: VariantNode = vec_get((*a).variants, vid)
+                map_put(variant_gens, vid, gens)
                 if v.fields_len > 0 {
                     vname: string = ast_name(a, v.name)
                     map_put(variant_idx, vname, vid)
@@ -246,21 +309,154 @@ export func sum_tables_new(a: *Ast) -> *SumTables {
             }
         } else if it.kind == ik_func() {
             f: FuncNode = vec_get((*a).funcs, it.id)
-            map_put(module_fns, ast_name(a, f.name), 1)
+            map_put(module_fns, ast_name(a, f.name), it.id)
+            map_put(fn_returns, ast_name(a, f.name), f.ret)
+        } else if it.kind == ik_impl() {
+            im: ImplNode = vec_get((*a).impls, it.id)
+            recv: string = ast_name(a, im.ty)
+            for j in 0..im.methods_len {
+                mid: int64 = vec_get((*a).kids, im.methods_off + j)
+                method: FuncNode = vec_get((*a).funcs, mid)
+                name: string = ast_name(a, method.name)
+                key: string = sum_variant_key(recv, name)
+                map_put(method_funcs, key, mid)
+                map_put(method_receivers, key, recv)
+                map_put(fn_returns, key, method.ret)
+                if !map_has(method_names, name) {
+                    names: *Vector<string> = alloc(vec_new())
+                    map_put(method_names, name, names)
+                }
+                names: *Vector<string> = unwrap_or(map_get(method_names, name), empty_names)
+                vec_push(names, key)
+            }
         }
     }
+    view_cache: *Map<int64, bool> = alloc(map_new())
+    managed_cache: *Map<int64, bool> = alloc(map_new())
     infer_ty: int64 = ast_type(a, tk_infer(), 0, 0, 0)
     fn_bind_cache: *Map<int64, *Map<string, string>> = alloc(map_new())
     fn_bind_empty: *Map<string, string> = alloc(map_new())
+    fn_bodies: *Map<int64, int64> = alloc(map_new())
+    for i in 0..vec_len((*a).funcs) {
+        owner: FuncNode = vec_get((*a).funcs, i)
+        if owner.body >= 0 { map_put(fn_bodies, owner.body, i) }
+    }
     lam_used_cache: *Map<int64, *Vector<string>> = alloc(map_new())
     lam_used_empty: *Vector<string> = alloc(vec_new())
     lam_sum_gen: *Map<int64, int64> = alloc(map_new())
     lam_sum_cache: *Map<int64, SummaryHandle> = alloc(map_new())
     lam_caps_cache: *Map<int64, string> = alloc(map_new())
-    return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, enum_idx: enum_idx, variant_idx: variant_idx, variant_by_enum: variant_by_enum, module_fns: module_fns, fn_bind_cache: fn_bind_cache, fn_bind_empty: fn_bind_empty, lam_used_cache: lam_used_cache, lam_used_empty: lam_used_empty, lam_cache_gen: 0, lam_sum_gen: lam_sum_gen, lam_sum_cache: lam_sum_cache, lam_caps_cache: lam_caps_cache, infer_ty: infer_ty })
+    lam_store_cache: *Map<int64, *Vector<FlowProv>> = alloc(map_new())
+    lam_store_empty: *Vector<FlowProv> = alloc(vec_new())
+    erased_returns: *Map<int64, int64> = alloc(map_new())
+    field_names: *Map<string, bool> = struct_field_names(a)
+    lam_fn_types: *Map<int64, int64> = alloc(map_new())
+    type_param_names: *Map<string, int64> = module_type_params(a)
+    return alloc(SumTables { ast: a, ifaces: ifaces, struct_idx: struct_idx, struct_gens: struct_gens, enum_idx: enum_idx, variant_idx: variant_idx, variant_by_enum: variant_by_enum, module_fns: module_fns, method_funcs: method_funcs, method_receivers: method_receivers, method_names: method_names, fn_returns: fn_returns, variant_gens: variant_gens, fn_bind_cache: fn_bind_cache, fn_bind_empty: fn_bind_empty, fn_bodies: fn_bodies, lam_used_cache: lam_used_cache, lam_used_empty: lam_used_empty, lam_cache_gen: 0, lam_sum_gen: lam_sum_gen, lam_sum_cache: lam_sum_cache, lam_caps_cache: lam_caps_cache, lam_store_cache: lam_store_cache, lam_store_empty: lam_store_empty, infer_ty: infer_ty, alias_mode: false, byte_ty: infer_ty, view_cache: view_cache, managed_cache: managed_cache, relation_memo: relation_memo_new(), erased_returns: erased_returns, field_names: field_names, lam_fn_types: lam_fn_types, type_param_names: type_param_names })
 }
 
-func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
+// The names the module's functions, methods, structs, enums, and interfaces take as
+// type parameters, read once so a type read outside its own scope can be told apart
+// from a declared type spelled the same
+func module_type_params(a: *Ast) -> *Map<string, int64> {
+    names: *Map<string, int64> = alloc(map_new())
+    for f in (*a).funcs { add_names(a, names, f.generics_off, f.generics_len) }
+    for record in (*a).structs { add_names(a, names, record.generics_off, record.generics_len) }
+    for enumeration in (*a).enums { add_names(a, names, enumeration.generics_off, enumeration.generics_len) }
+    for iface in (*a).interfaces { add_names(a, names, iface.generics_off, iface.generics_len) }
+    return names
+}
+
+func add_names(a: *Ast, names: *Map<string, int64>, off: int64, len: int64) -> void {
+    for i in 0..len { map_put(names, ast_name(a, vec_get((*a).kids, off + i)), 1) }
+}
+
+// The set of field names the module's structs declare, read once so a per call test
+// of whether some struct has a field of a name costs one lookup
+func struct_field_names(a: *Ast) -> *Map<string, bool> {
+    names: *Map<string, bool> = alloc(map_new())
+    for record in (*a).structs {
+        for i in 0..record.fields_len {
+            field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, record.fields_off + i))
+            map_put(names, ast_name(a, field.name), true)
+        }
+    }
+    return names
+}
+
+/** A second set of tables over the same module with alias_mode set. The name indices
+ *  and the purely lexical caches, the frame relations among them, are shared, since
+ *  they read only the AST; the lambda summary caches are fresh, since a lambda summary
+ *  depends on what counts as a view and one computed under the ordinary rule must never
+ *  answer for the alias walk. */
+export func sum_tables_alias(t: *SumTables) -> *SumTables {
+    lam_sum_gen: *Map<int64, int64> = alloc(map_new())
+    lam_sum_cache: *Map<int64, SummaryHandle> = alloc(map_new())
+    lam_caps_cache: *Map<int64, string> = alloc(map_new())
+    lam_store_cache: *Map<int64, *Vector<FlowProv>> = alloc(map_new())
+    view_cache: *Map<int64, bool> = alloc(map_new())
+    byte_ty: int64 = ast_type((*t).ast, tk_unit(), 0, 0, 0)
+    return alloc(SumTables { ast: (*t).ast, ifaces: (*t).ifaces, struct_idx: (*t).struct_idx, struct_gens: (*t).struct_gens, enum_idx: (*t).enum_idx, variant_idx: (*t).variant_idx, variant_by_enum: (*t).variant_by_enum, module_fns: (*t).module_fns, method_funcs: (*t).method_funcs, method_receivers: (*t).method_receivers, method_names: (*t).method_names, fn_returns: (*t).fn_returns, variant_gens: (*t).variant_gens, fn_bind_cache: (*t).fn_bind_cache, fn_bind_empty: (*t).fn_bind_empty, fn_bodies: (*t).fn_bodies, lam_used_cache: (*t).lam_used_cache, lam_used_empty: (*t).lam_used_empty, lam_cache_gen: 0, lam_sum_gen: lam_sum_gen, lam_sum_cache: lam_sum_cache, lam_caps_cache: lam_caps_cache, lam_store_cache: lam_store_cache, lam_store_empty: (*t).lam_store_empty, infer_ty: (*t).infer_ty, alias_mode: true, byte_ty: byte_ty, view_cache: view_cache, managed_cache: (*t).managed_cache, relation_memo: (*t).relation_memo, erased_returns: (*t).erased_returns, field_names: (*t).field_names, lam_fn_types: (*t).lam_fn_types, type_param_names: (*t).type_param_names })
+}
+
+/** The element an index reads under alias_mode, where the ordinary walk answers the
+ *  conservative infer node for anything but a slice or an array. A string's element is a
+ *  byte and a pointer's is its pointee, so a byte copied out of a string into a fresh
+ *  buffer never carries the string's view into that buffer. Anything else stays infer. */
+export func sum_alias_elem(t: *SumTables, n: TypeNode) -> int64 {
+    if n.kind == tk_ptr() || n.kind == tk_rawptr() { return n.a }
+    if n.kind == tk_named() && is_alias_view((*t).ast, n) { return (*t).byte_ty }
+    return (*t).infer_ty
+}
+
+/** Seeds the alias summary table before its fixpoint. Two builtins hand back a view of
+ *  their first argument once a pointer counts as a view: cstr reads a string straight out
+ *  of the bytes it is given, and ptr_add points into the same block. A foreign function
+ *  gets the opaque callee's summary narrowed by its declared types, since a C function
+ *  can store only through a pointer it is handed and return only a pointer it was handed.
+ *  The walk asks the summary table before the builtin table and the opaque fallback, so a
+ *  seed answers for the call; a module function of the same name replaces it when the
+ *  fixpoint seeds its own entry. */
+export func sum_alias_seed(t: *SumTables, sums: *Map<string, SummaryHandle>) -> void {
+    view_of_first: SummaryHandle = SummaryHandle { empty: false, returns_alias: 1, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() }
+    map_put(sums, "cstr", view_of_first)
+    map_put(sums, "ptr_add", view_of_first)
+    a: *Ast = (*t).ast
+    items: *Vector<ItemNode> = (*a).items
+    for it in items {
+        if it.kind == ik_foreign() {
+            fb: ForeignNode = vec_get((*a).foreigns, it.id)
+            for i in 0..fb.funcs_len {
+                seed_foreign(t, sums, vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + i)))
+            }
+        }
+    }
+}
+
+// The opaque summary of a fixed arity foreign function, narrowed by its declared types.
+// Every argument may still be stored into every other pointer argument and handed on,
+// as the opaque fallback assumes, but a scalar argument is passed by value and is never
+// a store destination, and a scalar return carries no argument at all. A variadic
+// function, whose trailing arguments have no declared type, keeps the opaque fallback.
+func seed_foreign(t: *SumTables, sums: *Map<string, SummaryHandle>, ff: ForeignFuncNode) -> void {
+    if ff.variadic || ff.params_len > 63 { return }
+    a: *Ast = (*t).ast
+    no_gens: *Map<string, int64> = alloc(map_new())
+    mut ptrs: int64 = 0
+    for i in 0..ff.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + i))
+        if sum_is_view(t, p.ty, no_gens) { ptrs = ptrs | ps_single(i) }
+    }
+    mut flows: int64[64] = flows_zero()
+    for j in 0..ff.params_len {
+        flows = flow_add_row(flows, j, ptrs - (ptrs & ps_single(j)))
+    }
+    mut ret: int64 = 0
+    if sum_is_view(t, ff.ret, no_gens) { ret = ptrs }
+    map_put(sums, ast_name(a, ff.name), SummaryHandle { empty: false, returns_alias: ret, reads_through: 0, sinks: ps_single(ff.params_len) - 1, collect_sinks: 0, flows: flows })
+}
+
+export func sum_gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
     g: *Map<string, int64> = alloc(map_new())
     for i in 0..len {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
@@ -273,14 +469,21 @@ func gens_of(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
  *  inference hole (conservative). A pointer, future, collector, and every scalar
  *  or heap-backed primitive do not. */
 export func sum_is_view(t: *SumTables, tyid: int64, gens: *Map<string, int64>) -> bool {
+    // Only an empty generic context can share a result keyed by type alone
+    can_cache: bool = map_len(gens) == 0
+    cache: *Map<int64, bool> = (*t).view_cache
+    if can_cache && map_has(cache, tyid) { return unwrap_or(map_get(cache, tyid), false) }
     seen: *Map<string, int64> = alloc(map_new())
-    return is_view_rec(t, tyid, gens, seen)
+    is_view: bool = is_view_rec(t, tyid, gens, seen)
+    if can_cache { map_put(cache, tyid, is_view) }
+    return is_view
 }
 func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *Map<string, int64>) -> bool {
     a: *Ast = (*t).ast
     kids: *Vector<int64> = (*a).kids
     n: TypeNode = vec_get((*a).types, tyid)
     if n.kind == tk_slice() || n.kind == tk_func() { return true }
+    if (*t).alias_mode && is_alias_view(a, n) { return true }
     if n.kind == tk_array() { return is_view_rec(t, n.a, gens, seen) }
     if n.kind == tk_tuple() {
         for i in 0..n.b {
@@ -297,14 +500,15 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
         sidx: *Map<string, int64> = (*t).struct_idx
         eidx: *Map<string, int64> = (*t).enum_idx
         name: string = ast_name(a, n.a)
-        if str_eq(name, "Future") { return false }
+        // A type parameter spelled `Future` stands for any type, so it is asked first
         if map_has(gens, name) { return true }
+        if str_eq(name, "Future") { return false }
         if map_has(ifaces, name) { return true }
         if map_has(sidx, name) {
             if map_has(seen, name) { return false }
             map_put(seen, name, 1)
             st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, name), 0))
-            sgen: *Map<string, int64> = gens_of(a, st.generics_off, st.generics_len)
+            sgen: *Map<string, int64> = sum_gens_of(a, st.generics_off, st.generics_len)
             for j in 0..st.fields_len {
                 fid: int64 = vec_get(kids, st.fields_off + j)
                 fld: FieldNode = vec_get((*a).fields, fid)
@@ -316,7 +520,7 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
             if map_has(seen, name) { return false }
             map_put(seen, name, 1)
             en: EnumNode = vec_get((*a).enums, unwrap_or(map_get(eidx, name), 0))
-            egen: *Map<string, int64> = gens_of(a, en.generics_off, en.generics_len)
+            egen: *Map<string, int64> = sum_gens_of(a, en.generics_off, en.generics_len)
             for k in 0..en.variants_len {
                 vid: int64 = vec_get(kids, en.variants_off + k)
                 vr: VariantNode = vec_get((*a).variants, vid)
@@ -333,13 +537,26 @@ func is_view_rec(t: *SumTables, tyid: int64, gens: *Map<string, int64>, seen: *M
     return false
 }
 
+// The three kinds alias_mode adds to the views: a string, which is a pointer to bytes
+// some other value may own, and a managed or raw pointer, either of which a string can
+// be read back out of.
+func is_alias_view(a: *Ast, n: TypeNode) -> bool {
+    if n.kind == tk_ptr() || n.kind == tk_rawptr() { return true }
+    if n.kind != tk_named() || n.c != 0 { return false }
+    return str_eq(ast_name(a, n.a), "string")
+}
+
 /** Whether a managed pointer is reachable through a value of this type, however
  *  deeply a struct, enum, tuple, or array buries it. A bare *T (not *void) counts;
  *  *raw T is the FFI boundary and does not; a generic type parameter does not,
  *  since it already seeds origins as a view. */
 export func sum_reaches_managed(t: *SumTables, tyid: int64) -> bool {
+    cache: *Map<int64, bool> = (*t).managed_cache
+    if map_has(cache, tyid) { return unwrap_or(map_get(cache, tyid), false) }
     seen: *Map<string, int64> = alloc(map_new())
-    return reaches_rec(t, tyid, seen)
+    has_managed: bool = reaches_rec(t, tyid, seen)
+    map_put(cache, tyid, has_managed)
+    return has_managed
 }
 func reaches_rec(t: *SumTables, tyid: int64, seen: *Map<string, int64>) -> bool {
     a: *Ast = (*t).ast

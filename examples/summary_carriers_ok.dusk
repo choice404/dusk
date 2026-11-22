@@ -1,0 +1,49 @@
+@paradigm procedural
+@paradigm functional
+@paradigm oop
+@import std.string
+@import std.map
+@import std.vector
+@import std.functional.maybe
+
+struct Envelope<T> { value: T }
+struct Rows { values: int64[], name: string }
+
+impl Rows {
+    func outer() -> int64[] { return self.inner() }
+    func inner() -> int64[] { return self.values }
+    func text() -> string { return self.name }
+    func fresh() -> string { return substring(self.name, 0, 5) }
+    func choose(value: int64[]) -> int64[] { return value }
+}
+
+func wrap<U>(value: U) -> Envelope<U> { return Envelope { value: value } }
+func pair(value: string) -> (string, int64) { return (value, 7) }
+func read_rows(rows: *Rows) -> int64[] { return (*rows).outer() }
+func heap_rows() -> int64[] {
+    values: int64[2] = [11, 22]
+    return map(values[0..2], lambda (value: int64) -> int64 { return value * 10 })
+}
+
+func main() -> int32 {
+    entries: *Map<string, string> = alloc(map_new())
+    map_put(entries, "user", substring("hello", 0, 5))
+    text: string = unwrap_or(map_get(entries, "user"), "")
+    wrapped: Envelope<string> = wrap(text)
+    first, count := pair(wrapped.value)
+    println(first)
+    println(count)
+    rows := alloc(Rows { values: heap_rows(), name: text })
+    view := read_rows(rows)
+    println(view[0])
+    println((*rows).choose(view)[1])
+    println((*rows).text())
+    fresh: string = (*rows).fresh()
+    free(fresh)
+    free(rows)
+    owned: string = map_take(entries, "user")
+    free(owned)
+    map_free(entries)
+    free(entries)
+    return 0
+}

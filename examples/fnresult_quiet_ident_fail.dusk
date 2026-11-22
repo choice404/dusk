@@ -1,0 +1,27 @@
+// Compile-fail: maybe_map's callback captures nothing and hands its argument back, and
+// the argument is a slice of a local array. A callback with no capture returns only
+// what its arguments reach, so the call still returns the frame slice it was given,
+// whether the callback is a lambda or a named function
+@paradigm procedural
+@paradigm functional
+@import std.functional.maybe
+func same(xs: int64[]) -> int64[] { return xs }
+func leak() -> Maybe<int64[]> {
+    local: int64[4] = [1, 2, 3, 4]
+    return maybe_map(Maybe.Some(local[0..2]), same)
+}
+func leak_lambda() -> Maybe<int64[]> {
+    local: int64[4] = [1, 2, 3, 4]
+    return maybe_map(Maybe.Some(local[0..2]), lambda (xs: int64[]) -> int64[] { return xs })
+}
+func main() -> int32 {
+    match leak() {
+        Some(xs) => { println(xs[0]) }
+        None => { println(0) }
+    }
+    match leak_lambda() {
+        Some(xs) => { println(xs[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

@@ -1,0 +1,84 @@
+// A generic helper whose type parameter is spelled like a builtin, a `Future`, a
+// declared struct, or a declared interface builds and runs when what it keeps lives on
+// the heap: each call below hands the helper heap rows rather than a frame slice
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+struct Q { n: int64 }
+impl Q {
+    func keep(xs: int64[]) -> void { }
+}
+
+struct Plain { n: int64 }
+interface Shape { keep(xs: int64[]) -> void }
+impl Shape for Plain {
+    func keep(xs: int64[]) -> void { }
+}
+
+struct Quiet { n: int64 }
+impl Quiet {
+    func keep(xs: int64[]) -> void { }
+}
+
+struct Rows { rows: int64[] }
+impl Rows {
+    func attach(h: *Holder) -> void { (*h).rows = self.rows }
+}
+
+func heap_rows(first: int64) -> int64[] {
+    seed: int64[4] = [first, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func keepvia<string>(q: string, xs: int64[]) -> void {
+    inner: *Holder = alloc(Holder { rows: heap_rows(0) })
+    s: *Sink = alloc(Sink { h: inner })
+    s.keep(xs)
+    q.point(inner)
+}
+
+func keepfuture<Future>(q: Future, xs: int64[]) -> void {
+    inner: *Holder = alloc(Holder { rows: heap_rows(0) })
+    s: *Sink = alloc(Sink { h: inner })
+    s.keep(xs)
+    q.point(inner)
+}
+
+func put<Q>(q: Q, xs: int64[]) -> void { q.keep(xs) }
+
+func putshape<Shape>(q: Shape, xs: int64[]) -> void { q.keep(xs) }
+
+func vecq<Quiet>(q: Quiet) -> *Vector<Quiet> {
+    v: *Vector<Quiet> = alloc(vec_new())
+    vec_push(v, q)
+    return v
+}
+
+func give<int64>(q: int64, h: *Holder) -> void { q.attach(h) }
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows(0) })
+    q: *Sink = alloc(Sink { h: h })
+    keepvia(q, heap_rows(1))
+    println((*(*q).h).rows[0])
+    keepfuture(q, heap_rows(2))
+    println((*(*q).h).rows[0])
+    put(q, heap_rows(3))
+    println((*(*q).h).rows[0])
+    putshape(q, heap_rows(4))
+    println((*(*q).h).rows[0])
+    vec_get(vecq(q), 0).keep(heap_rows(5))
+    println((*(*q).h).rows[0])
+    give(Rows { rows: heap_rows(6) }, h)
+    println((*h).rows[0])
+    return 0
+}

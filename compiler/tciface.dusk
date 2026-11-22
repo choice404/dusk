@@ -111,6 +111,44 @@ func impl_arity_msg(iface: string, tyname: string, mname: string, got: int64, wa
     return out
 }
 
+func impl_return_msg(iface: string, tyname: string, mname: string, got: string, want: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "method '")
+    sb_push(s, mname)
+    sb_push(s, "' of impl ")
+    sb_push(s, iface)
+    sb_push(s, " for ")
+    sb_push(s, tyname)
+    sb_push(s, " returns ")
+    sb_push(s, got)
+    sb_push(s, " but the interface declares ")
+    sb_push(s, want)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
+func impl_param_msg(iface: string, tyname: string, mname: string, index: int64, got: string, want: string) -> string {
+    s: *StringBuilder = alloc(sb_new())
+    sb_push(s, "parameter ")
+    sb_push_int(s, index + 1)
+    sb_push(s, " of method '")
+    sb_push(s, mname)
+    sb_push(s, "' in impl ")
+    sb_push(s, iface)
+    sb_push(s, " for ")
+    sb_push(s, tyname)
+    sb_push(s, " has type ")
+    sb_push(s, got)
+    sb_push(s, " but the interface declares ")
+    sb_push(s, want)
+    out: string = substring(sb_cstr(s), 0, sb_size(s))
+    sb_free(s)
+    free(s)
+    return out
+}
+
 func display_msg(name: string) -> string {
     s: *StringBuilder = alloc(sb_new())
     sb_push_char(s, 39)
@@ -462,10 +500,66 @@ func method_index(a: *Ast, im: ImplNode, name: string) -> int64 {
     return -1
 }
 
+func interface_node(a: *Ast, name: string) -> InterfaceNode {
+    for item in (*a).items {
+        if item.kind == ik_interface() {
+            iface: InterfaceNode = vec_get((*a).interfaces, item.id)
+            if str_eq(ast_name(a, iface.name), name) { return iface }
+        }
+    }
+    return InterfaceNode { exported: false, name: 0, lo: 0, hi: 0, generics_off: 0, generics_len: 0, methods_off: 0, methods_len: 0 }
+}
+
+func signature_generics(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
+    names: *Map<string, int64> = alloc(map_new())
+    for i in 0..len {
+        map_put(names, ast_name(a, vec_get((*a).kids, off + i)), 1)
+    }
+    return names
+}
+
+// Compare the raw lowered types before interface erasure or call coercions
+func check_impl_method_params(tc: *TypeChecker, iface: string, tyname: string, req: MethodSigNode, method: FuncNode, declared_gens: *Map<string, int64>, actual_gens: *Map<string, int64>) -> void {
+    a: *Ast = (*tc).ast
+    for i in 0..req.params_len {
+        declared_param: ParamNode = vec_get((*a).params, vec_get((*a).kids, req.params_off + i))
+        actual_param: ParamNode = vec_get((*a).params, vec_get((*a).kids, method.params_off + i))
+        declared: int64 = lower((*tc).ty, a, declared_param.ty, declared_gens)
+        actual: int64 = lower((*tc).ty, a, actual_param.ty, actual_gens)
+        if !ty_strict_eq((*tc).ty, actual, declared) {
+            tc_emit(tc, impl_param_msg(iface, tyname, ast_name(a, method.name), i, ty_src((*tc).ty, actual), ty_src((*tc).ty, declared)), method.lo, method.hi)
+        }
+    }
+}
+
+func check_impl_method_sig(tc: *TypeChecker, iface: string, tyname: string, req: MethodSigNode, method: FuncNode) -> void {
+    a: *Ast = (*tc).ast
+    if method.params_len != req.params_len {
+        tc_emit(tc, impl_arity_msg(iface, tyname, ast_name(a, method.name), method.params_len, req.params_len), method.lo, method.hi)
+        return
+    }
+    // Interface type parameters are rejected before this comparison
+    declared_gens: *Map<string, int64> = alloc(map_new())
+    actual_gens: *Map<string, int64> = signature_generics(a, method.generics_off, method.generics_len)
+    check_impl_method_params(tc, iface, tyname, req, method, declared_gens, actual_gens)
+    declared: int64 = lower((*tc).ty, a, req.ret, declared_gens)
+    actual: int64 = lower((*tc).ty, a, method.ret, actual_gens)
+    if !ty_strict_eq((*tc).ty, actual, declared) {
+        tc_emit(tc, impl_return_msg(iface, tyname, ast_name(a, method.name), ty_src((*tc).ty, actual), ty_src((*tc).ty, declared)), method.lo, method.hi)
+    }
+    map_free(declared_gens)
+    free(declared_gens)
+    map_free(actual_gens)
+    free(actual_gens)
+}
+
 export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
     if im.iface < 0 { return }
     a: *Ast = (*tc).ast
     iface: string = ast_name(a, im.iface)
+    iface_node: InterfaceNode = interface_node(a, iface)
+    // The declaration check owns the diagnostic for an unsupported generic interface
+    if iface_node.generics_len > 0 { return }
     iface_methods: *Map<string, MethodList> = (*tc).iface_methods
     ml: MethodList = unwrap_or(map_get(iface_methods, iface), MethodList { off: 0, len: 0 })
     tyname: string = ast_name(a, im.ty)
@@ -476,9 +570,8 @@ export func check_impl_complete(tc: *TypeChecker, im: ImplNode) -> void {
             tc_emit(tc, impl_missing_msg(iface, tyname, req.name), im.lo, im.hi)
         } else {
             m: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + idx))
-            if m.params_len != req.arity {
-                tc_emit(tc, impl_arity_msg(iface, tyname, req.name, m.params_len, req.arity), m.lo, m.hi)
-            }
+            method_req: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface_node.methods_off + i))
+            check_impl_method_sig(tc, iface, tyname, method_req, m)
         }
     }
 }

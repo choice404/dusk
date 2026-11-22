@@ -150,14 +150,16 @@ export func p_error(p: *Parser, msg: string) -> void {
     vec_push((*p).errors, located(p_lo(p), p_hi(p), msg))
 }
 
-// Reports a message the caller allocated. A muted parser frees it rather than
-// recording it, so suppression drops no allocation on the floor.
-export func p_error_owned(p: *Parser, msg: string) -> void {
+// Reports a message the caller allocated and returns whether the parser kept it. A
+// kept message belongs to the error list from here on; a muted parser records
+// nothing, so the caller frees the message on false and suppression drops no
+// allocation on the floor.
+export func p_error_owned(p: *Parser, msg: string) -> bool {
     if p_muted(p) {
-        free(msg)
-        return
+        return false
     }
     vec_push((*p).errors, located(p_lo(p), p_hi(p), msg))
+    return true
 }
 
 export func p_error_at(p: *Parser, lo: int64, msg: string) -> void {
@@ -189,7 +191,8 @@ export func p_expect(p: *Parser, k: int64) -> bool {
         return true
     }
     if !p_muted(p) {
-        p_error_owned(p, expected_found(kind_name(k), p))
+        msg: string = expected_found(kind_name(k), p)
+        if !p_error_owned(p, msg) { free(msg) }
     }
     return false
 }
@@ -250,7 +253,8 @@ export func p_ident(p: *Parser) -> int64 {
         return id
     }
     if !p_muted(p) {
-        p_error_owned(p, expected_found("identifier", p))
+        msg: string = expected_found("identifier", p)
+        if !p_error_owned(p, msg) { free(msg) }
     }
     return intern_id((*(*p).ast).interner, "")
 }
@@ -288,7 +292,7 @@ export func p_guard_progress(p: *Parser, before: int64, ctx: string) -> bool {
             sb_push(b, found)
             free(found)
             msg: string = substring(sb_cstr(b), 0, sb_size(b))
-            p_error_owned(p, msg)
+            if !p_error_owned(p, msg) { free(msg) }
             sb_free(b)
             free(b)
         }
@@ -326,7 +330,7 @@ export func p_skip_stmt_decl(p: *Parser) -> bool {
         sb_push(b, what)
         sb_push(b, " is declared at the top level, not inside a function body")
         msg: string = substring(sb_cstr(b), 0, sb_size(b))
-        p_error_owned(p, msg)
+        if !p_error_owned(p, msg) { free(msg) }
         sb_free(b)
         free(b)
     }
@@ -464,7 +468,8 @@ export func p_expect_gt(p: *Parser) -> void {
         t.lo = rest_lo
         vec_set((*p).toks, (*p).pos, t)
     } else if !p_muted(p) {
-        p_error_owned(p, expected_found("'>'", p))
+        msg: string = expected_found("'>'", p)
+        if !p_error_owned(p, msg) { free(msg) }
     }
 }
 

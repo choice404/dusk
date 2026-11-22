@@ -1,0 +1,49 @@
+// Compile-fail: a wrapper returns another function's result directly, and that
+// result came off a channel. The sink it hands back may be the one the sender still
+// holds, so storing a view of a frame array through it is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.concurrent.channel
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func recv1(ch: Channel<*Sink>) -> *Sink {
+    x, e := chan_recv(ch)
+    e.ignore()
+    return x
+}
+
+func recv2(ch: Channel<*Sink>) -> *Sink { return recv1(ch) }
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    ch: Channel<*Sink> = chan_new(1)
+    e := chan_send(ch, alloc(Sink { h: h }))
+    e.ignore()
+    x: *Sink = recv2(ch)
+    x.keep(local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

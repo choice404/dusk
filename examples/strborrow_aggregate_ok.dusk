@@ -1,0 +1,42 @@
+@paradigm procedural
+@import std.string
+@import std.functional.maybe
+
+struct Record { name: string }
+enum Name { Some(text: string), None }
+
+func name_of(record: Record) -> string { return record.name }
+func first(values: string[]) -> string { return values[0] }
+func tuple_name(value: (string, int64)) -> string {
+    text, number := value
+    number.ignore()
+    return text
+}
+func enum_name(value: Name) -> string {
+    match value {
+        Some(text) => { return text }
+        None => { return "" }
+    }
+    return ""
+}
+func fresh_record() -> Record {
+    return Record { name: substring("fresh", 0, 5) }
+}
+
+func main() -> int32 {
+    record: Record = Record { name: substring("held", 0, 4) }
+    println(name_of(record))
+    values: string[2] = [record.name, "other"]
+    println(first(values[0..2]))
+    pair: (string, int64) = (record.name, 1)
+    println(tuple_name(pair))
+    choice: Name = Name.Some(record.name)
+    println(enum_name(choice))
+    maybe: Maybe<string> = Maybe.Some(record.name)
+    println(unwrap_or(maybe, ""))
+    free(record.name)
+    fresh := name_of(fresh_record())
+    println(fresh)
+    free(fresh)
+    return 0
+}

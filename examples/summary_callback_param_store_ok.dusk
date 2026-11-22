@@ -1,0 +1,39 @@
+// The same helper handed a slice the heap owns: what the callback keeps outlives the
+// caller's frame, so the call is accepted and runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func keepvia(k: (*Holder) -> void, xs: int64[]) -> void {
+    inner: *Holder = alloc(Holder { rows: heap_rows() })
+    s: *Sink = alloc(Sink { h: inner })
+    s.keep(xs)
+    k(inner)
+}
+
+func fill(h: *Holder) -> void {
+    q: *Sink = alloc(Sink { h: h })
+    keepvia(lambda (held: *Holder) -> void { relink(q, held) }, heap_rows())
+    (*h).rows = (*(*q).h).rows
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

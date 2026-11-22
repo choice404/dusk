@@ -1,0 +1,297 @@
+// Surface receiver types recovered without changing inference or existing AST nodes
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tciface
+@import tcown
+@import tccall
+@import summary
+@import sumtype
+
+/** Recovers an expression's written receiver type with its generic arguments intact
+ *  @params tc - The checker holding lexical declarations
+ *  @params expression_id - The expression supplying a receiver
+ *  @returns {int64} - An AST type, or -1 when the result remains uncertain */
+export func escape_receiver_ast(tc: *TypeChecker, expression_id: int64) -> int64 {
+    bindings: *Map<string, int64> = alloc(map_new())
+    return expression_ast(tc, expression_id, bindings)
+}
+
+/** Saves a call result before its argument scopes leave the checker
+ *  @params tc - The current checker
+ *  @params call - The call expression
+ *  @returns {int64} - The recovered AST result type */
+export func record_escape_call_ast(tc: *TypeChecker, call: ExprNode) -> int64 {
+    bindings: *Map<string, int64> = alloc(map_new())
+    result: int64 = call_ast(tc, call, bindings)
+    stack: *Vector<*Map<string, int64>> = (*tc).binding_ast_ty
+    if vec_len(stack) > 0 {
+        map_put(vec_get(stack, 0), sig_pair_key("escape-call-ast", span_key(call.lo, call.hi)), result)
+    }
+    return result
+}
+
+func recorded_ast(tc: *TypeChecker, name: string) -> int64 {
+    mut index: int64 = vec_len((*tc).scopes) - 1
+    while index >= 0 {
+        if map_has(vec_get((*tc).scopes, index), name) {
+            return unwrap_or(map_get(vec_get((*tc).binding_ast_ty, index), sig_pair_key("escape-ast", name)), -1)
+        }
+        index--
+    }
+    return -1
+}
+
+func name_ast(tc: *TypeChecker, name: string, bindings: *Map<string, int64>) -> int64 {
+    if map_has(bindings, name) { return unwrap_or(map_get(bindings, name), -1) }
+    declared: int64 = binding_ast_of(tc, name)
+    if declared >= 0 { return declared }
+    recovered: int64 = recorded_ast(tc, name)
+    if recovered >= 0 { return recovered }
+    return borrow_ast_of(tc, name)
+}
+
+func expression_ast(tc: *TypeChecker, expression_id: int64, bindings: *Map<string, int64>) -> int64 {
+    if expression_id < 0 { return -1 }
+    a: *Ast = (*tc).ast
+    expression: ExprNode = vec_get((*a).exprs, expression_id)
+    if expression.kind == xk_ident() { return name_ast(tc, ast_name(a, expression.a), bindings) }
+    if expression.kind == xk_call() {
+        stack: *Vector<*Map<string, int64>> = (*tc).binding_ast_ty
+        if vec_len(stack) > 0 {
+            key: string = sig_pair_key("escape-call-ast", span_key(expression.lo, expression.hi))
+            cached: *Map<string, int64> = vec_get(stack, 0)
+            if map_has(cached, key) { return unwrap_or(map_get(cached, key), -1) }
+        }
+        return call_ast(tc, expression, bindings)
+    }
+    if expression.kind == xk_ifexpr() || expression.kind == xk_match() { return branches_ast(tc, expression, bindings) }
+    if expression.kind == xk_struct_lit() { return ast_type(a, tk_named(), expression.a, 0, 0) }
+    if expression.kind == xk_field() { return field_ast(tc, expression_ast(tc, expression.a, bindings), expression.b) }
+    if expression.kind == xk_unary() && expression.a == uop_deref() {
+        return element_ast(tc, expression_ast(tc, expression.b, bindings))
+    }
+    if expression.kind == xk_index() { return element_ast(tc, expression_ast(tc, expression.a, bindings)) }
+    if expression.kind == xk_tuple() { return tuple_ast(tc, expression, bindings) }
+    return -1
+}
+
+func element_ast(tc: *TypeChecker, type_id: int64) -> int64 {
+    if type_id < 0 { return -1 }
+    node: TypeNode = vec_get((*(*tc).ast).types, type_id)
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_array() || node.kind == tk_slice() { return node.a }
+    return -1
+}
+
+func tuple_ast(tc: *TypeChecker, expression: ExprNode, bindings: *Map<string, int64>) -> int64 {
+    a: *Ast = (*tc).ast
+    members: *Vector<int64> = alloc(vec_new())
+    for i in 0..expression.b {
+        member: int64 = expression_ast(tc, vec_get((*a).kids, expression.a + i), bindings)
+        if member < 0 { return -1 }
+        vec_push(members, member)
+    }
+    offset, count := ast_kids(a, members)
+    return ast_type(a, tk_tuple(), offset, count, 0)
+}
+
+func call_ast(tc: *TypeChecker, call: ExprNode, bindings: *Map<string, int64>) -> int64 {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    if callee.kind != xk_ident() { return -1 }
+    name: string = ast_name(a, callee.a)
+    if map_has(bindings, name) || is_local(tc, name) { return -1 }
+    index: int64 = unwrap_or(map_get((*(*tc).sum_tables).module_fns, name), -1)
+    if index < 0 { return -1 }
+    function: FuncNode = vec_get((*a).funcs, index)
+    if function.is_async { return -1 }
+    if function.generics_len == 0 { return function.ret }
+    substitutions: *Map<string, int64> = alloc(map_new())
+    // A `using` allocator is written at the call like any other argument, so the
+    // argument at a parameter's position is that parameter's
+    for i in 0..function.params_len {
+        if i >= call.c { break }
+        parameter: ParamNode = vec_get((*a).params, vec_get((*a).kids, function.params_off + i))
+        actual: int64 = expression_ast(tc, vec_get((*a).kids, call.b + i), bindings)
+        bind_type_arguments(a, parameter.ty, actual, function, substitutions)
+    }
+    return substitute_ast(a, function.ret, substitutions)
+}
+
+func bind_type_arguments(a: *Ast, pattern_id: int64, actual_id: int64, function: FuncNode, substitutions: *Map<string, int64>) -> void {
+    if actual_id < 0 { return }
+    pattern: TypeNode = vec_get((*a).types, pattern_id)
+    actual: TypeNode = vec_get((*a).types, actual_id)
+    if pattern.kind == tk_named() && pattern.c == 0 {
+        for i in 0..function.generics_len {
+            if vec_get((*a).kids, function.generics_off + i) == pattern.a {
+                map_put(substitutions, ast_name(a, pattern.a), actual_id)
+                return
+            }
+        }
+    }
+    if pattern.kind != actual.kind { return }
+    if pattern.kind == tk_ptr() || pattern.kind == tk_rawptr() || pattern.kind == tk_slice() || pattern.kind == tk_array() {
+        bind_type_arguments(a, pattern.a, actual.a, function, substitutions)
+    } else if pattern.kind == tk_named() && pattern.a == actual.a && pattern.c == actual.c {
+        for i in 0..pattern.c {
+            bind_type_arguments(a, vec_get((*a).kids, pattern.b + i), vec_get((*a).kids, actual.b + i), function, substitutions)
+        }
+    }
+}
+
+export func substitute_ast(a: *Ast, type_id: int64, substitutions: *Map<string, int64>) -> int64 {
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_named() && node.c == 0 { return unwrap_or(map_get(substitutions, ast_name(a, node.a)), type_id) }
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_slice() || node.kind == tk_array() {
+        return ast_type(a, node.kind, substitute_ast(a, node.a, substitutions), node.b, node.c)
+    }
+    if node.kind != tk_named() && node.kind != tk_tuple() { return type_id }
+    mut offset: int64 = node.a
+    mut count: int64 = node.b
+    if node.kind == tk_named() { offset = node.b; count = node.c }
+    parts: *Vector<int64> = alloc(vec_new())
+    for i in 0..count { vec_push(parts, substitute_ast(a, vec_get((*a).kids, offset + i), substitutions)) }
+    off, len := ast_kids(a, parts)
+    if node.kind == tk_named() { return ast_type(a, node.kind, node.a, off, len) }
+    return ast_type(a, node.kind, off, len, node.c)
+}
+
+export func type_substitutions(a: *Ast, node: TypeNode, offset: int64, count: int64) -> *Map<string, int64> {
+    substitutions: *Map<string, int64> = alloc(map_new())
+    if count != node.c { return substitutions }
+    for i in 0..count {
+        map_put(substitutions, ast_name(a, vec_get((*a).kids, offset + i)), vec_get((*a).kids, node.b + i))
+    }
+    return substitutions
+}
+
+func field_ast(tc: *TypeChecker, type_id: int64, field_name: int64) -> int64 {
+    if type_id < 0 { return -1 }
+    a: *Ast = (*tc).ast
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind != tk_named() { return -1 }
+    index: int64 = unwrap_or(map_get((*(*tc).sum_tables).struct_idx, ast_name(a, node.a)), -1)
+    if index < 0 { return -1 }
+    record: StructNode = vec_get((*a).structs, index)
+    substitutions: *Map<string, int64> = type_substitutions(a, node, record.generics_off, record.generics_len)
+    for i in 0..record.fields_len {
+        field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, record.fields_off + i))
+        if field.name != field_name { continue }
+        // A struct literal names no type arguments, so a field typed by the struct's own
+        // parameter stays unknown rather than read as a declared type spelled the same
+        if map_len(substitutions) == 0 && names_struct_parameter((*tc).sum_tables, ast_name(a, node.a), field.ty) { return -1 }
+        return substitute_ast(a, field.ty, substitutions)
+    }
+    return -1
+}
+
+func clone_bindings(bindings: *Map<string, int64>) -> *Map<string, int64> {
+    copied: *Map<string, int64> = alloc(map_new())
+    for name in map_keys(bindings) { map_put(copied, name, unwrap_or(map_get(bindings, name), -1)) }
+    return copied
+}
+
+func branches_ast(tc: *TypeChecker, expression: ExprNode, bindings: *Map<string, int64>) -> int64 {
+    a: *Ast = (*tc).ast
+    mut result: int64 = -1
+    for i in 0..branch_count(a, expression) {
+        local: *Map<string, int64> = clone_bindings(bindings)
+        if expression.kind == xk_match() {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, expression.b + i))
+            bind_pattern_types(tc, arm.pat, expression_ast(tc, expression.a, bindings), local)
+        }
+        current: int64 = block_ast(tc, branch_block_at(a, expression, i), local)
+        if current < 0 { return -1 }
+        if result >= 0 && !same_ast(a, result, current) { return -1 }
+        result = current
+    }
+    return result
+}
+
+func block_ast(tc: *TypeChecker, block_id: int64, bindings: *Map<string, int64>) -> int64 {
+    a: *Ast = (*tc).ast
+    block: BlockNode = vec_get((*a).blocks, block_id)
+    for i in 0..block.len {
+        statement: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, block.off + i))
+        if i == block.len - 1 && statement.kind == sk_expr() { return expression_ast(tc, statement.a, bindings) }
+        if statement.kind == sk_let() {
+            mut value: int64 = -1
+            if statement.b == 1 { value = expression_ast(tc, statement.c, bindings) }
+            for j in 0..statement.b {
+                binder: BindNode = vec_get((*a).binds, vec_get((*a).kids, statement.a + j))
+                mut written: int64 = binder.ty
+                if written < 0 { written = value }
+                map_put(bindings, ast_name(a, binder.name), written)
+            }
+        }
+    }
+    return -1
+}
+
+func bind_pattern_types(tc: *TypeChecker, pattern_id: int64, subject_id: int64, bindings: *Map<string, int64>) -> void {
+    a: *Ast = (*tc).ast
+    pattern: PatternNode = vec_get((*a).patterns, pattern_id)
+    if pattern.kind == pk_ident() { map_put(bindings, ast_name(a, pattern.a), subject_id); return }
+    if pattern.kind != pk_variant() { return }
+    for i in 0..pattern.c { map_put(bindings, ast_name(a, vec_get((*a).kids, pattern.b + i)), -1) }
+    if subject_id < 0 { return }
+    subject: TypeNode = vec_get((*a).types, subject_id)
+    if subject.kind != tk_named() { return }
+    index: int64 = unwrap_or(map_get((*(*tc).sum_tables).enum_idx, ast_name(a, subject.a)), -1)
+    if index < 0 { return }
+    enumeration: EnumNode = vec_get((*a).enums, index)
+    substitutions: *Map<string, int64> = type_substitutions(a, subject, enumeration.generics_off, enumeration.generics_len)
+    for i in 0..enumeration.variants_len {
+        variant: VariantNode = vec_get((*a).variants, vec_get((*a).kids, enumeration.variants_off + i))
+        if variant.name != pattern.a { continue }
+        for j in 0..pattern.c {
+            if j >= variant.fields_len { return }
+            field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, variant.fields_off + j))
+            map_put(bindings, ast_name(a, vec_get((*a).kids, pattern.b + j)), substitute_ast(a, field.ty, substitutions))
+        }
+    }
+}
+
+/** The written type a variant pattern's payload binder takes, its enum's type
+ *  parameters replaced by the arguments the scrutinee was written with
+ *  @params tc - The checker holding lexical declarations
+ *  @params pattern_id - The variant pattern
+ *  @params subject_id - The match scrutinee
+ *  @params slot - The binder's place in the pattern
+ *  @returns {int64} - An AST type, or -1 when the scrutinee's written type is unknown */
+export func escape_payload_ast(tc: *TypeChecker, pattern_id: int64, subject_id: int64, slot: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    pattern: PatternNode = vec_get((*a).patterns, pattern_id)
+    if pattern.kind != pk_variant() || slot < 0 || slot >= pattern.c { return -1 }
+    bindings: *Map<string, int64> = alloc(map_new())
+    bind_pattern_types(tc, pattern_id, escape_receiver_ast(tc, subject_id), bindings)
+    return unwrap_or(map_get(bindings, ast_name(a, vec_get((*a).kids, pattern.b + slot))), -1)
+}
+
+func same_ast(a: *Ast, first_id: int64, second_id: int64) -> bool {
+    if first_id == second_id { return true }
+    first: TypeNode = vec_get((*a).types, first_id)
+    second: TypeNode = vec_get((*a).types, second_id)
+    if first.kind != second.kind { return false }
+    if first.kind == tk_named() {
+        if first.a != second.a || first.c != second.c { return false }
+        for i in 0..first.c {
+            if !same_ast(a, vec_get((*a).kids, first.b + i), vec_get((*a).kids, second.b + i)) { return false }
+        }
+        return true
+    }
+    if first.kind == tk_ptr() || first.kind == tk_rawptr() || first.kind == tk_slice() {
+        return same_ast(a, first.a, second.a)
+    }
+    return false
+}

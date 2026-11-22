@@ -1,0 +1,35 @@
+// Generic helpers that call a function value on a value of their type parameter: a
+// callback that captures a frame array and only reads it beside the caller's holder
+// writes through nothing, so the caller's holder is accepted and the program runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func run1<S>(g: (S) -> void, x: S) -> void { g(x) }
+
+func pipe<T>(x: T, f: (T) -> int64) -> int64 { return f(x) }
+
+func first_row(h: *Holder) -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    run1(lambda (w: *Holder) -> void { println((*w).rows[0] + local[1]) }, h)
+    return pipe(h, lambda (w: *Holder) -> int64 { return (*w).rows[1] + local[2] })
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    println(first_row(h))
+    println((*h).rows[0])
+    return 0
+}

@@ -1,0 +1,36 @@
+// A lambda stores a view of its own array into a holder it allocates itself, and an
+// inner lambda stores into a holder the outer lambda owns. Neither holder outlives the
+// frame that owns the array, so both stores are legal
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func main() -> int32 {
+    own := lambda (n: int64) -> int64 {
+        local: int64[4] = [111, 222, 333, 444]
+        k: *Holder = alloc(Holder { rows: heap_rows() })
+        (*k).rows = local[0..4]
+        return (*k).rows[0] + n
+    }
+    println(own(1))
+    nested := lambda (n: int64) -> int64 {
+        local: int64[4] = [111, 222, 333, 444]
+        k: *Holder = alloc(Holder { rows: heap_rows() })
+        put := lambda (xs: int64[]) -> void { (*k).rows = xs }
+        put(local[0..4])
+        return (*k).rows[1] + n
+    }
+    println(nested(2))
+    return 0
+}

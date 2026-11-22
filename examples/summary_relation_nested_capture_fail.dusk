@@ -1,0 +1,33 @@
+// Compile-fail: an inner lambda stores its argument through a parameter of the
+// lambda around it. The call is written in the outer lambda, whose parameter is the
+// caller's holder, so the view of the outer lambda's array outlives its frame
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fill(h: *Holder) -> void {
+    store := lambda (target: *Holder) -> void {
+        local: int64[4] = [111, 222, 333, 444]
+        put := lambda (xs: int64[]) -> void { (*target).rows = xs }
+        put(local[0..4])
+    }
+    store(h)
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

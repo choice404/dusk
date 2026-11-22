@@ -1,0 +1,42 @@
+// Two lambdas declare a parameter of the same name; one sends it across a channel and
+// the other only reads it. A frame view is stored into a cell the reading lambda is
+// then called with, which is legal: the sending lambda's parameter is a different
+// binding, and the cell it sends is a second one the frame hands off. Prints 111
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Cell { rows: int64[] }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func stash(s: int64[], c: *Cell) -> void { (*c).rows = s }
+
+func run(ch: Channel<*Cell>) -> void {
+    c: *Cell = alloc(Cell { rows: heap4() })
+    spare: *Cell = alloc(Cell { rows: heap4() })
+    send := lambda (x: *Cell) -> void {
+        e := chan_send(ch, x)
+        e.ignore()
+    }
+    show := lambda (x: *Cell) -> void { println((*x).rows[0]) }
+    send(spare)
+    local: int64[4] = [111, 222, 333, 444]
+    stash(local[0..4], c)
+    show(c)
+    free(c)
+}
+
+func main() -> int32 {
+    ch: Channel<*Cell> = chan_new(4)
+    run(ch)
+    got, err := chan_recv(ch)
+    err.ignore()
+    free(got)
+    chan_close(ch)
+    chan_free(ch)
+    return 0
+}

@@ -1,0 +1,33 @@
+// A view of a frame array is written straight into one sink's holder while a second,
+// untied sink is returned. The returned sink never reaches the written holder, so
+// the store stays in the frame and the return is legal
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func make(fresh: bool) -> *Sink {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    t: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    if fresh { (*t).h = alloc(Holder { rows: heap_rows() }) }
+    (*(*s).h).rows = local[0..4]
+    println((*(*s).h).rows[1])
+    return t
+}
+
+func main() -> int32 {
+    t: *Sink = make(true)
+    println((*(*t).h).rows[0])
+    return 0
+}

@@ -1,0 +1,38 @@
+// Compile-fail: a generic parameter names whatever type a call gives it, even when a
+// struct elsewhere has the same name. The cell here holds a pointer, so putting the
+// caller's holder into it on one branch lets the later store reach the caller
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+struct T { x: int64 }
+struct Cell<T> { v: T }
+
+func put<T>(c: *Cell<T>, v: T) -> void { (*c).v = v }
+
+func store_rows(h: *Holder, xs: int64[]) -> void { (*h).rows = xs }
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    c: *Cell<*Holder> = alloc(Cell { v: alloc(Holder { rows: heap_rows() }) })
+    if local[0] > 0 { put(c, h) }
+    store_rows((*c).v, local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

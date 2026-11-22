@@ -1,0 +1,43 @@
+// Compile-fail: a generic function names its type parameter after a struct whose own
+// methods touch nothing. The parameter is not that struct, so the call through it is
+// read as any method of the name, which may point the sink at the caller's holder
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+struct Quiet { n: int64 }
+impl Quiet { func point(h: *Holder) -> void { println(self.n) } }
+
+func tie<Quiet>(x: Quiet, h: *Holder) -> void { x.point(h) }
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = fresh()
+    if local[0] > 0 { tie(s, h) }
+    s.keep(local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

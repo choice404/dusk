@@ -1,0 +1,27 @@
+// A sink built by value from a constructor holds a holder the frame owns alone, so a
+// method storing a view of a frame array through it is legal. Prints 444
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func sink_new() -> Sink { return Sink { h: alloc(Holder { rows: heap_rows() }) } }
+
+func main() -> int32 {
+    local: int64[4] = [111, 222, 333, 444]
+    k: Sink = sink_new()
+    k.keep(local[0..4])
+    println((*k.h).rows[3])
+    free(k.h)
+    return 0
+}

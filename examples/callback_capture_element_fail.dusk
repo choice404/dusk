@@ -1,0 +1,33 @@
+// Compile-fail: a callback handed to foreach stores each element, a view of a frame
+// array, through a sink it captures, and the sink leads to the parameter's holder
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    t: *Sink = alloc(Sink { h: h })
+    views: (int64[])[1] = [local[0..4]]
+    foreach(views[0..1], lambda (ys: int64[]) -> void { t.keep(ys) })
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

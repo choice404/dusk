@@ -1,0 +1,38 @@
+// The same callback storing a slice the heap owns into the holder the caller's sink
+// comes to share: no frame view reaches it, so it is accepted and runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func keepvia(q: *Sink, n: int64, xs: int64[]) -> void {
+    println(n)
+    inner: *Holder = alloc(Holder { rows: heap_rows() })
+    t: *Sink = alloc(Sink { h: inner })
+    ts: (*Sink)[1] = [t]
+    foreach(ts[0..1], lambda (n: *Sink) -> void { n.keep(heap_rows()) })
+    relink(q, inner)
+}
+func fill(q: *Sink) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    keepvia(q, 7, local[0..4])
+}
+func main() -> int32 {
+    q: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    fill(q)
+    println((*(*q).h).rows[0])
+    return 0
+}

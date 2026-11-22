@@ -1,0 +1,48 @@
+// Two blocks each declare their own sink under one name, and a loop body and the
+// block after it do the same. Each sink is fresh and stays in the frame, so the views
+// stored through them are legal, and one name used twice does not make them one value
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func sibling_blocks() -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    if local[0] > 0 {
+        s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+        s.keep(local[0..4])
+        println((*(*s).h).rows[1])
+    }
+    if local[1] > 0 {
+        s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+        s.keep(local[0..4])
+        println((*(*s).h).rows[2])
+    }
+}
+
+func loop_then_block() -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    for i in 0..2 {
+        s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+        s.keep(local[0..4])
+        println((*(*s).h).rows[i])
+    }
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    println((*(*s).h).rows[0])
+}
+
+func main() -> int32 {
+    sibling_blocks()
+    loop_then_block()
+    return 0
+}

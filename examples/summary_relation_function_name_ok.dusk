@@ -1,0 +1,32 @@
+// A local in one block shares its name with a module function that only reads the
+// sink, and the call outside the block reaches that function. Nothing reaches past the
+// frame, so the store through the sink afterward is legal
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func measure(s: *Sink) -> int64 { return (*(*s).h).rows[0] }
+
+func main() -> int32 {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    if local[0] < 0 {
+        measure: int64 = 3
+        println(measure)
+    }
+    println(measure(s))
+    s.keep(local[0..4])
+    println(measure(s))
+    return 0
+}

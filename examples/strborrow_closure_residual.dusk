@@ -1,0 +1,19 @@
+// A call through a closure value has no static summary, so the checker cannot see that
+// the string it returns is the borrowed argument it was given. The free of that result
+// passes check, and the caller's own free of the same text is the runtime's named
+// double free.
+@paradigm procedural
+@import std.string
+
+func show(s: string, f: (string) -> string) -> void {
+    x := f(s)
+    println(x)
+    free(x)
+}
+
+func main() -> int32 {
+    msg: string = substring("hello", 0, 5)
+    show(msg, lambda (t: string) -> string { return t })
+    free(msg)
+    return 0
+}

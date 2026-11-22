@@ -1,0 +1,46 @@
+@paradigm procedural
+
+// Freed blocks of every size do not accumulate. One block of every size from 1
+// to 65520 bytes is allocated, written at both ends, and freed at once. A freed
+// block is reused by any later request of its size class, so the heap ends up
+// holding one block per class the loop touched, under a megabyte in all, where
+// reuse by exact size alone kept a block per distinct size, two gigabytes. The
+// program caps its own address space at one gibibyte first, the limit
+// `ulimit -v 1048576` sets, so a heap that kept every block would run out of
+// room and die rather than pass.
+foreign "C" {
+    func getrlimit(resource: int32, rlim: *raw int64) -> int32
+    func setrlimit(resource: int32, rlim: *raw int64) -> int32
+}
+
+// RLIMIT_AS on Linux; a soft limit already lower than the cap is left alone
+func cap_address_space(bytes: int64) -> bool {
+    lim: *raw int64 = alloc_bytes(16)
+    if getrlimit(9, lim) != 0 {
+        free(lim)
+        return false
+    }
+    if lim[0] < 0 || lim[0] > bytes {
+        lim[0] = bytes
+    }
+    isSet: bool = setrlimit(9, lim) == 0
+    free(lim)
+    return isSet
+}
+
+func main() -> int32 {
+    if !cap_address_space(1073741824) {
+        println("could not cap the address space")
+        return 1
+    }
+    mut total: int64 = 0
+    for n in 1..65521 {
+        p: *raw char = alloc_bytes(n)
+        p[0] = 97
+        p[n - 1] = 98
+        total += n
+        free(p)
+    }
+    println(total)
+    return 0
+}

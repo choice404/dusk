@@ -280,7 +280,9 @@ func write_lock(m: *Manifest, deps: *Vector<*DawnDep>) -> int32 {
     free(out)
     free(lockp)
     if str_len(werr) > 0 {
-        return dawn_fail_owned(werr)
+        code: int32 = dawn_fail(werr)
+        free(werr)
+        return code
     }
     return 0
 }
@@ -318,7 +320,9 @@ export func dawn_fetch_all(m: *Manifest, force_all: bool, force_alias: string) -
         ready = dawn_mkdir_p(scratch)
     }
     if !ready {
-        code: int32 = dawn_fail_owned(f"cannot create {mods}")
+        msg: string = f"cannot create {mods}"
+        code: int32 = dawn_fail(msg)
+        free(msg)
         free(mods)
         free(scratch)
         return code
@@ -341,7 +345,9 @@ export func dawn_fetch_all(m: *Manifest, force_all: bool, force_alias: string) -
             known = true
         }
         if !known {
-            code: int32 = dawn_fail_owned(quote_msg("no package named ", force_alias, " is required here"))
+            msg: string = quote_msg("no package named ", force_alias, " is required here")
+            code: int32 = dawn_fail(msg)
+            free(msg)
             lock_free(l)
             free(l)
             dawn_rm_rf(scratch)
@@ -356,7 +362,9 @@ export func dawn_fetch_all(m: *Manifest, force_all: bool, force_alias: string) -
     dawn_rm_rf(scratch)
     free(scratch)
     if code == 0 && str_len(force_alias) > 0 && dawn_dep_index(deps, force_alias) < 0 {
-        code = dawn_fail_owned(quote_msg("no package named ", force_alias, " is required here"))
+        msg: string = quote_msg("no package named ", force_alias, " is required here")
+        code = dawn_fail(msg)
+        free(msg)
     }
     if code == 0 {
         code = write_lock(m, deps)

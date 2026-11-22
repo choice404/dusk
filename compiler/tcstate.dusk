@@ -14,6 +14,7 @@
 @import tysigs
 @import summary
 @import sumflow
+@import tcescunify
 
 /** A function's frame-view escape summary as the type pass reads it: whether it is
  *  empty, which parameter or return its result aliases, which parameters it reads
@@ -98,8 +99,24 @@ export struct TypeChecker {
     types_only: bool,
     summaries: *Map<string, SummaryHandle>,
     method_summaries: *Map<string, SummaryHandle>,
+    // The alias fixpoint's summaries, which treat a string and a pointer as views. Only
+    // the borrowed string rule reads them, on the surface pass; the ground pass leaves
+    // them empty.
+    alias_summaries: *Map<string, SummaryHandle>,
+    alias_method_summaries: *Map<string, SummaryHandle>,
     method_params: *Map<string, TyList>,
     iface_method_params: *Map<string, TyList>,
+    // Ground pass only: each impl and interface method's declared return, keyed by
+    // receiver and method name, which mono's output makes concrete. The surface pass
+    // leaves it empty, so a method call's result stays the wildcard it has always been
+    // there
+    method_returns: *Map<string, int64>,
+    // Ground pass only: the type every expression inferred to, keyed by
+    // expression id, so a call that takes one as its receiver or operand reads it back
+    // rather than inferring it a second time
+    ground_tys: *Map<int64, int64>,
+    // Preserve erased interface receiver names while each expression's scope is live
+    ground_ifaces: *Map<int64, string>,
     lambda_returns: *Map<string, int64>,
     lambda_sinks: *Map<string, int64>,
     lambda_collect_sinks: *Map<string, int64>,
@@ -131,6 +148,10 @@ export struct TypeChecker {
     match_ctx: int64,
     summary: SummaryHandle,
     sum_tables: *SumTables,
+    // The frame relation of the function whose stores the escape check last asked
+    // about, rebuilt when it asks about another function, and the callee summaries
+    // every relation shares. Surface only, since the ground pass never asks
+    relation_memo: *RelationMemo,
     errors: *Vector<SpanDiagnostic>,
 }
 
@@ -164,6 +185,8 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
     alias_edges: *Vector<*Map<string, string>> = alloc(vec_new())
     summaries: *Map<string, SummaryHandle> = alloc(map_new())
     method_summaries: *Map<string, SummaryHandle> = alloc(map_new())
+    alias_summaries: *Map<string, SummaryHandle> = alloc(map_new())
+    alias_method_summaries: *Map<string, SummaryHandle> = alloc(map_new())
     lambda_returns: *Map<string, int64> = alloc(map_new())
     lambda_sinks: *Map<string, int64> = alloc(map_new())
     lambda_collect_sinks: *Map<string, int64> = alloc(map_new())
@@ -180,6 +203,8 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
     tuple_member_own: *Map<string, int64> = alloc(map_new())
     for_iters: *Map<int64, int64> = alloc(map_new())
     for_iter_asts: *Map<int64, int64> = alloc(map_new())
+    ground_tys: *Map<int64, int64> = alloc(map_new())
+    ground_ifaces: *Map<int64, string> = alloc(map_new())
     cur_generics: *Map<string, int64> = alloc(map_new())
     errors: *Vector<SpanDiagnostic> = alloc(vec_new())
     return alloc(TypeChecker {
@@ -222,8 +247,13 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
         types_only: types_only,
         summaries: summaries,
         method_summaries: method_summaries,
+        alias_summaries: alias_summaries,
+        alias_method_summaries: alias_method_summaries,
         method_params: (*sigs).method_params,
         iface_method_params: (*sigs).iface_method_params,
+        method_returns: ground_method_returns(sigs, types_only),
+        ground_tys: ground_tys,
+        ground_ifaces: ground_ifaces,
         lambda_returns: lambda_returns,
         lambda_sinks: lambda_sinks,
         lambda_collect_sinks: lambda_collect_sinks,
@@ -243,6 +273,7 @@ export func tc_new(a: *Ast, types_only: bool, future_table: *Map<string, int64>)
         match_ctx: 0,
         summary: SummaryHandle { empty: true, returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero() },
         sum_tables: sum_tables_new(a),
+        relation_memo: relation_memo_new(),
         errors: errors,
     })
 }
@@ -327,4 +358,63 @@ export func set_cur_generics(tc: *TypeChecker, off: int64, len: int64) -> void {
         map_put(g, ast_name(a, vec_get((*a).kids, off + i)), 1)
     }
     (*tc).cur_generics = g
+}
+
+/** Collects, for the ground pass, the declared return of every impl and interface
+ *  method in the module, keyed the way method_params is. Mono has already made each
+ *  signature concrete, so the lowering reads only the method's own type parameters as
+ *  generic, and those stay the wildcard rather than becoming a named type.
+ *  @param sigs the signature tables the pass was built over
+ *  @param is_ground whether this checker is the ground pass
+ *  @return the table, empty on the surface pass */
+func ground_method_returns(sigs: *TypeSigs, is_ground: bool) -> *Map<string, int64> {
+    returns: *Map<string, int64> = alloc(map_new())
+    if !is_ground { return returns }
+    a: *Ast = (*sigs).ast
+    for item in (*a).items {
+        if item.kind == ik_impl() { record_impl_returns(sigs, returns, item.id) }
+        if item.kind == ik_interface() { record_iface_returns(sigs, returns, item.id) }
+    }
+    return returns
+}
+
+func record_impl_returns(sigs: *TypeSigs, returns: *Map<string, int64>, impl_id: int64) -> void {
+    a: *Ast = (*sigs).ast
+    im: ImplNode = vec_get((*a).impls, impl_id)
+    receiver: string = ast_name(a, im.ty)
+    for i in 0..im.methods_len {
+        f: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + i))
+        // An async method is refused on the surface, and its call would be a future
+        // rather than the declared return, so it gets no entry
+        if !f.is_async {
+            gens: *Map<string, int64> = generic_names(a, f.generics_off, f.generics_len)
+            map_put(returns, sig_pair_key(receiver, ast_name(a, f.name)), ground_sig_ty(sigs, f.ret, gens))
+        }
+    }
+}
+
+func record_iface_returns(sigs: *TypeSigs, returns: *Map<string, int64>, iface_id: int64) -> void {
+    a: *Ast = (*sigs).ast
+    iface: InterfaceNode = vec_get((*a).interfaces, iface_id)
+    receiver: string = ast_name(a, iface.name)
+    gens: *Map<string, int64> = generic_names(a, iface.generics_off, iface.generics_len)
+    for i in 0..iface.methods_len {
+        m: MethodSigNode = vec_get((*a).method_sigs, vec_get((*a).kids, iface.methods_off + i))
+        map_put(returns, sig_pair_key(receiver, ast_name(a, m.name)), ground_sig_ty(sigs, m.ret, gens))
+    }
+}
+
+// Lowers a signature type the way a function's return is lowered, so a method's
+// result and a function's result of one written type agree on the ground pass
+func ground_sig_ty(sigs: *TypeSigs, ast_ty: int64, gens: *Map<string, int64>) -> int64 {
+    raw: int64 = lower((*sigs).ty, (*sigs).ast, ast_ty, gens)
+    return unmangle((*sigs).ty, fix(sigs, raw), (*sigs).future_elems)
+}
+
+func generic_names(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
+    names: *Map<string, int64> = alloc(map_new())
+    for i in 0..len {
+        map_put(names, ast_name(a, vec_get((*a).kids, off + i)), 1)
+    }
+    return names
 }

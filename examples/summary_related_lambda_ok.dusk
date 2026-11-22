@@ -1,0 +1,39 @@
+// A closure that stores its parameter's view into its own fresh sink, and only reads
+// the holder it captures, keeps the view in its own frame and is legal
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func total(h: *Holder) -> int64 {
+    local: int64[4] = [5, 6, 7, 8]
+    put := lambda (xs: int64[]) -> int64 {
+        s: *Sink = fresh()
+        s.keep(xs)
+        return (*h).rows[0] + (*(*s).h).rows[0]
+    }
+    return put(local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    println(total(h))
+    return 0
+}

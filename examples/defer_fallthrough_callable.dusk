@@ -1,0 +1,33 @@
+@paradigm procedural
+@paradigm oop
+@import std.memory.allocator
+
+struct Counter { value: int64 }
+
+impl Counter {
+    func show() -> void {
+        defer println("method done")
+        println(self.value)
+    }
+
+    func cleanup(using allocator: Debug) -> void {
+        pointer: *int64 = alloc(self.value)
+        defer free(pointer)
+        defer println("method cleanup {}", *pointer)
+    }
+}
+
+func main() -> int32 {
+    counter := Counter { value: 4 }
+    counter.show()
+    mut allocator := debug()
+    counter.cleanup(allocator)
+    println("leaks {}", debug_leaks())
+    value: int64 = 5
+    work := lambda () -> void {
+        defer println("lambda done {}", value)
+        println(value)
+    }
+    work()
+    return 0
+}

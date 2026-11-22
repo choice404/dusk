@@ -1,0 +1,21 @@
+// Compile-fail: a spawned lambda captures a pointer to a struct with a function
+// field. The field holds a named function now, but either thread could store a
+// closure over its own frame there later, so the capture is refused by type.
+@paradigm procedural
+
+struct Srv { handler: (int64) -> int64, hits: int64 }
+
+func twice(x: int64) -> int64 { return x * 2 }
+
+func main() -> int32 {
+    s: *Srv = alloc(Srv { handler: twice, hits: 0 })
+    t, e := spawn(lambda () -> void {
+        h := (*s).handler
+        println(h(100))
+    })
+    if e.exists() { return 1 }
+    je := join(t)
+    je.ignore()
+    free(s)
+    return 0
+}

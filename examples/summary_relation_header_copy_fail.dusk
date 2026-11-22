@@ -1,0 +1,26 @@
+// Compile-fail: a helper copies the caller's vector header, its data pointer among the
+// fields, into a fresh local vector, so a set through the local writes the caller's
+// buffer. The frame view stored there would outlive the frame
+@paradigm procedural
+@import std.vector
+
+func steal(dst: *Vector<int64[]>, src: *Vector<int64[]>) -> void {
+    (*dst).data = (*src).data
+    (*dst).cap = (*src).cap
+    (*dst).len = (*src).len
+}
+
+func fill(pv: *Vector<int64[]>) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    v: *Vector<int64[]> = alloc(vec_new())
+    steal(v, pv)
+    vec_set(v, 0, local[0..4])
+}
+
+func main() -> int32 {
+    pv: *Vector<int64[]> = alloc(vec_new())
+    vec_push(pv, [7, 7])
+    fill(pv)
+    println((*pv).data[0][0])
+    return 0
+}

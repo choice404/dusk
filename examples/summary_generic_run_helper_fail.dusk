@@ -1,0 +1,41 @@
+// Compile-fail: the same generic helper hands its lambda and the value of its type
+// parameter to another generic helper that makes the call, so the write through the
+// value is still the helper's, and a view of a frame array is refused at the call
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func run1<S>(g: (S) -> void, x: S) -> void { g(x) }
+
+func keepvia<S>(q: S, xs: int64[]) -> void {
+    inner: *Holder = alloc(Holder { rows: heap_rows() })
+    s: *Sink = alloc(Sink { h: inner })
+    s.keep(xs)
+    g := lambda (w: S) -> void { w.point(inner) }
+    run1(g, q)
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    q: *Sink = alloc(Sink { h: h })
+    keepvia(q, local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

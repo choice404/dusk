@@ -1,0 +1,38 @@
+@paradigm procedural
+@paradigm oop
+@import std.string
+
+struct R { rows: int64[] }
+interface Viewer { view() -> int64[] }
+impl Viewer for R { func view() -> int64[] { return self.rows } }
+struct Holder { viewer: Viewer }
+func first(v: Viewer) -> int64 { return v.view()[0] }
+
+struct Rec { name: string }
+interface Labeled { label() -> string }
+impl Labeled for Rec { func label() -> string { return substring(self.name, 0, str_len(self.name)) } }
+struct Tag { code: string }
+impl Labeled for Tag { func label() -> string { return substring(self.code, 0, 1) } }
+
+func main() -> int32 {
+    // Reading a frame view through an interface inside the owning frame stays legal
+    local: int64[4] = [111, 222, 333, 444]
+    r: R = R { rows: local[0..4] }
+    v: Viewer = r
+    println(v.view()[1])
+    println(first(r))
+    h: Holder = Holder { viewer: r }
+    println(h.viewer.view()[2])
+    // Every implementation returns fresh text, so the caller owns and frees it
+    rec: Rec = Rec { name: "abc" }
+    k: Labeled = rec
+    n: string = k.label()
+    println(n)
+    free(n)
+    t: Tag = Tag { code: "xy" }
+    j: Labeled = t
+    m := j.label()
+    println(m)
+    free(m)
+    return 0
+}

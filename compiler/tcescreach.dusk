@@ -1,0 +1,385 @@
+// Reachability of stored pointer values, including nested calls and projections, and
+// what a store destination reaches by the frame relation of the function holding it
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tciface
+@import tcown
+@import tccall
+@import tcesc
+@import tcesc2
+@import tcesc3
+@import tcesc4
+@import tcesccap
+@import summary
+@import sumflow
+@import tcescunify
+@import tcescrepoint
+
+/** Collects reachable bindings and reports whether every shared origin was resolved
+ *  @params tc - The checker holding summaries and lexical bindings
+ *  @params expression_id - The stored value
+ *  @params roots - The bindings reached by the value
+ *  @returns {bool} - False when an opaque value can hide untracked memory */
+export func gather_store_reach(tc: *TypeChecker, expression_id: int64, roots: *Vector<string>) -> bool {
+    a: *Ast = (*tc).ast
+    expression: ExprNode = vec_get((*a).exprs, expression_id)
+    if expression.kind == xk_int() || expression.kind == xk_float() || expression.kind == xk_bool() || expression.kind == xk_char() || expression.kind == xk_str() { return true }
+    value_type: int64 = receiver_value_ty(tc, expression_id)
+    if type_holds_no_reach(tc, value_type) { return true }
+    if expression.kind == xk_lambda() { return gather_capture_reach(tc, expression, roots) }
+    // A module function holds no memory; a function value bound in this frame may be a closure
+    node: TyNode = ty_get((*tc).ty, value_type)
+    if node.kind == tyk_func() && expression.kind == xk_ident() && !is_local(tc, ast_name(a, expression.a)) { return true }
+    if expression.kind == xk_ident() {
+        name: string = ast_name(a, expression.a)
+        vec_push(roots, name)
+        return !store_reach_is_opaque(tc, name)
+    }
+    if expression.kind == xk_field() || expression.kind == xk_index() { return gather_store_reach(tc, expression.a, roots) }
+    if expression.kind == xk_unary() && expression.a == uop_deref() { return gather_store_reach(tc, expression.b, roots) }
+    if expression.kind == xk_call() { return gather_call_reach(tc, expression, roots) }
+    if expression.kind == xk_struct_lit() { return gather_members(tc, expression.b + 1, expression.c / 2, 2, roots) }
+    if expression.kind == xk_array() || expression.kind == xk_tuple() { return gather_members(tc, expression.a, expression.b, 1, roots) }
+    if expression.kind == xk_ifexpr() || expression.kind == xk_match() { return gather_branch_reach(tc, expression, roots) }
+    return false
+}
+
+// Scalars, strings, and slices of plain data lead to no memory a store can redirect
+func type_holds_no_reach(tc: *TypeChecker, value_type: int64) -> bool {
+    if is_scalar_borrow_ty(tc, value_type) || is_str_ty(tc, value_type) { return true }
+    node: TyNode = ty_get((*tc).ty, value_type)
+    return node.kind == tyk_slice() && !ty_reaches_view(tc, node.a) && !links_as_alias(tc, node.a)
+}
+
+// A closure reaches whatever its captured bindings reach
+func gather_capture_reach(tc: *TypeChecker, lambda_node: ExprNode, roots: *Vector<string>) -> bool {
+    mut is_known: bool = true
+    for name in lambda_captures(tc, lambda_node) {
+        if type_holds_no_reach(tc, lookup(tc, name)) { continue }
+        vec_push(roots, name)
+        if store_reach_is_opaque(tc, name) { is_known = false }
+    }
+    return is_known
+}
+
+func gather_members(tc: *TypeChecker, offset: int64, count: int64, stride: int64, roots: *Vector<string>) -> bool {
+    mut is_known: bool = true
+    for i in 0..count {
+        if !gather_store_reach(tc, vec_get((*(*tc).ast).kids, offset + i * stride), roots) { is_known = false }
+    }
+    return is_known
+}
+
+func gather_call_reach(tc: *TypeChecker, call: ExprNode, roots: *Vector<string>) -> bool {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    if str_len(variant_name(tc, call.a)) > 0 { return gather_members(tc, call.b, call.c, 1, roots) }
+    if callee.kind == xk_ident() {
+        name: string = ast_name(a, callee.a)
+        if !is_local(tc, name) && !sig_has_fn((*tc).sigtab, name) && call.c == 1 {
+            if str_eq(name, "alloc") || str_eq(name, "move") { return gather_members(tc, call.b, 1, 1, roots) }
+        }
+    }
+    resolved: CalleeEsc = tc_callee_esc(tc, call.a)
+    mut summary: SummaryHandle = resolved.sum
+    mut shift: int64 = 0
+    if callee.kind == xk_field() {
+        method: CallMethod = deep_method_summary(tc, call.a)
+        if !method.found { return false }
+        summary = method.sum
+        shift = 1
+    } else if resolved.opaque { return false }
+    mask: int64 = summary.returns_alias | summary.reads_through
+    mut is_known: bool = true
+    if shift == 1 && ps_has(mask, 0) { is_known = gather_store_reach(tc, callee.a, roots) }
+    for i in 0..call.c {
+        if i + shift < 64 && ps_has(mask, i + shift) {
+            if !gather_store_reach(tc, vec_get((*a).kids, call.b + i), roots) { is_known = false }
+        }
+    }
+    return is_known
+}
+
+func gather_branch_reach(tc: *TypeChecker, expression: ExprNode, roots: *Vector<string>) -> bool {
+    a: *Ast = (*tc).ast
+    mut is_known: bool = true
+    for i in 0..branch_count(a, expression) {
+        tail: int64 = branch_tail_at(a, expression, i)
+        if tail < 0 { return false }
+        if !gather_store_reach(tc, tail, roots) { is_known = false }
+    }
+    return is_known
+}
+
+/** Marks an alias binding whose initializer can hide unresolved shared memory
+ *  @params tc - The checker holding scoped metadata
+ *  @params name - The destination binding
+ *  @params is_opaque - Whether a shared origin remains unresolved
+ *  @params is_reassignment - Whether an existing binding receives the value
+ *  @returns {void} - Stores a conservative flag in the binding's own scope */
+export func record_store_reach(tc: *TypeChecker, name: string, is_opaque: bool, is_reassignment: bool) -> void {
+    mut index: int64 = vec_len((*tc).scopes) - 1
+    key: string = sig_pair_key("escape-opaque-reach", name)
+    while index >= 0 {
+        if !is_reassignment || map_has(vec_get((*tc).scopes, index), name) {
+            entries: *Map<string, int64> = vec_get((*tc).binding_ast_ty, index)
+            mut flag: int64 = 0
+            if is_opaque { flag = 1 }
+            if is_reassignment && (*tc).branch_depth > 0 { flag = flag | unwrap_or(map_get(entries, key), 0) }
+            map_put(entries, key, flag)
+            return
+        }
+        index--
+    }
+}
+
+/** Whether a binding's reachable memory includes an unresolved origin
+ *  @params tc - The checker holding scoped metadata
+ *  @params name - The source or destination binding
+ *  @returns {bool} - True for opaque bindings or names whose scope has ended */
+export func store_reach_is_opaque(tc: *TypeChecker, name: string) -> bool {
+    mut index: int64 = vec_len((*tc).scopes) - 1
+    while index >= 0 {
+        if map_has(vec_get((*tc).scopes, index), name) {
+            return unwrap_or(map_get(vec_get((*tc).binding_ast_ty, index), sig_pair_key("escape-opaque-reach", name)), 0) != 0
+        }
+        index--
+    }
+    return true
+}
+
+/** Whether a store destination's root names memory the querying frame owns alone.
+ *  Every declaration of a name along one chain of frames shares the name's node, so
+ *  a shadowed or reused name is answered for all of its declarations at once
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {bool} - False when the class reaches a parameter, an enclosing frame, a
+ *  returned value, or an opaque call, or when the walk never saw the root */
+export func relation_is_frame_local(rel: *FrameRelation, root: string) -> bool {
+    if !(*rel).found || relation_decl_count(rel, root) == 0 { return false }
+    return !relation_outlives(rel, root)
+}
+
+/** Whether a root's class leads outside the frame the query is asked from
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {bool} - True when some member outlives the frame, and for a root the
+ *  walk gave no node in that frame */
+export func relation_outlives(rel: *FrameRelation, root: string) -> bool {
+    if !(*rel).found { return true }
+    node: int64 = relation_root_node(rel, root)
+    if node < 0 || relation_class_marked(rel, node) { return true }
+    for member in relation_class_members(rel, node) {
+        if relation_member_outside(rel, member) { return true }
+    }
+    return false
+}
+
+/** Whether a root's class leads outside the frame the query is asked from other than
+ *  by the function returning the root itself, which the root's own flag answers for at
+ *  that return
+ *  @params rel - The relation of the function holding the call
+ *  @params root - A binding a called lambda stores into
+ *  @returns {bool} - True when some member outlives the frame, a value other than the
+ *  root is among the function's returned values, or the walk gave the root no node */
+export func relation_outlives_past_return(rel: *FrameRelation, root: string) -> bool {
+    if !(*rel).found { return true }
+    node: int64 = relation_root_node(rel, root)
+    if node < 0 || relation_marked(rel, node, relation_outside()) { return true }
+    if returned_past_node(rel, node) { return true }
+    for member in relation_class_members(rel, node) {
+        if relation_member_outside(rel, member) { return true }
+    }
+    return false
+}
+
+// Whether a value other than the node itself is among the class's returned values
+func returned_past_node(rel: *FrameRelation, node: int64) -> bool {
+    representative: int64 = relation_class(rel, node)
+    for returned in (*rel).returned {
+        if returned != node && relation_class(rel, returned) == representative { return true }
+    }
+    return false
+}
+
+/** The values of a root's class the function returns, the root aside, by the binding
+ *  each one is when a return names a binding declared once bare and the function's
+ *  result is one whose return the checker follows a binding's flag through
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {*Vector<string>} - One name per returned value, empty for any other value,
+ *  such as a closure's result, a match binder's payload, or a constructed value */
+export func relation_returned_names(rel: *FrameRelation, root: string) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    node: int64 = relation_root_node(rel, root)
+    if !(*rel).found || node < 0 { return out }
+    representative: int64 = relation_class(rel, node)
+    is_checked: bool = relation_result_checked(rel)
+    for returned in (*rel).returned {
+        if returned == node || relation_class(rel, returned) != representative { continue }
+        mut name: string = ""
+        if is_checked && is_plain_return(rel, returned) && is_sole_declaration(rel, returned) { name = vec_get((*rel).names, returned) }
+        vec_push(out, name)
+    }
+    return out
+}
+
+/** Whether the return check follows a raised escape flag through the function's
+ *  declared result: a pointer, a tuple, or a struct or enum named outright. A
+ *  `Future` is its own kind of value to the checker, whatever the library declares
+ *  @params rel - The relation of the function
+ *  @returns {bool} - False for any other result, a type parameter's name among them */
+export func relation_result_checked(rel: *FrameRelation) -> bool {
+    a: *Ast = (*(*rel).t).ast
+    function: FuncNode = vec_get((*a).funcs, (*rel).function_id)
+    if function.ret < 0 { return false }
+    written: TypeNode = vec_get((*a).types, function.ret)
+    if written.kind == tk_ptr() || written.kind == tk_tuple() { return true }
+    if written.kind != tk_named() || names_type_parameter(rel, function.ret) { return false }
+    name: string = ast_name(a, written.a)
+    if str_eq(name, "Future") { return false }
+    return map_has((*(*rel).t).struct_idx, name) || map_has((*(*rel).t).enum_idx, name)
+}
+
+// A name declared once in the function is the binding the checker flags at the
+// store; a name declared again, an arm binder or a shadow, may be another binding
+// spelled the same, whose flag no store raised
+func is_sole_declaration(rel: *FrameRelation, node: int64) -> bool {
+    return relation_decl_count(rel, vec_get((*rel).names, node)) == 1
+}
+
+func is_plain_return(rel: *FrameRelation, node: int64) -> bool {
+    if !relation_is_name(rel, node) { return false }
+    for plain in (*rel).plain_returns {
+        if plain == node { return true }
+    }
+    return false
+}
+
+/** Whether a root's class reaches a parameter of the function or of the querying
+ *  lambda, or a binding the lambda captures, which the escape summary names
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {bool} - True when a store through the root has a named destination */
+export func relation_reaches_named(rel: *FrameRelation, root: string) -> bool {
+    if relation_parameter_operand(rel, root) >= 0 || relation_lambda_parameter(rel, root) >= 0 { return true }
+    return str_len(relation_captured(rel, root)) > 0
+}
+
+/** The parameter of the walked function a root's class reaches, the lowest index first
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {int64} - The parameter index, a method receiver aside, or -1 */
+export func relation_parameter(rel: *FrameRelation, root: string) -> int64 {
+    return lowest_parameter(rel, root, -1, false)
+}
+
+/** The operand slot of the walked function's parameter a root's class reaches, a
+ *  method receiver at 0 as the escape summary numbers them
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {int64} - The lowest operand slot, or -1 */
+export func relation_parameter_operand(rel: *FrameRelation, root: string) -> int64 {
+    return lowest_parameter(rel, root, -1, true)
+}
+
+/** The parameter of the querying lambda itself a root's class reaches
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {int64} - The lowest of the lambda's parameter slots, or -1 when the query
+ *  frame is the function's own or no parameter of the lambda is in the class */
+export func relation_lambda_parameter(rel: *FrameRelation, root: string) -> int64 {
+    if (*rel).target_frame < 0 { return -1 }
+    return lowest_parameter(rel, root, (*rel).target_frame, true)
+}
+
+func lowest_parameter(rel: *FrameRelation, root: string, frame: int64, by_operand: bool) -> int64 {
+    node: int64 = relation_root_node(rel, root)
+    if !(*rel).found || node < 0 { return -1 }
+    representative: int64 = relation_class(rel, node)
+    mut best: int64 = -1
+    for record in (*rel).decls {
+        mut slot: int64 = record.index
+        if by_operand { slot = record.operand }
+        if !record.is_param || record.frame != frame || slot < 0 { continue }
+        member: int64 = relation_node_of(rel, record.name, record.frame)
+        if member < 0 || relation_class(rel, member) != representative { continue }
+        if best < 0 || slot < best { best = slot }
+    }
+    return best
+}
+
+/** A name in a root's class declared outside the querying lambda, which the lambda
+ *  reaches only by capturing it
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {string} - The captured name, or empty when the query frame is the
+ *  function's own or no member is captured */
+export func relation_captured(rel: *FrameRelation, root: string) -> string {
+    node: int64 = relation_root_node(rel, root)
+    if !(*rel).found || node < 0 || (*rel).target_frame < 0 { return "" }
+    representative: int64 = relation_class(rel, node)
+    for record in (*rel).decls {
+        if relation_frame_within(rel, record.frame, (*rel).target_frame) { continue }
+        member: int64 = relation_node_of(rel, record.name, record.frame)
+        if member >= 0 && relation_class(rel, member) == representative { return record.name }
+    }
+    return ""
+}
+
+/** Every name in a root's class
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {*Vector<string>} - The names, the root among them */
+export func relation_class_names(rel: *FrameRelation, root: string) -> *Vector<string> {
+    out: *Vector<string> = alloc(vec_new())
+    node: int64 = relation_root_node(rel, root)
+    if node < 0 { return out }
+    for member in relation_class_members(rel, node) {
+        if relation_is_name(rel, member) { vec_push(out, vec_get((*rel).names, member)) }
+    }
+    return out
+}
+
+/** Notes that a store into a root's class was refused for reaching the returned
+ *  value, so the return that hands the class out need not be refused a second time
+ *  @params rel - The relation of the function holding the store
+ *  @params root - The destination's root binding
+ *  @returns {void} */
+export func relation_note_reported(rel: *FrameRelation, root: string) -> void {
+    node: int64 = relation_root_node(rel, root)
+    if node >= 0 { vec_push((*rel).reported, node) }
+}
+
+/** Whether a returned expression reads a name whose class a refused store already
+ *  named as reaching the returned value
+ *  @params rel - The relation of the function holding the return
+ *  @params expression_id - The returned expression
+ *  @returns {bool} - True when the return repeats a refusal already given */
+export func relation_return_reported(rel: *FrameRelation, expression_id: int64) -> bool {
+    if !(*rel).found || vec_len((*rel).reported) == 0 { return false }
+    names: *Vector<string> = alloc(vec_new())
+    collect_read_names((*(*rel).t).ast, expression_id, names)
+    for name in names {
+        node: int64 = relation_root_node(rel, name)
+        if node >= 0 && class_reported(rel, relation_class(rel, node)) { return true }
+    }
+    return false
+}
+
+func class_reported(rel: *FrameRelation, representative: int64) -> bool {
+    for node in (*rel).reported {
+        if relation_class(rel, node) == representative { return true }
+    }
+    return false
+}

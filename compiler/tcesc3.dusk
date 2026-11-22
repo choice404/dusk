@@ -20,6 +20,9 @@
 @import tcesc
 @import tcesccap
 @import tcesc2
+@import tcesc4
+@import tcescreach
+@import tcescunify
 @import sumfix
 @import summary
 @import sumflow
@@ -299,7 +302,7 @@ func summary_alias_mask(tc: *TypeChecker, callee_id: int64, arg_len: int64) -> i
 export func call_result_alias_targets(tc: *TypeChecker, call_id: int64, out: *Vector<string>) -> void {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, call_id)
-    if !links_as_alias(tc, chain_ty(tc, call_id)) { return }
+    if !links_as_alias(tc, receiver_value_ty(tc, call_id)) { return }
     ce: CalleeEsc = tc_callee_esc(tc, e.a)
     if ce.opaque { return }
     mask: int64 = summary_alias_mask(tc, e.a, e.c)
@@ -315,21 +318,192 @@ export func call_result_alias_targets(tc: *TypeChecker, call_id: int64, out: *Ve
 // local that borrows a parameter names the borrowed parameter; any other local
 // raises its own flag and records the store provenance for its later egress check.
 export func route_flow_edge(tc: *TypeChecker, x: int64, y: int64, src_esc: EscPair, dst_id: int64, lo: int64, hi: int64) -> void {
+    if flow_destination_is_opaque(tc, dst_id, false) {
+        emit_opaque_store(tc, src_esc, lo, hi)
+        retain_refused_provenance(tc, x, y, src_esc, dst_id, lo, hi)
+        return
+    }
+    route_rooted_flow_edge(tc, x, y, src_esc, dst_id, lo, hi)
+}
+
+/** Keeps a refused call's destination flag for later egress checks without a second
+ *  report at the same call
+ *  @params tc - The checker holding store provenance
+ *  @params x - The source operand index
+ *  @params y - The destination operand index
+ *  @params source - The source's frame views
+ *  @params destination_id - The destination expression
+ *  @params lo - The call's span start
+ *  @params hi - The call's span end
+ *  @returns {void} - Raises the flags of a local root's class; a root the checker
+ *  links to a parameter needs nothing more */
+export func retain_refused_provenance(tc: *TypeChecker, x: int64, y: int64, source: EscPair, destination_id: int64, lo: int64, hi: int64) -> void {
+    root: string = store_root(tc, destination_id)
+    if str_len(root) == 0 || map_has((*tc).cur_params, root) || group_parameter(tc, root) >= 0 { return }
+    relation: *FrameRelation = destination_relation(tc, destination_id)
+    flag_destination_class(tc, relation, root, FlowProv { lo: lo, hi: hi, src: x, dst: y }, source)
+}
+
+/** Keeps store provenance on a rooted destination, including after a call was refused
+ *  @params tc - The checker holding store provenance
+ *  @params x - The source operand index
+ *  @params y - The destination operand index
+ *  @params src_esc - The source's frame views
+ *  @params dst_id - The destination expression
+ *  @params lo - The call's span start
+ *  @params hi - The call's span end
+ *  @returns {void} - Reports a parameter origin the checker links, or raises the
+ *  flags of every local in the destination's class, which a class that outlives the
+ *  frame keeps after the caller refused the store */
+export func route_rooted_flow_edge(tc: *TypeChecker, x: int64, y: int64, src_esc: EscPair, dst_id: int64, lo: int64, hi: int64) -> void {
     root: string = store_root(tc, dst_id)
-    if str_len(root) == 0 { return }
-    cps: *Map<string, int64> = (*tc).cur_params
-    if map_has(cps, root) {
+    if str_len(root) == 0 {
+        route_literal_flow(tc, x, y, src_esc, dst_id, lo, hi)
+        return
+    }
+    if map_has((*tc).cur_params, root) {
         emit_flow_escape(tc, lo, hi, x, y)
         return
     }
-    pidx: int64 = param_alias_of(tc, root)
+    pidx: int64 = group_parameter(tc, root)
     if pidx >= 0 {
         tc_emit(tc, borrow_flow_msg(pidx), lo, hi)
         return
     }
-    raise_esc(tc, root, src_esc.slice, src_esc.closure)
-    fp: *Map<string, FlowProv> = (*tc).flow_prov
-    map_put(fp, root, FlowProv { lo: lo, hi: hi, src: x, dst: y })
+    relation: *FrameRelation = destination_relation(tc, dst_id)
+    flag_destination_class(tc, relation, root, FlowProv { lo: lo, hi: hi, src: x, dst: y }, src_esc)
+}
+
+// A frame view stored into memory a name may reach travels with every name in its
+// class, so each one in scope carries the flag its later egress is checked by; the
+// store that polluted it is named through the root
+func flag_destination_class(tc: *TypeChecker, relation: *FrameRelation, root: string, prov: FlowProv, source: EscPair) -> void {
+    raise_esc(tc, root, source.slice, source.closure)
+    map_put((*tc).flow_prov, root, prov)
+    for name in relation_class_names(relation, root) {
+        if str_eq(name, root) || map_has((*tc).cur_params, name) || !is_local(tc, name) { continue }
+        raise_esc(tc, name, source.slice, source.closure)
+    }
+}
+
+/** Raises the escape flag of every local a directly written destination's class holds,
+ *  so a store into memory the function returns through another binding is refused at
+ *  that return the way the call form of the store is. A returned value no raised local
+ *  names, a match binder declared later or a closure's result, carries no flag to its
+ *  return, so the store itself is refused; a parameter or a captured binding in the
+ *  class is the escape summary's to name
+ *  @params tc - The checker
+ *  @params place_id - The written place
+ *  @params root - The place's root binding
+ *  @params source - What the stored value views
+ *  @returns {void} - Each local in the class carries the flag its egress is checked by */
+export func raise_store_class(tc: *TypeChecker, place_id: int64, root: string, source: EscPair) -> void {
+    raise_esc(tc, root, source.slice, source.closure)
+    relation: *FrameRelation = destination_relation(tc, place_id)
+    for name in relation_class_names(relation, root) {
+        if str_eq(name, root) || map_has((*tc).cur_params, name) || !is_local(tc, name) { continue }
+        raise_esc(tc, name, source.slice, source.closure)
+    }
+    if (*tc).types_only || !returns_unflagged(tc, relation, root) || relation_reaches_named(relation, root) { return }
+    place: ExprNode = vec_get((*(*tc).ast).exprs, place_id)
+    tc_emit(tc, "this assignment stores a view of the current frame into memory the function returns; put the backing on the heap", place.lo, place.hi)
+    relation_note_reported(relation, root)
+}
+
+// Whether the class reaches the function's result through a value whose return no
+// raised flag checks
+func returns_unflagged(tc: *TypeChecker, relation: *FrameRelation, root: string) -> bool {
+    for name in relation_returned_names(relation, root) {
+        if str_len(name) == 0 || map_has((*tc).cur_params, name) || !is_local(tc, name) { return true }
+    }
+    return false
+}
+
+/** Finds a caller parameter a binding's alias group reaches through the checker's
+ *  own links
+ *  @params tc - The checker holding pointer and aggregate aliases
+ *  @params root - The binding
+ *  @returns {int64} - The parameter index, or -1 */
+export func group_parameter(tc: *TypeChecker, root: string) -> int64 {
+    for name in alias_group(tc, root) {
+        index: int64 = param_alias_of(tc, name)
+        if index >= 0 { return index }
+    }
+    return -1
+}
+
+/** Keeps pointer reachability introduced by a summarized store, even without a frame view
+ *  @params tc - The checker holding aliases
+ *  @params sum - The callee's store edges
+ *  @params offset - The first argument's kid offset
+ *  @params count - The argument count
+ *  @returns {void} - Links stored pointers to their destination */
+export func link_call_store_aliases(tc: *TypeChecker, sum: SummaryHandle, offset: int64, count: int64) -> void {
+    a: *Ast = (*tc).ast
+    for x in 0..count {
+        if x >= 64 { return }
+        for y in 0..count {
+            if y < 64 && flow_has(sum.flows, x, y) {
+                link_store_aliases(tc, vec_get((*a).kids, offset + x), vec_get((*a).kids, offset + y))
+            }
+        }
+    }
+}
+
+/** Links the pointers a store makes reachable from a tracked destination
+ *  @params tc - The checker holding aliases
+ *  @params source_id - The stored operand
+ *  @params destination_id - The receiving operand
+ *  @returns {void} - Leaves scalar and slice copies unlinked */
+export func link_store_aliases(tc: *TypeChecker, source_id: int64, destination_id: int64) -> void {
+    root: string = store_root(tc, destination_id)
+    if str_len(root) == 0 { return }
+    sources: *Vector<string> = alloc(vec_new())
+    if !gather_store_reach(tc, source_id, sources) { record_store_reach(tc, root, true, true) }
+    for source in sources { alias_link(tc, root, source) }
+}
+
+// A literal carrier has no binding of its own, so flag every embedded pointer
+func route_literal_flow(tc: *TypeChecker, x: int64, y: int64, source: EscPair, destination_id: int64, lo: int64, hi: int64) -> void {
+    destination: ExprNode = vec_get((*(*tc).ast).exprs, destination_id)
+    if destination.kind != xk_struct_lit() && destination.kind != xk_tuple() && destination.kind != xk_array() { return }
+    roots: *Vector<string> = alloc(vec_new())
+    collect_embedded(tc, destination_id, roots)
+    relation: *FrameRelation = destination_relation(tc, destination_id)
+    for root in roots {
+        index: int64 = destination_parameter(tc, relation, root)
+        if index >= 0 {
+            tc_emit(tc, borrow_flow_msg(index), lo, hi)
+        } else {
+            flag_destination_class(tc, relation, root, FlowProv { lo: lo, hi: hi, src: x, dst: y }, source)
+        }
+    }
+}
+
+/** Routes a method store, refusing a receiver whose reachable memory may outlive it
+ *  @params tc - The checker holding store provenance
+ *  @params x - The source operand index
+ *  @params y - The destination operand index, zero for the receiver
+ *  @params source - The source's frame views
+ *  @params destination_id - The destination expression
+ *  @params lo - The call's span start
+ *  @params hi - The call's span end
+ *  @returns {void} - Emits a refusal or records the destination's frame views */
+export func route_method_flow_edge(tc: *TypeChecker, x: int64, y: int64, source: EscPair, destination_id: int64, lo: int64, hi: int64) -> void {
+    if y == 0 && flow_destination_is_opaque(tc, destination_id, true) {
+        emit_opaque_store(tc, source, lo, hi)
+        retain_refused_provenance(tc, x, y, source, destination_id, lo, hi)
+        return
+    }
+    route_flow_edge(tc, x, y, source, destination_id, lo, hi)
+}
+
+func emit_opaque_store(tc: *TypeChecker, source: EscPair, lo: int64, hi: int64) -> void {
+    if source.slice {
+        tc_emit(tc, "this call may store a view of the current frame beyond it; put the backing on the heap", lo, hi)
+    } else if source.closure {
+        tc_emit(tc, "this call may store a closure that captures the current frame beyond it; put the captured backing on the heap", lo, hi)
+    }
 }
 
 func borrow_flow_msg(pidx: int64) -> string {
@@ -365,7 +539,10 @@ func value_flow_prov(tc: *TypeChecker, expr_id: int64) -> FlowProv {
 // The frame-escape diagnostic for a returned managed pointer whose object a store
 // edge polluted with a frame view: the store-edge message when a call recorded the
 // provenance, else the pointer-object message at the call origin or the value span.
+// A return of a class whose direct store was already refused for reaching the
+// returned value repeats that refusal and gives none of its own
 export func report_ptr_return_escape(tc: *TypeChecker, expr_id: int64) -> void {
+    if !(*tc).types_only && relation_return_reported(destination_relation(tc, expr_id), expr_id) { return }
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, expr_id)
     vp: FlowProv = value_flow_prov(tc, expr_id)
@@ -390,6 +567,7 @@ export func report_ptr_return_escape(tc: *TypeChecker, expr_id: int64) -> void {
 // `d := same(c)` both aliases c and, when c borrows a parameter, borrows it too.
 export func record_ptr_borrows(tc: *TypeChecker, name: string, value_id: int64, tyid: int64) -> void {
     if (*tc).types_only { return }
+    record_receiver_binding_type(tc, name, value_id)
     a: *Ast = (*tc).ast
     val: ExprNode = vec_get((*a).exprs, value_id)
     if val.kind == xk_ident() {
@@ -447,6 +625,7 @@ export func record_ptr_borrows(tc: *TypeChecker, name: string, value_id: int64, 
 // binder still names the borrowed parameter.
 export func record_ptr_borrow_member(tc: *TypeChecker, name: string, member_id: int64) -> void {
     if (*tc).types_only { return }
+    record_receiver_binding_type(tc, name, member_id)
     a: *Ast = (*tc).ast
     me: ExprNode = vec_get((*a).exprs, member_id)
     if me.kind == xk_ident() {
@@ -464,7 +643,7 @@ func resolved_method_summary(tc: *TypeChecker, callee_id: int64) -> MethodSum {
     a: *Ast = (*tc).ast
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind != xk_field() { return MethodSum { found: false, mname: "", sum: empty_summary() } }
-    tname: string = receiver_type_name(tc, callee.a)
+    tname: string = recv_type_name_deep(tc, callee.a)
     if str_len(tname) == 0 { return MethodSum { found: false, mname: "", sum: empty_summary() } }
     mname: string = ast_name(a, callee.b)
     ms: *Map<string, SummaryHandle> = (*tc).method_summaries
@@ -517,6 +696,11 @@ func method_apply_flows(tc: *TypeChecker, sum: SummaryHandle, eff: *Vector<int64
     for s in 0..n {
         vec_push(src, value_escape(tc, vec_get(eff, s)))
     }
+    for x in 0..n {
+        for y in 0..n {
+            if x < 64 && y < 64 && flow_has(sum.flows, x, y) { link_store_aliases(tc, vec_get(eff, x), vec_get(eff, y)) }
+        }
+    }
     mut x: int64 = 0
     while x < n && x < 64 {
         src_esc: EscPair = vec_get(src, x)
@@ -524,7 +708,7 @@ func method_apply_flows(tc: *TypeChecker, sum: SummaryHandle, eff: *Vector<int64
             mut y: int64 = 0
             while y < n && y < 64 {
                 if flow_has(sum.flows, x, y) {
-                    route_flow_edge(tc, x, y, src_esc, vec_get(eff, y), lo, hi)
+                    route_method_flow_edge(tc, x, y, src_esc, vec_get(eff, y), lo, hi)
                 }
                 y++
             }

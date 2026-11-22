@@ -1,0 +1,49 @@
+// Fields read through match payload binders: heap rows handed out of the frame, and a
+// scalar count read out of an option built with no annotation over a holder of a frame
+// view, both accepted and run
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+struct Counted { rows: int64[], n: int64 }
+
+func heap_of() -> int64[] {
+    s: *Holder = alloc(Holder { rows: heap_rows() })
+    m: Maybe<*Holder> = Maybe.Some(s)
+    match m {
+        Some(y) => { return (*y).rows }
+        None => { }
+    }
+    return heap_rows()
+}
+
+func count_of() -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Counted = alloc(Counted { rows: local[0..4], n: 7 })
+    m := Maybe.Some(s)
+    match m {
+        Some(y) => { return (*y).n + (*y).rows[0] }
+        None => { }
+    }
+    return 0
+}
+
+func main() -> int32 {
+    println(heap_of()[2])
+    println(count_of())
+    return 0
+}

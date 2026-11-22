@@ -1,8 +1,9 @@
 // sumwalk: the per-function abstract interpretation for the escape summary. It
 // replays the intraprocedural escape check broadened so each place carries a frame
 // flag and the parameter sets it may alias, and it accumulates the summary
-// components. Every update is a join (raise, never clear), so branch structure
-// needs no modeling. Store routing lives in sumplace, lambda and higher-order
+// components. Every update to a flow fact is a join (raise, never clear), so branch
+// structure needs no modeling; surface types and pattern binders follow lexical
+// scopes (sumscope). Store routing lives in sumplace, lambda and higher-order
 // handling in sumhof; those files are pulled into the merged module by sumfix.
 
 @paradigm procedural
@@ -15,6 +16,8 @@
 @import tcstate
 @import summary
 @import sumflow
+@import sumscope
+@import sumquiet
 
 export struct SumCtx {
     t: *SumTables,
@@ -25,6 +28,8 @@ export struct SumCtx {
     fn_binds: *Map<string, string>,
     locals: *Map<string, int64>,
     local_types: *Map<string, int64>,
+    type_bindings: *Vector<SumTypeBinding>,
+    type_depth: int64,
     env: *Map<string, SumVal>,
     returns_alias: int64,
     reads_through: int64,
@@ -40,26 +45,60 @@ export struct SumCtx {
     lambda_spans: *Vector<SpanKey>,
     frame_stores: *Vector<FlowProv>,
     capture_flows: *Vector<CapFlow>,
+    capture_names: *Vector<string>,
+    outer: *Vector<*Map<string, int64>>,
+    retired: *Map<string, SumVal>,
+    lambda_id: int64,
+    related: *Map<int64, RelatedClass>,
+    // The parameters whose calls a quiet walk takes to return only their arguments,
+    // and the walked function's or lambda's declared result, -1 when it has none
+    quiet: int64,
+    ret_ty: int64,
 }
+
+/** What a store root's class in the frame relation holds for one walk, worked out once
+ *  per root and kept for every later store through the same class: the class's local
+ *  names, the walk's parameters and captures it names, and whether it leads to memory
+ *  outside the frame or to the walk's result past the root */
+export struct RelatedClass { names: *Vector<string>, params: int64, captures: int64, outside: bool, returned: bool }
 
 // Creates a walk state over the given tables and settled summary map. The lambda
 // tables, span list, and frame-store vector are the caller's, so the fixpoint
 // passes throwaway ones and only the collection pass passes the shared outputs.
+// outer starts empty: a function walk captures nothing, and a lambda walk is handed
+// the binding sets of every scope that encloses it.
 export func ctx_new(t: *SumTables, summaries: *Map<string, SummaryHandle>, gens: *Map<string, int64>, fn_binds: *Map<string, string>, lret: *Map<string, int64>, lsink: *Map<string, int64>, lcoll: *Map<string, int64>, lcap: *Map<string, string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> *SumCtx {
     param_index: *Map<string, int64> = alloc(map_new())
     locals: *Map<string, int64> = alloc(map_new())
     local_types: *Map<string, int64> = alloc(map_new())
+    type_bindings: *Vector<SumTypeBinding> = alloc(vec_new())
     env: *Map<string, SumVal> = alloc(map_new())
     lambda_rets: *Vector<SumVal> = alloc(vec_new())
     capture_flows: *Vector<CapFlow> = alloc(vec_new())
+    capture_names: *Vector<string> = alloc(vec_new())
+    outer: *Vector<*Map<string, int64>> = alloc(vec_new())
+    retired: *Map<string, SumVal> = alloc(map_new())
+    related: *Map<int64, RelatedClass> = alloc(map_new())
     return alloc(SumCtx {
         t: t, summaries: summaries, gens: gens, param_index: param_index, dest_mask: 0,
         fn_binds: fn_binds, locals: locals, local_types: local_types, env: env,
+        type_bindings: type_bindings, type_depth: 0,
         returns_alias: 0, reads_through: 0, sinks: 0, collect_sinks: 0, flows: flows_zero(),
         lambda_rets: lambda_rets, lambda_depth: 0, lambda_returns: lret, lambda_sinks: lsink,
         lambda_collect_sinks: lcoll, lambda_capture_flows: lcap, lambda_spans: lspans,
-        frame_stores: fs, capture_flows: capture_flows,
+        frame_stores: fs, capture_flows: capture_flows, capture_names: capture_names, outer: outer,
+        retired: retired, lambda_id: -1, related: related, quiet: 0, ret_ty: -1,
     })
+}
+
+// Whether a name is bound by a scope enclosing the lambda this state walks, that is,
+// whether the lambda captures it. Always false in a function walk.
+export func outer_has(c: *SumCtx, name: string) -> bool {
+    outer: *Vector<*Map<string, int64>> = (*c).outer
+    for scope in outer {
+        if map_has(scope, name) { return true }
+    }
+    return false
 }
 
 // Seeds one parameter: a view parameter contributes its own index to origins, a
@@ -115,14 +154,53 @@ export func ctx_flow_edges(c: *SumCtx, srcps: int64, dests: int64) -> void {
 
 func kid(a: *Ast, off: int64, i: int64) -> int64 { return vec_get((*a).kids, off + i) }
 
-export func sum_block(c: *SumCtx, bid: int64) -> void {
-    if bid < 0 { return }
+export func sum_block(c: *SumCtx, bid: int64) -> SumVal {
+    return walk_scoped_block(c, bid, false)
+}
+
+/** Walks a function or lambda body, then each deferred expression of it once more
+ *  while the body's bindings are still in scope, since that is where a defer runs
+ *  @params c - The walk state
+ *  @params bid - The body
+ *  @returns {SumVal} - The body's tail value */
+export func sum_body(c: *SumCtx, bid: int64) -> SumVal {
+    return walk_scoped_block(c, bid, true)
+}
+
+func walk_scoped_block(c: *SumCtx, bid: int64, replays: bool) -> SumVal {
+    if bid < 0 { return val_none() }
     a: *Ast = (*(*c).t).ast
     blocks: *Vector<BlockNode> = (*a).blocks
-    if bid >= vec_len(blocks) { return }
+    if bid >= vec_len(blocks) { return val_none() }
     b: BlockNode = vec_get(blocks, bid)
+    depth: int64 = (*c).type_depth
+    mut result: SumVal = val_none()
     for i in 0..b.len {
-        sum_stmt(c, kid(a, b.off, i))
+        statement: StmtNode = vec_get((*a).stmts, kid(a, b.off, i))
+        if i == b.len - 1 && statement.kind == sk_expr() {
+            result = sum_eval(c, statement.a)
+        } else {
+            sum_stmt(c, kid(a, b.off, i))
+        }
+    }
+    if replays { replay_defers(c, bid) }
+    sum_restore_types(c, depth)
+    return result
+}
+
+/** Walks each deferred expression of a body once more at the body's end, where it
+ *  runs, so a store it makes sees every link the body made after registering it
+ *  @params c - The walk state
+ *  @params bid - The function or lambda body; a defer sits only at its top level
+ *  @returns {void} */
+func replay_defers(c: *SumCtx, bid: int64) -> void {
+    if bid < 0 { return }
+    a: *Ast = (*(*c).t).ast
+    if bid >= vec_len((*a).blocks) { return }
+    body: BlockNode = vec_get((*a).blocks, bid)
+    for i in 0..body.len {
+        statement: StmtNode = vec_get((*a).stmts, kid(a, body.off, i))
+        if statement.kind == sk_defer() { sum_eval(c, statement.a) }
     }
 }
 
@@ -153,7 +231,8 @@ func sum_stmt(c: *SumCtx, sid: int64) -> void {
         v: SumVal = sum_eval(c, s.a)
         if (*c).lambda_depth > 0 {
             lret_set_top(c, val_join(lret_top(c), v))
-        } else {
+        } else if !sum_carries_nothing((*c).t, (*c).ret_ty, (*c).gens) {
+            // A declared result that holds no reference returns no argument's view
             (*c).returns_alias = (*c).returns_alias | v.origins
             (*c).reads_through = (*c).reads_through | v.reads
         }
@@ -167,19 +246,24 @@ func sum_stmt(c: *SumCtx, sid: int64) -> void {
         sum_eval(c, s.a)
         loop_fixpoint(c, s.b)
     } else if s.kind == sk_for() {
+        depth: int64 = (*c).type_depth
         it: SumVal = sum_eval(c, s.b)
         vname: string = ast_name(a, s.a)
+        iterator: TypeNode = vec_get((*a).types, sum_chain_ty(c, s.b))
+        mut element: int64 = (*(*c).t).infer_ty
+        if iterator.kind == tk_array() || iterator.kind == tk_slice() { element = iterator.a }
+        sum_bind_value(c, vname, element, it)
         map_put((*c).locals, vname, 1)
-        map_put((*c).env, vname, it)
         // `for k, v in m` binds a second name, the interned name plus one in d. Left
         // unbound it read as a free use of whatever the enclosing frame calls v, so a
         // closure that only walks the map was charged with capturing that frame value.
         if s.d != 0 {
             vname2: string = ast_name(a, s.d - 1)
+            sum_bind_value(c, vname2, (*(*c).t).infer_ty, it)
             map_put((*c).locals, vname2, 1)
-            map_put((*c).env, vname2, it)
         }
         loop_fixpoint(c, s.c)
+        sum_restore_types(c, depth)
     } else if s.kind == sk_match() {
         sum_stmt_match(c, s)
     }
@@ -197,34 +281,51 @@ func sum_let(c: *SumCtx, s: StmtNode) -> void {
     }
     if s.b == 1 {
         v: SumVal = sum_eval(c, s.c)
-        b: BindNode = vec_get((*a).binds, kid(a, s.a, 0))
+        mut b: BindNode = vec_get((*a).binds, kid(a, s.a, 0))
+        written: int64 = b.ty
+        mut inferred: int64 = b.ty
+        if b.ty < 0 { inferred = sum_chain_ty(c, s.c) }
+        b.ty = inferred
         note_local(c, b)
-        raise_env(c, ast_name(a, b.name), v)
+        raise_env(c, ast_name(a, b.name), held_value(c, written, v))
         return
     }
     if val.kind == xk_tuple() && val.b == s.b {
         for i in 0..s.b {
             mv: SumVal = sum_eval(c, kid(a, val.a, i))
-            b: BindNode = vec_get((*a).binds, kid(a, s.a, i))
+            mut b: BindNode = vec_get((*a).binds, kid(a, s.a, i))
+            written: int64 = b.ty
+            if b.ty < 0 { b.ty = sum_chain_ty(c, kid(a, val.a, i)) }
             note_local(c, b)
-            raise_env(c, ast_name(a, b.name), mv)
+            raise_env(c, ast_name(a, b.name), held_value(c, written, mv))
         }
         return
     }
     v2: SumVal = sum_eval(c, s.c)
+    tuple: TypeNode = vec_get((*a).types, sum_chain_ty(c, s.c))
     for j in 0..s.b {
-        b2: BindNode = vec_get((*a).binds, kid(a, s.a, j))
+        mut b2: BindNode = vec_get((*a).binds, kid(a, s.a, j))
+        written: int64 = b2.ty
+        if b2.ty < 0 && tuple.kind == tk_tuple() && j < tuple.b { b2.ty = kid(a, tuple.a, j) }
         note_local(c, b2)
-        raise_env(c, ast_name(a, b2.name), v2)
+        raise_env(c, ast_name(a, b2.name), held_value(c, written, v2))
     }
+}
+
+// A binding annotated with a type that holds no reference keeps none of its value's
+// views, whatever the initializer reached
+func held_value(c: *SumCtx, written: int64, v: SumVal) -> SumVal {
+    if written >= 0 && sum_carries_nothing((*c).t, written, (*c).gens) { return val_none() }
+    return v
 }
 
 func note_local(c: *SumCtx, b: BindNode) -> void {
     a: *Ast = (*(*c).t).ast
     locals: *Map<string, int64> = (*c).locals
-    lt: *Map<string, int64> = (*c).local_types
     map_put(locals, ast_name(a, b.name), 1)
-    if b.ty >= 0 { map_put(lt, ast_name(a, b.name), b.ty) }
+    mut tyid: int64 = b.ty
+    if tyid < 0 { tyid = (*(*c).t).infer_ty }
+    sum_bind_type(c, ast_name(a, b.name), tyid)
 }
 
 func sum_stmt_match(c: *SumCtx, s: StmtNode) -> void {
@@ -232,8 +333,10 @@ func sum_stmt_match(c: *SumCtx, s: StmtNode) -> void {
     scrut: SumVal = sum_eval(c, s.a)
     for i in 0..s.c {
         arm: ArmNode = vec_get((*a).arms, kid(a, s.b, i))
+        depth: int64 = (*c).type_depth
         bind_arm(c, arm.pat, scrut)
         sum_block(c, arm.body)
+        sum_restore_types(c, depth)
     }
 }
 
@@ -243,19 +346,19 @@ func bind_arm(c: *SumCtx, pat_id: int64, scrut: SumVal) -> void {
     if p.kind == pk_variant() {
         for i in 0..p.c {
             name: string = ast_name(a, kid(a, p.b, i))
+            sum_bind_value(c, name, (*(*c).t).infer_ty, scrut)
             map_put((*c).locals, name, 1)
-            map_put((*c).env, name, scrut)
         }
     } else if p.kind == pk_ident() {
         name: string = ast_name(a, p.a)
+        sum_bind_value(c, name, (*(*c).t).infer_ty, scrut)
         map_put((*c).locals, name, 1)
-        map_put((*c).env, name, scrut)
     }
 }
 
 // The abstract value of an expression, evaluating every subexpression so a nested
 // call's store edges are recorded even when the call result is discarded.
-func sum_eval(c: *SumCtx, id: int64) -> SumVal {
+export func sum_eval(c: *SumCtx, id: int64) -> SumVal {
     if id < 0 { return val_none() }
     a: *Ast = (*(*c).t).ast
     exprs: *Vector<ExprNode> = (*a).exprs
@@ -266,7 +369,8 @@ func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         return unwrap_or(r, val_none())
     }
     if e.kind == xk_unary() {
-        sum_eval(c, e.b)
+        operand: SumVal = sum_eval(c, e.b)
+        if e.a == uop_deref() { return projection_val(c, id, operand) }
         return val_none()
     }
     if e.kind == xk_binary() {
@@ -280,14 +384,12 @@ func sum_eval(c: *SumCtx, id: int64) -> SumVal {
         return val_none()
     }
     if e.kind == xk_array() {
-        mut origins: int64 = 0
-        mut reads: int64 = 0
+        mut value: SumVal = val_none()
         for i in 0..e.b {
-            ev: SumVal = sum_eval(c, kid(a, e.a, i))
-            origins = origins | ev.origins
-            reads = reads | ev.reads
+            value = val_join(value, sum_eval(c, kid(a, e.a, i)))
         }
-        return SumVal { origins: origins, reads: reads, frame: true }
+        value.frame = true
+        return value
     }
     if e.kind == xk_tuple() {
         mut v: SumVal = val_none()
@@ -312,12 +414,10 @@ func sum_eval(c: *SumCtx, id: int64) -> SumVal {
             return sum_eval(c, e.a)
         }
         sum_eval(c, e.b)
-        sum_eval(c, e.a)
-        return projection_val(c, id)
+        return projection_val(c, id, sum_eval_place_base(c, e.a))
     }
     if e.kind == xk_field() {
-        sum_eval(c, e.a)
-        return projection_val(c, id)
+        return projection_val(c, id, sum_eval_place_base(c, e.a))
     }
     if e.kind == xk_lambda() {
         return sum_eval_lambda(c, e, id)
@@ -367,7 +467,7 @@ func sum_struct_lit(c: *SumCtx, e: ExprNode) -> SumVal {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
     sname: string = ast_name(a, e.a)
-    gens: *Map<string, int64> = (*c).gens
+    gens: *Map<string, int64> = sum_struct_gens(c, sname)
     mut v: SumVal = val_none()
     for j in 0..e.c by 2 {
         fname: string = ast_name(a, kid(a, e.b, j))
@@ -385,17 +485,17 @@ func sum_struct_lit(c: *SumCtx, e: ExprNode) -> SumVal {
 // identity travels while the pointer never frame-taints the literal (invariant
 // I1); anything else contributes nothing. A field type that could not be resolved
 // (-1) joins whole, the conservative fallback the classifier used before.
-func member_contrib(t: *SumTables, iv: SumVal, ft: int64, gens: *Map<string, int64>) -> SumVal {
+export func member_contrib(t: *SumTables, iv: SumVal, ft: int64, gens: *Map<string, int64>) -> SumVal {
     if ft < 0 { return iv }
     if sum_is_view(t, ft, gens) { return iv }
-    if sum_reaches_managed(t, ft) { return SumVal { origins: iv.origins, reads: iv.reads, frame: false } }
+    if sum_reaches_managed(t, ft) { return SumVal { origins: iv.origins, reads: iv.reads, captures: iv.captures, frame: false } }
     return val_none()
 }
 
 // The declared type of a struct's field, or -1 when the struct or field is not
-// found. The field type is classified against the enclosing function's generics,
-// not the struct's own, matching stage0's eval_struct_lit which passes
-// self.generics.
+// found. The literal walk classifies it with the declaring struct's generic
+// parameters, so a field named T carries a view even when the enclosing
+// function names its corresponding type parameter U
 func struct_field_ty_id(c: *SumCtx, sname: string, fname: string) -> int64 {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
@@ -413,18 +513,12 @@ func struct_field_ty_id(c: *SumCtx, sname: string, fname: string) -> int64 {
 // contributes the join of its arm tails. Both branch bodies are walked whole, so a store
 // or a call inside one registers even when the branch yields nothing.
 func sum_eval_ifexpr(c: *SumCtx, e: ExprNode) -> SumVal {
-    a: *Ast = (*(*c).t).ast
     sum_eval(c, e.a)
     mut r: SumVal = val_none()
     for i in 0..2 {
         mut blk: int64 = e.b
         if i == 1 { blk = e.c }
-        sum_block(c, blk)
-        b: BlockNode = vec_get((*a).blocks, blk)
-        if b.len > 0 {
-            last: StmtNode = vec_get((*a).stmts, kid(a, b.off, b.len - 1))
-            if last.kind == sk_expr() { r = val_join(r, sum_eval(c, last.a)) }
-        }
+        r = val_join(r, sum_block(c, blk))
     }
     return r
 }
@@ -435,173 +529,15 @@ func sum_eval_match(c: *SumCtx, e: ExprNode) -> SumVal {
     mut r: SumVal = val_none()
     for i in 0..e.c {
         arm: ArmNode = vec_get((*a).arms, kid(a, e.b, i))
+        depth: int64 = (*c).type_depth
         bind_arm(c, arm.pat, scrut)
-        sum_block(c, arm.body)
-        blk: BlockNode = vec_get((*a).blocks, arm.body)
-        if blk.len > 0 {
-            last: StmtNode = vec_get((*a).stmts, kid(a, blk.off, blk.len - 1))
-            if last.kind == sk_expr() { r = val_join(r, sum_eval(c, last.a)) }
-        }
+        r = val_join(r, sum_block(c, arm.body))
+        sum_restore_types(c, depth)
     }
     return r
 }
 
-// The call dispatch: a channel send records its sink by name first, then the
-// callee resolves to a known module summary, a constructor, a builtin (with the
-// higher-order element models), a resolvable local bind, or the conservative TOP.
-func sum_eval_call(c: *SumCtx, callee_id: int64, arg_off: int64, arg_len: int64) -> SumVal {
-    t: *SumTables = (*c).t
-    a: *Ast = (*t).ast
-    vidx: *Map<string, int64> = (*t).variant_idx
-    eidx: *Map<string, int64> = (*t).enum_idx
-    argvals: *Vector<SumVal> = alloc(vec_new())
-    for i in 0..arg_len {
-        vec_push(argvals, sum_eval(c, kid(a, arg_off, i)))
-    }
-    callee: ExprNode = vec_get((*a).exprs, callee_id)
-    if callee.kind == xk_ident() {
-        name: string = ast_name(a, callee.a)
-        if (str_eq(name, "chan_send") || str_eq(name, "chan_try_send")) && arg_len == 2 {
-            record_chan_sink(c, vec_get(argvals, 1))
-        }
-        sums: *Map<string, SummaryHandle> = (*c).summaries
-        fb: *Map<string, string> = (*c).fn_binds
-        if map_has(sums, name) {
-            return apply_summary(c, unwrap_or(map_get(sums, name), empty_summary()), arg_off, arg_len, argvals)
-        }
-        // A bare constructor call is refused by the call check, which says to write it
-        // as 'A.Some', so the bare name is only ever seen on a program that is rejected
-        // either way; it keeps the name keyed slot. A local binding, a parameter, or a
-        // resolvable function bind of that name is the callee instead, and answering it
-        // with a variant's payload model dropped the view an argument carries, so those
-        // are checked first and this arm only takes a name nothing else owns.
-        lcl: *Map<string, int64> = (*c).locals
-        pidx: *Map<string, int64> = (*c).param_index
-        if map_has(vidx, name) && !map_has(lcl, name) && !map_has(pidx, name) && !map_has(fb, name) {
-            return ctor_val(c, unwrap_or(map_get(vidx, name), -1), argvals)
-        }
-        bs: SummaryHandle = builtin_summary(name)
-        if !bs.empty {
-            if is_higher_order(name, arg_len) {
-                return higher_order_val(c, name, arg_off, arg_len, argvals)
-            }
-            return apply_summary(c, bs, arg_off, arg_len, argvals)
-        }
-        if map_has(fb, name) {
-            g: string = unwrap_or(map_get(fb, name), "")
-            if map_has(sums, g) {
-                return apply_summary(c, unwrap_or(map_get(sums, g), empty_summary()), arg_off, arg_len, argvals)
-            }
-        }
-        return apply_top(c, arg_off, arg_len, argvals)
-    }
-    if callee.kind == xk_field() {
-        base: ExprNode = vec_get((*a).exprs, callee.a)
-        mut is_enum_ctor: bool = false
-        if base.kind == xk_ident() {
-            if map_has(eidx, ast_name(a, base.a)) { is_enum_ctor = true }
-        }
-        if is_enum_ctor {
-            // Asked with the enum, not the bare variant name: two enums may declare
-            // the same variant, the name keyed slot answers with whichever was
-            // declared last, and reading one enum's scalar payload for another's
-            // slice drops the view this constructor really carries.
-            vkey: string = sum_variant_key(ast_name(a, base.a), ast_name(a, callee.b))
-            vbe: *Map<string, int64> = (*t).variant_by_enum
-            if map_has(vbe, vkey) { return ctor_val(c, unwrap_or(map_get(vbe, vkey), -1), argvals) }
-            return join_all(argvals)
-        }
-        sum_eval(c, callee.a)
-        return apply_top(c, arg_off, arg_len, argvals)
-    }
-    sum_eval(c, callee_id)
-    return apply_top(c, arg_off, arg_len, argvals)
-}
-
-// Applies a known callee summary: route each store edge from arg i into arg j's
-// place, join every returned or read-back argument into the result, and thread
-// each sunk argument's provenance into this function's sink set.
-func apply_summary(c: *SumCtx, sum: SummaryHandle, arg_off: int64, arg_len: int64, argvals: *Vector<SumVal>) -> SumVal {
-    a: *Ast = (*(*c).t).ast
-    mut i: int64 = 0
-    while i < arg_len && i < 64 {
-        row: int64 = flow_row(sum.flows, i)
-        if row != 0 {
-            vi: SumVal = vec_get(argvals, i)
-            mut j: int64 = 0
-            while j < arg_len && j < 64 {
-                if (row & (1 << j)) != 0 { flow_into_place(c, kid(a, arg_off, j), vi) }
-                j++
-            }
-        }
-        i++
-    }
-    mut r: SumVal = val_none()
-    mut k: int64 = 0
-    while k < arg_len && k < 64 {
-        if ps_has(sum.returns_alias, k) { r = val_join(r, vec_get(argvals, k)) }
-        if ps_has(sum.reads_through, k) { r = val_join(r, vec_get(argvals, k)) }
-        if ps_has(sum.sinks, k) {
-            av: SumVal = vec_get(argvals, k)
-            ps: int64 = av.origins | av.reads
-            (*c).sinks = (*c).sinks | ps
-            if ps_has(sum.collect_sinks, k) { (*c).collect_sinks = (*c).collect_sinks | ps }
-        }
-        k++
-    }
-    return r
-}
-
-// The TOP summary of an unknown callee: it may return any argument, store any
-// argument's view into any other, and hand any argument to a channel.
-func apply_top(c: *SumCtx, arg_off: int64, arg_len: int64, argvals: *Vector<SumVal>) -> SumVal {
-    a: *Ast = (*(*c).t).ast
-    for i in 0..arg_len {
-        vi: SumVal = vec_get(argvals, i)
-        for j in 0..arg_len {
-            if i != j { flow_into_place(c, kid(a, arg_off, j), vi) }
-        }
-    }
-    for k in 0..arg_len {
-        av: SumVal = vec_get(argvals, k)
-        (*c).sinks = (*c).sinks | av.origins | av.reads
-    }
-    return join_all(argvals)
-}
-
-// The abstract value of a constructor call, taken as the join of each payload
-// argument's contribution under that payload's declared field type. The variant is
-// named by node index rather than by name, so the caller decides which enum's slot
-// is read; an index outside the arena joins every argument, the conservative answer
-// an unresolvable callee already gets.
-func ctor_val(c: *SumCtx, vid: int64, argvals: *Vector<SumVal>) -> SumVal {
-    t: *SumTables = (*c).t
-    a: *Ast = (*t).ast
-    variants: *Vector<VariantNode> = (*a).variants
-    if vid < 0 || vid >= vec_len(variants) { return join_all(argvals) }
-    vr: VariantNode = vec_get(variants, vid)
-    gens: *Map<string, int64> = (*c).gens
-    mut v: SumVal = val_none()
-    for i in 0..vec_len(argvals) {
-        mut ft: int64 = -1
-        if i < vr.fields_len {
-            fld: FieldNode = vec_get((*a).fields, kid(a, vr.fields_off, i))
-            ft = fld.ty
-        }
-        v = val_join(v, member_contrib(t, vec_get(argvals, i), ft, gens))
-    }
-    return v
-}
-
-func join_all(argvals: *Vector<SumVal>) -> SumVal {
-    mut r: SumVal = val_none()
-    for i in 0..vec_len(argvals) {
-        r = val_join(r, vec_get(argvals, i))
-    }
-    return r
-}
-
-func record_chan_sink(c: *SumCtx, sent: SumVal) -> void {
+export func record_chan_sink(c: *SumCtx, sent: SumVal) -> void {
     (*c).sinks = (*c).sinks | sent.origins | sent.reads
 }
 func record_collect_sink(c: *SumCtx, sent: SumVal) -> void {
@@ -625,6 +561,8 @@ func loop_state(c: *SumCtx) -> string {
         sb_push_int(b, av.origins)
         sb_push_char(b, 44)
         sb_push_int(b, av.reads)
+        sb_push_char(b, 44)
+        sb_push_int(b, av.captures)
         sb_push_char(b, 44)
         if av.frame { sb_push_char(b, 49) } else { sb_push_char(b, 48) }
         sb_push_char(b, 59)
@@ -726,4 +664,23 @@ func lret_set_top(c: *SumCtx, v: SumVal) -> void {
         lr: *Vector<SumVal> = (*c).lambda_rets
         vec_set(lr, (*c).lambda_depth - 1, v)
     }
+}
+
+func sum_struct_gens(c: *SumCtx, name: string) -> *Map<string, int64> {
+    return unwrap_or(map_get((*(*c).t).struct_gens, name), (*c).gens)
+}
+
+// Intermediate places are visited for effects only, so a field read classifies
+// its final value once instead of recursively classifying every enclosing struct;
+// the value the chain bottoms out at comes back for a chain no binding roots
+func sum_eval_place_base(c: *SumCtx, id: int64) -> SumVal {
+    if id < 0 { return val_none() }
+    e: ExprNode = vec_get((*(*(*c).t).ast).exprs, id)
+    if e.kind == xk_field() { return sum_eval_place_base(c, e.a) }
+    if e.kind == xk_index() {
+        sum_eval(c, e.b)
+        return sum_eval_place_base(c, e.a)
+    }
+    if e.kind == xk_unary() && e.a == uop_deref() { return sum_eval_place_base(c, e.b) }
+    return sum_eval(c, id)
 }

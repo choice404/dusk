@@ -1,0 +1,494 @@
+// tcesc4: the call site escape check for a method call whose receiver's place type
+// does not name the method. A receiver typed through a call chain applies its
+// method's summary, an interface receiver applies the join of every implementation
+// of the method, and a receiver nothing resolves is one more operand of the opaque
+// call. check_method_call_escape keeps the receivers its place type names. The
+// receiver's named type resolves here too, through a chain of calls, for the result
+// escape, the opaque test, and the string borrow verdict tcesc2 holds.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tciface
+@import tcesc
+@import tcesc2
+@import tcesc3
+@import tcesctype
+@import tcescreach
+@import tcescrepoint
+@import tcescunify
+@import tccall
+@import sumfix
+@import summary
+@import sumflow
+@import summethod
+
+export struct CallMethod { found: bool, mname: string, sum: SummaryHandle }
+
+func no_method() -> CallMethod { return CallMethod { found: false, mname: "", sum: empty_summary() } }
+
+/** The escape summary a method call answers to past its receiver's place type: the
+ *  method a call chain's result names, or every implementation behind an interface
+ *  @params tc - The type checker holding the method summaries
+ *  @params callee_id - The method selection
+ *  @returns {CallMethod} - The summary, found false when the receiver stays opaque */
+export func deep_method_summary(tc: *TypeChecker, callee_id: int64) -> CallMethod {
+    return method_summary_in(tc, callee_id, (*tc).method_summaries)
+}
+
+/** The deep_method_summary resolution over a chosen table, the escape summaries or
+ *  the string alias summaries
+ *  @params tc - The type checker
+ *  @params callee_id - The method selection
+ *  @params sums - Method summaries keyed by receiver type and method name
+ *  @returns {CallMethod} - The summary, found false when the receiver stays opaque */
+export func method_summary_in(tc: *TypeChecker, callee_id: int64, sums: *Map<string, SummaryHandle>) -> CallMethod {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() { return no_method() }
+    tname: string = receiver_name(tc, callee.a)
+    mname: string = ast_name(a, callee.b)
+    key: string = method_key(tname, mname)
+    if map_has(sums, key) { return CallMethod { found: true, mname: mname, sum: unwrap_or(map_get(sums, key), empty_summary()) } }
+    if is_discard_method(tc, callee, tname) { return CallMethod { found: true, mname: mname, sum: empty_summary() } }
+    if !map_has((*tc).ifaces, tname) { return no_method() }
+    joined: SummaryHandle = sum_join_impls(a, sums, tname, mname)
+    if joined.empty { return no_method() }
+    return CallMethod { found: true, mname: mname, sum: joined }
+}
+
+// The built in discard has no store or return edges; a declared method takes precedence
+func is_discard_method(tc: *TypeChecker, callee: ExprNode, tname: string) -> bool {
+    if !str_eq(ast_name((*tc).ast, callee.b), "ignore") { return false }
+    if map_has((*tc).ifaces, tname) || struct_has_field(tc, tname, "ignore") { return false }
+    if str_len(tname) > 0 && !map_has((*tc).structs, tname) && !map_has((*tc).enums, tname) { return false }
+    return ty_get((*tc).ty, receiver_value_ty(tc, callee.a)).kind != tyk_unknown()
+}
+
+// The receiver's named type, or the interface an interface typed binding or field
+// was declared with, which the surface pass erases from the value's own type
+func receiver_name(tc: *TypeChecker, base_id: int64) -> string {
+    direct: string = recv_type_name_deep(tc, base_id)
+    if str_len(direct) != 0 { return direct }
+    a: *Ast = (*tc).ast
+    base: ExprNode = vec_get((*a).exprs, base_id)
+    if base.kind == xk_ident() { return iface_bind_name(tc, ast_name(a, base.a)) }
+    if base.kind != xk_field() { return "" }
+    raw: int64 = field_raw_ty(tc, receiver_name(tc, base.a), ast_name(a, base.b))
+    if raw < 0 || ty_get((*tc).ty, raw).kind != tyk_named() { return "" }
+    name: string = ty_name((*tc).ty, raw)
+    if !map_has((*tc).ifaces, name) { return "" }
+    return name
+}
+
+func field_raw_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
+    if str_len(sname) == 0 { return -1 }
+    record: StructSig = sig_struct((*tc).sigtab, sname)
+    for i in 0..record.len {
+        field: FieldSig = vec_get((*(*tc).sigtab).fields, record.off + i)
+        if str_eq(field.name, fname) { return field.raw }
+    }
+    return -1
+}
+
+/** The receiver an opaque method call hands its callee, or -1. A call through a
+ *  struct's function typed field calls the closure the field holds, not a method
+ *  taking the value, so it passes no receiver
+ *  @params tc - The type checker
+ *  @params callee_id - The callee of the call
+ *  @returns {int64} - The receiver expression, an explicit dereference peeled */
+export func opaque_method_receiver(tc: *TypeChecker, callee_id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() || str_len(variant_name(tc, callee_id)) > 0 { return -1 }
+    if struct_has_field(tc, recv_type_name_deep(tc, callee.a), ast_name(a, callee.b)) { return -1 }
+    return method_receiver(a, callee)
+}
+
+func struct_has_field(tc: *TypeChecker, sname: string, fname: string) -> bool {
+    return field_raw_ty(tc, sname, fname) >= 0
+}
+
+func method_receiver(a: *Ast, callee: ExprNode) -> int64 {
+    base: ExprNode = vec_get((*a).exprs, callee.a)
+    if base.kind == xk_unary() && base.a == uop_deref() { return base.b }
+    return callee.a
+}
+
+/** Apply a method summary the receiver's place type did not name, at the call site,
+ *  with the receiver as operand 0, the way check_method_call_escape applies one it did
+ *  @params tc - The type checker
+ *  @params callee_id - The method selection
+ *  @params arg_off - The first written argument's kid offset
+ *  @params arg_len - The written argument count
+ *  @params lo - The call's span start
+ *  @params hi - The call's span end
+ *  @returns {void} - Emits each sink and store refusal */
+export func check_deep_method_escape(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_field() || place_names_method(tc, callee) { return }
+    found: CallMethod = deep_method_summary(tc, callee_id)
+    if !found.found { return }
+    operands: *Vector<int64> = alloc(vec_new())
+    vec_push(operands, method_receiver(a, callee))
+    for i in 0..arg_len { vec_push(operands, vec_get((*a).kids, arg_off + i)) }
+    deep_check_sinks(tc, found, operands, lo, hi)
+    deep_apply_flows(tc, found.sum, operands, lo, hi)
+}
+
+// check_method_call_escape already applied the summary this receiver's place type names
+func place_names_method(tc: *TypeChecker, callee: ExprNode) -> bool {
+    tname: string = recv_type_name_deep(tc, callee.a)
+    if str_len(tname) == 0 { return false }
+    return map_has((*tc).method_summaries, method_key(tname, ast_name((*tc).ast, callee.b)))
+}
+
+func deep_check_sinks(tc: *TypeChecker, found: CallMethod, operands: *Vector<int64>, lo: int64, hi: int64) -> void {
+    fp: *Map<string, FlowProv> = (*tc).flow_prov
+    for j in 0..vec_len(operands) {
+        if j >= 64 { return }
+        if !ps_has(found.sum.sinks, j) { continue }
+        root: string = send_value_root(tc, vec_get(operands, j))
+        if str_len(root) > 0 && (is_esc_slice(tc, root) || is_esc_closure(tc, root)) {
+            prov: FlowProv = unwrap_or(map_get(fp, root), no_flow_prov())
+            emit_sink_reject(tc, found.mname, root, ps_has(found.sum.collect_sinks, j), prov, lo, hi)
+        }
+    }
+}
+
+func deep_apply_flows(tc: *TypeChecker, sum: SummaryHandle, operands: *Vector<int64>, lo: int64, hi: int64) -> void {
+    count: int64 = vec_len(operands)
+    for x in 0..count {
+        if x >= 64 { return }
+        for y in 0..count {
+            if y < 64 && flow_has(sum.flows, x, y) { link_store_aliases(tc, vec_get(operands, x), vec_get(operands, y)) }
+        }
+        source: EscPair = value_escape(tc, vec_get(operands, x))
+        if !source.slice && !source.closure { continue }
+        for y in 0..count {
+            if y < 64 && flow_has(sum.flows, x, y) { route_method_flow_edge(tc, x, y, source, vec_get(operands, y), lo, hi) }
+        }
+    }
+}
+
+// The result type of a call, resolved from the callee's recorded signature without
+// re-inferring the call (a second infer_expr over the receiver would double any
+// diagnostic its argument list carries). A bare top-level function resolves through
+// its signature, an open generic result through its declared form; a method resolves
+// through its receiver's named type and that method's declared result, so a chain
+// such as r.me().nm() grounds each link in turn. A closure value or an unknown callee
+// stays unknown, and the receiver it feeds stays opaque.
+func call_result_ty(tc: *TypeChecker, e: ExprNode) -> int64 {
+    a: *Ast = (*tc).ast
+    if e.kind != xk_call() { return ty_unknown((*tc).ty) }
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind == xk_field() {
+        receiver: string = recv_type_name_deep(tc, callee.a)
+        key: string = method_key(receiver, ast_name(a, callee.b))
+        declared: int64 = unwrap_or(map_get((*(*tc).sum_tables).fn_returns, key), -1)
+        if declared >= 0 { return tc_type(tc, declared) }
+        return ty_unknown((*tc).ty)
+    }
+    if callee.kind != xk_ident() { return ty_unknown((*tc).ty) }
+    name: string = ast_name(a, callee.a)
+    if is_local(tc, name) { return ty_unknown((*tc).ty) }
+    if !sig_has_fn((*tc).sigtab, name) { return ty_unknown((*tc).ty) }
+    ft: int64 = lookup(tc, name)
+    fn: TyNode = ty_get((*tc).ty, ft)
+    if fn.kind != tyk_func() { return ty_unknown((*tc).ty) }
+    if ty_get((*tc).ty, fn.a).kind == tyk_unknown() {
+        argument_ty: int64 = generic_result_argument_ty(tc, name, e)
+        if ty_get((*tc).ty, argument_ty).kind != tyk_unknown() { return argument_ty }
+    }
+    return borrow_call_ty(tc, e, fn.a)
+}
+
+// A bare result parameter can also be pinned by a concrete fallback argument
+func generic_result_argument_ty(tc: *TypeChecker, name: string, call: ExprNode) -> int64 {
+    a: *Ast = (*tc).ast
+    function_id: int64 = unwrap_or(map_get((*(*tc).sum_tables).module_fns, name), -1)
+    if function_id < 0 { return ty_unknown((*tc).ty) }
+    function: FuncNode = vec_get((*a).funcs, function_id)
+    result: TypeNode = vec_get((*a).types, function.ret)
+    if function.generics_len == 0 || result.kind != tk_named() || result.c != 0 { return ty_unknown((*tc).ty) }
+    // A `using` allocator is written at the call like any other argument, so the
+    // argument at a parameter's position is that parameter's
+    for i in 0..function.params_len {
+        if i >= call.c { break }
+        param: ParamNode = vec_get((*a).params, vec_get((*a).kids, function.params_off + i))
+        pattern: TypeNode = vec_get((*a).types, param.ty)
+        if pattern.kind == tk_named() && pattern.c == 0 && pattern.a == result.a {
+            actual: int64 = receiver_value_ty(tc, vec_get((*a).kids, call.b + i))
+            if ty_get((*tc).ty, actual).kind != tyk_unknown() { return actual }
+        }
+    }
+    return ty_unknown((*tc).ty)
+}
+
+// The named type a method receiver base carries, falling back past receiver_type_name
+// when the base is a call result. receiver_type_name walks a place chain (idents,
+// fields, indexes, dereferences) and returns "" for a call node, which has no place
+// to walk; a getter freed off a fresh call result (free(mk().get(i))) then lost its
+// receiver type and slipped the read-back guard. Here the call result's return type,
+// a method's included, grounds the receiver: it peels pointers to the underlying
+// named type, a struct whose method summary owns the report or an interface whose
+// implementations deep_method_summary joins.
+export func recv_type_name_deep(tc: *TypeChecker, base_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    base: ExprNode = vec_get((*a).exprs, base_id)
+    mut t: int64 = receiver_value_ty(tc, base_id)
+    mut going: bool = true
+    while going {
+        n: TyNode = ty_get((*tc).ty, t)
+        if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
+            t = n.a
+        } else if n.kind == tyk_named() {
+            return ty_name((*tc).ty, t)
+        } else {
+            going = false
+        }
+    }
+    if base.kind == xk_ifexpr() { return branch_type_name(tc, base) }
+    return receiver_type_name(tc, base_id)
+}
+
+/** Reuses a receiver's recovered type without inferring its initializer again
+ *  @params tc - The checker holding scoped receiver metadata
+ *  @params expr_id - The receiver or store operand
+ *  @returns {int64} - Its recovered type, or the inference placeholder */
+export func receiver_value_ty(tc: *TypeChecker, expr_id: int64) -> int64 {
+    expr: ExprNode = vec_get((*(*tc).ast).exprs, expr_id)
+    if expr.kind == xk_ident() {
+        recorded: int64 = receiver_binding_ty(tc, ast_name((*tc).ast, expr.a))
+        if recorded >= 0 { return recorded }
+    }
+    mut value_ty: int64 = chain_ty(tc, expr_id)
+    if expr.kind == xk_call() { value_ty = call_result_ty(tc, expr) }
+    if expr.kind == xk_struct_lit() { return ty_named((*tc).ty, ast_name((*tc).ast, expr.a)) }
+    if ty_get((*tc).ty, value_ty).kind != tyk_unknown() { return value_ty }
+    recovered: int64 = escape_receiver_ast(tc, expr_id)
+    if recovered >= 0 { return tc_type(tc, recovered) }
+    borrowed: int64 = borrow_expr_ast(tc, expr_id)
+    if borrowed >= 0 { return tc_type(tc, borrowed) }
+    return value_ty
+}
+
+// Escape type entries share the scope lifetime of borrow metadata but use separate keys
+func receiver_binding_ty(tc: *TypeChecker, name: string) -> int64 {
+    mut index: int64 = vec_len((*tc).scopes) - 1
+    while index >= 0 {
+        if map_has(vec_get((*tc).scopes, index), name) {
+            return unwrap_or(map_get(vec_get((*tc).binding_ast_ty, index), sig_pair_key("escape-type", name)), -1)
+        }
+        index--
+    }
+    return -1
+}
+
+/** Saves a call's receiver type while its arguments' scopes are still visible
+ *  @params tc - The checker holding scoped escape metadata
+ *  @params callee_id - The callee expression
+ *  @params arg_off - The first argument's kid offset
+ *  @params arg_len - The written argument count
+ *  @params lo - The call's span start
+ *  @params hi - The call's span end
+ *  @returns {void} - Records only a resolved result type */
+export func record_call_receiver_type(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
+    call: ExprNode = ExprNode { kind: xk_call(), lo: lo, hi: hi, a: callee_id, b: arg_off, c: arg_len, d: 0 }
+    written: int64 = record_escape_call_ast(tc, call)
+    mut result: int64 = call_result_ty(tc, call)
+    if written >= 0 { result = tc_type(tc, written) }
+    if ty_get((*tc).ty, result).kind == tyk_unknown() { return }
+    declare_binding_ast(tc, sig_pair_key("escape-call", span_key(lo, hi)), result)
+}
+
+/** Copies a call's already resolved type to its new binding for later method selection
+ *  @params tc - The checker holding scoped escape metadata
+ *  @params name - The newly declared binding
+ *  @params value_id - The initializer expression
+ *  @returns {void} - Leaves inference and borrow metadata unchanged */
+export func record_receiver_binding_type(tc: *TypeChecker, name: string, value_id: int64) -> void {
+    value: ExprNode = vec_get((*(*tc).ast).exprs, value_id)
+    if binding_ast_of(tc, name) >= 0 { return }
+    if value.kind == xk_ident() && str_eq(name, ast_name((*tc).ast, value.a)) { return }
+    written: int64 = escape_receiver_ast(tc, value_id)
+    if written >= 0 {
+        declare_binding_ast(tc, sig_pair_key("escape-ast", name), written)
+        resolved_type: int64 = tc_type(tc, written)
+        if ty_get((*tc).ty, resolved_type).kind != tyk_unknown() {
+            declare_binding_ast(tc, sig_pair_key("escape-type", name), resolved_type)
+            return
+        }
+    }
+    mut resolved: int64 = -1
+    if value.kind == xk_call() {
+        stack: *Vector<*Map<string, int64>> = (*tc).binding_ast_ty
+        if vec_len(stack) == 0 { return }
+        resolved = unwrap_or(map_get(vec_get(stack, vec_len(stack) - 1), sig_pair_key("escape-call", span_key(value.lo, value.hi))), -1)
+    } else {
+        resolved = receiver_value_ty(tc, value_id)
+    }
+    if resolved < 0 || ty_get((*tc).ty, resolved).kind == tyk_unknown() { return }
+    declare_binding_ast(tc, sig_pair_key("escape-type", name), resolved)
+}
+
+/** Whether a store destination may reach memory its root flag cannot account for
+ *  @params tc - The checker holding receiver types and binding metadata
+ *  @params destination_id - The expression receiving a frame view
+ *  @params is_receiver - Whether the destination is an implicit method receiver
+ *  @returns {bool} - True when the store needs the conservative refusal */
+export func flow_destination_is_opaque(tc: *TypeChecker, destination_id: int64, is_receiver: bool) -> bool {
+    root: string = store_root(tc, destination_id)
+    if str_len(root) == 0 { return !literal_destination_is_local(tc, destination_id) }
+    name: string = receiver_name(tc, destination_id)
+    if map_has((*tc).ifaces, name) { return true }
+    destination_ty: int64 = receiver_value_ty(tc, destination_id)
+    kind: int64 = ty_get((*tc).ty, destination_ty).kind
+    is_pointer: bool = kind == tyk_ptr() || kind == tyk_rawptr()
+    relation: *FrameRelation = destination_relation(tc, destination_id)
+    // A parameter argument and a pointer the checker links to one keep their precise
+    // report; a parameter the relation alone reaches is refused like any memory that
+    // outlives the frame
+    if !is_receiver && is_pointer && links_parameter(tc, root) { return false }
+    seen: *Map<string, int64> = alloc(map_new())
+    // A destination with no pointer in it keeps its own flag, or the precise report of
+    // a parameter the checker links it to, unless what it reaches outlives the frame
+    if !is_pointer && !store_type_reaches_pointer(tc, destination_ty, seen) {
+        return !links_parameter(tc, root) && relation_outlives(relation, root)
+    }
+    return !frame_owns_destination(tc, relation, root)
+}
+
+func links_parameter(tc: *TypeChecker, root: string) -> bool {
+    return map_has((*tc).cur_params, root) || group_parameter(tc, root) >= 0
+}
+
+/** The relation of the function holding a store destination, asked from the
+ *  destination's own frame. The relation is built once per function the checker
+ *  queries, and every relation shares one cache of callee summaries
+ *  @params tc - The checker holding the surface tables
+ *  @params destination_id - The store destination
+ *  @returns {*FrameRelation} - The relation */
+export func destination_relation(tc: *TypeChecker, destination_id: int64) -> *FrameRelation {
+    return memo_relation((*tc).relation_memo, (*tc).sum_tables, destination_id)
+}
+
+/** Whether a binding a called closure stores a frame view through may outlive the
+ *  frame making the call, asked from the frame the call is written in. A binding the
+ *  function only returns itself is left to its own flag, which the call raises and
+ *  the return checks
+ *  @params tc - The checker holding pointer and aggregate aliases
+ *  @params callee_id - The callee of the call
+ *  @params name - The captured binding the closure stores through
+ *  @returns {bool} - True when the binding reaches a parameter, an enclosing frame,
+ *  an opaque call, or a returned value other than itself */
+export func capture_outlives_call(tc: *TypeChecker, callee_id: int64, name: string) -> bool {
+    if group_parameter(tc, name) >= 0 { return true }
+    return relation_outlives_past_return(destination_relation(tc, callee_id), name)
+}
+
+/** The caller parameter a destination's class reaches, by the checker's own alias
+ *  links or by the function's frame relation
+ *  @params tc - The checker holding pointer and aggregate aliases
+ *  @params relation - The relation of the function holding the store
+ *  @params root - The destination binding
+ *  @returns {int64} - The parameter index, or -1 */
+export func destination_parameter(tc: *TypeChecker, relation: *FrameRelation, root: string) -> int64 {
+    linked: int64 = group_parameter(tc, root)
+    if linked >= 0 { return linked }
+    return relation_parameter(relation, root)
+}
+
+/** Whether a destination's root names memory only its frame can reach: linked to no
+ *  parameter, and in a class with nothing that outlives the frame
+ *  @params tc - The checker holding pointer and aggregate aliases
+ *  @params relation - The relation of the function holding the store
+ *  @params root - The destination binding
+ *  @returns {bool} - True when the frame owns everything the destination reaches */
+export func frame_owns_destination(tc: *TypeChecker, relation: *FrameRelation, root: string) -> bool {
+    if group_parameter(tc, root) >= 0 { return false }
+    return relation_is_frame_local(relation, root)
+}
+
+// Memory the frame allocated and still holds alone
+func destination_is_frame_local(tc: *TypeChecker, destination_id: int64, root: string) -> bool {
+    return frame_owns_destination(tc, destination_relation(tc, destination_id), root)
+}
+
+// A temporary literal is local when every member that leads elsewhere leads to frame memory
+func literal_destination_is_local(tc: *TypeChecker, expression_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    expression: ExprNode = vec_get((*a).exprs, expression_id)
+    if expression.kind != xk_struct_lit() && expression.kind != xk_tuple() && expression.kind != xk_array() { return false }
+    mut offset: int64 = expression.a
+    mut count: int64 = expression.b
+    mut stride: int64 = 1
+    if expression.kind == xk_struct_lit() {
+        offset = expression.b + 1
+        count = expression.c / 2
+        stride = 2
+    }
+    for i in 0..count {
+        if !literal_member_is_local(tc, vec_get((*a).kids, offset + i * stride)) { return false }
+    }
+    return true
+}
+
+func literal_member_is_local(tc: *TypeChecker, member_id: int64) -> bool {
+    member_ty: int64 = receiver_value_ty(tc, member_id)
+    if ty_get((*tc).ty, member_ty).kind == tyk_slice() { return false }
+    seen: *Map<string, int64> = alloc(map_new())
+    if !store_type_reaches_pointer(tc, member_ty, seen) { return true }
+    root: string = store_root(tc, member_id)
+    if str_len(root) == 0 { return literal_destination_is_local(tc, member_id) }
+    return destination_is_frame_local(tc, member_id, root)
+}
+
+func store_type_reaches_pointer(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+    node: TyNode = ty_get((*tc).ty, tyid)
+    if node.kind == tyk_ptr() || node.kind == tyk_rawptr() || node.kind == tyk_unknown() { return true }
+    if node.kind == tyk_array() || node.kind == tyk_slice() || node.kind == tyk_collector() {
+        return store_type_reaches_pointer(tc, node.a, seen)
+    }
+    if node.kind == tyk_tuple() {
+        for i in 0..node.len {
+            if store_type_reaches_pointer(tc, vec_get((*(*tc).ty).kids, node.off + i), seen) { return true }
+        }
+    }
+    if node.kind != tyk_named() { return false }
+    name: string = ty_name((*tc).ty, tyid)
+    if map_has((*tc).ifaces, name) { return true }
+    if map_has(seen, name) { return false }
+    map_put(seen, name, 1)
+    fields: TyList = unwrap_or(map_get((*tc).embed_fields, name), empty_tylist())
+    for i in 0..fields.len {
+        if store_type_reaches_pointer(tc, sig_ty_at((*tc).sigtab, fields, i), seen) { return true }
+    }
+    return false
+}
+
+// A conditional receiver names a type when both arms are a lone expression naming it
+func branch_type_name(tc: *TypeChecker, cond: ExprNode) -> string {
+    first: string = tail_type_name(tc, cond.b)
+    if str_len(first) == 0 || !str_eq(first, tail_type_name(tc, cond.c)) { return "" }
+    return first
+}
+
+func tail_type_name(tc: *TypeChecker, block_id: int64) -> string {
+    if block_id < 0 { return "" }
+    a: *Ast = (*tc).ast
+    block: BlockNode = vec_get((*a).blocks, block_id)
+    if block.len != 1 { return "" }
+    tail: StmtNode = vec_get((*a).stmts, vec_get((*a).kids, block.off))
+    if tail.kind != sk_expr() { return "" }
+    return recv_type_name_deep(tc, tail.a)
+}

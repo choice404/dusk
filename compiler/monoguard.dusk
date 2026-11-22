@@ -16,7 +16,11 @@
 @import monoemit
 @import monosolve
 
-export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bool, path: *Map<string, int64>) -> bool {
+// ban_ptr_view additionally refuses a pointer whose target reaches a slice, closure,
+// or interface value. Only the spawn and submit capture check sets it: a thread may
+// store a view of its own frame into such a field after the capture was judged. The
+// channel and future element bans leave it clear by design.
+export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bool, ban_ptr_view: bool, path: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_slice() || n.kind == tk_func() { return false }
@@ -27,9 +31,13 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
         if map_has(path, name) { return true }
         child: *Map<string, int64> = map_clone_i64(path)
         map_put(child, name, 1)
-        // Every type argument must cross on its own.
+        // Channel and future elements cross through their own transfer rule
+        mut arg_ban_ptr_view: bool = ban_ptr_view
+        if str_eq(name, "Channel") || str_eq(name, "Future") {
+            arg_ban_ptr_view = false
+        }
         for i in 0..n.c {
-            if !crossable(m, vec_get((*a).kids, n.b + i), ban_future, allow_collector, child) {
+            if !crossable(m, vec_get((*a).kids, n.b + i), ban_future, allow_collector, arg_ban_ptr_view, child) {
                 return false
             }
         }
@@ -40,7 +48,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
             subst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
             for fi in 0..gs.fields_len {
                 fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
-                if !crossable(m, subst_apply(m, fld.ty, subst), ban_future, allow_collector, child) {
+                if !crossable(m, subst_apply(m, fld.ty, subst), ban_future, allow_collector, ban_ptr_view, child) {
                     return false
                 }
             }
@@ -55,27 +63,30 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
                 va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
                 for vfi in 0..va.fields_len {
                     fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
-                    if !crossable(m, subst_apply(m, fld2.ty, subst2), ban_future, allow_collector, child) {
+                    if !crossable(m, subst_apply(m, fld2.ty, subst2), ban_future, allow_collector, ban_ptr_view, child) {
                         return false
                     }
                 }
             }
             return true
         }
-        return crossable_named_nongeneric(m, name, ban_future, allow_collector, child)
+        return crossable_named_nongeneric(m, name, ban_future, allow_collector, ban_ptr_view, child)
     }
     if n.kind == tk_ptr() || n.kind == tk_rawptr() {
         if ban_future && ptr_reaches_future(m, n.a, path) {
             return false
         }
+        if ban_ptr_view && ptr_reaches_view(m, n.a, path) {
+            return false
+        }
         return allow_collector || !ptr_reaches_collector(m, n.a, path)
     }
     if n.kind == tk_array() {
-        return crossable(m, n.a, ban_future, allow_collector, path)
+        return crossable(m, n.a, ban_future, allow_collector, ban_ptr_view, path)
     }
     if n.kind == tk_tuple() {
         for ti in 0..n.b {
-            if !crossable(m, vec_get((*a).kids, n.a + ti), ban_future, allow_collector, path) {
+            if !crossable(m, vec_get((*a).kids, n.a + ti), ban_future, allow_collector, ban_ptr_view, path) {
                 return false
             }
         }
@@ -87,7 +98,7 @@ export func crossable(m: *Mono, id: int64, ban_future: bool, allow_collector: bo
 
 // The non-generic named fallback: a struct or enum declared without generics is
 // judged by its declared fields, and an interface is refused outright.
-func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_collector: bool, child: *Map<string, int64>) -> bool {
+func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_collector: bool, ban_ptr_view: bool, child: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     items: *Vector<ItemNode> = (*a).items
     for it in items {
@@ -96,7 +107,7 @@ func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_
             if str_eq(ast_name(a, s.name), name) {
                 for fi in 0..s.fields_len {
                     fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, s.fields_off + fi))
-                    if !crossable(m, fld.ty, ban_future, allow_collector, child) {
+                    if !crossable(m, fld.ty, ban_future, allow_collector, ban_ptr_view, child) {
                         return false
                     }
                 }
@@ -109,7 +120,7 @@ func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_
                     va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + vi))
                     for vfi in 0..va.fields_len {
                         fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
-                        if !crossable(m, fld2.ty, ban_future, allow_collector, child) {
+                        if !crossable(m, fld2.ty, ban_future, allow_collector, ban_ptr_view, child) {
                             return false
                         }
                     }
@@ -126,44 +137,19 @@ func crossable_named_nongeneric(m: *Mono, name: string, ban_future: bool, allow_
     return true
 }
 
+// The three things a pointer's target is hunted for: a future, a collected value, or
+// a value that can view a frame (a slice, a closure, or an interface value).
+func reach_future() -> int64 { return 0 }
+func reach_collector() -> int64 { return 1 }
+func reach_view() -> int64 { return 2 }
+
 func ptr_reaches_future(m: *Mono, id: int64, path: *Map<string, int64>) -> bool {
     a: *Ast = (*m).ast
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_named() {
         name: string = ast_name(a, n.a)
         if str_eq(name, "Future") { return true }
-        if map_has(path, name) { return false }
-        child: *Map<string, int64> = map_clone_i64(path)
-        map_put(child, name, 1)
-        for i in 0..n.c {
-            if ptr_reaches_future(m, vec_get((*a).kids, n.b + i), child) { return true }
-        }
-        if map_has(m_gstructs(m), name) {
-            gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
-            gs: StructNode = vec_get((*a).structs, gsid)
-            targs: *Vector<int64> = named_targs(a, id)
-            subst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
-            for fi in 0..gs.fields_len {
-                fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
-                if ptr_reaches_future(m, subst_apply(m, fld.ty, subst), child) { return true }
-            }
-            return false
-        }
-        if map_has(m_genums(m), name) {
-            geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
-            ge: EnumNode = vec_get((*a).enums, geid)
-            targs2: *Vector<int64> = named_targs(a, id)
-            subst2: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
-            for vi in 0..ge.variants_len {
-                va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
-                for vfi in 0..va.fields_len {
-                    fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
-                    if ptr_reaches_future(m, subst_apply(m, fld2.ty, subst2), child) { return true }
-                }
-            }
-            return false
-        }
-        return reaches_nongeneric(m, name, child, true)
+        return reaches_named(m, id, name, path, reach_future())
     }
     if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() {
         return ptr_reaches_future(m, n.a, path)
@@ -182,39 +168,7 @@ func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>) -> bo
     n: TypeNode = vec_get((*a).types, id)
     if n.kind == tk_collector() { return true }
     if n.kind == tk_named() {
-        name: string = ast_name(a, n.a)
-        if map_has(path, name) { return false }
-        child: *Map<string, int64> = map_clone_i64(path)
-        map_put(child, name, 1)
-        for i in 0..n.c {
-            if ptr_reaches_collector(m, vec_get((*a).kids, n.b + i), child) { return true }
-        }
-        if map_has(m_gstructs(m), name) {
-            gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
-            gs: StructNode = vec_get((*a).structs, gsid)
-            targs: *Vector<int64> = named_targs(a, id)
-            subst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, targs)
-            for fi in 0..gs.fields_len {
-                fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
-                if ptr_reaches_collector(m, subst_apply(m, fld.ty, subst), child) { return true }
-            }
-            return false
-        }
-        if map_has(m_genums(m), name) {
-            geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
-            ge: EnumNode = vec_get((*a).enums, geid)
-            targs2: *Vector<int64> = named_targs(a, id)
-            subst2: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, targs2)
-            for vi in 0..ge.variants_len {
-                va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
-                for vfi in 0..va.fields_len {
-                    fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
-                    if ptr_reaches_collector(m, subst_apply(m, fld2.ty, subst2), child) { return true }
-                }
-            }
-            return false
-        }
-        return reaches_nongeneric(m, name, child, false)
+        return reaches_named(m, id, ast_name(a, n.a), path, reach_collector())
     }
     if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_slice() || n.kind == tk_array() {
         return ptr_reaches_collector(m, n.a, path)
@@ -228,9 +182,77 @@ func ptr_reaches_collector(m: *Mono, id: int64, path: *Map<string, int64>) -> bo
     return false
 }
 
-// The non-generic named fallback for the two ptr_reaches walks: want_future picks
-// which sink the struct or enum fields are hunted for.
-func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, want_future: bool) -> bool {
+// Whether a pointer's target reaches a slice, a closure, or an interface value
+// through fields, payloads, tuples, arrays, nested pointers, collector elements, and
+// generic arguments. Either thread may store a view of its own frame into such a
+// place after a spawn capture was judged.
+func ptr_reaches_view(m: *Mono, id: int64, path: *Map<string, int64>) -> bool {
+    a: *Ast = (*m).ast
+    n: TypeNode = vec_get((*a).types, id)
+    if n.kind == tk_slice() || n.kind == tk_func() { return true }
+    if n.kind == tk_named() {
+        return reaches_named(m, id, ast_name(a, n.a), path, reach_view())
+    }
+    if n.kind == tk_ptr() || n.kind == tk_rawptr() || n.kind == tk_array() || n.kind == tk_collector() {
+        return ptr_reaches_view(m, n.a, path)
+    }
+    if n.kind == tk_tuple() {
+        for ti in 0..n.b {
+            if ptr_reaches_view(m, vec_get((*a).kids, n.a + ti), path) { return true }
+        }
+        return false
+    }
+    return false
+}
+
+// The named arm the three walks share: every type argument, then a generic struct's
+// fields or a generic enum's payloads with the arguments substituted, else the
+// declared fields of a non-generic struct or enum. The path set ends a recursion.
+func reaches_named(m: *Mono, id: int64, name: string, path: *Map<string, int64>, kind: int64) -> bool {
+    a: *Ast = (*m).ast
+    n: TypeNode = vec_get((*a).types, id)
+    if map_has(path, name) { return false }
+    child: *Map<string, int64> = map_clone_i64(path)
+    map_put(child, name, 1)
+    // Handle elements are transferred separately; keep checking the handle fields
+    mut has_view_boundary: bool = false
+    if kind == reach_view() && (str_eq(name, "Channel") || str_eq(name, "Future")) {
+        has_view_boundary = true
+    }
+    if !has_view_boundary {
+        for i in 0..n.c {
+            if reaches_field(m, vec_get((*a).kids, n.b + i), child, kind) { return true }
+        }
+    }
+    if map_has(m_gstructs(m), name) {
+        gsid: int64 = unwrap_or(map_get(m_gstructs(m), name), -1)
+        gs: StructNode = vec_get((*a).structs, gsid)
+        subst: *Map<string, int64> = build_subst(m, gs.generics_off, gs.generics_len, named_targs(a, id))
+        for fi in 0..gs.fields_len {
+            fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, gs.fields_off + fi))
+            if reaches_field(m, subst_apply(m, fld.ty, subst), child, kind) { return true }
+        }
+        return false
+    }
+    if map_has(m_genums(m), name) {
+        geid: int64 = unwrap_or(map_get(m_genums(m), name), -1)
+        ge: EnumNode = vec_get((*a).enums, geid)
+        subst2: *Map<string, int64> = build_subst(m, ge.generics_off, ge.generics_len, named_targs(a, id))
+        for vi in 0..ge.variants_len {
+            va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, ge.variants_off + vi))
+            for vfi in 0..va.fields_len {
+                fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
+                if reaches_field(m, subst_apply(m, fld2.ty, subst2), child, kind) { return true }
+            }
+        }
+        return false
+    }
+    return reaches_nongeneric(m, name, child, kind)
+}
+
+// The non-generic named fallback for the ptr_reaches walks: kind picks which sink
+// the struct or enum fields are hunted for. An interface is itself a view.
+func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, kind: int64) -> bool {
     a: *Ast = (*m).ast
     items: *Vector<ItemNode> = (*a).items
     for it in items {
@@ -239,7 +261,7 @@ func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, want
             if str_eq(ast_name(a, s.name), name) {
                 for fi in 0..s.fields_len {
                     fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, s.fields_off + fi))
-                    if reaches_field(m, fld.ty, child, want_future) { return true }
+                    if reaches_field(m, fld.ty, child, kind) { return true }
                 }
                 return false
             }
@@ -250,23 +272,27 @@ func reaches_nongeneric(m: *Mono, name: string, child: *Map<string, int64>, want
                     va: VariantNode = vec_get((*a).variants, vec_get((*a).kids, e.variants_off + vi))
                     for vfi in 0..va.fields_len {
                         fld2: FieldNode = vec_get((*a).fields, vec_get((*a).kids, va.fields_off + vfi))
-                        if reaches_field(m, fld2.ty, child, want_future) { return true }
+                        if reaches_field(m, fld2.ty, child, kind) { return true }
                     }
                 }
                 return false
             }
+        } else if it.kind == ik_interface() && kind == reach_view() {
+            iface: InterfaceNode = vec_get((*a).interfaces, it.id)
+            if str_eq(ast_name(a, iface.name), name) { return true }
         }
     }
     return false
 }
 
-func reaches_field(m: *Mono, id: int64, child: *Map<string, int64>, want_future: bool) -> bool {
-    if want_future { return ptr_reaches_future(m, id, child) }
-    return ptr_reaches_collector(m, id, child)
+func reaches_field(m: *Mono, id: int64, child: *Map<string, int64>, kind: int64) -> bool {
+    if kind == reach_future() { return ptr_reaches_future(m, id, child) }
+    if kind == reach_collector() { return ptr_reaches_collector(m, id, child) }
+    return ptr_reaches_view(m, id, child)
 }
 
 func chan_element_ok(m: *Mono, id: int64, path: *Map<string, int64>) -> bool {
-    return crossable(m, id, false, false, path)
+    return crossable(m, id, false, false, false, path)
 }
 
 export func check_future_spell(m: *Mono, id: int64, lo: int64, hi: int64) -> void {
@@ -277,7 +303,7 @@ export func check_future_spell(m: *Mono, id: int64, lo: int64, hi: int64) -> voi
         if str_eq(name, "Future") && n.c == 1 {
             inner: int64 = vec_get((*a).kids, n.b)
             empty: *Map<string, int64> = alloc(map_new())
-            if !crossable(m, inner, false, true, empty) {
+            if !crossable(m, inner, false, true, false, empty) {
                 mono_diag(m, "a future element cannot contain a slice, closure, or interface value; a view of the completing thread's frame would dangle in the awaiter; send heap owned data instead", lo, hi)
             }
             check_future_spell(m, inner, lo, hi)
@@ -335,12 +361,12 @@ export func check_chan_element(m: *Mono, name: string, targs: *Vector<int64>, lo
         ok = chan_element_ok(m, t, empty)
     } else {
         e2: *Map<string, int64> = alloc(map_new())
-        ok = crossable(m, t, false, true, e2)
+        ok = crossable(m, t, false, true, false, e2)
     }
     if ok { return }
     if chan {
         e3: *Map<string, int64> = alloc(map_new())
-        if !crossable(m, t, false, true, e3) {
+        if !crossable(m, t, false, true, false, e3) {
             mono_diag(m, "a channel element cannot contain a slice, closure, or interface value; a view of the sending thread's frame would dangle in the receiver; send heap owned data instead", lo, hi)
         } else {
             mono_diag(m, "a collected value stays on the main thread; it cannot cross through a channel to another thread", lo, hi)
@@ -371,20 +397,42 @@ export func check_task_captures(m: *Mono, name: string, lam_exprid: int64, env: 
         } else {
             map_put(done, c, 1)
             if map_has(env, c) {
-                t: int64 = unwrap_or(map_get(env, c), -1)
-                e1: *Map<string, int64> = alloc(map_new())
-                if !crossable(m, t, true, false, e1) {
-                    e2: *Map<string, int64> = alloc(map_new())
-                    if crossable(m, t, true, true, e2) {
-                        mono_diag(m, capture_collect_msg(name, c), lo, hi)
-                    } else {
-                        mono_diag(m, capture_view_msg(name, c), lo, hi)
-                    }
-                }
+                check_one_capture(m, name, c, unwrap_or(map_get(env, c), -1), lo, hi)
             }
             i++
         }
     }
+}
+
+// Judges one capture's concrete type. The value bans come first, then the pointer
+// reach ban, so a capture that fails only the latter gets its own sentence.
+func check_one_capture(m: *Mono, name: string, c: string, t: int64, lo: int64, hi: int64) -> void {
+    e1: *Map<string, int64> = alloc(map_new())
+    if !crossable(m, t, true, false, false, e1) {
+        e2: *Map<string, int64> = alloc(map_new())
+        if crossable(m, t, true, true, false, e2) {
+            mono_diag(m, capture_collect_msg(name, c), lo, hi)
+        } else {
+            mono_diag(m, capture_view_msg(name, c), lo, hi)
+        }
+        return
+    }
+    e3: *Map<string, int64> = alloc(map_new())
+    if !crossable(m, t, true, false, true, e3) {
+        mono_diag(m, capture_ptr_view_msg(name, c), lo, hi)
+    }
+}
+
+func capture_ptr_view_msg(name: string, c: string) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, name)
+    sb_push(b, " cannot capture '")
+    sb_push(b, c)
+    sb_push(b, "'; it points at a value that holds a slice, closure, or interface value, which may come to view a thread's frame, so share plain data or send it through a channel")
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 func capture_collect_msg(name: string, c: string) -> string {

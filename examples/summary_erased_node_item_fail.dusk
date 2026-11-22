@@ -1,0 +1,24 @@
+// Compile-fail: the same generic node, but the helper stores the node's item, the
+// member at the type parameter's position, into the caller's holder. The item still
+// carries the view handed in, so a frame array reaching the helper is refused
+@paradigm procedural
+struct Holder { rows: int64[] }
+struct Node<T> { item: T, depth: int64 }
+func mknode<T>(x: T) -> *Node<T> { return alloc(Node { item: x, depth: 1 }) }
+func helper(h: *Holder, xs: int64[]) -> int64 {
+    n := mknode(xs)
+    (*h).rows = (*n).item
+    d: int64 = (*n).depth
+    free(n)
+    return d
+}
+func work(h: *Holder) -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    return helper(h, local[0..4])
+}
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: [1, 2] })
+    println(work(h))
+    println((*h).rows[0])
+    return 0
+}

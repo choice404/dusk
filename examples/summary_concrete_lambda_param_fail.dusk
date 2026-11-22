@@ -1,0 +1,39 @@
+// Compile-fail: the concrete twin of a generic helper that points its sink parameter
+// at a holder of its view from inside a lambda it calls on the sink, refused at the
+// call the same way
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func keepvia(q: *Sink, xs: int64[]) -> void {
+    inner: *Holder = alloc(Holder { rows: heap_rows() })
+    s: *Sink = alloc(Sink { h: inner })
+    s.keep(xs)
+    g := lambda (w: *Sink) -> void { w.point(inner) }
+    g(q)
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    q: *Sink = alloc(Sink { h: h })
+    keepvia(q, local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

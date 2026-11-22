@@ -1,0 +1,16 @@
+// Compile-fail: a callback declares an int64[] result and returns a slice of a local
+// array it captured. A slice result may hold a view, so the helper's call still
+// returns whatever the callback captured, and the lambda's own return of the frame
+// slice is refused
+@paradigm procedural
+@paradigm functional
+func apply<T>(f: () -> T) -> T { return f() }
+func leak() -> int64[] {
+    local: int64[4] = [1, 2, 3, 4]
+    return apply(lambda () -> int64[] { return local[0..4] })
+}
+func main() -> int32 {
+    xs: int64[] = leak()
+    println(xs[0])
+    return 0
+}

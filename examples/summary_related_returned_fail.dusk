@@ -1,0 +1,46 @@
+// Compile-fail: a builder attaches a fresh node to the list it returns, then stores
+// its parameter's view into the node. The returned list reaches that view, so
+// returning the list built from a frame array is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+struct Node { rows: int64[] }
+impl Node { func set_rows(xs: int64[]) -> void { self.rows = xs } }
+struct List { head: *Node }
+
+func build(xs: int64[]) -> *List {
+    node: *Node = alloc(Node { rows: heap_rows() })
+    list: *List = alloc(List { head: node })
+    node.set_rows(xs)
+    return list
+}
+
+func make() -> *List {
+    local: int64[4] = [111, 222, 333, 444]
+    return build(local[0..4])
+}
+
+func main() -> int32 {
+    list: *List = make()
+    println((*(*list).head).rows[0])
+    return 0
+}

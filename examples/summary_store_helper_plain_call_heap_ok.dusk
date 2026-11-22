@@ -1,0 +1,40 @@
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+@import std.map
+@import std.functional.maybe
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+struct Deep { s: Sink }
+interface Keeper { keep(xs: int64[]) -> void }
+impl Keeper for Sink { func keep(xs: int64[]) -> void { (*self.h).rows = xs } }
+impl Sink {
+    func keep2(xs: int64[]) -> void { (*self.h).rows = xs }
+    func me() -> Sink { return Sink { h: self.h } }
+}
+func mksink(h: *Holder) -> Sink { return Sink { h: h } }
+func pick<T>(a: T, b: T) -> T { return a }
+func via(k: Keeper, xs: int64[]) -> void { k.keep(xs) }
+func keepf(s: Sink, xs: int64[]) -> void { (*s.h).rows = xs }
+func keepp(h: *Holder, xs: int64[]) -> void { (*h).rows = xs }
+func noise(a: int64, b: int64) -> int64 {
+    e: int64[8] = [9, 9, 9, 9, 9, 9, 9, 9]
+    return a + b + e[0]
+}
+func viah(q: *Holder, xs: int64[]) -> void {
+    keepf(mksink(q), xs)
+}
+
+func fillit(h: *Holder) -> void {
+    seed: int64[4] = [111, 222, 333, 444]
+    local: int64[] = map(seed[0..4], lambda (value: int64) -> int64 { return value })
+    viah(h, local[0..4])
+}
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: [] })
+    fillit(h)
+    println(noise(1, 2))
+    println((*h).rows[0])
+    return 0
+}

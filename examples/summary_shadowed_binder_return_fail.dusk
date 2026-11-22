@@ -1,0 +1,40 @@
+// Compile-fail: a loop binder spelled like the alias the function returns stores the
+// view through the sink, whose holder the alias names. The bare return names the
+// alias, not the binder, yet the two share the holder, so the returned holder carries
+// the view and the caller handing it a frame array is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func make(xs: int64[]) -> *Holder {
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    ref y := (*s).h
+    sinks: (*Sink)[1] = [s]
+    for y in sinks[0..1] { (*(*y).h).rows = xs }
+    return y
+}
+
+func outer() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    return make(local[0..4])
+}
+
+func main() -> int32 {
+    r: *Holder = outer()
+    println((*r).rows[0])
+    return 0
+}

@@ -102,19 +102,28 @@ export func dawn_cmd_add(argv: string[]) -> int32 {
     ref: string = argv[4]
     ae: string = alias_error(alias)
     if str_len(ae) > 0 {
-        return dawn_fail_owned(ae)
+        code: int32 = dawn_fail(ae)
+        free(ae)
+        return code
     }
     se: string = writable_error("source", src)
     if str_len(se) > 0 {
-        return dawn_fail_owned(se)
+        code: int32 = dawn_fail(se)
+        free(se)
+        return code
     }
     re: string = writable_error("ref", ref)
     if str_len(re) > 0 {
-        return dawn_fail_owned(re)
+        code: int32 = dawn_fail(re)
+        free(re)
+        return code
     }
     url: string = source_url(src)
     if str_len(url) == 0 {
-        return dawn_fail_owned(f"bad source '{src}' for '{alias}'")
+        msg: string = f"bad source '{src}' for '{alias}'"
+        code: int32 = dawn_fail(msg)
+        free(msg)
+        return code
     }
     free(url)
     mpath: string = dawn_manifest_path()
@@ -127,7 +136,8 @@ export func dawn_cmd_add(argv: string[]) -> int32 {
         code = 1
     } else if require_index((*m).requires, alias) >= 0 {
         msg: string = f"'{alias}' is already required in {mpath}; run dawn update {alias} to move it"
-        code = dawn_fail_owned(msg)
+        code = dawn_fail(msg)
+        free(msg)
     } else {
         // The fetch runs first, over a manifest carrying the new require in memory
         // only. A ref that does not resolve, a source that is not there, and an alias

@@ -1,0 +1,41 @@
+// Compile-fail: a view of a frame array is stored into a holder an option already
+// wraps, and the arm returning the option's payload binds a name an outer local
+// already uses. The stored holder is the returned one, so the store is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func outer() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = fresh()
+    x: int64 = 4
+    println(x)
+    m: Maybe<*Holder> = Maybe.Some((*s).h)
+    (*(*s).h).rows = local[0..4]
+    match m {
+        Some(x) => { return x }
+        None => { return alloc(Holder { rows: heap_rows() }) }
+    }
+}
+
+func main() -> int32 {
+    r: *Holder = outer()
+    println((*r).rows[0])
+    return 0
+}

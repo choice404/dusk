@@ -1,0 +1,31 @@
+// A spawned lambda may still capture pointers to plain shared data: a counter
+// struct of integers, a vector of strings, and a struct of strings and managed
+// pointers. None of them reaches a slice, closure, or interface value.
+@paradigm procedural
+@import std.vector
+
+struct Counter { hits: int64, misses: int64 }
+
+struct Entry { name: string, count: *Counter }
+
+func main() -> int32 {
+    c: *Counter = alloc(Counter { hits: 3, misses: 1 })
+    names: *Vector<string> = alloc(vec_new())
+    vec_push(names, "alpha")
+    vec_push(names, "beta")
+    en: *Entry = alloc(Entry { name: "gamma", count: c })
+    t, e := spawn(lambda () -> void {
+        println((*c).hits + (*c).misses)
+        println(vec_get(names, 1))
+        println((*en).name)
+        println((*(*en).count).hits)
+    })
+    if e.exists() { return 1 }
+    je := join(t)
+    je.ignore()
+    free(en)
+    vec_free(names)
+    free(names)
+    free(c)
+    return 0
+}

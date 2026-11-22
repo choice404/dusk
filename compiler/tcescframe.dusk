@@ -1,0 +1,219 @@
+// tcescframe: a store root's class as the summary walk of one frame sees it. The
+// function's own walk reads the whole class. A lambda's own walk leaves out the
+// lambda's environment, which ties every parameter, capture, and result of the lambda
+// together for a caller holding the lambda as a value, but says nothing about what
+// the body itself links, so the class is the part the body and the lambdas inside it
+// link without passing through that environment. Settled callee relations are kept
+// here too, for the queries that would walk them again
+
+@paradigm procedural
+
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import summary
+@import tcescunify
+@import tcescrepoint
+
+/** Keeps the relations a settled pass built over its callees, when the pass read no
+ *  summary back. Every summary such a pass applied was final, so each relation is the
+ *  one a later query would build, and the query takes it instead of walking again
+ *  @params cache - The cache a callee summary just settled in
+ *  @returns {void} */
+export func keep_final_relations(cache: *RelationCache) -> void {
+    if map_len((*cache).read_back) > 0 || (*cache).saturated { return }
+    built: *Map<int64, *FrameRelation> = (*cache).pass_relations
+    for i in 0..map_len(built) { map_put((*cache).relations, map_key_at(built, i), map_val_at(built, i)) }
+}
+
+/** The frame a lambda's body is walked in
+ *  @params rel - A built relation
+ *  @params lambda_id - The lambda expression
+ *  @returns {int64} - The frame, or -1 when the walk never met the lambda */
+export func relation_lambda_frame(rel: *FrameRelation, lambda_id: int64) -> int64 {
+    return unwrap_or(map_get((*rel).lambda_frames, lambda_id), -1)
+}
+
+/** The nodes of a store root's class as a summary walk of a frame sees them: the whole
+ *  class for the function's own frame, and for a lambda's frame every node the ties of
+ *  its body and of the lambdas inside it reach without passing through that lambda's
+ *  environment
+ *  @params rel - A built relation
+ *  @params root - The store's root binding
+ *  @params frame - The walked frame, -1 for the function's own
+ *  @returns {*Vector<int64>} - The nodes, empty when the root has none */
+export func relation_store_members(rel: *FrameRelation, root: string, frame: int64) -> *Vector<int64> {
+    node: int64 = relation_root_node(rel, root)
+    if node < 0 { return (*rel).no_decls }
+    if frame < 0 { return relation_class_members(rel, node) }
+    parts: *Map<int64, *Vector<int64>> = frame_parts(rel, frame)
+    match map_get(parts, node) {
+        Some(kept) => { return kept }
+        None => {}
+    }
+    reached: *Vector<int64> = reach_past_environment(rel, node, frame)
+    // Every node the walk reached reaches the same nodes, so one walk answers them all
+    for member in reached { map_put(parts, member, reached) }
+    return reached
+}
+
+// The parts of the classes one lambda frame's walks have reached so far, by node
+func frame_parts(rel: *FrameRelation, frame: int64) -> *Map<int64, *Vector<int64>> {
+    match map_get((*rel).frame_classes, frame) {
+        Some(parts) => { return parts }
+        None => {}
+    }
+    fresh: *Map<int64, *Vector<int64>> = alloc(map_new())
+    map_put((*rel).frame_classes, frame, fresh)
+    return fresh
+}
+
+// A walk over the ties the lambda's body and the lambdas inside it recorded, from one
+// node, which never enters the environment of the lambda's frame
+func reach_past_environment(rel: *FrameRelation, start: int64, frame: int64) -> *Vector<int64> {
+    adjacency: *Map<int64, *Vector<int64>> = frame_adjacency(rel, frame)
+    seen: *Map<int64, bool> = alloc(map_new())
+    out: *Vector<int64> = alloc(vec_new())
+    map_put(seen, start, true)
+    vec_push(out, start)
+    mut cursor: int64 = 0
+    while cursor < vec_len(out) {
+        current: int64 = vec_get(out, cursor)
+        cursor++
+        neighbours: *Vector<int64> = unwrap_or(map_get(adjacency, current), (*rel).no_decls)
+        for next in neighbours {
+            if map_has(seen, next) || is_frame_environment(rel, next, frame) { continue }
+            map_put(seen, next, true)
+            vec_push(out, next)
+        }
+    }
+    return out
+}
+
+func is_frame_environment(rel: *FrameRelation, node: int64, frame: int64) -> bool {
+    return vec_get((*rel).kinds, node) == relation_kind_lambda() && vec_get((*rel).owner, node) == frame
+}
+
+// The ties a lambda frame's walk reads, by node: those its body or a lambda inside it
+// recorded. A tie the frames around it made between two bindings it captures is
+// theirs to judge, and their own walk of the body reads every tie, so the lambda's
+// part of a class stays its own, built once per frame from the ties grouped by frame
+func frame_adjacency(rel: *FrameRelation, frame: int64) -> *Map<int64, *Vector<int64>> {
+    match map_get((*rel).adjacency, frame) {
+        Some(kept) => { return kept }
+        None => {}
+    }
+    adjacency: *Map<int64, *Vector<int64>> = alloc(map_new())
+    grouped: *Map<int64, *Vector<int64>> = edges_by_frame(rel)
+    for inner in 0..vec_len((*rel).frame_parent) {
+        if !relation_frame_within(rel, inner, frame) { continue }
+        edges: *Vector<int64> = unwrap_or(map_get(grouped, inner), (*rel).no_decls)
+        for edge in edges {
+            first: int64 = vec_get((*rel).edge_from, edge)
+            second: int64 = vec_get((*rel).edge_to, edge)
+            add_neighbour(adjacency, first, second)
+            add_neighbour(adjacency, second, first)
+        }
+    }
+    map_put((*rel).adjacency, frame, adjacency)
+    return adjacency
+}
+
+// The recorded ties grouped by the frame that made each, gathered on first use
+func edges_by_frame(rel: *FrameRelation) -> *Map<int64, *Vector<int64>> {
+    grouped: *Map<int64, *Vector<int64>> = (*rel).frame_edges
+    if map_len(grouped) > 0 || vec_len((*rel).edge_from) == 0 { return grouped }
+    for edge in 0..vec_len((*rel).edge_from) { add_neighbour(grouped, vec_get((*rel).edge_frames, edge), edge) }
+    return grouped
+}
+
+func add_neighbour(adjacency: *Map<int64, *Vector<int64>>, node: int64, next: int64) -> void {
+    match map_get(adjacency, node) {
+        Some(list) => { vec_push(list, next) }
+        None => {
+            fresh: *Vector<int64> = alloc(vec_new())
+            vec_push(fresh, next)
+            map_put(adjacency, node, fresh)
+        }
+    }
+}
+
+/** Whether a node among a class's members was tied to memory outside the frame an
+ *  opaque call may reach
+ *  @params rel - A built relation
+ *  @params members - The nodes
+ *  @returns {bool} - True when one of them carries the outside mark itself */
+export func relation_members_outside(rel: *FrameRelation, members: *Vector<int64>) -> bool {
+    marks: *Map<int64, int64> = (*rel).direct_marks
+    for member in members {
+        if (unwrap_or(map_get(marks, member), 0) & 1) != 0 { return true }
+    }
+    return false
+}
+
+/** Whether the function returns a member of the root's class other than by naming the
+ *  root bare. A field read of the root evaluates to the root's own node, yet the walk's
+ *  value of that read does not carry what was stored through the root, so only a
+ *  return of the root binding itself is left to the walk, and only when the function
+ *  declares the root once: a name declared again, a binder or a shadow, shares one
+ *  node with every binding spelled the same, and the bare return may name another
+ *  @params rel - A built relation
+ *  @params root - The root's node, or -1
+ *  @returns {bool} - True when some other return hands out the class */
+export func relation_root_returned(rel: *FrameRelation, root: int64) -> bool {
+    if root < 0 { return false }
+    representative: int64 = relation_class(rel, root)
+    is_sole: bool = is_sole_name(rel, root)
+    mut root_returns: int64 = 0
+    for value in (*rel).returned {
+        if value == root && is_sole { root_returns++ } else if relation_class(rel, value) == representative { return true }
+    }
+    for value in (*rel).plain_returns {
+        if value == root { root_returns-- }
+    }
+    return root_returns > 0
+}
+
+// A node standing for a binding the function declares exactly once
+func is_sole_name(rel: *FrameRelation, node: int64) -> bool {
+    return node >= 0 && relation_is_name(rel, node) && relation_decl_count(rel, vec_get((*rel).names, node)) == 1
+}
+
+/** The same question for a lambda's own walk, over the members its frame reaches and
+ *  the results returned from that frame
+ *  @params rel - A built relation
+ *  @params members - The nodes
+ *  @params root - The root's node
+ *  @params frame - The lambda's frame
+ *  @returns {bool} - True when some other return from the frame hands out a member */
+export func relation_members_returned(rel: *FrameRelation, members: *Vector<int64>, root: int64, frame: int64) -> bool {
+    if vec_len(members) == 0 { return false }
+    is_sole: bool = is_sole_name(rel, root)
+    returns: *Vector<int64> = (*rel).frame_returns
+    for i in 0..vec_len(returns) {
+        value: int64 = vec_get(returns, i)
+        if vec_get((*rel).frame_return_frames, i) != frame || !is_reached_with(rel, value, frame, members) { continue }
+        if value != root || !is_sole || !vec_get((*rel).frame_return_names, i) { return true }
+    }
+    return false
+}
+
+// Whether a frame's walk from a node reached the same part of a class as the given
+// members, each part being kept once under every node it holds
+func is_reached_with(rel: *FrameRelation, node: int64, frame: int64, members: *Vector<int64>) -> bool {
+    match map_get(frame_parts(rel, frame), node) {
+        Some(part) => { return vec_len(part) > 0 && vec_get(part, 0) == vec_get(members, 0) }
+        None => { return false }
+    }
+}
+
+/** The frame a member binding is declared in
+ *  @params rel - A built relation
+ *  @params member - A node
+ *  @returns {int64} - The frame, -1 for the function's own, or -2 for a node that
+ *  names no binding */
+export func relation_member_frame(rel: *FrameRelation, member: int64) -> int64 {
+    if !relation_is_name(rel, member) { return -2 }
+    return vec_get((*rel).node_frames, member)
+}

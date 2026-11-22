@@ -1,0 +1,45 @@
+// The legal twin: the same shadowing struct and helper over heap rows. The helper's
+// result views the caller's heap rows, never a frame, so it runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+    func same(xs: int64[]) -> int64[] { return xs }
+}
+struct Cell<T> { item: T }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func mk2<T>(a: T, b: T, pick: bool) -> Cell<T> {
+    if pick { return Cell { item: a } }
+    return Cell { item: b }
+}
+
+func unbox<T>(a: T, b: T) -> T { return mk2(a, b, true).item }
+
+func gpoint<S>(q: S, h: *Holder) -> void { q.point(h) }
+
+struct Quiet { n: int64 }
+impl Quiet { func same(xs: int64[]) -> int64[] { return heap_rows() } }
+struct QCell<Quiet> { item: Quiet }
+
+func pass<S>(q: S, xs: int64[]) -> int64[] { return QCell { item: q }.item.same(xs) }
+
+func outer(q: *Sink) -> int64[] {
+    rows: int64[] = heap_rows()
+    return pass(q, rows)
+}
+
+func main() -> int32 {
+    q: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    println(outer(q)[0])
+    return 0
+}

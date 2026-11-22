@@ -1,0 +1,31 @@
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+// A lambda that hands its own frame slice to a helper storing through a captured
+// pointer leaves the captured object viewing a dead frame once the lambda returns.
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+func store_rows(s: *Sink, xs: int64[]) -> void { (*(*s).h).rows = xs }
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+func fillit(h: *Holder) -> void {
+    s: *Sink = alloc(Sink { h: h })
+    fill := lambda () -> void {
+        inner: int64[4] = [111, 222, 333, 444]
+        store_rows(s, inner[0..4])
+    }
+    fill()
+    free(s)
+}
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fillit(h)
+    println((*h).rows[0])
+    return 0
+}

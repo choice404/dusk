@@ -1,0 +1,97 @@
+// tcescquiet: the checker's reading of a callback whose declared result holds no
+// reference. A generic helper calling such a callback hands back nothing the
+// callback captured, so a call whose every callback in a quiet position qualifies
+// applies the helper's quiet summary, and a return or an annotated binding whose
+// written type holds no reference carries no frame view at all.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tcstate
+@import tcscope
+@import summary
+@import sumquiet
+@import tcesc2
+@import tcesccap
+
+/** Whether a written type, read in the current function's scope, holds no reference
+ *  @params tc - The checker
+ *  @params type_id - The written type, or -1 for none
+ *  @returns {bool} - True only for a type no value of which can carry a frame view */
+export func written_carries_nothing(tc: *TypeChecker, type_id: int64) -> bool {
+    if type_id < 0 { return false }
+    return sum_carries_nothing((*tc).sum_tables, type_id, (*tc).cur_generics)
+}
+
+/** The escape relation a call applies: tc_callee_esc's, or the callee's quiet summary
+ *  when it has one and every callback the call hands it returns nothing it captured
+ *  @params tc - The checker
+ *  @params callee_id - The called expression
+ *  @params arg_off - The first argument's kid offset
+ *  @params arg_len - The written argument count
+ *  @returns {CalleeEsc} - The relation to apply at this call */
+export func tc_call_esc(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> CalleeEsc {
+    ce: CalleeEsc = tc_callee_esc(tc, callee_id)
+    if ce.opaque { return ce }
+    name: string = summarized_callee(tc, callee_id)
+    if str_len(name) == 0 { return ce }
+    mask: int64 = quiet_mask_of((*tc).sum_tables, name)
+    if mask == 0 { return ce }
+    key: string = quiet_key(name)
+    sums: *Map<string, SummaryHandle> = (*tc).summaries
+    if !map_has(sums, key) || !quiet_arguments(tc, mask, arg_off, arg_len) { return ce }
+    return CalleeEsc { opaque: false, sum: unwrap_or(map_get(sums, key), ce.sum) }
+}
+
+// The module function a call names, directly or through a local bound once to it
+func summarized_callee(tc: *TypeChecker, callee_id: int64) -> string {
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, callee_id)
+    if callee.kind != xk_ident() { return "" }
+    name: string = ast_name(a, callee.a)
+    if !is_local(tc, name) { return name }
+    return unwrap_or(map_get((*tc).resolvable_fn_binds, name), "")
+}
+
+func quiet_arguments(tc: *TypeChecker, mask: int64, arg_off: int64, arg_len: int64) -> bool {
+    a: *Ast = (*tc).ast
+    for i in 0..arg_len {
+        if ps_has(mask, i) && !callback_returns_nothing(tc, vec_get((*a).kids, arg_off + i)) { return false }
+    }
+    return true
+}
+
+// A lambda that declares a result holding no reference or captures no binding, a
+// module function, a local bound once to one, or a local whose type declares such a
+// result
+func callback_returns_nothing(tc: *TypeChecker, arg_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind == xk_lambda() {
+        return written_carries_nothing(tc, arg.c) || vec_len(lambda_captures(tc, arg)) == 0
+    }
+    if arg.kind != xk_ident() { return false }
+    name: string = ast_name(a, arg.a)
+    if !is_local(tc, name) || map_has((*tc).resolvable_fn_binds, name) { return true }
+    declared: int64 = binding_ast_of(tc, name)
+    if declared >= 0 {
+        node: TypeNode = vec_get((*a).types, declared)
+        return node.kind == tk_func() && written_carries_nothing(tc, node.c)
+    }
+    return function_result_plain(tc, lookup(tc, name))
+}
+
+// A function type whose result is a number, a bool, a character, a string, an error,
+// or unit, the results the checker's own types name in full
+func function_result_plain(tc: *TypeChecker, fn_type: int64) -> bool {
+    fn: TyNode = ty_get((*tc).ty, fn_type)
+    if fn.kind != tyk_func() { return false }
+    k: int64 = ty_get((*tc).ty, fn.a).kind
+    if k == tyk_int() || k == tyk_float() || k == tyk_bool() || k == tyk_char() { return true }
+    return k == tyk_rune() || k == tyk_str() || k == tyk_unit() || k == tyk_error()
+}

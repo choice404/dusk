@@ -299,11 +299,34 @@ export func declare_binding_ast(tc: *TypeChecker, name: string, astty: int64) ->
 // The AST type id a binding was declared with, or -1 when none was recorded (an
 // inferred binding, or one out of scope).
 export func binding_ast_of(tc: *TypeChecker, name: string) -> int64 {
+    return scoped_binding_ast(tc, name, name)
+}
+
+/** Stores recovery metadata under a key only the borrow checks read
+ *  @params tc - The checker holding the binding scopes
+ *  @params name - The binding whose initializer was read before declaration
+ *  @params astty - Its recovered AST type, or -1 when uncertain
+ *  @returns {void} - Leaves the annotation and inferred scope type unchanged */
+export func declare_borrow_ast(tc: *TypeChecker, name: string, astty: int64) -> void {
+    declare_binding_ast(tc, sig_pair_key("borrow", name), astty)
+}
+
+/** Reads borrow recovery metadata from the nearest declaring scope
+ *  @params tc - The checker holding the binding scopes
+ *  @params name - The binding to read
+ *  @returns {int64} - Its recovered AST type, or -1 when uncertain */
+export func borrow_ast_of(tc: *TypeChecker, name: string) -> int64 {
+    return scoped_binding_ast(tc, name, sig_pair_key("borrow", name))
+}
+
+func scoped_binding_ast(tc: *TypeChecker, name: string, key: string) -> int64 {
     binding_ast_ty: *Vector<*Map<string, int64>> = (*tc).binding_ast_ty
+    scopes: *Vector<*Map<string, int64>> = (*tc).scopes
     mut i: int64 = vec_len(binding_ast_ty) - 1
     while i >= 0 {
         m: *Map<string, int64> = vec_get(binding_ast_ty, i)
-        if map_has(m, name) { return unwrap_or(map_get(m, name), -1) }
+        if map_has(m, key) { return unwrap_or(map_get(m, key), -1) }
+        if map_has(vec_get(scopes, i), name) { return -1 }
         i--
     }
     return -1
@@ -485,17 +508,27 @@ export func alias_link(tc: *TypeChecker, a: string, b: string) -> void {
     map_put(scope, b, alias_list_add(unwrap_or(map_get(scope, b), ""), a))
 }
 
+// Whether a newline separated alias list holds a name, compared in place so a long
+// list costs no copy per entry
 func alias_list_has(list: string, name: string) -> bool {
+    width: int64 = str_len(name)
     mut start: int64 = 0
     mut i: int64 = 0
     while list[i] != 0 {
         if list[i] == 10 {
-            if str_eq(substring(list, start, i), name) { return true }
+            if i - start == width && list_span_is(list, start, name, width) { return true }
             start = i + 1
         }
         i++
     }
     return false
+}
+
+func list_span_is(list: string, start: int64, name: string, width: int64) -> bool {
+    for k in 0..width {
+        if list[start + k] != name[k] { return false }
+    }
+    return true
 }
 
 func alias_list_add(list: string, name: string) -> string {

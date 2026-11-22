@@ -1,0 +1,43 @@
+// A do block over Maybe and Result reads a parameter in its later steps. The steps
+// desugar to lambdas that capture the parameter, and the block's result is a
+// Maybe<int64> or a Result<int64, string>, which holds no reference, so the call
+// that hands those lambdas to bind returns nothing they captured and the function
+// may return it
+@paradigm procedural
+@paradigm functional
+@import std.functional.maybe
+@import std.functional.result
+func half(x: int64) -> Maybe<int64> {
+    if x % 2 == 0 { return Maybe.Some(x / 2) }
+    return Maybe.None
+}
+func rhalf(x: int64) -> Result<int64, string> {
+    if x % 2 == 0 { return Result.Ok(x / 2) }
+    return Result.Err("odd")
+}
+func calc(a: int64, k: int64) -> Maybe<int64> {
+    return do Maybe {
+        x <- half(a)
+        y <- half(x + k)
+        y + k
+    }
+}
+func rcalc(a: int64, k: int64) -> Result<int64, string> {
+    return do Result {
+        x <- rhalf(a)
+        x + k
+    }
+}
+func main() -> int32 {
+    println(unwrap_or(calc(12, 2), -1))
+    println(unwrap_or(calc(13, 2), -1))
+    match rcalc(12, 2) {
+        Ok(v) => { println(v) }
+        Err(e) => { println(e) }
+    }
+    match rcalc(7, 2) {
+        Ok(v) => { println(v) }
+        Err(e) => { println(e) }
+    }
+    return 0
+}

@@ -1,0 +1,33 @@
+// The context struct's step helper takes the output vector as a parameter of its own
+// rather than reading it out of the context, so the vector the function returns stays
+// apart from the caller's slice, and a view of a frame array is accepted and runs
+@paradigm procedural
+@import std.vector
+
+struct Lexer { src: int64[], pos: int64, out: *Vector<int64> }
+
+func step(lx: *Lexer, out: *Vector<int64>) -> void {
+    vec_push(out, (*lx).src[(*lx).pos] * 2)
+    (*lx).pos = (*lx).pos + 1
+}
+
+func tokenize(xs: int64[]) -> *Vector<int64> {
+    o: *Vector<int64> = alloc(vec_new())
+    p: *Lexer = alloc(Lexer { src: xs, pos: 0, out: o })
+    while (*p).pos < 4 { step(p, o) }
+    free(p)
+    return o
+}
+
+func run() -> *Vector<int64> {
+    buf: int64[4] = [10, 20, 30, 40]
+    return tokenize(buf[0..4])
+}
+
+func main() -> int32 {
+    v: *Vector<int64> = run()
+    println(vec_get(v, 2))
+    vec_free(v)
+    free(v)
+    return 0
+}

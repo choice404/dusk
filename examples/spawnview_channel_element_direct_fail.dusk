@@ -1,0 +1,23 @@
+// Compile-fail: the channel element exemption belongs to the handle. Capturing
+// the same pointer directly still reaches a record that can hold a frame slice
+@paradigm procedural
+@paradigm functional
+
+struct Job { rows: int64[], id: int64 }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [10, 20, 30, 40]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func main() -> int32 {
+    j: *Job = alloc(Job { rows: heap4(), id: 2 })
+    t, e := spawn(lambda () -> void {
+        println((*j).rows[3] + (*j).id)
+    })
+    if e.exists() { return 1 }
+    je := join(t)
+    je.ignore()
+    free(j)
+    return 0
+}

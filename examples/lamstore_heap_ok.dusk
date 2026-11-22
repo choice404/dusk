@@ -1,0 +1,33 @@
+// A lambda may store heap data through a captured pointer: a heap backed slice
+// and a capture free lambda both outlive the lambda's frame. A field of a
+// captured struct value is the lambda's own copy, so a slice of a lambda local
+// stored there dies with it and is not refused.
+@paradigm procedural
+@paradigm functional
+
+struct Cell { rows: int64[], f: (int64) -> int64 }
+
+func ident(x: int64) -> int64 { return x }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [5, 6, 7, 8]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x * 10 })
+}
+
+func main() -> int32 {
+    c: *Cell = alloc(Cell { rows: [], f: ident })
+    mut copy: Cell = Cell { rows: [], f: ident }
+    fill := lambda () -> void {
+        local: int64[2] = [1, 2]
+        copy.rows = local[0..2]
+        (*c).rows = heap4()
+        (*c).f = lambda (x: int64) -> int64 { return x + 100 }
+    }
+    fill()
+    println((*c).rows[0])
+    println((*c).rows[3])
+    println((*c).f(1))
+    println(copy.f(9))
+    free(c)
+    return 0
+}

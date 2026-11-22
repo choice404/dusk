@@ -1,0 +1,37 @@
+// The same helper with its result kept in the caller's frame, which outlives every
+// read of it, so it is accepted and runs
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func helper(xs: int64[]) -> *Holder {
+    s: *Sink = fresh()
+    (*(*s).h).rows = xs
+    return (*s).h
+}
+
+func outer() -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    r: *Holder = helper(local[0..4])
+    return (*r).rows[1]
+}
+
+func main() -> int32 {
+    println(outer())
+    return 0
+}

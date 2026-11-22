@@ -1,0 +1,70 @@
+// The error a call returns beside a value is checked with exists, ignore, and check.
+// None of the three ties the error to anything, so the sink the value came from stays
+// frame-owned and the view stored through it is legal
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.vector
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func holder_of(s: *Sink) -> (*Holder, error) { return ((*s).h, error {}) }
+
+func row_at(v: *Vector<int64[]>, i: int64) -> (int64[], error) {
+    if i >= vec_len(v) { return (vec_get(v, 0), error { message: "range" }) }
+    return (vec_get(v, i), error {})
+}
+
+func with_ignore() -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    hh, e := holder_of(s)
+    e.ignore()
+    s.keep(local[0..4])
+    println((*hh).rows[1])
+}
+
+func with_exists() -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    hh, e := holder_of(s)
+    if e.exists() { println(0) }
+    s.keep(local[0..4])
+    println((*hh).rows[2])
+}
+
+func with_check() -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    hh, e := holder_of(s)
+    e.check(lambda (err: error) -> void { println(err.message) })
+    s.keep(local[0..4])
+    println((*hh).rows[3])
+}
+
+func with_vector() -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    v: *Vector<int64[]> = alloc(vec_new())
+    vec_push(v, local[0..2])
+    row, e := row_at(v, 0)
+    if e.exists() { println(0) }
+    vec_push(v, local[2..4])
+    println(row[0] + vec_len(v))
+}
+
+func main() -> int32 {
+    with_ignore()
+    with_exists()
+    with_check()
+    with_vector()
+    return 0
+}

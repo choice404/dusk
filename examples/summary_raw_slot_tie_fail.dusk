@@ -1,0 +1,50 @@
+// Compile-fail: a direct store into a raw pointer's slot reaches a value of a bare type
+// parameter that holds the buffer. `keepvia` stores a struct holding its slice
+// argument into a fresh buffer's slot and hands the buffer to `q` through `tie`, so a
+// caller handing it its own sink and a frame slice is refused at the call
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Rows { rows: int64[] }
+struct RSink { buf: *raw Rows }
+impl RSink {
+    func adopt(p: *raw Rows) -> void { self.buf = p }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh_buf() -> *raw Rows {
+    b: *raw Rows = alloc_bytes(4 * sizeof(Rows))
+    b[0] = Rows { rows: heap_rows() }
+    return b
+}
+
+func tie<S>(q: S, p: *raw Rows) -> void { q.adopt(p) }
+
+func keepvia<S>(q: S, xs: int64[]) -> void {
+    p: *raw Rows = fresh_buf()
+    p[0] = Rows { rows: xs }
+    tie(q, p)
+}
+
+func fill(q: *RSink) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    keepvia(q, local[0..4])
+}
+
+func noise(a: int64, b: int64) -> int64 {
+    e: int64[8] = [9, 9, 9, 9, 9, 9, 9, 9]
+    return a + b + e[0]
+}
+
+func main() -> int32 {
+    q: *RSink = alloc(RSink { buf: fresh_buf() })
+    fill(q)
+    println(noise(1, 2))
+    println((*q).buf[0].rows[0])
+    return 0
+}

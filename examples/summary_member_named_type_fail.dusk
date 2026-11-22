@@ -1,0 +1,43 @@
+// Compile-fail: a member of a generic struct typed by the struct's own type parameter,
+// `struct W<T> { item: T }` beside a declared `struct T`, is a value of that parameter,
+// so `w.item.rows_of()` over `w: W<R>` is a call the summary cannot see into rather
+// than `T.rows_of`, which returns fresh rows. `R.rows_of` returns its own rows, so a
+// caller returning `get` over a frame slice is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct T { rows: int64[] }
+struct R { rows: int64[] }
+struct W<T> { item: T }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+impl T {
+    func rows_of() -> int64[] { return heap_rows() }
+}
+impl R {
+    func rows_of() -> int64[] { return self.rows }
+}
+
+func get(w: W<R>) -> int64[] { return w.item.rows_of() }
+
+func outer() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return get(W { item: R { rows: local[0..4] } })
+}
+
+func noise(a: int64, b: int64) -> int64 {
+    e: int64[8] = [9, 9, 9, 9, 9, 9, 9, 9]
+    return a + b + e[0]
+}
+
+func main() -> int32 {
+    xs: int64[] = outer()
+    println(noise(1, 2))
+    println(xs[0])
+    return 0
+}

@@ -22,6 +22,9 @@
 @import summary
 @import sumflow
 @import tcesc3
+@import tcesc4
+@import tcesccb
+@import tcescquiet
 
 func esc_none() -> EscPair { return EscPair { slice: false, closure: false } }
 func esc_or(a: EscPair, b: EscPair) -> EscPair { return EscPair { slice: a.slice || b.slice, closure: a.closure || b.closure } }
@@ -34,11 +37,34 @@ export struct CalleeEsc { opaque: bool, sum: SummaryHandle }
 // call is opaque; a local proven bound once to one module function resolves to
 // that function's relation.
 export func tc_callee_esc(tc: *TypeChecker, callee_id: int64) -> CalleeEsc {
+    return callee_esc_in(tc, callee_id, (*tc).summaries)
+}
+
+// The tc_callee_esc twin over the alias fixpoint, where a string and a pointer count as
+// views. A method callee answers from the alias method table by its resolved receiver
+// type, with the receiver at index 0 and the arguments after it, and an interface
+// method by the join of its implementations; an unresolved receiver and every other
+// opaque callee stay opaque.
+export func tc_callee_alias(tc: *TypeChecker, callee_id: int64) -> CalleeEsc {
+    a: *Ast = (*tc).ast
+    c: ExprNode = vec_get((*a).exprs, callee_id)
+    // A constructor carries its payload aliases without reading through them
+    if str_len(variant_name(tc, callee_id)) > 0 {
+        mut payload: SummaryHandle = empty_summary()
+        payload.returns_alias = -1
+        return CalleeEsc { opaque: false, sum: payload }
+    }
+    if c.kind != xk_field() { return callee_esc_in(tc, callee_id, (*tc).alias_summaries) }
+    found: CallMethod = method_summary_in(tc, callee_id, (*tc).alias_method_summaries)
+    if !found.found { return CalleeEsc { opaque: true, sum: empty_summary() } }
+    return CalleeEsc { opaque: false, sum: found.sum }
+}
+
+func callee_esc_in(tc: *TypeChecker, callee_id: int64, sums: *Map<string, SummaryHandle>) -> CalleeEsc {
     a: *Ast = (*tc).ast
     c: ExprNode = vec_get((*a).exprs, callee_id)
     if c.kind == xk_ident() {
         name: string = ast_name(a, c.a)
-        sums: *Map<string, SummaryHandle> = (*tc).summaries
         if !is_local(tc, name) {
             if map_has(sums, name) {
                 return CalleeEsc { opaque: false, sum: unwrap_or(map_get(sums, name), empty_summary()) }
@@ -64,26 +90,43 @@ export func tc_callee_esc(tc: *TypeChecker, callee_id: int64) -> CalleeEsc {
 // callee may return any argument. Higher-order builtins are element-aware.
 export func call_result_escape(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> EscPair {
     if (*tc).types_only { return esc_none() }
-    a: *Ast = (*tc).ast
     ht: TaintRes = higher_order_taint(tc, callee_id, arg_off, arg_len)
     if ht.has { return ht.esc }
-    ce: CalleeEsc = tc_callee_esc(tc, callee_id)
+    ce: CalleeEsc = result_callee(tc, callee_id, arg_off, arg_len)
+    receiver: int64 = result_receiver(tc, callee_id)
+    mut count: int64 = arg_len
+    if receiver >= 0 { count++ }
     mut out: EscPair = esc_none()
-    if ce.opaque {
-        mut i: int64 = 0
-        while i < arg_len && i < 64 {
-            out = esc_or(out, value_escape(tc, vec_get((*a).kids, arg_off + i)))
-            i++
-        }
-    } else {
-        mask: int64 = ce.sum.returns_alias | ce.sum.reads_through
-        mut j: int64 = 0
-        while j < arg_len && j < 64 {
-            if ps_has(mask, j) { out = esc_or(out, value_escape(tc, vec_get((*a).kids, arg_off + j))) }
-            j++
+    for index in 0..count {
+        if ce.opaque || ps_has(ce.sum.returns_alias | ce.sum.reads_through, index) {
+            out = esc_or(out, value_escape(tc, result_arg_id(tc, arg_off, index, receiver)))
         }
     }
     return out
+}
+
+func result_callee(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64) -> CalleeEsc {
+    callee: ExprNode = vec_get((*(*tc).ast).exprs, callee_id)
+    if callee.kind != xk_field() { return tc_call_esc(tc, callee_id, arg_off, arg_len) }
+    name: string = recv_type_name_deep(tc, callee.a)
+    key: string = method_key(name, ast_name((*tc).ast, callee.b))
+    sums: *Map<string, SummaryHandle> = (*tc).method_summaries
+    if !map_has(sums, key) { return CalleeEsc { opaque: true, sum: empty_summary() } }
+    return CalleeEsc { opaque: false, sum: unwrap_or(map_get(sums, key), empty_summary()) }
+}
+
+// A method call's receiver is summary index 0 whether or not the method resolves, so
+// an opaque method may return its receiver; an enum constructor's name is no receiver
+func result_receiver(tc: *TypeChecker, callee_id: int64) -> int64 {
+    callee: ExprNode = vec_get((*(*tc).ast).exprs, callee_id)
+    if callee.kind == xk_field() && str_len(variant_name(tc, callee_id)) == 0 { return callee.a }
+    return -1
+}
+
+func result_arg_id(tc: *TypeChecker, off: int64, index: int64, receiver: int64) -> int64 {
+    if receiver < 0 { return vec_get((*(*tc).ast).kids, off + index) }
+    if index == 0 { return receiver }
+    return vec_get((*(*tc).ast).kids, off + index - 1)
 }
 
 // If a call's result views a frame through a returned or read-back argument, the
@@ -93,30 +136,20 @@ export struct FrameOrigin { has: bool, lo: int64, hi: int64, idx: int64 }
 
 export func call_frame_origin(tc: *TypeChecker, e: ExprNode) -> FrameOrigin {
     if (*tc).types_only { return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 } }
-    a: *Ast = (*tc).ast
     if str_len(variant_name(tc, e.a)) > 0 { return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 } }
     ht: TaintRes = higher_order_taint(tc, e.a, e.b, e.c)
     if ht.has {
         if ht.esc.slice || ht.esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: ht.idx } }
         return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 }
     }
-    ce: CalleeEsc = tc_callee_esc(tc, e.a)
-    if ce.opaque {
-        mut i: int64 = 0
-        while i < e.c && i < 64 {
-            esc: EscPair = value_escape(tc, vec_get((*a).kids, e.b + i))
-            if esc.slice || esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: i } }
-            i++
-        }
-    } else {
-        mask: int64 = ce.sum.returns_alias | ce.sum.reads_through
-        mut j: int64 = 0
-        while j < e.c && j < 64 {
-            if ps_has(mask, j) {
-                esc: EscPair = value_escape(tc, vec_get((*a).kids, e.b + j))
-                if esc.slice || esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: j } }
-            }
-            j++
+    ce: CalleeEsc = result_callee(tc, e.a, e.b, e.c)
+    receiver: int64 = result_receiver(tc, e.a)
+    mut count: int64 = e.c
+    if receiver >= 0 { count++ }
+    for index in 0..count {
+        if ce.opaque || ps_has(ce.sum.returns_alias | ce.sum.reads_through, index) {
+            esc: EscPair = value_escape(tc, result_arg_id(tc, e.b, index, receiver))
+            if esc.slice || esc.closure { return FrameOrigin { has: true, lo: e.lo, hi: e.hi, idx: index } }
         }
     }
     return FrameOrigin { has: false, lo: 0, hi: 0, idx: 0 }
@@ -331,19 +364,16 @@ export func enforce_call_escape(tc: *TypeChecker, callee_id: int64, arg_off: int
     check_lambda_call_sinks(tc, callee_id, arg_off, arg_len, lo, hi)
     check_opaque_call_send(tc, callee_id, arg_off, arg_len, lo, hi)
     apply_lambda_capture_flows(tc, callee_id, arg_off, arg_len, lo, hi)
+    apply_callback_capture_flows(tc, callee_id, arg_off, arg_len, lo, hi)
     apply_call_flows(tc, callee_id, arg_off, arg_len, lo, hi)
     check_method_call_escape(tc, callee_id, arg_off, arg_len, lo, hi)
+    check_deep_method_escape(tc, callee_id, arg_off, arg_len, lo, hi)
     check_chan_send_flow(tc, callee_id, arg_off, arg_len)
+    record_call_receiver_type(tc, callee_id, arg_off, arg_len, lo, hi)
 }
 
 func has_method_summary(tc: *TypeChecker, callee_id: int64) -> bool {
-    a: *Ast = (*tc).ast
-    callee: ExprNode = vec_get((*a).exprs, callee_id)
-    if callee.kind != xk_field() { return false }
-    tname: string = receiver_type_name(tc, callee.a)
-    if str_len(tname) == 0 { return false }
-    ms: *Map<string, SummaryHandle> = (*tc).method_summaries
-    return map_has(ms, method_key(tname, ast_name(a, callee.b)))
+    return deep_method_summary(tc, callee_id).found
 }
 
 // The read-back relation of a method call's target for the free/move guard.
@@ -358,63 +388,13 @@ func has_method_summary(tc: *TypeChecker, callee_id: int64) -> bool {
 // direct vec_get spelling, while a method that mints a fresh value reports zero.
 export struct MethodEsc { has_summary: bool, reads_through: int64 }
 
-// The result type of a direct top-level call, resolved from the callee's recorded
-// signature without re-inferring the call (a second infer_expr over the receiver
-// would double any diagnostic its argument list carries). Only a bare top-level
-// function callee resolves; a closure value, a method field, or an unknown callee
-// stays unknown, so the receiver's type-name resolver keeps its accepting default
-// for a shape it cannot ground.
-func call_result_ty(tc: *TypeChecker, call_id: int64) -> int64 {
-    a: *Ast = (*tc).ast
-    e: ExprNode = vec_get((*a).exprs, call_id)
-    if e.kind != xk_call() { return ty_unknown((*tc).ty) }
-    callee: ExprNode = vec_get((*a).exprs, e.a)
-    if callee.kind != xk_ident() { return ty_unknown((*tc).ty) }
-    name: string = ast_name(a, callee.a)
-    if is_local(tc, name) { return ty_unknown((*tc).ty) }
-    if !sig_has_fn((*tc).sigtab, name) { return ty_unknown((*tc).ty) }
-    ft: int64 = lookup(tc, name)
-    fn: TyNode = ty_get((*tc).ty, ft)
-    if fn.kind != tyk_func() { return ty_unknown((*tc).ty) }
-    return fn.a
-}
-
-// The named type a method receiver base carries, falling back past receiver_type_name
-// when the base is a call result. receiver_type_name walks a place chain (idents,
-// fields, indexes, dereferences) and returns "" for a call node, which has no place
-// to walk; a getter freed off a fresh call result (free(mk().get(i))) then lost its
-// receiver type and slipped the read-back guard. Here the call result's return type
-// grounds the receiver: it peels pointers to the underlying named type, a struct
-// whose method summary owns the report or an interface whose dynamic dispatch has no
-// static summary and rightly stays accepted.
-func recv_type_name_deep(tc: *TypeChecker, base_id: int64) -> string {
-    direct: string = receiver_type_name(tc, base_id)
-    if str_len(direct) != 0 { return direct }
-    a: *Ast = (*tc).ast
-    base: ExprNode = vec_get((*a).exprs, base_id)
-    if base.kind != xk_call() { return "" }
-    mut t: int64 = call_result_ty(tc, base_id)
-    mut going: bool = true
-    while going {
-        n: TyNode = ty_get((*tc).ty, t)
-        if n.kind == tyk_ptr() || n.kind == tyk_rawptr() {
-            t = n.a
-        } else if n.kind == tyk_named() {
-            return ty_name((*tc).ty, t)
-        } else {
-            going = false
-        }
-    }
-    return ""
-}
-
 export func method_call_esc(tc: *TypeChecker, callee_id: int64) -> MethodEsc {
     a: *Ast = (*tc).ast
     callee: ExprNode = vec_get((*a).exprs, callee_id)
     if callee.kind != xk_field() { return MethodEsc { has_summary: false, reads_through: 0 } }
     tname: string = recv_type_name_deep(tc, callee.a)
     if str_len(tname) == 0 { return MethodEsc { has_summary: false, reads_through: 0 } }
-    ms: *Map<string, SummaryHandle> = (*tc).method_summaries
+    ms: *Map<string, SummaryHandle> = (*tc).alias_method_summaries
     key: string = method_key(tname, ast_name(a, callee.b))
     if !map_has(ms, key) { return MethodEsc { has_summary: false, reads_through: 0 } }
     sum: SummaryHandle = unwrap_or(map_get(ms, key), empty_summary())
@@ -468,8 +448,12 @@ func check_opaque_call_send(tc: *TypeChecker, callee_id: int64, arg_off: int64, 
     if !callee_is_opaque(tc, callee_id) { return }
     a: *Ast = (*tc).ast
     fp: *Map<string, FlowProv> = (*tc).flow_prov
-    for i in 0..arg_len {
-        arg_id: int64 = vec_get((*a).kids, arg_off + i)
+    // An opaque method may send or store its receiver like any written argument
+    operands: *Vector<int64> = alloc(vec_new())
+    receiver: int64 = opaque_method_receiver(tc, callee_id)
+    if receiver >= 0 { vec_push(operands, receiver) }
+    for i in 0..arg_len { vec_push(operands, vec_get((*a).kids, arg_off + i)) }
+    for arg_id in operands {
         root: string = send_value_root(tc, arg_id)
         mut handled: bool = false
         if str_len(root) > 0 {
@@ -516,53 +500,6 @@ func emit_opaque_send(tc: *TypeChecker, root: string, prov: FlowProv, lo: int64,
     }
 }
 
-// A parameter's view stored through a captured binding is an escape edge the
-// argument-to-argument store model cannot see, since the captured place is not an
-// argument. At a direct call of a lambda-bound local whose argument in that
-// position is a frame view, the captured binding escapes if it outlives the frame
-// (a parameter or a pointer that borrows one), else its own flag is raised for its
-// later egress check.
-func apply_lambda_capture_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
-    a: *Ast = (*tc).ast
-    callee: ExprNode = vec_get((*a).exprs, callee_id)
-    if callee.kind != xk_ident() { return }
-    cname: string = ast_name(a, callee.a)
-    cl: CapLookup = lambda_capture_bind_lookup(tc, cname)
-    if !cl.found { return }
-    caps: string = cl.edges
-    cps: *Map<string, int64> = (*tc).cur_params
-    mut p: int64 = 0
-    while caps[p] != 0 {
-        mut idx: int64 = 0
-        while caps[p] != 44 {
-            digit: int64 = caps[p]
-            idx = idx * 10 + (digit - 48)
-            p++
-        }
-        p++
-        cb: *StringBuilder = alloc(sb_new())
-        while caps[p] != 59 {
-            sb_push_char(cb, caps[p])
-            p++
-        }
-        p++
-        bname: string = substring(sb_cstr(cb), 0, sb_size(cb))
-        sb_free(cb)
-        free(cb)
-        if idx < arg_len {
-            arg_id: int64 = vec_get((*a).kids, arg_off + idx)
-            esc: EscPair = value_escape(tc, arg_id)
-            if esc.slice || esc.closure {
-                if map_has(cps, bname) || param_alias_of(tc, bname) >= 0 {
-                    tc_emit(tc, "this call stores a view of the current frame into a place that outlives it; put the backing on the heap", lo, hi)
-                } else {
-                    raise_esc(tc, bname, esc.slice, esc.closure)
-                }
-            }
-        }
-    }
-}
-
 // For each sink parameter j of a callee's summary, reject a polluted argument in
 // that position. The channel-send builtins defer to the leaf check below, which
 // owns the send in the frame that holds the value.
@@ -580,7 +517,7 @@ func check_call_sinks(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
         target = unwrap_or(map_get(rfb, cname), "")
     }
     if !map_has(sums, target) { return }
-    sum: SummaryHandle = unwrap_or(map_get(sums, target), empty_summary())
+    sum: SummaryHandle = tc_call_esc(tc, callee_id, arg_off, arg_len).sum
     fp: *Map<string, FlowProv> = (*tc).flow_prov
     mut j: int64 = 0
     while j < arg_len && j < 64 {
@@ -677,7 +614,8 @@ export func emit_sink_reject(tc: *TypeChecker, cname: string, root: string, coll
 func apply_call_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_len: int64, lo: int64, hi: int64) -> void {
     a: *Ast = (*tc).ast
     if str_len(variant_name(tc, callee_id)) > 0 { return }
-    ce: CalleeEsc = tc_callee_esc(tc, callee_id)
+    if has_method_summary(tc, callee_id) { return }
+    ce: CalleeEsc = tc_call_esc(tc, callee_id, arg_off, arg_len)
     // Snapshot every argument's frame-view kind before any edge raises a flag, so
     // an edge reads the pre-call state (a `two(s, x, y)` that stores s into x then
     // reads x back into y sees x clean at both edges).
@@ -685,6 +623,7 @@ func apply_call_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
     for s in 0..arg_len {
         vec_push(src, value_escape(tc, vec_get((*a).kids, arg_off + s)))
     }
+    if !ce.opaque { link_call_store_aliases(tc, ce.sum, arg_off, arg_len) }
     mut x: int64 = 0
     while x < arg_len && x < 64 {
         src_esc: EscPair = vec_get(src, x)
@@ -697,14 +636,35 @@ func apply_call_flows(tc: *TypeChecker, callee_id: int64, arg_off: int64, arg_le
                 } else {
                     if flow_has(ce.sum.flows, x, y) { edge = true }
                 }
+                destination_id: int64 = vec_get((*a).kids, arg_off + y)
+                if edge && destination_holds_no_place(tc, destination_id) { edge = false }
                 if edge {
-                    route_flow_edge(tc, x, y, src_esc, vec_get((*a).kids, arg_off + y), lo, hi)
+                    if ce.opaque && callee_is_opaque(tc, callee_id) {
+                        // The opaque send check already refused the source; retain rooted provenance
+                        route_rooted_flow_edge(tc, x, y, src_esc, destination_id, lo, hi)
+                    } else {
+                        route_flow_edge(tc, x, y, src_esc, destination_id, lo, hi)
+                    }
                 }
                 y++
             }
         }
         x++
     }
+}
+
+// A destination operand no stored view can land in: a literal or an operator's
+// result, or a binding whose type is a number, a bool, a character, or a string, all
+// passed by value or immutable. A binding typed by a type parameter is unknown here
+// and stays a destination
+func destination_holds_no_place(tc: *TypeChecker, destination_id: int64) -> bool {
+    a: *Ast = (*tc).ast
+    if operand_holds_no_place(a, destination_id) { return true }
+    destination: ExprNode = vec_get((*a).exprs, destination_id)
+    if destination.kind != xk_ident() { return false }
+    kind: int64 = ty_get((*tc).ty, lookup(tc, ast_name(a, destination.a))).kind
+    if kind == tyk_int() || kind == tyk_float() || kind == tyk_bool() || kind == tyk_char() { return true }
+    return kind == tyk_rune() || kind == tyk_str()
 }
 
 // The leaf channel send: a direct chan_send in the frame that holds the value. A

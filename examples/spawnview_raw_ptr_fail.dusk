@@ -1,0 +1,16 @@
+// Compile-fail: a raw pointer crosses a spawn freely, but not one whose target
+// holds a function field; the thread could read a closure over a dead frame.
+@paradigm procedural
+
+struct Srv { handler: (int64) -> int64, hits: int64 }
+
+func main() -> int32 {
+    rp: *raw Srv = alloc_bytes(sizeof(Srv))
+    t, e := spawn(lambda () -> void {
+        println((*rp).hits)
+    })
+    if e.exists() { return 1 }
+    je := join(t)
+    je.ignore()
+    return 0
+}

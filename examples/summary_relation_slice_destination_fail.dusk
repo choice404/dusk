@@ -1,0 +1,40 @@
+// Compile-fail: a slice of rows holds no pointer of its own, yet a store into one of
+// its elements writes whatever memory the slice views. The local takes the caller's
+// rows on one branch, so the frame view the call stores there outlives the frame
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+struct Grid { cells: int64[][] }
+
+func put(rows: int64[][], xs: int64[]) -> void { rows[0] = xs }
+
+func heap_grid() -> int64[][] {
+    seed: int64[2] = [1, 2]
+    return map(seed[0..2], lambda (value: int64) -> int64[] { return heap_rows() })
+}
+
+func fill(grid: *Grid) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    mut rows: int64[][] = heap_grid()
+    if local[0] > 0 { rows = (*grid).cells }
+    put(rows, local[0..4])
+}
+
+func main() -> int32 {
+    grid: *Grid = alloc(Grid { cells: heap_grid() })
+    fill(grid)
+    println((*grid).cells[0][0])
+    return 0
+}

@@ -1,0 +1,45 @@
+// Callbacks over views of a frame array: one that keeps each view in a sink the frame
+// owns alone, one that only reads each view and keeps heap rows in the parameter's
+// sink, and an ordinary fold and foreach that read, all accepted and run
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+@import std.functional.maybe
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func own_sink() -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    t: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    views: (int64[])[1] = [local[0..4]]
+    foreach(views[0..1], lambda (ys: int64[]) -> void { t.keep(ys) })
+    return (*(*t).h).rows[0]
+}
+
+func read_only(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    t: *Sink = alloc(Sink { h: h })
+    views: (int64[])[1] = [local[0..4]]
+    foreach(views[0..1], lambda (ys: int64[]) -> void { println(ys[1]); t.keep(heap_rows()) })
+    total := fold(views[0..1], 0, lambda (acc: int64, ys: int64[]) -> int64 { return acc + ys[2] })
+    println(total)
+}
+
+func main() -> int32 {
+    println(own_sink())
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    read_only(h)
+    println((*h).rows[0])
+    return 0
+}

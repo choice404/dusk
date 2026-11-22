@@ -13,6 +13,8 @@
 @import tcown
 @import tcesccap
 @import tcesc3
+@import tcesctype
+@import tcescquiet
 
 export struct EscPair { slice: bool, closure: bool }
 
@@ -170,8 +172,9 @@ export func ty_reaches_view(tc: *TypeChecker, tyid: int64) -> bool {
     return view_reaches(tc, tyid, seen)
 }
 
+// A projection carries its root's view when the member can hold one
 func projection_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
-    if !member_carries_view(tc, chain_ty(tc, expr_id)) { return esc_none() }
+    if !projection_may_hold_view(tc, expr_id) { return esc_none() }
     mut s: bool = false
     mut c: bool = false
     root: string = projection_root(tc, expr_id)
@@ -185,6 +188,56 @@ func projection_escape(tc: *TypeChecker, expr_id: int64) -> EscPair {
         c = c || is_esc_closure(tc, droot)
     }
     return esc_pair(s, c)
+}
+
+// Whether a projection's member can hold a view
+func projection_may_hold_view(tc: *TypeChecker, expr_id: int64) -> bool {
+    member: int64 = chain_ty(tc, expr_id)
+    if ty_get((*tc).ty, member).kind != tyk_unknown() { return member_carries_view(tc, member) }
+    return unknown_member_may_hold_view(tc, expr_id, false)
+}
+
+// A member the checker types unknown holds a view only when it is read through a
+// match payload binder the checker types unknown, one typed by its enum's own type
+// parameter. It takes the type the scrutinee's written type names, and counts as one
+// that can when no written type names it or names only a generic struct's own type
+// parameter, since the binder carries the scrutinee's view. An element of a chain is
+// judged as the chain indexed
+func unknown_member_may_hold_view(tc: *TypeChecker, chain_id: int64, is_element: bool) -> bool {
+    mut root: string = deref_root(tc, chain_id)
+    if str_len(root) == 0 { root = projection_root(tc, chain_id) }
+    if str_len(root) == 0 || !is_unknown_payload(tc, root) { return false }
+    mut written: int64 = escape_receiver_ast(tc, chain_id)
+    if is_element { written = ast_element((*tc).ast, written) }
+    if written < 0 { return true }
+    resolved: int64 = tc_type(tc, written)
+    if ty_get((*tc).ty, resolved).kind == tyk_unknown() || names_no_declaration(tc, resolved) { return true }
+    return member_carries_view(tc, resolved)
+}
+
+func ast_element(a: *Ast, type_id: int64) -> int64 {
+    if type_id < 0 { return -1 }
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_array() || node.kind == tk_slice() { return node.a }
+    return -1
+}
+
+/** The escape an element of a collection carries: none for an element that cannot
+ *  hold a view, and otherwise what the collection's root binding holds, judged as an
+ *  indexed read of a binding is. A collection that is no place chain, a call result,
+ *  answers with its own value
+ *  @params tc - The checker
+ *  @params collection_id - The collection expression
+ *  @returns {EscPair} - The element's escape */
+export func element_escape(tc: *TypeChecker, collection_id: int64) -> EscPair {
+    element: int64 = elem_of((*tc).ty, chain_ty(tc, collection_id))
+    is_unknown: bool = ty_get((*tc).ty, element).kind == tyk_unknown()
+    if !is_unknown && !member_carries_view(tc, element) { return esc_none() }
+    if str_len(projection_root(tc, collection_id)) == 0 && str_len(deref_root(tc, collection_id)) == 0 {
+        return value_escape(tc, collection_id)
+    }
+    if is_unknown && !unknown_member_may_hold_view(tc, collection_id, true) { return esc_none() }
+    return projection_escape(tc, collection_id)
 }
 
 func struct_field_ty(tc: *TypeChecker, sname: string, fname: string) -> int64 {
@@ -555,5 +608,8 @@ func escape_walk(tc: *TypeChecker, expr_id: int64, declared: int64, inferred: in
 
 export func check_escape(tc: *TypeChecker, expr_id: int64, inferred: int64) -> void {
     if (*tc).types_only { return }
+    // A declared result that holds no reference returns no view, whatever its value
+    // was computed from
+    if written_carries_nothing(tc, (*tc).cur_ret_ast) { return }
     escape_walk(tc, expr_id, (*tc).cur_ret, inferred)
 }

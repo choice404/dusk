@@ -1,0 +1,51 @@
+// The enum's own variant, written qualified, still constructs a plain value, and a
+// sink the channel never sees takes a view of the frame's array
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.concurrent.channel
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+enum Event { leak(n: int64), Quiet }
+
+func leak(ch: Channel<*Sink>, s: *Sink) -> void {
+    e := chan_send(ch, s)
+    e.ignore()
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    ch: Channel<*Sink> = chan_new(1)
+    leak(ch, fresh())
+    s: *Sink = fresh()
+    s.keep(local[0..4])
+    ev: Event = Event.leak(7)
+    match ev {
+        leak(n) => println(n + (*(*s).h).rows[0]),
+        Quiet => println(0),
+    }
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

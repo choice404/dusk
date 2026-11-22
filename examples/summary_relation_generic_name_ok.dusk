@@ -1,0 +1,36 @@
+// A generic cell holding a pointer takes only a frame-owned holder, so the view
+// stored through the cell stays in the frame. The generic parameter shares its name
+// with a struct, which changes nothing about what the cell holds
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+struct T { x: int64 }
+struct Cell<T> { v: T }
+
+func put<T>(c: *Cell<T>, v: T) -> void { (*c).v = v }
+
+func store_rows(h: *Holder, xs: int64[]) -> void { (*h).rows = xs }
+
+func main() -> int32 {
+    local: int64[4] = [111, 222, 333, 444]
+    c: *Cell<*Holder> = alloc(Cell { v: alloc(Holder { rows: heap_rows() }) })
+    fresh: *Holder = alloc(Holder { rows: heap_rows() })
+    if local[0] > 0 { put(c, fresh) }
+    store_rows((*c).v, local[0..4])
+    println((*(*c).v).rows[2])
+    t: T = T { x: 7 }
+    println(t.x)
+    return 0
+}

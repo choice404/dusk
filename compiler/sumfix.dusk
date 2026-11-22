@@ -1,6 +1,6 @@
 // sumfix: the fixpoint driver, the method summaries, the lambda and frame-store
 // collection pass, the top-level compute entry, and the canonical dump renderer.
-// The per-function summaries climb a monotone lattice from bottom by chaotic
+// Function and method summaries climb a monotone lattice from bottom by chaotic
 // iteration over the module order until stable; the lambda tables and frame-store
 // sites come from one walk of every function and method under the settled table.
 // Every dump line mirrors stage0's render_escape_info byte for byte.
@@ -17,6 +17,8 @@
 @import sumflow
 @import sumwalk
 @import sumhof
+@import sumcall
+@import sumquiet
 
 func build_gens(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
     g: *Map<string, int64> = alloc(map_new())
@@ -30,7 +32,7 @@ func build_gens(a: *Ast, off: int64, len: int64) -> *Map<string, int64> {
 // reads callee summaries and writes only local state. When lret/fs point at the
 // shared outputs the caller keeps the lambda tables and frame stores; the fixpoint
 // passes throwaway ones.
-func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string, lret: *Map<string, int64>, lsink: *Map<string, int64>, lcoll: *Map<string, int64>, lcap: *Map<string, string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> SummaryHandle {
+func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string, quiet: int64, lret: *Map<string, int64>, lsink: *Map<string, int64>, lcoll: *Map<string, int64>, lcap: *Map<string, string>, lspans: *Vector<SpanKey>, fs: *Vector<FlowProv>) -> SummaryHandle {
     // One transfer is one lambda-summary generation. The walk below never writes the
     // summary table and every nested lambda state inherits it, so a lambda summary
     // cached during this transfer is reusable throughout it; a summary that grew since
@@ -40,6 +42,9 @@ func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: Fun
     gens: *Map<string, int64> = build_gens(a, f.generics_off, f.generics_len)
     fnb: *Map<string, string> = sum_resolvable_fn_binds(t, f.body)
     c: *SumCtx = ctx_new(t, summaries, gens, fnb, lret, lsink, lcoll, lcap, lspans, fs)
+    (*c).quiet = quiet
+    // An async function's result is the task, which keeps every argument
+    if !f.is_async { (*c).ret_ty = f.ret }
     mut idx: int64 = 0
     if str_len(self_ty) > 0 {
         ctx_bind_self(c, self_ty, 0)
@@ -50,18 +55,18 @@ func transfer_func(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: Fun
         ctx_bind_param(c, ast_name(a, p.name), p.ty, idx)
         idx++
     }
-    sum_block(c, f.body)
+    sum_body(c, f.body)
     return ctx_summary(c)
 }
 
-func throwaway_transfer(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string) -> SummaryHandle {
+func throwaway_transfer(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string, quiet: int64) -> SummaryHandle {
     lret: *Map<string, int64> = alloc(map_new())
     lsink: *Map<string, int64> = alloc(map_new())
     lcoll: *Map<string, int64> = alloc(map_new())
     lcap: *Map<string, string> = alloc(map_new())
     lspans: *Vector<SpanKey> = alloc(vec_new())
     fs: *Vector<FlowProv> = alloc(vec_new())
-    return transfer_func(t, summaries, f, self_ty, lret, lsink, lcoll, lcap, lspans, fs)
+    return transfer_func(t, summaries, f, self_ty, quiet, lret, lsink, lcoll, lcap, lspans, fs)
 }
 
 func sum_eq(a: SummaryHandle, b: SummaryHandle) -> bool {
@@ -76,7 +81,8 @@ func sum_eq(a: SummaryHandle, b: SummaryHandle) -> bool {
 // occurrence kept, paired with a funcs map from name to the last function of that
 // name (a duplicate name in an invalid program resolves to the latter definition,
 // matching stage0's HashMap of func references).
-func build_funcs_order(a: *Ast, funcs: *Map<string, int64>, order: *Vector<string>) -> void {
+func build_funcs_order(t: *SumTables, funcs: *Map<string, int64>, order: *Vector<string>) -> void {
+    a: *Ast = (*t).ast
     items: *Vector<ItemNode> = (*a).items
     seen: *Map<string, int64> = alloc(map_new())
     for it in items {
@@ -89,6 +95,11 @@ func build_funcs_order(a: *Ast, funcs: *Map<string, int64>, order: *Vector<strin
                 vec_push(order, name)
             }
         }
+    }
+    method_keys: *Vector<string> = map_keys((*t).method_funcs)
+    for key in method_keys {
+        map_put(funcs, key, unwrap_or(map_get((*t).method_funcs, key), 0))
+        vec_push(order, key)
     }
 }
 
@@ -131,10 +142,16 @@ func build_callers(t: *SumTables, funcs: *Map<string, int64>, callers: *Map<stri
 }
 
 func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
-    a: *Ast = (*t).ast
     funcs: *Map<string, int64> = alloc(map_new())
     order: *Vector<string> = alloc(vec_new())
-    build_funcs_order(a, funcs, order)
+    build_funcs_order(t, funcs, order)
+    solve_order(t, summaries, funcs, order)
+}
+
+// The worklist fixpoint over the functions named in order, each starting from bottom.
+// A callee outside the set is read from the table as it stands and never changes.
+func solve_order(t: *SumTables, summaries: *Map<string, SummaryHandle>, funcs: *Map<string, int64>, order: *Vector<string>) -> void {
+    a: *Ast = (*t).ast
     callers: *Map<string, *Vector<string>> = alloc(map_new())
     build_callers(t, funcs, callers)
     queue: *Vector<string> = alloc(vec_new())
@@ -142,6 +159,7 @@ func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
     for i in 0..vec_len(order) {
         name: string = vec_get(order, i)
         map_put(summaries, name, empty_summary())
+        if solved_quiet_mask(t, funcs, name) != 0 { map_put(summaries, quiet_key(name), empty_summary()) }
         vec_push(queue, name)
         map_put(queued, name, 1)
     }
@@ -158,14 +176,29 @@ func solve_fns(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
         if steps > cap { return }
         if map_has(funcs, name) {
             f: FuncNode = vec_get((*a).funcs, unwrap_or(map_get(funcs, name), 0))
-            now: SummaryHandle = throwaway_transfer(t, summaries, f, "")
-            old: SummaryHandle = unwrap_or(map_get(summaries, name), empty_summary())
-            if !sum_eq(old, now) {
-                map_put(summaries, name, now)
-                enqueue_callers(callers, name, queue, queued)
-            }
+            self_ty: string = unwrap_or(map_get((*t).method_receivers, name), "")
+            mut grew: bool = settle(summaries, name, throwaway_transfer(t, summaries, f, self_ty, 0))
+            quiet: int64 = solved_quiet_mask(t, funcs, name)
+            if quiet != 0 { grew = settle(summaries, quiet_key(name), throwaway_transfer(t, summaries, f, self_ty, quiet)) || grew }
+            if grew { enqueue_callers(callers, name, queue, queued) }
         }
     }
+}
+
+// Stores a freshly computed summary under its key, answering whether it changed
+func settle(summaries: *Map<string, SummaryHandle>, key: string, now: SummaryHandle) -> bool {
+    old: SummaryHandle = unwrap_or(map_get(summaries, key), empty_summary())
+    if sum_eq(old, now) { return false }
+    map_put(summaries, key, now)
+    return true
+}
+
+// The quiet parameters of a free function the fixpoint solves. A method keeps only its
+// ordinary summary, and so does every function of the alias walk, whose callbacks may
+// return a string the escape walk would call plain data
+func solved_quiet_mask(t: *SumTables, funcs: *Map<string, int64>, name: string) -> int64 {
+    if (*t).alias_mode || map_has((*t).method_receivers, name) || !map_has(funcs, name) { return 0 }
+    return function_quiet_mask(t, vec_get((*(*t).ast).funcs, unwrap_or(map_get(funcs, name), 0)))
 }
 
 // Every caller of name that is not already waiting, in the order the callers were
@@ -244,6 +277,12 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
         if callee.kind == xk_ident() {
             name: string = ast_name(a, callee.a)
             if map_has(mfns, name) { map_put(out, name, 1) }
+        } else if callee.kind == xk_field() {
+            name: string = ast_name(a, callee.b)
+            if map_has((*t).method_names, name) {
+                methods: *Vector<string> = unwrap_or(map_get((*t).method_names, name), (*t).lam_used_empty)
+                for method in methods { map_put(out, method, 1) }
+            }
         }
         collect_callees_expr(t, mfns, e.a, out)
         for i in 0..e.c {
@@ -288,19 +327,15 @@ func collect_callees_expr(t: *SumTables, mfns: *Map<string, int64>, id: int64, o
 }
 
 func collect_methods(t: *SumTables, summaries: *Map<string, SummaryHandle>, method_summaries: *Map<string, SummaryHandle>) -> void {
-    a: *Ast = (*t).ast
-    items: *Vector<ItemNode> = (*a).items
-    for it in items {
-        if it.kind == ik_impl() {
-            im: ImplNode = vec_get((*a).impls, it.id)
-            recv: string = ast_name(a, im.ty)
-            for j in 0..im.methods_len {
-                m: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, im.methods_off + j))
-                sum: SummaryHandle = throwaway_transfer(t, summaries, m, recv)
-                map_put(method_summaries, method_key(recv, ast_name(a, m.name)), sum)
-            }
-        }
+    keys: *Vector<string> = map_keys((*t).method_funcs)
+    for key in keys {
+        map_put(method_summaries, key, unwrap_or(map_get(summaries, key), empty_summary()))
     }
+}
+
+func separate_methods(t: *SumTables, summaries: *Map<string, SummaryHandle>) -> void {
+    keys: *Vector<string> = map_keys((*t).method_funcs)
+    for key in keys { map_remove(summaries, key).ignore() }
 }
 
 // One walk of every function and impl method under the settled summary table,
@@ -323,7 +358,7 @@ func collect_pass(t: *SumTables, summaries: *Map<string, SummaryHandle>, info: E
 }
 
 func collect_one(t: *SumTables, summaries: *Map<string, SummaryHandle>, f: FuncNode, self_ty: string, info: EscapeInfo) -> void {
-    transfer_func(t, summaries, f, self_ty, info.lambda_returns, info.lambda_sinks, info.lambda_collect_sinks, info.lambda_capture_flows, info.lambda_spans, info.frame_stores)
+    transfer_func(t, summaries, f, self_ty, 0, info.lambda_returns, info.lambda_sinks, info.lambda_collect_sinks, info.lambda_capture_flows, info.lambda_spans, info.frame_stores)
 }
 
 export func method_key(recv: string, name: string) -> string {
@@ -356,6 +391,30 @@ func sort_frame_stores(fs: *Vector<FlowProv>) -> void {
         i++
     }
     dedup_frame_stores(fs)
+    drop_shadowed_capture_stores(fs)
+}
+
+// A lambda's store through a binding its enclosing function holds as a parameter is
+// recorded twice: once by the function's inline walk of the lambda body, against the
+// parameter, and once by the lambda's own walk, against the capture. The parameter
+// record is the one reported, so a capture record (dst -1, sorted first in its span)
+// whose span also holds a parameter record is dropped.
+func drop_shadowed_capture_stores(fs: *Vector<FlowProv>) -> void {
+    n: int64 = vec_len(fs)
+    mut write: int64 = 0
+    for read in 0..n {
+        cur: FlowProv = vec_get(fs, read)
+        mut shadowed: bool = false
+        if cur.dst < 0 && read + 1 < n {
+            next: FlowProv = vec_get(fs, read + 1)
+            shadowed = next.lo == cur.lo && next.hi == cur.hi && next.dst >= 0
+        }
+        if !shadowed {
+            vec_set(fs, write, cur)
+            write++
+        }
+    }
+    (*fs).len = write
 }
 
 // Collapses adjacent equal (lo, hi, dst) entries after the sort, so the vector the
@@ -399,14 +458,62 @@ export func compute_escape_info(a: *Ast) -> EscapeInfo {
     lspans: *Vector<SpanKey> = alloc(vec_new())
     fs: *Vector<FlowProv> = alloc(vec_new())
     rfb: *Map<string, string> = alloc(map_new())
+    alias_summaries: *Map<string, SummaryHandle> = alloc(map_new())
+    alias_method_summaries: *Map<string, SummaryHandle> = alloc(map_new())
     info: EscapeInfo = EscapeInfo {
         summaries: summaries, method_summaries: method_summaries,
+        alias_summaries: alias_summaries, alias_method_summaries: alias_method_summaries,
         lambda_returns: lret, lambda_sinks: lsink, lambda_collect_sinks: lcoll,
         lambda_capture_flows: lcap, lambda_spans: lspans, frame_stores: fs,
-        resolvable_fn_binds: rfb,
+        resolvable_fn_binds: rfb, relation_memo: (*t).relation_memo,
     }
     collect_pass(t, summaries, info)
+    solve_alias(t, info)
+    separate_methods(t, summaries)
     return info
+}
+
+// The alias fixpoint: the same solve over tables where a string and a pointer count as
+// views, so a summary says which arguments a string result was read out of or is. It
+// runs after the ordinary summaries and the collection pass are complete and writes
+// only its own two tables. No collection pass follows it, so it records no lambda table,
+// no frame store, and no dump line. Only a function whose result can carry a string or
+// a pointer is solved. Every other function returns plain data, so its entry is its
+// ordinary summary with the return relation dropped: its stores and sinks still route
+// through a caller's walk, and its result carries no argument.
+func solve_alias(t: *SumTables, info: EscapeInfo) -> void {
+    ta: *SumTables = sum_tables_alias(t)
+    sums: *Map<string, SummaryHandle> = info.alias_summaries
+    msums: *Map<string, SummaryHandle> = info.alias_method_summaries
+    sum_alias_seed(ta, sums)
+    a: *Ast = (*t).ast
+    funcs: *Map<string, int64> = alloc(map_new())
+    order: *Vector<string> = alloc(vec_new())
+    build_funcs_order(t, funcs, order)
+    keep: *Map<string, int64> = alloc(map_new())
+    keep_order: *Vector<string> = alloc(vec_new())
+    for name in order {
+        id: int64 = unwrap_or(map_get(funcs, name), 0)
+        if alias_wanted(ta, vec_get((*a).funcs, id)) {
+            map_put(keep, name, id)
+            vec_push(keep_order, name)
+        } else {
+            map_put(sums, name, without_return(unwrap_or(map_get(info.summaries, name), empty_summary())))
+        }
+    }
+    solve_order(ta, sums, keep, keep_order)
+    collect_methods(ta, sums, msums)
+    separate_methods(ta, sums)
+}
+
+// Whether a function's result can carry a string a binding is judged on: its declared
+// return is a view once a string and a pointer count as views
+func alias_wanted(t: *SumTables, f: FuncNode) -> bool {
+    return sum_is_view(t, f.ret, build_gens((*t).ast, f.generics_off, f.generics_len))
+}
+
+func without_return(s: SummaryHandle) -> SummaryHandle {
+    return SummaryHandle { empty: s.empty, returns_alias: 0, reads_through: 0, sinks: s.sinks, collect_sinks: s.collect_sinks, flows: s.flows }
 }
 
 func render_mask(m: int64) -> string {
@@ -519,6 +626,17 @@ func span_less(x: SpanKey, y: SpanKey) -> bool {
     return x.hi < y.hi
 }
 
+// A frame store's destination: the parameter index, or the captured binding's name
+// for a lambda's store of its own frame through a capture.
+func render_store_dst(b: *StringBuilder, a: *Ast, st: FlowProv) -> void {
+    if st.dst >= 0 {
+        sb_push_int(b, st.dst)
+        return
+    }
+    sb_push(b, "capture ")
+    sb_push(b, ast_name(a, st.src))
+}
+
 func lambda_line(b: *StringBuilder, lo: int64, hi: int64, table: string, value: string) -> void {
     sb_push(b, "lambda ")
     sb_push_int(b, lo)
@@ -535,7 +653,7 @@ func lambda_line(b: *StringBuilder, lo: int64, hi: int64, table: string, value: 
 // lambda tables by (lo, hi, table name), and the frame-store sites. Every line ends
 // with a newline; the command prints the result verbatim so the byte stream matches
 // stage0's println of its joined lines.
-export func render_escape_info(info: EscapeInfo) -> string {
+export func render_escape_info(a: *Ast, info: EscapeInfo) -> string {
     b: *StringBuilder = alloc(sb_new())
     sums: *Map<string, SummaryHandle> = info.summaries
     msums: *Map<string, SummaryHandle> = info.method_summaries
@@ -549,11 +667,14 @@ export func render_escape_info(info: EscapeInfo) -> string {
     mut i: int64 = 0
     while i < vec_len(fkeys) {
         k: string = vec_get(fkeys, i)
-        sb_push(b, "fn ")
-        sb_push(b, k)
-        sb_push_char(b, 32)
-        render_summary(b, unwrap_or(map_get(sums, k), empty_summary()))
-        sb_push_char(b, 10)
+        // A quiet summary is the walk's own refinement, not a line of the dump
+        if !is_quiet_key(k) {
+            sb_push(b, "fn ")
+            sb_push(b, k)
+            sb_push_char(b, 32)
+            render_summary(b, unwrap_or(map_get(sums, k), empty_summary()))
+            sb_push_char(b, 10)
+        }
         i++
     }
     mkeys: *Vector<string> = map_keys(msums)
@@ -595,7 +716,7 @@ export func render_escape_info(info: EscapeInfo) -> string {
             sb_push_char(b, 58)
             sb_push_int(b, st.hi)
             sb_push_char(b, 32)
-            sb_push_int(b, st.dst)
+            render_store_dst(b, a, st)
             sb_push_char(b, 10)
         }
         prev = st

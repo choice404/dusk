@@ -1,10 +1,10 @@
-// FIX-A backstop: the HIGH repro. A heap slice minted by `map` erases its element
-// type in the checker, so neither the direct-call nor the interface-receiver
-// covariance guard can see the concrete `Sq` element, and the slice dodges the
-// escape reject because it is heap owned. This once reached the codegen backstop
-// as a Rust panic (exit 101) on a program `dusk check` accepted; the backstop is
-// now a clean, named build error (exit 1), so the miss is loud, never a silent
-// miscompile.
+// A heap slice minted by `map` over concrete `Sq` values, handed to an interface
+// method that takes a slice of `Shape`, which the escape reject leaves alone since
+// the slice is heap owned. The type pass after monomorphization gives the `map`
+// result its element type, so the covariance guard sees `Sq` and refuses the call
+// at check, `cannot pass a slice of 'Sq' as a slice of interface 'Shape'; ...`.
+// The codegen backstop that refused it before, a named build error, stays behind
+// the check, so the miss is loud either way and never a silent miscompile
 @paradigm oop
 @paradigm procedural
 @paradigm functional

@@ -7,9 +7,10 @@
  *  depend on: the contents of the source it came from, the contents of every runtime
  *  header the sources include, the clang that compiles them, and the optimization
  *  level it compiles at. An object is reused only by a link that would have compiled
- *  it identically, so an edited runtime source, an upgraded toolchain, and the step
- *  between a plain build and a release build each miss the key and compile rather
- *  than link against something stale. The headers are read out of the runtime
+ *  it identically, so an edited runtime source, an upgraded toolchain, and a change of
+ *  that level each miss the key and compile rather than link against something
+ *  stale. The runtime compiles at one fixed level for a plain build and a release
+ *  build alike, so the two share their objects. The headers are read out of the runtime
  *  directory rather than listed here, so a header added later joins the key without
  *  anyone remembering to add it.
  *
@@ -227,9 +228,8 @@ func key_digits(material: string) -> string {
 }
 
 /** The name a cached object lives under, the source's stem and then its key, in the
- *  build's own output directory. A plain build and a release build of one tree
- *  differ in the key, so the two keep their objects side by side and neither
- *  invalidates the other. */
+ *  build's own output directory. An object an older compiler built at another level
+ *  differs in the key, so it stays on disk unused rather than being linked. */
 func cache_object_path(out: string, stem: string, key: string) -> string {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "runtime-")
@@ -376,7 +376,7 @@ func cached_objects(rt: string, out: string, names: *Vector<string>, opt: string
  *  free_runtime_inputs.
  *  @param home the toolchain home, whose runtime directory holds the sources
  *  @param out the build's output directory, where the cache lives
- *  @param opt the optimization flag the link carries, empty for the default build */
+ *  @param opt the optimization flag the runtime compiles at, runtime_opt_flag */
 export func runtime_inputs(home: string, out: string, opt: string) -> *Vector<string> {
     rt: string = path_join(home, "runtime")
     names: *Vector<string> = runtime_sources()

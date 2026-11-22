@@ -1,0 +1,19 @@
+// A by value sink whose holder the frame allocated inline takes a view of a frame
+// array through a method; nothing else reaches the holder. Prints 4
+@paradigm procedural
+@paradigm oop
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func main() -> int32 {
+    local: int64[4] = [1, 2, 3, 4]
+    k: Sink = Sink { h: alloc(Holder { rows: local[0..1] }) }
+    k.keep(local[0..4])
+    println((*k.h).rows[3])
+    free(k.h)
+    return 0
+}

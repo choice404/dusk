@@ -14,6 +14,11 @@
 @import tcstate
 @import summary
 @import sumwalk
+@import sumtype
+@import sumscope
+@import tcescrepoint
+@import tcescunify
+@import tcescframe
 
 // Routes a stored value to its destination. The destination's caller reachability
 // is decided by the root binding's own abstract value, not its name: a parameter
@@ -22,22 +27,18 @@
 // caller-reaching store carries the source's origins and reads as flow edges; a
 // direct store of a frame view additionally records a frame-store site. A store
 // rooted at a captured binding (a free name in a synthetic lambda walk) records a
-// capture-flow edge instead.
+// capture-flow edge instead. A binder or local spelled like a parameter is that
+// binding, not the parameter, for as long as it is in scope
 export func record_store(c: *SumCtx, place_id: int64, src: SumVal, via_call: bool) -> void {
     a: *Ast = (*(*c).t).ast
-    root: string = dest_root(c, place_id)
-    if str_len(root) == 0 { return }
-    mut targets: int64 = 0
-    pi: *Map<string, int64> = (*c).param_index
-    if map_has(pi, root) {
-        j: int64 = unwrap_or(map_get(pi, root), 0)
-        if ps_has((*c).dest_mask, j) { targets = targets | ps_single(j) }
+    root: string = store_root(c, place_id)
+    if str_len(root) == 0 {
+        (*c).sinks = (*c).sinks | src.origins | src.reads
+        return
     }
+    is_parameter: bool = sum_names_parameter(c, root)
+    targets: int64 = root_targets(c, root)
     env: *Map<string, SumVal> = (*c).env
-    if map_has(env, root) {
-        av: SumVal = unwrap_or(map_get(env, root), val_none())
-        targets = targets | av.origins | av.reads
-    }
     srcps: int64 = src.origins | src.reads
     if targets != 0 {
         // Every source in srcps reaches every destination in targets, which is one
@@ -52,18 +53,448 @@ export func record_store(c: *SumCtx, place_id: int64, src: SumVal, via_call: boo
             }
         }
     }
-    locals: *Map<string, int64> = (*c).locals
-    if !map_has(pi, root) && !map_has(locals, root) {
-        caps: *Vector<CapFlow> = (*c).capture_flows
-        for k2 in 0..64 {
-            if ps_has(srcps, k2) { vec_push(caps, CapFlow { idx: k2, name: root }) }
+    destination: SumVal = unwrap_or(map_get(env, root), val_none())
+    if destination.captures != 0 { record_capture_store(c, place_id, destination.captures, src, via_call) }
+    if is_parameter { return }
+    record_related_store(c, place_id, root, src, via_call, targets == 0 && destination.captures == 0)
+    raise_env(c, root, src)
+}
+
+// The parameters a store rooted at a binding writes into: the parameter itself, or
+// every parameter the binding's value reaches at this point of the walk
+func root_targets(c: *SumCtx, root: string) -> int64 {
+    mut targets: int64 = 0
+    if sum_names_parameter(c, root) {
+        j: int64 = unwrap_or(map_get((*c).param_index, root), 0)
+        if ps_has((*c).dest_mask, j) { targets = ps_single(j) }
+    }
+    env: *Map<string, SumVal> = (*c).env
+    if map_has(env, root) {
+        av: SumVal = unwrap_or(map_get(env, root), val_none())
+        targets = targets | av.origins | av.reads
+    }
+    return targets
+}
+
+// A store through a local, whatever its own value reaches at this point of the walk:
+// the binding may share memory with a parameter, with a binding a lambda captured,
+// with memory an opaque call holds, or with a value the frame returns, through a link
+// made before or after the store or one the value walk does not follow (a call that
+// relinks a pointer, a ref binding, a for binder, a closure called later). The frame
+// relation of the whole function, built once per function, finds that sharing
+// whichever statement makes it. A direct store counts only through a dereference, an
+// index, or a call that hands back its argument, since a field of a local struct value
+// is the frame's own copy; a call's store edge always counts, since the callee writes
+// through what the argument reaches
+func record_related_store(c: *SumCtx, place_id: int64, root: string, src: SumVal, via_call: bool, is_unrouted: bool) -> void {
+    if !via_call && !is_shared_place(c, place_id) { return }
+    sources: int64 = src.origins | src.reads
+    if sources == 0 && !src.frame { return }
+    t: *SumTables = (*c).t
+    relation: *FrameRelation = memo_relation((*t).relation_memo, t, place_id)
+    if !(*relation).found { return }
+    if src.frame && !via_call && is_unrouted { record_related_frame_store(c, place_id, root, relation) }
+    if sources == 0 { return }
+    class: RelatedClass = related_class(c, relation, root)
+    mut elements: int64 = 0
+    if !via_call && is_raw_slot(c, place_id) { elements = raw_element_parameters(c, relation, root) }
+    route_related_store(c, class, sources, elements)
+    if class.outside { (*c).sinks = (*c).sinks | sources }
+    if class.returned { (*c).reads_through = (*c).reads_through | sources }
+}
+
+// The class a store root's relation names for this walk. Only the walk's values change
+// from store to store, so the rest is worked out once per class: the whole class in
+// the function's own walk, and in a lambda's walk the part of it the lambda's frame
+// reaches. Whether the walk's result reaches the class past the root is asked per
+// root, against the few returns of the walked frame
+func related_class(c: *SumCtx, relation: *FrameRelation, root: string) -> RelatedClass {
+    frame: int64 = walk_frame(c, relation)
+    node: int64 = relation_root_node(relation, root)
+    members: *Vector<int64> = relation_store_members(relation, root, frame)
+    class: RelatedClass = class_facts(c, relation, members, node, frame)
+    mut returned: bool = false
+    if frame >= 0 { returned = relation_members_returned(relation, members, node, frame) } else { returned = relation_root_returned(relation, node) }
+    return RelatedClass {
+        names: class.names, params: class.params, captures: class.captures, outside: class.outside,
+        returned: returned,
+    }
+}
+
+func class_facts(c: *SumCtx, relation: *FrameRelation, members: *Vector<int64>, node: int64, frame: int64) -> RelatedClass {
+    mut key: int64 = -1
+    if node >= 0 { key = class_key(relation, members, node, frame) }
+    match map_get((*c).related, key) {
+        Some(kept) => { return kept }
+        None => {}
+    }
+    fresh: RelatedClass = RelatedClass {
+        names: class_local_names(c, relation, members), params: class_parameters(c, relation, members, frame),
+        captures: class_captures(c, relation, members, frame),
+        outside: relation_members_outside(relation, members), returned: false,
+    }
+    if key >= 0 { map_put((*c).related, key, fresh) }
+    return fresh
+}
+
+// One key per class for the frame the walk stands for: the class's representative,
+// or for a lambda's frame the node its part of the class was first reached from,
+// which every node of that part shares
+func class_key(relation: *FrameRelation, members: *Vector<int64>, node: int64, frame: int64) -> int64 {
+    if frame >= 0 && vec_len(members) > 0 { return vec_get(members, 0) }
+    return relation_class(relation, node)
+}
+
+// The frame a walk stands for: the function's own, or the lambda a standalone lambda
+// walk summarizes
+func walk_frame(c: *SumCtx, relation: *FrameRelation) -> int64 {
+    if (*c).lambda_id < 0 { return -1 }
+    return relation_lambda_frame(relation, (*c).lambda_id)
+}
+
+// A parameter or a captured binding is reached when it is itself in the destination's
+// class, as a list a fresh node was attached to is, or when some local of the class
+// carries it in the value walk (an alias, a binder, a closure that holds it). A
+// function value is called with what the class holds or hands it out, so it counts
+// like any pointer, and so does a parameter typed by a bare type parameter, which may
+// be a pointer, except one of the elements a direct store into a raw pointer's slot
+// skips
+func route_related_store(c: *SumCtx, class: RelatedClass, sources: int64, elements: int64) -> void {
+    reached: SumVal = class_locals_value(c, class.names)
+    candidates: int64 = reached.origins | reached.reads | class.params
+    pi: *Map<string, int64> = (*c).param_index
+    mut destinations: int64 = 0
+    for i in 0..map_len(pi) {
+        index: int64 = map_val_at(pi, i)
+        if !ps_has(candidates, index) || !ps_has((*c).dest_mask, index) { continue }
+        if is_store_destination(c, map_key_at(pi, i), ps_has(elements, index)) { destinations = destinations | ps_single(index) }
+    }
+    for k in 0..64 {
+        if !ps_has(sources, k) { continue }
+        row: int64 = destinations - (destinations & ps_single(k))
+        if row != 0 { (*c).flows = flow_add_row((*c).flows, k, row) }
+    }
+    route_related_captures(c, reached.captures | class.captures, sources)
+}
+
+// The walked frame's own parameters named in the destination's class
+func class_parameters(c: *SumCtx, relation: *FrameRelation, members: *Vector<int64>, frame: int64) -> int64 {
+    mut found: int64 = 0
+    for member in members {
+        if !is_frame_member(relation, member, frame) { continue }
+        name: string = vec_get((*relation).names, member)
+        index: int64 = unwrap_or(map_get((*c).param_index, name), -1)
+        if index >= 0 { found = found | ps_single(index) }
+    }
+    return found
+}
+
+// A member declared in the walked frame. A lambda parameter spelled like a binding of
+// a frame around the lambda shares that binding's node, so in the lambda's own walk
+// such a node stands for the parameter as well
+func is_frame_member(relation: *FrameRelation, member: int64, frame: int64) -> bool {
+    declared: int64 = relation_member_frame(relation, member)
+    if declared == frame { return true }
+    if frame < 0 || declared == -2 || relation_frame_within(relation, declared, frame) { return false }
+    return relation_frame_declares(relation, vec_get((*relation).names, member), frame)
+}
+
+// A parameter typed by a bare type parameter is a destination whatever the type
+// parameter is spelled like, `string` or a declared type included, ahead of the type
+// filter, unless the store skips it as a buffer's element; any other parameter is one
+// when its type can hold a place a stored reference lands in
+func is_store_destination(c: *SumCtx, name: string, is_element: bool) -> bool {
+    if is_bare_type_parameter(c, name) { return !is_element }
+    type_id: int64 = sum_parameter_type(c, name)
+    return is_function_type(c, type_id) || type_may_hold_reference(c, type_id)
+}
+
+func is_bare_type_parameter(c: *SumCtx, name: string) -> bool {
+    return sum_is_type_parameter(c, sum_parameter_type(c, name))
+}
+
+/** Whether a written type is a bare type parameter of the walked function
+ *  @params c - The current summary walk
+ *  @params type_id - A written type, or -1
+ *  @returns {bool} - True for a type parameter whatever type it is spelled like */
+export func sum_is_type_parameter(c: *SumCtx, type_id: int64) -> bool {
+    if type_id < 0 { return false }
+    a: *Ast = (*(*c).t).ast
+    node: TypeNode = vec_get((*a).types, type_id)
+    return node.kind == tk_named() && node.c == 0 && map_has((*c).gens, ast_name(a, node.a))
+}
+
+// Whether a store writes an index of a raw pointer, a buffer slot
+func is_raw_slot(c: *SumCtx, place_id: int64) -> bool {
+    a: *Ast = (*(*c).t).ast
+    place: ExprNode = vec_get((*a).exprs, place_id)
+    if place.kind != xk_index() { return false }
+    base: TypeNode = vec_get((*a).types, sum_chain_ty(c, place.a))
+    return base.kind == tk_rawptr()
+}
+
+func is_function_type(c: *SumCtx, type_id: int64) -> bool {
+    if type_id < 0 { return false }
+    node: TypeNode = vec_get((*(*(*c).t).ast).types, type_id)
+    return node.kind == tk_func()
+}
+
+// The parameters a direct store into a raw pointer's slot skips: those typed by a bare
+// type parameter that the function itself stores whole into a raw slot of the same
+// class, `(*m).vals[i] = v` beside `(*m).keys[i] = k`. Such a parameter is in the class
+// as an element the buffer holds, and since a generic body cannot index or dereference
+// a value of a bare type parameter, a store into a sibling slot does not write through
+// it, the way `vec_push` and `map_put` record no flow into their element. A parameter
+// the class holds any other way, handed the buffer by a call or a method, stays a
+// destination, and so does every parameter at a call's store edge into a slot, since
+// the callee writes through what the slot holds, and every parameter of a lambda's own
+// walk
+func raw_element_parameters(c: *SumCtx, relation: *FrameRelation, root: string) -> int64 {
+    a: *Ast = (*(*c).t).ast
+    if (*c).lambda_id >= 0 || (*relation).function_id < 0 { return 0 }
+    node: int64 = relation_root_node(relation, root)
+    if node < 0 { return 0 }
+    function: FuncNode = vec_get((*a).funcs, (*relation).function_id)
+    return block_element_stores(c, relation, function.body, relation_class(relation, node))
+}
+
+func block_element_stores(c: *SumCtx, relation: *FrameRelation, block_id: int64, class: int64) -> int64 {
+    if block_id < 0 { return 0 }
+    a: *Ast = (*(*c).t).ast
+    block: BlockNode = vec_get((*a).blocks, block_id)
+    mut found: int64 = 0
+    for i in 0..block.len {
+        found = found | stmt_element_stores(c, relation, vec_get((*a).kids, block.off + i), class)
+    }
+    return found
+}
+
+// The statement forms that hold blocks are followed; a store inside a lambda body is
+// not, so a parameter stored only there stays a destination
+func stmt_element_stores(c: *SumCtx, relation: *FrameRelation, stmt_id: int64, class: int64) -> int64 {
+    a: *Ast = (*(*c).t).ast
+    s: StmtNode = vec_get((*a).stmts, stmt_id)
+    if s.kind == sk_if() { return block_element_stores(c, relation, s.b, class) | block_element_stores(c, relation, s.c, class) }
+    if s.kind == sk_while() { return block_element_stores(c, relation, s.b, class) }
+    if s.kind == sk_for() { return block_element_stores(c, relation, s.c, class) }
+    if s.kind == sk_match() {
+        mut found: int64 = 0
+        for i in 0..s.c {
+            arm: ArmNode = vec_get((*a).arms, vec_get((*a).kids, s.b + i))
+            found = found | block_element_stores(c, relation, arm.body, class)
+        }
+        return found
+    }
+    if s.kind != sk_assign() { return 0 }
+    return element_store(c, relation, s.a, s.b, class)
+}
+
+// The parameter a store `slot[i] = name` in the function's own frame puts whole into
+// a raw slot of the class
+func element_store(c: *SumCtx, relation: *FrameRelation, place_id: int64, value_id: int64, class: int64) -> int64 {
+    a: *Ast = (*(*c).t).ast
+    value: ExprNode = vec_get((*a).exprs, value_id)
+    if value.kind != xk_ident() || !is_raw_slot(c, place_id) { return 0 }
+    name: string = ast_name(a, value.a)
+    index: int64 = unwrap_or(map_get((*c).param_index, name), -1)
+    if index < 0 || !is_bare_type_parameter(c, name) { return 0 }
+    node: int64 = relation_node_of(relation, written_place_root(a, place_id), -1)
+    if node < 0 || relation_class(relation, node) != class { return 0 }
+    return ps_single(index)
+}
+
+// The bindings a lambda's walk captures that the destination's class names, each by
+// its place among the walk's captures; a binding declared in the lambda's own frame or
+// in one inside it is the lambda's own
+func class_captures(c: *SumCtx, relation: *FrameRelation, members: *Vector<int64>, frame: int64) -> int64 {
+    if frame < 0 { return 0 }
+    names: *Vector<string> = (*c).capture_names
+    mut found: int64 = 0
+    for member in members {
+        declared: int64 = relation_member_frame(relation, member)
+        if declared == -2 || relation_frame_within(relation, declared, frame) { continue }
+        name: string = vec_get((*relation).names, member)
+        for index in 0..vec_len(names) {
+            if str_eq(vec_get(names, index), name) { found = found | ps_single(index) }
         }
     }
-    if !map_has(pi, root) { raise_env(c, root, src) }
+    return found
+}
+
+// The names of the destination's class other than the walk's parameters, each once
+func class_local_names(c: *SumCtx, relation: *FrameRelation, members: *Vector<int64>) -> *Vector<string> {
+    seen: *Map<string, bool> = alloc(map_new())
+    names: *Vector<string> = alloc(vec_new())
+    for member in members {
+        if !relation_is_name(relation, member) { continue }
+        name: string = vec_get((*relation).names, member)
+        if map_has(seen, name) || map_has((*c).param_index, name) { continue }
+        map_put(seen, name, true)
+        vec_push(names, name)
+    }
+    return names
+}
+
+// The join of every walk local's value in the destination's class, a binder's value
+// from a scope that already ended included
+func class_locals_value(c: *SumCtx, names: *Vector<string>) -> SumVal {
+    mut joined: SumVal = val_none()
+    for name in names {
+        if !map_has((*c).locals, name) { continue }
+        joined = val_join(joined, unwrap_or(map_get((*c).env, name), val_none()))
+        joined = val_join(joined, unwrap_or(map_get((*c).retired, name), val_none()))
+    }
+    return joined
+}
+
+// In a lambda's own walk, each source reaches every captured binding a local of the
+// destination's class carries
+func route_related_captures(c: *SumCtx, captures: int64, sources: int64) -> void {
+    names: *Vector<string> = (*c).capture_names
+    for index in 0..vec_len(names) {
+        name: string = vec_get(names, index)
+        if !(captures == -1 || ps_has(captures, index)) || !may_hold_reference(c, name) { continue }
+        for k in 0..64 {
+            if ps_has(sources, k) { vec_push((*c).capture_flows, CapFlow { idx: k, name: name }) }
+        }
+    }
+}
+
+// A slice of plain data, a string, and a function value hold no place a stored
+// reference could land in, so the class holding one as a source never writes into it.
+// A bare type parameter may stand for a pointer whatever it is spelled like, so a
+// value of one may hold such a place, `string` as a type parameter's name included
+func may_hold_reference(c: *SumCtx, name: string) -> bool {
+    return type_may_hold_reference(c, unwrap_or(map_get((*c).local_types, name), -1))
+}
+
+func type_may_hold_reference(c: *SumCtx, type_id: int64) -> bool {
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
+    if type_id < 0 || sum_is_type_parameter(c, type_id) { return true }
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_func() { return false }
+    if node.kind == tk_slice() { return sum_reaches_managed(t, node.a) || sum_is_view(t, node.a, (*c).gens) }
+    return node.kind != tk_named() || !str_eq(ast_name(a, node.a), "string")
+}
+
+// A direct store of a frame view through a local the relation ties to memory past the
+// frame. A lambda's own parameter outlives the lambda's frame the way a function's
+// does, so its store reads as a store through that parameter. The function's own walk
+// of a lambda body reports the function's parameter the class reaches first, the one
+// a call handing it to the lambda ties in, which outranks the capture record the
+// lambda's own walk makes at the same site
+func record_related_frame_store(c: *SumCtx, place_id: int64, root: string, relation: *FrameRelation) -> void {
+    a: *Ast = (*(*c).t).ast
+    if !relation_outlives(relation, root) { return }
+    place: ExprNode = vec_get((*a).exprs, place_id)
+    if (*c).lambda_id < 0 && (*relation).target_frame >= 0 {
+        function_operand: int64 = relation_parameter_operand(relation, root)
+        if function_operand >= 0 {
+            vec_push((*c).frame_stores, FlowProv { lo: place.lo, hi: place.hi, src: 0, dst: function_operand })
+            return
+        }
+    }
+    captured: string = relation_captured(relation, root)
+    if str_len(captured) > 0 {
+        vec_push((*c).frame_stores, FlowProv { lo: place.lo, hi: place.hi, src: intern_id((*a).interner, captured), dst: -1 })
+        return
+    }
+    mut operand: int64 = relation_lambda_parameter(relation, root)
+    if operand < 0 { operand = relation_parameter_operand(relation, root) }
+    if operand >= 0 { vec_push((*c).frame_stores, FlowProv { lo: place.lo, hi: place.hi, src: 0, dst: operand }) }
+}
+
+// A lambda that stores a view of its own frame through a binding it captures leaves
+// that view behind in memory the capture reaches, which outlives the lambda's frame
+// the same way a caller's object outlives a callee's. A direct store counts only
+// through a dereference or an index, since a field of a captured struct value is the
+// lambda's own copy and dies with it; a call's store edge always counts, since the
+// callee writes through what the captured argument reaches. The site is recorded as a
+// frame store whose dst is -1 and whose src is the captured name's interned id.
+func record_capture_store(c: *SumCtx, place_id: int64, captures: int64, src: SumVal, via_call: bool) -> void {
+    if shared_store_root_id(c, place_id) < 0 && !via_call { return }
+    a: *Ast = (*(*c).t).ast
+    names: *Vector<string> = (*c).capture_names
+    source_params: int64 = src.origins | src.reads
+    for index in 0..vec_len(names) {
+        if captures == -1 || ps_has(captures, index) {
+            name: string = vec_get(names, index)
+            for param in 0..64 {
+                if ps_has(source_params, param) { vec_push((*c).capture_flows, CapFlow { idx: param, name: name }) }
+            }
+            if src.frame {
+                place: ExprNode = vec_get((*a).exprs, place_id)
+                rid: int64 = intern_id((*a).interner, name)
+                vec_push((*c).frame_stores, FlowProv { lo: place.lo, hi: place.hi, src: rid, dst: -1 })
+            }
+        }
+    }
+}
+
+// The interned name of the binding a store place writes through, when the place
+// chain crosses a dereference or an index on the way to it, else -1.
+func shared_store_root_id(c: *SumCtx, id: int64) -> int64 {
+    if id < 0 { return -1 }
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_field() { return shared_store_root_id(c, e.a) }
+    if e.kind == xk_index() { return root_ident_id(c, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return root_ident_id(c, e.b) }
+    return -1
+}
+
+// Whether a store place writes memory other bindings may share: through a
+// dereference or an index of a binding, or through what a call hands back
+func is_shared_place(c: *SumCtx, place_id: int64) -> bool {
+    return shared_store_root_id(c, place_id) >= 0 || crosses_call(c, place_id)
+}
+
+func crosses_call(c: *SumCtx, id: int64) -> bool {
+    if id < 0 { return false }
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_call() { return true }
+    if e.kind == xk_field() || e.kind == xk_index() { return crosses_call(c, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return crosses_call(c, e.b) }
+    return false
+}
+
+// The interned name of a place chain's root binding, rooting through fields,
+// indexes, and dereferences alike as dest_root does, or -1 for any other base.
+func root_ident_id(c: *SumCtx, id: int64) -> int64 {
+    if id < 0 { return -1 }
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() { return e.a }
+    if e.kind == xk_field() || e.kind == xk_index() { return root_ident_id(c, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return root_ident_id(c, e.b) }
+    return -1
 }
 
 export func flow_into_place(c: *SumCtx, place_id: int64, src: SumVal) -> void {
     record_store(c, place_id, src, true)
+}
+
+/** Routes a call store through the destination value when no binding roots it
+ *  @params c - The current summary walk
+ *  @params place_id - The destination operand
+ *  @params source - The stored value
+ *  @params destination - The already evaluated destination
+ *  @returns {void} - Records caller reachability or a conservative sink */
+export func flow_into_value(c: *SumCtx, place_id: int64, source: SumVal, destination: SumVal) -> void {
+    if str_len(store_root(c, place_id)) > 0 {
+        record_store(c, place_id, source, true)
+        return
+    }
+    targets: int64 = destination.origins | destination.reads
+    ctx_flow_edges(c, source.origins | source.reads, targets)
+    if destination.captures != 0 {
+        record_capture_store(c, place_id, destination.captures, source, true)
+    }
+    if targets == 0 && destination.captures == 0 {
+        (*c).sinks = (*c).sinks | source.origins | source.reads
+    }
 }
 
 export func raise_env(c: *SumCtx, name: string, v: SumVal) -> void {
@@ -82,6 +513,38 @@ func dest_root(c: *SumCtx, id: int64) -> string {
     if e.kind == xk_field() || e.kind == xk_index() { return dest_root(c, e.a) }
     if e.kind == xk_unary() && e.a == uop_deref() { return dest_root(c, e.b) }
     return ""
+}
+
+// The root binding of a store place as dest_root finds it, or, for a place rooted
+// at a call, the binding of the one argument the callee hands back as its result
+func store_root(c: *SumCtx, id: int64) -> string {
+    if id < 0 { return "" }
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_field() || e.kind == xk_index() { return store_root(c, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return store_root(c, e.b) }
+    if e.kind == xk_call() { return passthrough_root(c, e) }
+    return dest_root(c, id)
+}
+
+// A module function whose result is, or is read out of, exactly one argument hands
+// back memory that argument reaches, so a store through the result writes there
+func passthrough_root(c: *SumCtx, call: ExprNode) -> string {
+    a: *Ast = (*(*c).t).ast
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    if callee.kind != xk_ident() { return "" }
+    name: string = ast_name(a, callee.a)
+    if sum_name_bound(c, name) || !map_has((*c).summaries, name) { return "" }
+    summary: SummaryHandle = unwrap_or(map_get((*c).summaries, name), empty_summary())
+    returned: int64 = summary.returns_alias | summary.reads_through
+    mut found: int64 = -1
+    for k in 0..call.c {
+        if !ps_has(returned, k) { continue }
+        if found >= 0 { return "" }
+        found = k
+    }
+    if found < 0 { return "" }
+    return store_root(c, vec_get((*a).kids, call.b + found))
 }
 
 // The base binding of a by-value projection chain, rooting through field accesses
@@ -110,6 +573,7 @@ export func sum_elem_of(t: *SumTables, tyid: int64) -> int64 {
     a: *Ast = (*t).ast
     n: TypeNode = vec_get((*a).types, tyid)
     if n.kind == tk_slice() || n.kind == tk_array() { return n.a }
+    if (*t).alias_mode { return sum_alias_elem(t, n) }
     return (*t).infer_ty
 }
 
@@ -126,7 +590,8 @@ export func sum_chain_ty(c: *SumCtx, id: int64) -> int64 {
     }
     if e.kind == xk_field() {
         bt: int64 = sum_chain_ty(c, e.a)
-        bn: TypeNode = vec_get((*a).types, bt)
+        mut bn: TypeNode = vec_get((*a).types, bt)
+        if bn.kind == tk_ptr() || bn.kind == tk_rawptr() { bn = vec_get((*a).types, bn.a) }
         if bn.kind == tk_named() {
             return struct_field_ty(t, ast_name(a, bn.a), ast_name(a, e.b))
         }
@@ -146,9 +611,17 @@ export func sum_chain_ty(c: *SumCtx, id: int64) -> int64 {
         if pn.kind == tk_ptr() || pn.kind == tk_rawptr() || pn.kind == tk_collector() { return pn.a }
         return (*t).infer_ty
     }
+    if e.kind == xk_struct_lit() { return ast_type(a, tk_named(), e.a, 0, 0) }
+    if e.kind == xk_call() { return sum_call_ty(c, e) }
+    if e.kind == xk_tuple() { return sum_tuple_ty(c, e) }
+    if e.kind == xk_ifexpr() { return sum_branch_ty(c, e) }
+    if e.kind == xk_lambda() { return lambda_fn_type(c, e, id) }
     return (*t).infer_ty
 }
 
+// A field's declared type, unknown when it names a type parameter of its own struct,
+// since a method or a scalar read off a name like `Quiet` in `struct QCell<Quiet>`
+// would otherwise resolve against the declared type spelled the same
 func struct_field_ty(t: *SumTables, sname: string, fname: string) -> int64 {
     a: *Ast = (*t).ast
     sidx: *Map<string, int64> = (*t).struct_idx
@@ -156,27 +629,88 @@ func struct_field_ty(t: *SumTables, sname: string, fname: string) -> int64 {
     st: StructNode = vec_get((*a).structs, unwrap_or(map_get(sidx, sname), 0))
     for i in 0..st.fields_len {
         fld: FieldNode = vec_get((*a).fields, vec_get((*a).kids, st.fields_off + i))
-        if str_eq(ast_name(a, fld.name), fname) { return fld.ty }
+        if !str_eq(ast_name(a, fld.name), fname) { continue }
+        if names_struct_parameter(t, sname, fld.ty) { return (*t).infer_ty }
+        return fld.ty
     }
     return (*t).infer_ty
 }
 
 // The abstract value of a by-value projection: only a member that can carry a view
-// inherits its root binding's state. Frame-ness and origins root through fields and
-// indexes but stop at a dereference; the reads-through relation follows the
-// dereference, exposing whatever the caller stored behind the pointer.
-export func projection_val(c: *SumCtx, id: int64) -> SumVal {
+// or lead to memory, a managed or a raw pointer, inherits its root binding's state.
+// Frame-ness and origins root through fields and indexes, and through a dereference
+// of a local to a member that can hold a view, since the memory a local points at
+// holds what the walk put into it; a dereference of a parameter stops them. The
+// reads-through relation follows any dereference, exposing whatever the caller stored
+// behind the pointer, so a copied vector header or its raw buffer still names the
+// parameter it was read out of. A chain no binding roots, off a struct literal or a
+// fresh allocation, reads its base's value as a local's; one off any other call
+// result reads nothing
+export func projection_val(c: *SumCtx, id: int64, base: SumVal) -> SumVal {
     t: *SumTables = (*c).t
     ct: int64 = sum_chain_ty(c, id)
-    if !sum_is_view(t, ct, (*c).gens) { return val_none() }
+    gens: *Map<string, int64> = sum_projection_gens(c, id)
+    is_view: bool = sum_is_view(t, ct, gens)
+    if !is_view && !sum_reaches_managed(t, ct) && !reaches_raw(t, ct) { return val_none() }
     env: *Map<string, SumVal> = (*c).env
     mut v: SumVal = val_none()
     proot: string = projection_root(c, id)
-    if str_len(proot) > 0 { v = unwrap_or(map_get(env, proot), val_none()) }
     rroot: string = reads_through_root(c, id)
+    if str_len(proot) == 0 && str_len(rroot) == 0 {
+        if !is_fresh_base(c, id) { return val_none() }
+        return rootless_projection_val(c, id, base, is_view, ct, gens)
+    }
+    if str_len(proot) > 0 { v = unwrap_or(map_get(env, proot), val_none()) }
     if str_len(rroot) > 0 && map_has(env, rroot) {
         av: SumVal = unwrap_or(map_get(env, rroot), val_none())
         v.reads = v.reads | av.reads
+        v.captures = v.captures | av.captures
+        // Memory a local points at holds whatever views were put into it, a parameter's
+        // view or a view of the frame a struct literal initializer placed there included,
+        // and a member that can hold none, even behind a pointer, reads none of them back
+        if !sum_names_parameter(c, rroot) && (is_view || view_within(t, ct, gens, alloc(map_new()))) {
+            v.origins = v.origins | av.origins
+            v.frame = v.frame || av.frame
+        }
+    }
+    if !is_view { v.frame = false }
+    return v
+}
+
+// The projection_val of a chain whose base no binding names: by value, the chain
+// reads the base's whole value; across a dereference, what the memory holds, the
+// way a dereference of a local reads it
+func rootless_projection_val(c: *SumCtx, id: int64, base: SumVal, is_view: bool, ct: int64, gens: *Map<string, int64>) -> SumVal {
+    if !chain_crosses_deref(c, id) {
+        mut whole: SumVal = base
+        if !is_view { whole.frame = false }
+        return whole
+    }
+    mut v: SumVal = SumVal { origins: 0, reads: base.reads, captures: base.captures, frame: false }
+    if is_view || view_within((*c).t, ct, gens, alloc(map_new())) {
+        v.origins = base.origins
+        v.frame = is_view && base.frame
     }
     return v
+}
+
+// Whether a projection chain bottoms out at a struct literal or a call of the alloc
+// builtin, whose value the walk holds whole
+func is_fresh_base(c: *SumCtx, id: int64) -> bool {
+    a: *Ast = (*(*c).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_field() || e.kind == xk_index() { return is_fresh_base(c, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return is_fresh_base(c, e.b) }
+    if e.kind == xk_struct_lit() { return true }
+    if e.kind != xk_call() { return false }
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind != xk_ident() { return false }
+    return str_eq(ast_name(a, callee.a), "alloc") && !sum_name_bound(c, "alloc")
+}
+
+// Whether a projection chain reads through a dereference before it reaches its base
+func chain_crosses_deref(c: *SumCtx, id: int64) -> bool {
+    e: ExprNode = vec_get((*(*(*c).t).ast).exprs, id)
+    if e.kind == xk_field() || e.kind == xk_index() { return chain_crosses_deref(c, e.a) }
+    return e.kind == xk_unary() && e.a == uop_deref()
 }

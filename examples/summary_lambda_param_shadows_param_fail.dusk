@@ -1,0 +1,41 @@
+// Compile-fail: a callback's parameter spelled like a scalar parameter of the helper
+// stores the view through a sink whose holder the helper then hands to the caller's
+// sink. Inside the callback the name is the callback's own parameter, so the store
+// counts as one through a sink the caller's sink comes to share, and the caller
+// handing the helper a frame array is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func keepvia(q: *Sink, n: int64, xs: int64[]) -> void {
+    println(n)
+    inner: *Holder = alloc(Holder { rows: heap_rows() })
+    t: *Sink = alloc(Sink { h: inner })
+    ts: (*Sink)[1] = [t]
+    foreach(ts[0..1], lambda (n: *Sink) -> void { n.keep(xs) })
+    relink(q, inner)
+}
+func fill(q: *Sink) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    keepvia(q, 7, local[0..4])
+}
+func main() -> int32 {
+    q: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    fill(q)
+    println((*(*q).h).rows[0])
+    return 0
+}

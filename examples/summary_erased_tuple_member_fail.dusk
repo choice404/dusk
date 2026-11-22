@@ -1,0 +1,24 @@
+// Compile-fail: the same generic scanner, but the helper stores the member at the type
+// parameter's position into the caller's holder. That member is unknown, not dropped,
+// so the view it carries still flows and a frame array handed in is refused
+@paradigm procedural
+@paradigm oop
+struct Holder { rows: int64[] }
+struct Stats { n: int64 }
+impl Stats { func total() -> int64 { return self.n } }
+func scan<T>(x: T) -> (T, Stats) { return (x, Stats { n: 4 }) }
+func helper(h: *Holder, xs: int64[]) -> int64 {
+    first, st := scan(xs)
+    (*h).rows = first
+    return st.total()
+}
+func work(h: *Holder) -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    return helper(h, local[0..4])
+}
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: [1, 2] })
+    println(work(h))
+    println((*h).rows[0])
+    return 0
+}

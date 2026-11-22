@@ -1,0 +1,20 @@
+// Compile-fail: a lambda builds a closure over its own local and stores it into
+// the struct a captured pointer reaches. The closure's environment lives on the
+// lambda's frame, which is gone by the time the enclosing function calls it.
+@paradigm procedural
+
+struct Srv { handler: (int64) -> int64, hits: int64 }
+
+func twice(x: int64) -> int64 { return x * 2 }
+
+func main() -> int32 {
+    s: *Srv = alloc(Srv { handler: twice, hits: 0 })
+    f := lambda () -> void {
+        k: int64 = 41
+        (*s).handler = lambda (x: int64) -> int64 { return x + k }
+    }
+    f()
+    println((*s).handler(1))
+    free(s)
+    return 0
+}

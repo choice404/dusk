@@ -1,0 +1,30 @@
+// A generic buffer that keeps its type parameter's value whole in a raw slot. Its
+// summary records a flow from `x` into the buffer and none from the buffer's contents
+// into `x`, though the copy loop writes slots of the same memory: `x` is in that
+// memory only as an element, and a generic body cannot write through a value of a
+// bare type parameter
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Buf<T> { data: *raw T, len: int64 }
+
+func push_one<T>(b: *Buf<T>, x: T) -> void {
+    grown: *raw T = alloc_bytes(((*b).len + 1) * sizeof(T))
+    for i in 0..(*b).len { grown[i] = (*b).data[i] }
+    grown[(*b).len] = x
+    free((*b).data)
+    (*b).data = grown
+    (*b).len = (*b).len + 1
+}
+
+func main() -> int32 {
+    b: *Buf<*Holder> = alloc(Buf { data: alloc_bytes(0), len: 0 })
+    push_one(b, alloc(Holder { rows: [3, 4] }))
+    push_one(b, alloc(Holder { rows: [5, 6] }))
+    first: *Holder = (*b).data[0]
+    second: *Holder = (*b).data[1]
+    println((*first).rows[1] + (*second).rows[0])
+    return 0
+}

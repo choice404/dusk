@@ -15,6 +15,8 @@
 @import tcown
 @import tcesc
 @import tcesc3
+@import tcescreach
+@import tcesctype
 
 func capture_add(tc: *TypeChecker, name: string, bound: *Map<string, int64>, seen: *Map<string, int64>, out: *Vector<string>) -> void {
     if !map_has(bound, name) && is_local(tc, name) && !map_has(seen, name) {
@@ -281,6 +283,8 @@ func binding_alias_targets(tc: *TypeChecker, expr_id: int64) -> *Vector<string> 
 export func link_binding_aliases(tc: *TypeChecker, name: string, expr_id: int64, reassign: bool) -> void {
     if (*tc).types_only { return }
     targets: *Vector<string> = binding_alias_targets(tc, expr_id)
+    is_known: bool = gather_store_reach(tc, expr_id, targets)
+    record_store_reach(tc, name, !is_known, reassign)
     if reassign && ((*tc).branch_depth == 0 || vec_len(targets) == 0) { alias_drop(tc, name) }
     for i in 0..vec_len(targets) {
         alias_link(tc, name, vec_get(targets, i))
@@ -396,6 +400,7 @@ export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_ty: int
                 oname: string = ast_name(a, vec_get((*a).kids, p.b + oi))
                 set_esc(tc, oname, scrut.slice, scrut.closure)
                 link_binding_aliases(tc, oname, scrut_id, false)
+                mark_unknown_payload(tc, oname)
             }
             return
         }
@@ -404,8 +409,12 @@ export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_ty: int
             bname: string = ast_name(a, vec_get((*a).kids, p.b + i))
             set_esc(tc, bname, false, false)
             pty: int64 = sig_ty_at((*tc).sigtab, TyList { off: vs.off, len: vs.len }, i)
-            if (scrut.slice || scrut.closure) && member_carries_view(tc, pty) { set_esc(tc, bname, scrut.slice, scrut.closure) }
-            if links_as_alias(tc, pty) { link_binding_aliases(tc, bname, scrut_id, false) }
+            if ty_get((*tc).ty, pty).kind == tyk_unknown() { mark_unknown_payload(tc, bname) }
+            payload: int64 = written_payload_type(tc, bname, pty, pat_id, scrut_id, i)
+            // A payload whose type stays unknown is read the way an opaque one is
+            is_unknown: bool = ty_get((*tc).ty, payload).kind == tyk_unknown()
+            if (scrut.slice || scrut.closure) && (is_unknown || member_carries_view(tc, payload)) { set_esc(tc, bname, scrut.slice, scrut.closure) }
+            if is_unknown || links_as_alias(tc, payload) { link_binding_aliases(tc, bname, scrut_id, false) }
         }
     } else if p.kind == pk_ident() {
         name: string = ast_name(a, p.a)
@@ -413,6 +422,53 @@ export func bind_match_arm_escape(tc: *TypeChecker, pat_id: int64, scrut_ty: int
         if scrut.slice || scrut.closure { set_esc(tc, name, scrut.slice, scrut.closure) }
         link_binding_aliases(tc, name, scrut_id, false)
     }
+}
+
+// Marks a payload binder the checker types unknown, so a field read through it is
+// judged by the type the scrutinee's written type names
+func mark_unknown_payload(tc: *TypeChecker, name: string) -> void {
+    declare_binding_ast(tc, sig_pair_key("escape-payload", name), -1)
+}
+
+/** Whether a binding is a match payload binder the checker types unknown
+ *  @params tc - The checker holding scoped escape metadata
+ *  @params name - The binding
+ *  @returns {bool} - True for a binder whose payload is typed by its enum's own type
+ *  parameter or belongs to an unresolvable enum */
+export func is_unknown_payload(tc: *TypeChecker, name: string) -> bool {
+    mut index: int64 = vec_len((*tc).scopes) - 1
+    while index >= 0 {
+        if map_has(vec_get((*tc).scopes, index), name) {
+            return map_has(vec_get((*tc).binding_ast_ty, index), sig_pair_key("escape-payload", name))
+        }
+        index--
+    }
+    return false
+}
+
+// A payload typed by the enum's own type parameter lowers unknown, so the binder
+// would drop the view the scrutinee holds there. The scrutinee's written type names
+// the argument, which decides it the way a concrete payload type does, and is kept
+// for the binder the way a call result's is, so a method called on it finds its
+// receiver. A scrutinee with no written type leaves the payload unknown, and the
+// binder then carries the scrutinee's view and aliases it
+func written_payload_type(tc: *TypeChecker, name: string, pty: int64, pat_id: int64, scrut_id: int64, slot: int64) -> int64 {
+    if ty_get((*tc).ty, pty).kind != tyk_unknown() { return pty }
+    written: int64 = escape_payload_ast(tc, pat_id, scrut_id, slot)
+    if written < 0 { return pty }
+    resolved: int64 = tc_type(tc, written)
+    if names_no_declaration(tc, resolved) { return pty }
+    declare_binding_ast(tc, sig_pair_key("escape-ast", name), written)
+    if ty_get((*tc).ty, resolved).kind != tyk_unknown() { declare_binding_ast(tc, sig_pair_key("escape-type", name), resolved) }
+    return resolved
+}
+
+// A name no struct, enum, or interface declares, such as a generic struct's own type
+// parameter read through a value bound with no annotation, decides nothing
+export func names_no_declaration(tc: *TypeChecker, tyid: int64) -> bool {
+    if ty_get((*tc).ty, tyid).kind != tyk_named() { return false }
+    name: string = ty_name((*tc).ty, tyid)
+    return !map_has((*tc).structs, name) && !map_has((*tc).enums, name) && !map_has((*tc).ifaces, name)
 }
 
 export func esc_snapshot(tc: *TypeChecker) -> string {
@@ -438,4 +494,3 @@ func snap_stack(b: *StringBuilder, stack: *Vector<*Map<string, int64>>) -> void 
         sb_push_char(b, 47)
     }
 }
-

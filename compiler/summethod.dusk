@@ -1,0 +1,66 @@
+// Resolve interface dispatch over every implementation in the loaded module
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import tcstate
+@import summary
+@import sumflow
+@import sumwalk
+@import sumplace
+
+/** Join the possible implementations of a known interface receiver
+ *  @params c - The current summary walk
+ *  @params callee - The method selection
+ *  @returns {SummaryHandle} - The joined summary, or empty when dispatch is unknown */
+export func sum_interface_method(c: *SumCtx, callee: ExprNode) -> SummaryHandle {
+    t: *SumTables = (*c).t
+    a: *Ast = (*t).ast
+    receiver: string = sum_receiver_type_name(c, callee)
+    if !map_has((*t).ifaces, receiver) { return not_resolved() }
+    return sum_join_impls(a, (*c).summaries, receiver, ast_name(a, callee.b))
+}
+
+/** Join the summaries of every implementation of one interface method, the call
+ *  site check and the summary walk reading the same dispatch set
+ *  @params a - The merged module
+ *  @params sums - Summaries keyed by receiver type and method name
+ *  @params iface - The interface the receiver is typed as
+ *  @params mname - The method called through it
+ *  @returns {SummaryHandle} - The join, or empty when no implementation declares it */
+export func sum_join_impls(a: *Ast, sums: *Map<string, SummaryHandle>, iface: string, mname: string) -> SummaryHandle {
+    mut result: SummaryHandle = not_resolved()
+    for implementation in (*a).impls {
+        if implementation.iface < 0 || !str_eq(ast_name(a, implementation.iface), iface) { continue }
+        for i in 0..implementation.methods_len {
+            method: FuncNode = vec_get((*a).funcs, vec_get((*a).kids, implementation.methods_off + i))
+            if !str_eq(ast_name(a, method.name), mname) { continue }
+            key: string = sum_variant_key(ast_name(a, implementation.ty), mname)
+            // An implementation with no summary leaves the dispatch unknown, so the call stays opaque
+            if !map_has(sums, key) { return not_resolved() }
+            result = join_method_summary(result, unwrap_or(map_get(sums, key), empty_summary()))
+        }
+    }
+    return result
+}
+
+func not_resolved() -> SummaryHandle {
+    mut result: SummaryHandle = empty_summary()
+    result.empty = true
+    return result
+}
+
+func join_method_summary(first: SummaryHandle, second: SummaryHandle) -> SummaryHandle {
+    mut result: SummaryHandle = first
+    result.empty = false
+    result.returns_alias = result.returns_alias | second.returns_alias
+    result.reads_through = result.reads_through | second.reads_through
+    result.sinks = result.sinks | second.sinks
+    result.collect_sinks = result.collect_sinks | second.collect_sinks
+    for i in 0..64 { result.flows = flow_add_row(result.flows, i, flow_row(second.flows, i)) }
+    return result
+}

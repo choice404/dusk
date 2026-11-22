@@ -265,8 +265,9 @@ func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, 
     return run(oline)
 }
 
-// Compiles the emitted IR, the runtime, and every @csource to objects, each at the
-// build's own optimization level, and bundles them into a deterministic static
+// Compiles the emitted IR and every @csource to objects at the build's own
+// optimization level, and the runtime at runtime_opt_flag the way an executable
+// link's cached runtime is, and bundles them into a deterministic static
 // archive with llvm-ar. The module object and the
 // @csource objects merge into one relocatable object whose only global symbols are
 // the exports, so neither a private dusk helper nor a @csource entry can interpose
@@ -310,7 +311,7 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
     for ri in 0..vec_len(rts) {
         src: string = path_join(rt, vec_get(rts, ri))
         obj: string = prefixed_obj_path(out, "duskrt_", ri, src)
-        rc: int64 = compile_object(src, obj, opt)
+        rc: int64 = compile_object(src, obj, runtime_opt_flag())
         free(src)
         if rc != 0 {
             d: Diagnostic = diag_new(stem, 0, 0, "clang failed to compile a runtime source")

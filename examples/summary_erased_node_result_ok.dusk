@@ -1,0 +1,23 @@
+// A generic constructor returns a pointer to a node over its type parameter, and the
+// helper one call down stores only the node's concrete depth into the caller's state.
+// The node keeps its shape with the parameter's position unknown, so it runs
+@paradigm procedural
+struct State { pos: int64 }
+struct Node<T> { value: T, depth: int64 }
+func mknode<T>(x: T) -> *Node<T> { return alloc(Node { value: x, depth: 3 }) }
+func step(st: *State, xs: int64[]) -> int64 {
+    n := mknode(xs)
+    (*st).pos = (*n).depth
+    r: int64 = (*n).value[1]
+    free(n)
+    return r
+}
+func run(st: *State) -> int64 {
+    local: int64[4] = [111, 222, 333, 444]
+    return step(st, local[0..4])
+}
+func main() -> int32 {
+    st: *State = alloc(State { pos: 0 })
+    println(run(st) + (*st).pos)
+    return 0
+}

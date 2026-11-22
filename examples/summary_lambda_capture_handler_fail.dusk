@@ -1,0 +1,23 @@
+@paradigm procedural
+@paradigm functional
+// A lambda that hands a helper a closure over one of its own locals, to be stored through
+// a captured pointer, leaves the object holding a closure whose frame is gone once the
+// lambda returns.
+struct Srv { handler: (int64) -> int64 }
+func set_handler(s: *Srv, f: (int64) -> int64) -> void { (*s).handler = f }
+func noise(a: int64, b: int64) -> int64 {
+    e: int64[8] = [9, 9, 9, 9, 9, 9, 9, 9]
+    return a + b + e[0]
+}
+func main() -> int32 {
+    s: *Srv = alloc(Srv { handler: lambda (x: int64) -> int64 { return x } })
+    install := lambda () -> void {
+        k: int64 = 41
+        set_handler(s, lambda (x: int64) -> int64 { return x + k })
+    }
+    install()
+    println(noise(1, 2))
+    println((*s).handler(1))
+    free(s)
+    return 0
+}

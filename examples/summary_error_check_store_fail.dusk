@@ -1,0 +1,21 @@
+// Compile-fail: the handler given to an error's check stores the view that came back
+// beside the error into the caller's holder. The handler is still judged as an
+// argument of a call the walk cannot see into, so a frame view handed in is refused
+@paradigm procedural
+@paradigm functional
+struct Holder { rows: int64[] }
+func scan(xs: int64[]) -> (int64[], error) { return (xs, error { message: "bad" }) }
+func helper(h: *Holder, xs: int64[]) -> void {
+    rest, e := scan(xs)
+    e.check(lambda (err: error) -> void { (*h).rows = rest })
+}
+func work(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    helper(h, local[0..4])
+}
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: [1, 2] })
+    work(h)
+    println((*h).rows[0])
+    return 0
+}

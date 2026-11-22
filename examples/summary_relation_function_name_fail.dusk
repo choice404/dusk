@@ -1,0 +1,43 @@
+// Compile-fail: a local in one block shares its name with a module function that
+// another statement calls. The call outside that block reaches the function, which
+// sends the sink across a channel where another thread may hold it, so the view
+// stored through the sink afterward may outlive the frame
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.concurrent.channel
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func publish(s: *Sink) -> void {
+    ch: Channel<*Sink> = chan_new(1)
+    e := chan_send(ch, s)
+    e.ignore()
+}
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    if local[0] < 0 {
+        publish: int64 = 3
+        println(publish)
+    }
+    publish(s)
+    s.keep(local[0..4])
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

@@ -1,0 +1,23 @@
+@paradigm procedural
+@paradigm oop
+
+interface Raw { bytes() -> *raw char }
+struct Record { data: *raw char }
+struct Outer { inner: Record }
+impl Raw for Record {
+    func bytes() -> *raw char { return self.data }
+}
+func makePointer(data: *raw char) -> *Record { return alloc(Record { data: data }) }
+func makeOuter(data: *raw char) -> Outer { return Outer { inner: Record { data: data } } }
+
+func main() -> int32 {
+    data: *raw char = alloc_bytes(4)
+    data[0] = 97
+    data[1] = 0
+    data[2] = 99
+    data[3] = 0
+    bytes := makeOuter(data).inner.bytes()
+    println(int64(bytes[2]))
+    free(data)
+    return 0
+}

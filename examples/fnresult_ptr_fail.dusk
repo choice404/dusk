@@ -1,0 +1,17 @@
+// Compile-fail: a callback returns a captured pointer to a holder that keeps a slice
+// of a local array. A pointer result may reach a view, so the helper's call returns
+// what the callback captured and the holder cannot leave the frame
+@paradigm procedural
+@paradigm functional
+struct Holder { xs: int64[] }
+func apply<T>(f: () -> T) -> T { return f() }
+func leak() -> *Holder {
+    local: int64[4] = [1, 2, 3, 4]
+    h: *Holder = alloc(Holder { xs: local[0..4] })
+    return apply(lambda () -> *Holder { return h })
+}
+func main() -> int32 {
+    g: *Holder = leak()
+    println((*g).xs[0])
+    return 0
+}

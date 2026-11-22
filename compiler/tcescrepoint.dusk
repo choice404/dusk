@@ -1,0 +1,793 @@
+// The call edges and written type facts the frame relation reads. A call ties its
+// operands the way the callee's own relation ties its parameters, read once per
+// callee and cached; a builtin, a constructor, a call through a function value, and an
+// opaque callee each have their fixed shape. The type facts say whether a value of a
+// written type can hold a reference at all and the declared type a field, a
+// dereference, or an element projects to, each answered over the AST alone, an
+// unknown or generic type conservatively
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import summary
+@import resolveexpr
+@import tcescunify
+@import tcescwalk
+
+/** The call edges of a function as its callers see them, per operand slot with a
+ *  method receiver at 0: the lowest slot sharing its class, whether the class reaches
+ *  outside, and whether the function's result may be it */
+export struct ClassSummary { group: *Vector<int64>, sinks: *Vector<int64>, returns: *Vector<int64>, result_outside: bool }
+
+/** The callee summaries computed so far and the cycle state behind them: the callees
+ *  being walked, the summaries a recursive call reads back while its cycle settles,
+ *  those the current pass computed, the relations it built and those kept once final,
+ *  and the names every relation tests a type or a pattern against */
+export struct RelationCache {
+    classes: *Map<int64, ClassSummary>,
+    active: *Map<int64, int64>,
+    provisional: *Map<int64, ClassSummary>,
+    tentative: *Map<int64, ClassSummary>,
+    read_back: *Map<int64, int64>,
+    walking: int64,
+    saturated: bool,
+    receivers: *Map<int64, string>,
+    carries: *Map<int64, bool>,
+    generics: *Map<string, int64>,
+    variants: *Map<string, int64>,
+    pass_relations: *Map<int64, *FrameRelation>,
+    relations: *Map<int64, *FrameRelation>,
+}
+
+/** A fresh cache
+ *  @params t - The surface tables
+ *  @returns {*RelationCache} - The cache, with every method's receiver, every type
+ *  parameter name, and every variant name indexed */
+export func relation_cache_new(t: *SumTables) -> *RelationCache {
+    a: *Ast = (*t).ast
+    receivers: *Map<int64, string> = alloc(map_new())
+    for implementation in (*a).impls {
+        receiver: string = ast_name(a, implementation.ty)
+        for i in 0..implementation.methods_len { map_put(receivers, vec_get((*a).kids, implementation.methods_off + i), receiver) }
+    }
+    classes: *Map<int64, ClassSummary> = alloc(map_new())
+    active: *Map<int64, int64> = alloc(map_new())
+    provisional: *Map<int64, ClassSummary> = alloc(map_new())
+    tentative: *Map<int64, ClassSummary> = alloc(map_new())
+    read_back: *Map<int64, int64> = alloc(map_new())
+    carries: *Map<int64, bool> = alloc(map_new())
+    pass_relations: *Map<int64, *FrameRelation> = alloc(map_new())
+    relations: *Map<int64, *FrameRelation> = alloc(map_new())
+    return alloc(RelationCache {
+        classes: classes, active: active, provisional: provisional, tentative: tentative, read_back: read_back,
+        walking: 0, saturated: false, receivers: receivers, carries: carries,
+        generics: type_parameter_names(a), variants: variant_names(a),
+        pass_relations: pass_relations, relations: relations,
+    })
+}
+
+// Every name any function, method, struct, enum, or interface takes as a type
+// parameter. A written type of such a name may stand for any type, a pointer included,
+// even where a struct or a builtin type spells the same name
+func type_parameter_names(a: *Ast) -> *Map<string, int64> {
+    out: *Map<string, int64> = alloc(map_new())
+    for function in (*a).funcs { note_names(a, function.generics_off, function.generics_len, out) }
+    for record in (*a).structs { note_names(a, record.generics_off, record.generics_len, out) }
+    for enumeration in (*a).enums { note_names(a, enumeration.generics_off, enumeration.generics_len, out) }
+    for contract in (*a).interfaces { note_names(a, contract.generics_off, contract.generics_len, out) }
+    return out
+}
+
+func note_names(a: *Ast, offset: int64, count: int64, out: *Map<string, int64>) -> void {
+    for i in 0..count { map_put(out, ast_name(a, vec_get((*a).kids, offset + i)), 1) }
+}
+
+// Every variant name, a payloadless one included, which a match pattern names rather
+// than binds
+func variant_names(a: *Ast) -> *Map<string, int64> {
+    out: *Map<string, int64> = alloc(map_new())
+    for variant in (*a).variants { map_put(out, ast_name(a, variant.name), 1) }
+    return out
+}
+
+/** The receiver type a method is declared on
+ *  @params t - The surface tables
+ *  @params cache - The query's cache
+ *  @params function_id - A function node
+ *  @returns {string} - The receiver's name, or empty for a free function */
+export func method_receiver(t: *SumTables, cache: *RelationCache, function_id: int64) -> string {
+    return unwrap_or(map_get((*cache).receivers, function_id), "")
+}
+
+/** The edges a call adds and the class its result points into
+ *  @params rel - The relation being built
+ *  @params call - The call expression
+ *  @returns {int64} - The result's node, or -1 */
+export func relation_call(rel: *FrameRelation, call: ExprNode) -> int64 {
+    a: *Ast = (*(*rel).t).ast
+    operands: *Vector<int64> = alloc(vec_new())
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    is_method: bool = callee.kind == xk_field() && !is_enum_base(rel, callee)
+    if is_method { vec_push(operands, relation_eval(rel, callee.a)) }
+    for i in 0..call.c { vec_push(operands, relation_eval(rel, vec_get((*a).kids, call.b + i))) }
+    relation_note_callee(rel, call.a)
+    if callee.kind == xk_ident() { return call_named(rel, ast_name(a, callee.a), operands) }
+    if is_method { return call_method(rel, callee, operands) }
+    if callee.kind == xk_field() { return relation_join_all(rel, operands) }
+    // A call through any other value reaches what the value's environment reaches
+    vec_push(operands, relation_eval(rel, call.a))
+    return relation_join_all(rel, operands)
+}
+
+// A constructor qualified by an enum the function does not rebind
+func is_enum_base(rel: *FrameRelation, callee: ExprNode) -> bool {
+    a: *Ast = (*(*rel).t).ast
+    base: ExprNode = vec_get((*a).exprs, callee.a)
+    if base.kind != xk_ident() { return false }
+    name: string = ast_name(a, base.a)
+    return map_has((*(*rel).t).enum_idx, name) && relation_decl_count(rel, name) == 0
+}
+
+// A name the function binds is a function value, which may touch every argument and
+// its environment. One the module or the language also declares may be that item in a
+// scope the binding does not cover, so the call takes both edges
+func call_named(rel: *FrameRelation, name: string, operands: *Vector<int64>) -> int64 {
+    if relation_decl_count(rel, name) == 0 { return call_item(rel, name, operands) }
+    through: *Vector<int64> = alloc(vec_new())
+    for operand in operands { vec_push(through, operand) }
+    vec_push(through, relation_ident(rel, name))
+    bound: int64 = relation_join_all(rel, through)
+    if !names_callable_item(rel, name) { return bound }
+    return relation_join(rel, bound, call_item(rel, name, operands))
+}
+
+func names_callable_item(rel: *FrameRelation, name: string) -> bool {
+    t: *SumTables = (*rel).t
+    if map_has((*t).module_fns, name) || map_has((*t).variant_idx, name) || is_builtin_name(name) { return true }
+    return is_shared_builtin(name) || is_cast_name(name) || !builtin_summary(name).empty
+}
+
+func call_item(rel: *FrameRelation, name: string, operands: *Vector<int64>) -> int64 {
+    t: *SumTables = (*rel).t
+    if is_first_operand_builtin(name) && vec_len(operands) >= 1 { return vec_get(operands, 0) }
+    if is_cast_name(name) { return -1 }
+    if is_shared_builtin(name) { return join_outside(rel, operands) }
+    function_id: int64 = unwrap_or(map_get((*t).module_fns, name), -1)
+    if function_id >= 0 { return apply_function(rel, function_id, operands) }
+    if is_higher_order_name(name) || map_has((*t).variant_idx, name) { return relation_join_all(rel, operands) }
+    if !builtin_summary(name).empty { return -1 }
+    return join_outside(rel, operands)
+}
+
+// Every operand of an opaque call reaches outside the frame, and so does its result
+func join_outside(rel: *FrameRelation, operands: *Vector<int64>) -> int64 {
+    for operand in operands { relation_unite(rel, operand, relation_outside()) }
+    return relation_outside()
+}
+
+// The result of these is, or points into, their first argument
+func is_first_operand_builtin(name: string) -> bool {
+    if str_eq(name, "alloc") || str_eq(name, "move") { return true }
+    return str_eq(name, "ptr_add") || str_eq(name, "cstr")
+}
+
+func is_cast_name(name: string) -> bool {
+    if str_eq(name, "int8") || str_eq(name, "int16") || str_eq(name, "int32") || str_eq(name, "int64") { return true }
+    if str_eq(name, "uint8") || str_eq(name, "uint16") || str_eq(name, "uint32") || str_eq(name, "uint64") { return true }
+    return str_eq(name, "float32") || str_eq(name, "float64") || str_eq(name, "char") || str_eq(name, "rune")
+}
+
+// What another thread or a channel receives leaves the frame the moment it is handed
+// over, and what a joined thread hands back was made elsewhere
+func is_shared_builtin(name: string) -> bool {
+    if str_eq(name, "chan_send") || str_eq(name, "chan_try_send") || str_eq(name, "join") { return true }
+    return str_eq(name, "spawn") || str_eq(name, "submit") || str_eq(name, "async_run")
+}
+
+func is_higher_order_name(name: string) -> bool {
+    if str_eq(name, "map") || str_eq(name, "filter") || str_eq(name, "reduce") { return true }
+    return str_eq(name, "fold") || str_eq(name, "foreach")
+}
+
+// The method the receiver's written type names, else the join of every method of the
+// name, since a method touches only its receiver and arguments. A name no method
+// declares is opaque, unless it is one of the error value's own methods, and a name
+// some struct field also carries may be a call through a closure the receiver holds
+func call_method(rel: *FrameRelation, callee: ExprNode, operands: *Vector<int64>) -> int64 {
+    t: *SumTables = (*rel).t
+    a: *Ast = (*t).ast
+    method: string = ast_name(a, callee.b)
+    no_keys: *Vector<string> = alloc(vec_new())
+    keys: *Vector<string> = unwrap_or(map_get((*t).method_names, method), no_keys)
+    is_field: bool = field_named(t, method)
+    if vec_len(keys) == 0 && !is_field { return call_unnamed_method(rel, method, operands) }
+    mut result: int64 = -1
+    if is_field { result = relation_join_all(rel, operands) }
+    exact: string = sum_variant_key(receiver_type_name(rel, callee.a), method)
+    if map_has((*t).method_funcs, exact) {
+        return relation_join(rel, result, apply_function(rel, unwrap_or(map_get((*t).method_funcs, exact), -1), operands))
+    }
+    for key in keys {
+        result = relation_join(rel, result, apply_function(rel, unwrap_or(map_get((*t).method_funcs, key), -1), operands))
+    }
+    return result
+}
+
+// The error value's exists, toString, and ignore read it and nothing else; check
+// hands the error to its handler, a call through the handler's value. Any other method
+// no declaration names is opaque
+func call_unnamed_method(rel: *FrameRelation, method: string, operands: *Vector<int64>) -> int64 {
+    if str_eq(method, "exists") || str_eq(method, "toString") || str_eq(method, "ignore") { return -1 }
+    if !str_eq(method, "check") { return join_outside(rel, operands) }
+    relation_join_all(rel, operands)
+    return -1
+}
+
+// The struct a receiver's written type names, through any pointer, or empty
+func receiver_type_name(rel: *FrameRelation, receiver_id: int64) -> string {
+    t: *SumTables = (*rel).t
+    a: *Ast = (*t).ast
+    receiver: ExprNode = vec_get((*a).exprs, receiver_id)
+    if receiver.kind == xk_ident() && str_eq(ast_name(a, receiver.a), "self") && relation_decl_count(rel, "self") == 1 {
+        return method_receiver(t, (*rel).cache, (*rel).function_id)
+    }
+    type_id: int64 = relation_expr_type(rel, receiver_id)
+    if type_id < 0 { return "" }
+    mut node: TypeNode = vec_get((*a).types, type_id)
+    while node.kind == tk_ptr() || node.kind == tk_rawptr() { node = vec_get((*a).types, node.a) }
+    if node.kind != tk_named() || map_has((*t).ifaces, ast_name(a, node.a)) { return "" }
+    return ast_name(a, node.a)
+}
+
+// Whether some struct declares a field of the name, which a call may read a closure from
+func field_named(t: *SumTables, name: string) -> bool {
+    a: *Ast = (*t).ast
+    for record in (*a).structs {
+        for i in 0..record.fields_len {
+            field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, record.fields_off + i))
+            if str_eq(ast_name(a, field.name), name) { return true }
+        }
+    }
+    return false
+}
+
+// A call into the function being walked ties each operand to its own parameter. An
+// async callee's task holds every operand until it is awaited, past the frame
+func apply_function(rel: *FrameRelation, function_id: int64, operands: *Vector<int64>) -> int64 {
+    if function_id < 0 { return join_outside(rel, operands) }
+    if is_async_function((*rel).t, function_id) { return async_task(rel, operands) }
+    if function_id == (*rel).function_id {
+        for i in 0..vec_len(operands) { relation_unite(rel, vec_get(operands, i), relation_own_operand(rel, i)) }
+        return relation_returned(rel)
+    }
+    summary: ClassSummary = class_summary((*rel).t, (*rel).cache, function_id)
+    if vec_len(summary.group) != vec_len(operands) { return join_outside(rel, operands) }
+    return apply_class_summary(rel, summary, operands)
+}
+
+func is_async_function(t: *SumTables, function_id: int64) -> bool {
+    function: FuncNode = vec_get((*(*t).ast).funcs, function_id)
+    return function.is_async
+}
+
+// Every operand reaches outside the frame, and the task the call returns holds them all
+func async_task(rel: *FrameRelation, operands: *Vector<int64>) -> int64 {
+    joined: int64 = relation_join_all(rel, operands)
+    join_outside(rel, operands)
+    return relation_join(rel, joined, relation_outside())
+}
+
+/** Whether a function, called through a value, may hand an operand or its result to
+ *  memory outside the calling frame
+ *  @params rel - The relation being built
+ *  @params function_id - The function read as a value
+ *  @returns {bool} - True for the function being walked itself */
+export func function_value_leaks(rel: *FrameRelation, function_id: int64) -> bool {
+    if function_id < 0 || function_id == (*rel).function_id { return true }
+    summary: ClassSummary = class_summary((*rel).t, (*rel).cache, function_id)
+    if summary.result_outside { return true }
+    for sink in summary.sinks {
+        if sink != 0 { return true }
+    }
+    return false
+}
+
+/** The call edges of a function, computed from its relation once per cache. A cycle of
+ *  calls settles to its least fixpoint: each pass starts from the summaries the cycle
+ *  read back from the pass before, none on the first, and the cycle repeats until every
+ *  summary read back equals the one the pass computed
+ *  @params t - The surface tables
+ *  @params cache - The shared cache
+ *  @params function_id - The callee
+ *  @returns {ClassSummary} - Its edges per operand slot */
+export func class_summary(t: *SumTables, cache: *RelationCache, function_id: int64) -> ClassSummary {
+    if map_has((*cache).classes, function_id) {
+        return unwrap_or(map_get((*cache).classes, function_id), empty_class_summary())
+    }
+    if is_async_function(t, function_id) { return keep_summary(cache, function_id, task_summary(t, cache, function_id)) }
+    if (*cache).walking > 0 { return summary_in_pass(t, cache, function_id) }
+    return summary_to_fixpoint(t, cache, function_id)
+}
+
+func keep_summary(cache: *RelationCache, function_id: int64, summary: ClassSummary) -> ClassSummary {
+    map_put((*cache).classes, function_id, summary)
+    return summary
+}
+
+// Deep enough for any cycle of real calls; past it every summary a cycle reads back
+// is the widest, which settles in one more pass
+func pass_limit() -> int64 { return 24 }
+
+func summary_to_fixpoint(t: *SumTables, cache: *RelationCache, function_id: int64) -> ClassSummary {
+    mut result: ClassSummary = empty_class_summary()
+    mut passes: int64 = 0
+    mut settled: bool = false
+    while !settled {
+        (*cache).tentative = alloc(map_new())
+        (*cache).read_back = alloc(map_new())
+        fresh_relations: *Map<int64, *FrameRelation> = alloc(map_new())
+        (*cache).pass_relations = fresh_relations
+        result = summary_in_pass(t, cache, function_id)
+        passes++
+        settled = pass_settled(cache)
+        if passes >= pass_limit() { (*cache).saturated = true }
+    }
+    tentative: *Map<int64, ClassSummary> = (*cache).tentative
+    for i in 0..map_len(tentative) { map_put((*cache).classes, map_key_at(tentative, i), map_val_at(tentative, i)) }
+    keep_final_relations(cache)
+    (*cache).saturated = false
+    (*cache).provisional = alloc(map_new())
+    return result
+}
+
+// One pass's summary of a callee: one the pass already computed, the provisional one of
+// a callee the pass is still walking, which a recursive call reads back, or a fresh walk
+func summary_in_pass(t: *SumTables, cache: *RelationCache, function_id: int64) -> ClassSummary {
+    if map_has((*cache).tentative, function_id) {
+        return unwrap_or(map_get((*cache).tentative, function_id), empty_class_summary())
+    }
+    if map_has((*cache).active, function_id) {
+        map_put((*cache).read_back, function_id, 1)
+        if (*cache).saturated { return task_summary(t, cache, function_id) }
+        return unwrap_or(map_get((*cache).provisional, function_id), bottom_summary(operand_count(t, cache, function_id)))
+    }
+    map_put((*cache).active, function_id, 1)
+    (*cache).walking = (*cache).walking + 1
+    rel: *FrameRelation = function_frame_relation(t, cache, function_id)
+    map_put((*cache).pass_relations, function_id, rel)
+    summary: ClassSummary = relation_summary(rel, operand_count(t, cache, function_id))
+    (*cache).walking = (*cache).walking - 1
+    map_remove((*cache).active, function_id)
+    map_put((*cache).tentative, function_id, summary)
+    return summary
+}
+
+// A pass settles when every summary read back equals what the pass computed for it;
+// otherwise the computed ones become the next pass's provisional summaries. A pass
+// past the limit read back only the widest summaries, so it settles as it is
+func pass_settled(cache: *RelationCache) -> bool {
+    if (*cache).saturated { return true }
+    mut settled: bool = true
+    read_back: *Map<int64, int64> = (*cache).read_back
+    for i in 0..map_len(read_back) {
+        function_id: int64 = map_key_at(read_back, i)
+        computed: ClassSummary = unwrap_or(map_get((*cache).tentative, function_id), empty_class_summary())
+        used: ClassSummary = unwrap_or(map_get((*cache).provisional, function_id), bottom_summary(vec_len(computed.group)))
+        if !same_summary(computed, used) {
+            map_put((*cache).provisional, function_id, computed)
+            settled = false
+        }
+    }
+    return settled
+}
+
+func operand_count(t: *SumTables, cache: *RelationCache, function_id: int64) -> int64 {
+    function: FuncNode = vec_get((*(*t).ast).funcs, function_id)
+    if str_len(method_receiver(t, cache, function_id)) > 0 { return function.params_len + 1 }
+    return function.params_len
+}
+
+// The narrowest summary of a callee, the start of a cycle's first pass: no operand
+// shares a class, none reaches outside, and none is returned
+func bottom_summary(count: int64) -> ClassSummary {
+    return flat_summary(count, 0)
+}
+
+// The widest summary of a callee: every operand reaches outside and the result holds
+// every operand, the shape an async callee's task has
+func task_summary(t: *SumTables, cache: *RelationCache, function_id: int64) -> ClassSummary {
+    summary: ClassSummary = flat_summary(operand_count(t, cache, function_id), 1)
+    return ClassSummary { group: summary.group, sinks: summary.sinks, returns: summary.returns, result_outside: true }
+}
+
+func flat_summary(count: int64, flag: int64) -> ClassSummary {
+    group: *Vector<int64> = alloc(vec_new())
+    sinks: *Vector<int64> = alloc(vec_new())
+    returns: *Vector<int64> = alloc(vec_new())
+    for i in 0..count {
+        vec_push(group, i)
+        vec_push(sinks, flag)
+        vec_push(returns, flag)
+    }
+    return ClassSummary { group: group, sinks: sinks, returns: returns, result_outside: false }
+}
+
+// Two summaries that make the same edges; a slot alone in its class is its own group
+func same_summary(first: ClassSummary, second: ClassSummary) -> bool {
+    count: int64 = vec_len(first.group)
+    if count != vec_len(second.group) || first.result_outside != second.result_outside { return false }
+    for i in 0..count {
+        if own_group(first.group, i) != own_group(second.group, i) { return false }
+        if vec_get(first.sinks, i) != vec_get(second.sinks, i) || vec_get(first.returns, i) != vec_get(second.returns, i) { return false }
+    }
+    return true
+}
+
+func own_group(group: *Vector<int64>, i: int64) -> int64 {
+    value: int64 = vec_get(group, i)
+    if value < 0 { return i }
+    return value
+}
+
+func empty_class_summary() -> ClassSummary {
+    none: *Vector<int64> = alloc(vec_new())
+    return ClassSummary { group: none, sinks: none, returns: none, result_outside: true }
+}
+
+/** The operand slots of the walked function whose classes reach outside, reach its
+ *  result, or share one class, read by a caller of it
+ *  @params rel - A whole function relation
+ *  @params count - The operand count, a method receiver included
+ *  @returns {ClassSummary} - The call edges the function may make */
+export func relation_summary(rel: *FrameRelation, count: int64) -> ClassSummary {
+    group: *Vector<int64> = alloc(vec_new())
+    sinks: *Vector<int64> = alloc(vec_new())
+    returns: *Vector<int64> = alloc(vec_new())
+    classes: *Vector<int64> = alloc(vec_new())
+    for i in 0..count {
+        node: int64 = operand_node(rel, i)
+        mut class: int64 = -1
+        if node >= 0 { class = relation_class(rel, node) }
+        vec_push(classes, class)
+        vec_push(group, first_index_of(classes, class))
+        vec_push(sinks, flag_int(relation_marked(rel, node, relation_outside())))
+        vec_push(returns, flag_int(relation_marked(rel, node, relation_return())))
+    }
+    return ClassSummary { group: group, sinks: sinks, returns: returns, result_outside: returns_outside(rel) }
+}
+
+// Whether a value the function returns may point outside its frame
+func returns_outside(rel: *FrameRelation) -> bool {
+    for i in 0..vec_len((*rel).parent) {
+        if relation_marked(rel, i, relation_return()) && relation_marked(rel, i, relation_outside()) { return true }
+    }
+    return false
+}
+
+func operand_node(rel: *FrameRelation, operand: int64) -> int64 {
+    index: int64 = relation_operand_decl(rel, operand)
+    if index < 0 { return -1 }
+    record: NameDecl = vec_get((*rel).decls, index)
+    return relation_node_of(rel, record.name, record.frame)
+}
+
+func first_index_of(values: *Vector<int64>, value: int64) -> int64 {
+    if value < 0 { return -1 }
+    for i in 0..vec_len(values) {
+        if vec_get(values, i) == value { return i }
+    }
+    return -1
+}
+
+func flag_int(flag: bool) -> int64 {
+    if flag { return 1 }
+    return 0
+}
+
+/** The node of a walked function's own operand slot, for a call back into the
+ *  function being walked
+ *  @params rel - The relation being built
+ *  @params operand - The operand slot, a method receiver at 0
+ *  @returns {int64} - The parameter's node, or -1 */
+export func relation_own_operand(rel: *FrameRelation, operand: int64) -> int64 {
+    index: int64 = relation_operand_decl(rel, operand)
+    if index < 0 { return -1 }
+    record: NameDecl = vec_get((*rel).decls, index)
+    return relation_name_value(rel, record.name)
+}
+
+// Operands sharing a parameter class join, a class reaching outside takes its operands
+// with it, and the result points into each operand the callee may return
+func apply_class_summary(rel: *FrameRelation, summary: ClassSummary, operands: *Vector<int64>) -> int64 {
+    count: int64 = vec_len(operands)
+    joined: *Vector<int64> = alloc(vec_new())
+    for i in 0..count { vec_push(joined, -1) }
+    mut result: int64 = -1
+    for i in 0..count {
+        operand: int64 = vec_get(operands, i)
+        group: int64 = vec_get(summary.group, i)
+        if group >= 0 { vec_set(joined, group, relation_join(rel, vec_get(joined, group), operand)) }
+        if vec_get(summary.sinks, i) != 0 { relation_unite(rel, operand, relation_outside()) }
+        if vec_get(summary.returns, i) != 0 { result = relation_join(rel, result, operand) }
+    }
+    if summary.result_outside { result = relation_join(rel, result, relation_outside()) }
+    return result
+}
+
+
+/** Whether an expression's written type, where the walk can read one, holds no
+ *  reference
+ *  @params rel - The relation being built
+ *  @params id - The expression
+ *  @returns {bool} - False when the type is unknown */
+export func relation_holds_no_reference(rel: *FrameRelation, id: int64) -> bool {
+    ty: int64 = relation_expr_type(rel, id)
+    return ty >= 0 && !type_carries((*rel).t, (*rel).cache, ty)
+}
+
+/** The declared type of a projection chain over annotated bindings
+ *  @params rel - The relation being built
+ *  @params id - The expression
+ *  @returns {int64} - The written type, or -1 when the walk cannot read one */
+export func relation_expr_type(rel: *FrameRelation, id: int64) -> int64 {
+    written: int64 = written_expr_type(rel, id)
+    if names_type_parameter(rel, written) { return -1 }
+    return written
+}
+
+/** Whether a written type names a type parameter, through any pointer. A type some
+ *  generic declaration also names as a parameter may be that parameter rather than
+ *  the struct or enum of the name, so the walk reads it as unknown
+ *  @params rel - The relation asking
+ *  @params type_id - The written type
+ *  @returns {bool} - True for a name some declaration takes as a type parameter */
+export func names_type_parameter(rel: *FrameRelation, type_id: int64) -> bool {
+    if type_id < 0 { return false }
+    a: *Ast = (*(*rel).t).ast
+    mut node: TypeNode = vec_get((*a).types, type_id)
+    while node.kind == tk_ptr() || node.kind == tk_rawptr() { node = vec_get((*a).types, node.a) }
+    return node.kind == tk_named() && map_has((*(*rel).cache).generics, ast_name(a, node.a))
+}
+
+func written_expr_type(rel: *FrameRelation, id: int64) -> int64 {
+    a: *Ast = (*(*rel).t).ast
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() { return ident_type(rel, ast_name(a, e.a)) }
+    if e.kind == xk_field() { return field_type((*rel).t, relation_expr_type(rel, e.a), ast_name(a, e.b)) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return pointee_type((*rel).t, relation_expr_type(rel, e.b)) }
+    if e.kind == xk_index() {
+        index: ExprNode = vec_get((*a).exprs, e.b)
+        if index.kind == xk_range() { return -1 }
+        return element_type((*rel).t, relation_expr_type(rel, e.a))
+    }
+    return -1
+}
+
+// A name that is also a module function may read the function where no declaration
+// covers it, so a declared type of the name says nothing about the value
+func ident_type(rel: *FrameRelation, name: string) -> int64 {
+    if map_has((*(*rel).t).module_fns, name) { return -1 }
+    return name_type(rel, name)
+}
+
+// A name's type when every declaration writes the same one, kept once the first walk
+// has collected every declaration
+func name_type(rel: *FrameRelation, name: string) -> int64 {
+    if map_has((*rel).type_memo, name) { return unwrap_or(map_get((*rel).type_memo, name), -1) }
+    found: int64 = declared_type(rel, name)
+    if !(*rel).collecting { map_put((*rel).type_memo, name, found) }
+    return found
+}
+
+func declared_type(rel: *FrameRelation, name: string) -> int64 {
+    mut found: int64 = -1
+    for index in relation_decls_of(rel, name) {
+        record: NameDecl = vec_get((*rel).decls, index)
+        if record.ty < 0 { return -1 }
+        if found >= 0 && !same_type((*(*rel).t).ast, found, record.ty) { return -1 }
+        found = record.ty
+    }
+    return found
+}
+
+/** The binding a written place roots at through fields, indexes, and dereferences
+ *  @params a - The AST
+ *  @params id - The place expression
+ *  @returns {string} - The root binding's name, or empty for any other base */
+export func written_place_root(a: *Ast, id: int64) -> string {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() { return ast_name(a, e.a) }
+    if e.kind == xk_field() || e.kind == xk_index() { return written_place_root(a, e.a) }
+    if e.kind == xk_unary() && e.a == uop_deref() { return written_place_root(a, e.b) }
+    return ""
+}
+
+/** Every name an expression reads, at any depth, lambda bodies aside
+ *  @params a - The AST
+ *  @params id - The expression
+ *  @params out - Receives the names, repeats included
+ *  @returns {void} */
+export func collect_read_names(a: *Ast, id: int64, out: *Vector<string>) -> void {
+    if id < 0 { return }
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        vec_push(out, ast_name(a, e.a))
+    } else if e.kind == xk_unary() {
+        collect_read_names(a, e.b, out)
+    } else if e.kind == xk_binary() {
+        collect_read_names(a, e.b, out)
+        collect_read_names(a, e.c, out)
+    } else if e.kind == xk_field() || e.kind == xk_incdec() || e.kind == xk_await() {
+        collect_read_names(a, e.a, out)
+    } else if e.kind == xk_index() || e.kind == xk_range() {
+        collect_read_names(a, e.a, out)
+        collect_read_names(a, e.b, out)
+    } else if e.kind == xk_call() {
+        collect_read_names(a, e.a, out)
+        for i in 0..e.c { collect_read_names(a, vec_get((*a).kids, e.b + i), out) }
+    } else if e.kind == xk_tuple() || e.kind == xk_array() || e.kind == xk_fstr() {
+        for j in 0..e.b { collect_read_names(a, vec_get((*a).kids, e.a + j), out) }
+    } else if e.kind == xk_struct_lit() {
+        for k in 0..e.c / 2 { collect_read_names(a, vec_get((*a).kids, e.b + 2 * k + 1), out) }
+    }
+}
+
+// Deep enough for any written type; a deeper one is answered conservatively
+func reach_depth_limit() -> int64 { return 12 }
+
+func scalar_name(name: string) -> bool {
+    if str_eq(name, "int8") || str_eq(name, "uint8") || str_eq(name, "int16") || str_eq(name, "uint16") { return true }
+    if str_eq(name, "int32") || str_eq(name, "uint32") || str_eq(name, "int64") || str_eq(name, "uint64") { return true }
+    if str_eq(name, "float32") || str_eq(name, "float64") || str_eq(name, "bool") || str_eq(name, "char") { return true }
+    return str_eq(name, "rune") || str_eq(name, "string") || str_eq(name, "void") || str_eq(name, "error")
+}
+
+/** The member types of a declared struct, or of every variant of a declared enum
+ *  @params t - The surface tables
+ *  @params name - The type's name
+ *  @returns {*Vector<int64>} - The written member types, empty for any other name */
+export func aggregate_member_types(t: *SumTables, name: string) -> *Vector<int64> {
+    a: *Ast = (*t).ast
+    out: *Vector<int64> = alloc(vec_new())
+    struct_index: int64 = unwrap_or(map_get((*t).struct_idx, name), -1)
+    if struct_index >= 0 {
+        record: StructNode = vec_get((*a).structs, struct_index)
+        for i in 0..record.fields_len {
+            field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, record.fields_off + i))
+            vec_push(out, field.ty)
+        }
+        return out
+    }
+    enum_index: int64 = unwrap_or(map_get((*t).enum_idx, name), -1)
+    if enum_index < 0 { return out }
+    enumeration: EnumNode = vec_get((*a).enums, enum_index)
+    for i in 0..enumeration.variants_len {
+        variant: VariantNode = vec_get((*a).variants, vec_get((*a).kids, enumeration.variants_off + i))
+        for j in 0..variant.fields_len {
+            field: FieldNode = vec_get((*a).fields, vec_get((*a).kids, variant.fields_off + j))
+            vec_push(out, field.ty)
+        }
+    }
+    return out
+}
+
+func is_aggregate(t: *SumTables, name: string) -> bool {
+    return map_has((*t).struct_idx, name) || map_has((*t).enum_idx, name)
+}
+
+/** Whether a value of a written type can hold a pointer, a slice, or a closure
+ *  @params t - The surface tables
+ *  @params relations - The query's cache
+ *  @params type_id - The written type
+ *  @returns {bool} - False only for a type built of scalars and strings alone */
+export func type_carries(t: *SumTables, relations: *RelationCache, type_id: int64) -> bool {
+    if type_id < 0 { return true }
+    cache: *Map<int64, bool> = (*relations).carries
+    if map_has(cache, type_id) { return unwrap_or(map_get(cache, type_id), true) }
+    seen: *Map<string, int64> = alloc(map_new())
+    answer: bool = carries_at(t, (*relations).generics, type_id, seen, 0)
+    map_put(cache, type_id, answer)
+    return answer
+}
+
+// A name some declaration takes as a type parameter may stand for any type, so it
+// carries whatever struct or builtin type shares its spelling
+func carries_at(t: *SumTables, generics: *Map<string, int64>, type_id: int64, seen: *Map<string, int64>, depth: int64) -> bool {
+    if depth > reach_depth_limit() { return true }
+    a: *Ast = (*t).ast
+    node: TypeNode = vec_get((*a).types, type_id)
+    if node.kind == tk_slice() || node.kind == tk_func() || node.kind == tk_ptr() || node.kind == tk_rawptr() { return true }
+    if node.kind == tk_unit() { return false }
+    if node.kind == tk_array() { return carries_at(t, generics, node.a, seen, depth + 1) }
+    if node.kind == tk_tuple() {
+        for i in 0..node.b {
+            if carries_at(t, generics, vec_get((*a).kids, node.a + i), seen, depth + 1) { return true }
+        }
+        return false
+    }
+    if node.kind != tk_named() { return true }
+    name: string = ast_name(a, node.a)
+    if map_has(generics, name) { return true }
+    if scalar_name(name) { return false }
+    if map_has((*t).ifaces, name) || !is_aggregate(t, name) { return true }
+    for i in 0..node.c {
+        if carries_at(t, generics, vec_get((*a).kids, node.b + i), seen, depth + 1) { return true }
+    }
+    if map_has(seen, name) { return false }
+    map_put(seen, name, 1)
+    for member in aggregate_member_types(t, name) {
+        if carries_at(t, generics, member, seen, depth + 1) { return true }
+    }
+    return false
+}
+
+/** The declared type of a named field of a struct value or of a pointer to one
+ *  @params t - The surface tables
+ *  @params base - The base's written type, or -1
+ *  @params field - The field name
+ *  @returns {int64} - The field's written type, or -1 when unknown or generic */
+export func field_type(t: *SumTables, base: int64, field: string) -> int64 {
+    if base < 0 { return -1 }
+    a: *Ast = (*t).ast
+    mut node: TypeNode = vec_get((*a).types, base)
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() { node = vec_get((*a).types, node.a) }
+    if node.kind != tk_named() || node.c != 0 { return -1 }
+    struct_index: int64 = unwrap_or(map_get((*t).struct_idx, ast_name(a, node.a)), -1)
+    if struct_index < 0 { return -1 }
+    record: StructNode = vec_get((*a).structs, struct_index)
+    if record.generics_len != 0 { return -1 }
+    for i in 0..record.fields_len {
+        candidate: FieldNode = vec_get((*a).fields, vec_get((*a).kids, record.fields_off + i))
+        if str_eq(ast_name(a, candidate.name), field) { return candidate.ty }
+    }
+    return -1
+}
+
+/** The pointee a dereference reads
+ *  @params t - The surface tables
+ *  @params base - The pointer's written type, or -1
+ *  @returns {int64} - The pointee's written type, or -1 */
+export func pointee_type(t: *SumTables, base: int64) -> int64 {
+    if base < 0 { return -1 }
+    node: TypeNode = vec_get((*(*t).ast).types, base)
+    if node.kind == tk_ptr() || node.kind == tk_rawptr() || node.kind == tk_collector() { return node.a }
+    return -1
+}
+
+/** The element a single index reads out of a slice or an array
+ *  @params t - The surface tables
+ *  @params base - The indexed value's written type, or -1
+ *  @returns {int64} - The element's written type, or -1 */
+export func element_type(t: *SumTables, base: int64) -> int64 {
+    if base < 0 { return -1 }
+    node: TypeNode = vec_get((*(*t).ast).types, base)
+    if node.kind == tk_slice() || node.kind == tk_array() { return node.a }
+    return -1
+}
+
+/** Whether two written types spell the same type
+ *  @params a - The AST holding both
+ *  @params first - One written type
+ *  @params second - The other
+ *  @returns {bool} - True when they match node for node */
+export func same_type(a: *Ast, first: int64, second: int64) -> bool {
+    if first == second { return true }
+    if first < 0 || second < 0 { return false }
+    x: TypeNode = vec_get((*a).types, first)
+    y: TypeNode = vec_get((*a).types, second)
+    if x.kind != y.kind { return false }
+    if x.kind == tk_named() {
+        if x.a != y.a || x.c != y.c { return false }
+        for i in 0..x.c {
+            if !same_type(a, vec_get((*a).kids, x.b + i), vec_get((*a).kids, y.b + i)) { return false }
+        }
+        return true
+    }
+    if x.kind == tk_ptr() || x.kind == tk_rawptr() || x.kind == tk_slice() || x.kind == tk_collector() { return same_type(a, x.a, y.a) }
+    if x.kind == tk_array() { return x.b == y.b && same_type(a, x.a, y.a) }
+    return false
+}

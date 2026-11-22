@@ -1,0 +1,25 @@
+@paradigm procedural
+@paradigm functional
+@import std.vector
+// Writing a parameter's buffer into a local vector's header makes the local share that
+// buffer, so pushing a frame slice into the local lands in the caller's vector and the
+// push is refused.
+func noise(a: int64, b: int64) -> int64 {
+    e: int64[8] = [9, 9, 9, 9, 9, 9, 9, 9]
+    return a + b + e[0]
+}
+func fillit(pv: *Vector<int64[]>) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    v: *Vector<int64[]> = alloc(vec_new())
+    (*v).data = (*pv).data
+    (*v).cap = (*pv).cap
+    vec_push(v, local[0..4])
+}
+func main() -> int32 {
+    pv: *Vector<int64[]> = alloc(vec_new())
+    vec_push(pv, [7, 7])
+    fillit(pv)
+    println(noise(1, 2))
+    println((*pv).data[0][0])
+    return 0
+}

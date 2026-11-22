@@ -15,13 +15,17 @@
 @import summary
 @import sumflow
 @import sumwalk
+@import sumscope
+@import sumquiet
 @import sumplace
 
 struct SavedParam { name: string, had_env: bool, env_val: SumVal, had_ty: bool, ty_val: int64 }
 
 // The abstract value of a lambda literal: capture-based, so the closure aliases
 // whatever it captures and its environment sits on this frame when it captures any
-// in-scope binding. The body is also summarized standalone (record_lambda_summary)
+// in-scope binding. Inside a lambda walk a binding the walked lambda itself captures
+// counts too, since the inner closure's environment is still built on the walked
+// lambda's frame. The body is also summarized standalone (record_lambda_summary)
 // and walked inline (walk_lambda_inline) so stores through captured places and the
 // lambda's own relation are recorded.
 export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
@@ -38,6 +42,7 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
     pidx: *Map<string, int64> = (*c).param_index
     mut origins: int64 = 0
     mut reads: int64 = 0
+    mut captures: int64 = 0
     mut frame: bool = false
     for n in used {
         if !map_has(bound, n) {
@@ -45,13 +50,14 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
                 av: SumVal = unwrap_or(map_get(env, n), val_none())
                 origins = origins | av.origins
                 reads = reads | av.reads
+                captures = captures | av.captures
             }
-            if map_has(locals, n) || map_has(pidx, n) { frame = true }
+            if map_has(locals, n) || map_has(pidx, n) || outer_has(c, n) { frame = true }
         }
     }
     empty_seeds: *Vector<SumVal> = alloc(vec_new())
     walk_lambda_inline(c, e, empty_seeds)
-    return SumVal { origins: origins, reads: reads, frame: frame }
+    return SumVal { origins: origins, reads: reads, captures: captures, frame: frame }
 }
 
 // Summarizes the lambda body standalone as a function of its own parameters and
@@ -59,7 +65,9 @@ export func sum_eval_lambda(c: *SumCtx, e: ExprNode, id: int64) -> SumVal {
 // view may reach the return (as alias or read-back), those that sink into a
 // channel, the collect subset, and the capture-flow edges. First-wins per span:
 // desugar stamps a do's generated lambdas with the whole do span, so one span
-// records once, in walk order.
+// records once, in walk order. The sites where the body stores a view of its own
+// frame through a capture join this state's frame stores, so they reach the
+// collection pass from however deep a lambda nests.
 func record_lambda_summary(c: *SumCtx, e: ExprNode, id: int64) -> void {
     lret: *Map<string, int64> = (*c).lambda_returns
     lsink: *Map<string, int64> = (*c).lambda_sinks
@@ -68,7 +76,11 @@ func record_lambda_summary(c: *SumCtx, e: ExprNode, id: int64) -> void {
     lspans: *Vector<SpanKey> = (*c).lambda_spans
     key: string = sum_span_key(e.lo, e.hi)
     if map_has(lret, key) { return }
-    sm, caps := lambda_transfer(c, e, id)
+    sm, caps, stores := lambda_transfer(c, e, id)
+    fs: *Vector<FlowProv> = (*c).frame_stores
+    for st in stores {
+        vec_push(fs, st)
+    }
     map_put(lret, key, sm.returns_alias | sm.reads_through)
     map_put(lsink, key, sm.sinks)
     map_put(lcoll, key, sm.collect_sinks)
@@ -90,20 +102,22 @@ func record_lambda_summary(c: *SumCtx, e: ExprNode, id: int64) -> void {
 // is fixed, so within one generation a hit is exactly what a recomputation would yield.
 // A summary that grows between transfers opens a new generation, so a stale, smaller
 // value can never be read back and no view is lost from the summary it feeds.
-func lambda_transfer(c: *SumCtx, e: ExprNode, id: int64) -> (SummaryHandle, string) {
+func lambda_transfer(c: *SumCtx, e: ExprNode, id: int64) -> (SummaryHandle, string, *Vector<FlowProv>) {
     t: *SumTables = (*c).t
     stamps: *Map<int64, int64> = (*t).lam_sum_gen
     gen: int64 = (*t).lam_cache_gen
     if map_has(stamps, id) && unwrap_or(map_get(stamps, id), -1) == gen {
         hit: SummaryHandle = unwrap_or(map_get((*t).lam_sum_cache, id), empty_summary())
-        return (hit, unwrap_or(map_get((*t).lam_caps_cache, id), ""))
+        hit_stores: *Vector<FlowProv> = unwrap_or(map_get((*t).lam_store_cache, id), (*t).lam_store_empty)
+        return (hit, unwrap_or(map_get((*t).lam_caps_cache, id), ""), hit_stores)
     }
-    sm, caps := sum_transfer_lambda(c, e)
+    sm, caps, stores := sum_transfer_lambda(c, e, id)
     ser: string = caps_string(caps)
     map_put((*t).lam_sum_cache, id, sm)
     map_put((*t).lam_caps_cache, id, ser)
+    map_put((*t).lam_store_cache, id, stores)
     map_put(stamps, id, gen)
-    return (sm, ser)
+    return (sm, ser, stores)
 }
 
 // The serialized capture edges of a lambda, or the empty string when it captures
@@ -128,10 +142,12 @@ func lambda_used_names(t: *SumTables, e: ExprNode, id: int64, bound: *Map<string
     return used
 }
 
-// The standalone summary of a lambda body, plus its sorted capture-flow edges,
-// computed in a fresh state seeded with the lambda's own parameters and the
-// enclosing generics.
-func sum_transfer_lambda(c: *SumCtx, e: ExprNode) -> (SummaryHandle, *Vector<CapFlow>) {
+// The standalone summary of a lambda body, plus its sorted capture-flow edges and the
+// capture store sites of its own frame, computed in a fresh state seeded with the
+// lambda's own parameters and the enclosing generics. The state's outer chain is the
+// enclosing state's, plus that state's own parameters and locals, so a name the body
+// uses free and some enclosing scope binds reads as a capture.
+func sum_transfer_lambda(c: *SumCtx, e: ExprNode, id: int64) -> (SummaryHandle, *Vector<CapFlow>, *Vector<FlowProv>) {
     t: *SumTables = (*c).t
     a: *Ast = (*t).ast
     fnb: *Map<string, string> = sum_resolvable_fn_binds(t, e.d)
@@ -142,20 +158,67 @@ func sum_transfer_lambda(c: *SumCtx, e: ExprNode) -> (SummaryHandle, *Vector<Cap
     lspans: *Vector<SpanKey> = alloc(vec_new())
     fs: *Vector<FlowProv> = alloc(vec_new())
     syn: *SumCtx = ctx_new(t, (*c).summaries, (*c).gens, fnb, lret, lsink, lcoll, lcap, lspans, fs)
+    (*syn).outer = enclosing_scopes(c)
+    (*syn).lambda_id = id
+    (*syn).ret_ty = e.c
     for i in 0..e.b {
         pn: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + i))
         ctx_bind_param(syn, ast_name(a, pn.name), pn.ty, i)
     }
-    sum_block(syn, e.d)
+    seed_lambda_captures(c, syn, e, id)
+    sum_body(syn, e.d)
     caps: *Vector<CapFlow> = sort_caps((*syn).capture_flows)
-    return (ctx_summary(syn), caps)
+    return (ctx_summary(syn), caps, capture_stores_of(fs))
+}
+
+// Captures carry their own origin set, so a local alias still names the enclosing
+// binding while the lambda's public summary remains indexed only by parameters
+func seed_lambda_captures(c: *SumCtx, syn: *SumCtx, e: ExprNode, id: int64) -> void {
+    bound: *Map<string, int64> = (*syn).param_index
+    used: *Vector<string> = lambda_used_names((*c).t, e, id, bound)
+    for name in used {
+        if !map_has(bound, name) && outer_has(syn, name) && !map_has((*syn).env, name) {
+            index: int64 = vec_len((*syn).capture_names)
+            vec_push((*syn).capture_names, name)
+            tyid: int64 = unwrap_or(map_get((*c).local_types, name), (*(*c).t).infer_ty)
+            map_put((*syn).local_types, name, tyid)
+            mut value: SumVal = val_none()
+            value.captures = ps_single(index)
+            map_put((*syn).env, name, value)
+        }
+    }
+}
+
+// The scope chain a lambda walked from this state sees: every scope this state sees,
+// then this state's own parameters and locals.
+func enclosing_scopes(c: *SumCtx) -> *Vector<*Map<string, int64>> {
+    out: *Vector<*Map<string, int64>> = alloc(vec_new())
+    outer: *Vector<*Map<string, int64>> = (*c).outer
+    for scope in outer {
+        vec_push(out, scope)
+    }
+    vec_push(out, (*c).param_index)
+    vec_push(out, (*c).locals)
+    return out
+}
+
+// The capture store sites among a lambda walk's frame stores. A store through the
+// lambda's own parameter is left behind: its caller is the code that calls the
+// closure, which this walk cannot name.
+func capture_stores_of(fs: *Vector<FlowProv>) -> *Vector<FlowProv> {
+    out: *Vector<FlowProv> = alloc(vec_new())
+    for st in fs {
+        if st.dst < 0 { vec_push(out, st) }
+    }
+    return out
 }
 
 // Walks a lambda body inline in the enclosing state, with the lambda's parameters
 // bound to the given seeds. Only a view-carrying or managed-pointer-reaching
 // parameter propagates its seed; stores through captures route to the enclosing
-// parameters, and the lambda's returns join an inline sink. The shadowed enclosing
-// bindings are restored afterwards.
+// parameters, and the lambda's returns join an inline sink. Each parameter shadows
+// an enclosing binding or parameter spelled the same for the body's length, and the
+// shadowed enclosing bindings are restored afterwards
 func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) -> SumVal {
     a: *Ast = (*(*c).t).ast
     env: *Map<string, SumVal> = (*c).env
@@ -171,11 +234,12 @@ func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) -> SumV
         tv: int64 = unwrap_or(map_get(lt, name), -1)
         vec_push(saved, SavedParam { name: name, had_env: he, env_val: ev, had_ty: ht, ty_val: tv })
     }
+    depth: int64 = (*c).type_depth
     for j in 0..e.b {
         pn2: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + j))
         name2: string = ast_name(a, pn2.name)
         map_put(locals, name2, 1)
-        map_put(lt, name2, pn2.ty)
+        sum_bind_type(c, name2, pn2.ty)
         view: bool = sum_is_view((*c).t, pn2.ty, (*c).gens)
         reaches: bool = sum_reaches_managed((*c).t, pn2.ty)
         mut seed: SumVal = val_none()
@@ -183,8 +247,10 @@ func walk_lambda_inline(c: *SumCtx, e: ExprNode, seeds: *Vector<SumVal>) -> SumV
         map_put(env, name2, seed)
     }
     lret_push(c, val_none())
-    sum_block(c, e.d)
-    ret: SumVal = lret_pop(c)
+    sum_body(c, e.d)
+    mut ret: SumVal = lret_pop(c)
+    if sum_carries_nothing((*c).t, e.c, (*c).gens) { ret = val_none() }
+    sum_restore_types(c, depth)
     for sp in saved {
         if sp.had_env { map_put(env, sp.name, sp.env_val) } else { map_remove(env, sp.name).ignore() }
         if sp.had_ty { map_put(lt, sp.name, sp.ty_val) } else { map_remove(lt, sp.name).ignore() }
@@ -341,7 +407,10 @@ func serialize_caps(caps: *Vector<CapFlow>) -> string {
 
 // The names a function binds exactly once by a straight `name := g` to a known
 // module function and never reassigns or rebinds. At a call these resolve to the
-// target's real summary instead of the opaque TOP.
+// target's real summary instead of the opaque TOP. A name that also names a
+// parameter, a lambda parameter, a module function, or a builtin never resolves:
+// outside the binding's block that name is the other callee, and this table is
+// flat over the whole body.
 export func sum_resolvable_fn_binds(t: *SumTables, body: int64) -> *Map<string, string> {
     // Memoized on the body id. The walk reads only the AST, never a summary or any
     // walk state, so one body always yields the same table and the fixpoint's repeated
@@ -350,9 +419,27 @@ export func sum_resolvable_fn_binds(t: *SumTables, body: int64) -> *Map<string, 
     if map_has(cache, body) { return unwrap_or(map_get(cache, body), (*t).fn_bind_empty) }
     candidate: *Map<string, string> = alloc(map_new())
     poisoned: *Map<string, int64> = alloc(map_new())
+    fnb_poison_params(t, body, poisoned)
     fnb_block(t, body, candidate, poisoned)
     map_put(cache, body, candidate)
     return candidate
+}
+
+// A parameter keeps its name everywhere outside an inner bind of the same name
+func fnb_poison_params(t: *SumTables, body: int64, pois: *Map<string, int64>) -> void {
+    if !map_has((*t).fn_bodies, body) { return }
+    a: *Ast = (*t).ast
+    owner: FuncNode = vec_get((*a).funcs, unwrap_or(map_get((*t).fn_bodies, body), 0))
+    for i in 0..owner.params_len {
+        param: ParamNode = vec_get((*a).params, vec_get((*a).kids, owner.params_off + i))
+        map_put(pois, ast_name(a, param.name), 1)
+    }
+}
+
+// A module function or builtin of the same name is the callee wherever the local is
+// out of scope, so binding over one never resolves
+func fnb_shadows_global(t: *SumTables, name: string) -> bool {
+    return map_has((*t).module_fns, name) || !builtin_summary(name).empty
 }
 
 func fnb_poison(name: string, cand: *Map<string, string>, pois: *Map<string, int64>) -> void {
@@ -385,7 +472,7 @@ func fnb_stmt(t: *SumTables, sid: int64, cand: *Map<string, string>, pois: *Map<
             if val.kind == xk_ident() {
                 g: string = ast_name(a, val.a)
                 if map_has(mfns, g) {
-                    if map_has(cand, name) || map_has(pois, name) {
+                    if map_has(cand, name) || map_has(pois, name) || fnb_shadows_global(t, name) {
                         fnb_poison(name, cand, pois)
                     } else {
                         map_put(cand, name, g)
@@ -475,6 +562,10 @@ func fnb_expr(t: *SumTables, id: int64, cand: *Map<string, string>, pois: *Map<s
             fnb_expr(t, vec_get((*a).kids, e.b + k), cand, pois)
         }
     } else if e.kind == xk_lambda() {
+        for p in 0..e.b {
+            param: ParamNode = vec_get((*a).params, vec_get((*a).kids, e.a + p))
+            fnb_poison(ast_name(a, param.name), cand, pois)
+        }
         fnb_block(t, e.d, cand, pois)
     } else if e.kind == xk_match() {
         fnb_match(t, e.a, e.b, e.c, cand, pois)

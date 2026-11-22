@@ -1,0 +1,32 @@
+// Compile-fail: a sink is attached to the returned wrapper on one branch, then a frame
+// view is stored through the sink. The wrapper and the sink share a class that holds
+// the returned value, so the store is refused before the return
+@paradigm procedural
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+struct Wrap { s: *Sink }
+
+func keeps(s: *Sink, xs: int64[]) -> void { (*(*s).h).rows = xs }
+func attach(w: *Wrap, s: *Sink) -> void { (*w).s = s }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func build(flag: int64) -> *Wrap {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    w: *Wrap = alloc(Wrap { s: alloc(Sink { h: alloc(Holder { rows: heap_rows() }) }) })
+    if flag > 0 { attach(w, s) }
+    keeps(s, local[0..4])
+    return w
+}
+
+func main() -> int32 {
+    w: *Wrap = build(1)
+    println((*(*(*w).s).h).rows[0])
+    return 0
+}

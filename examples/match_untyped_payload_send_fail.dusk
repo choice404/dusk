@@ -1,0 +1,28 @@
+// Compile-fail: an option built with no annotation wraps a sink's holder, and a view of
+// a frame array is stored into the holder afterwards. The arm's binder carries the
+// scrutinee's view though the payload's type is unknown, so sending it is refused
+@paradigm procedural
+@paradigm functional
+@import std.functional.maybe
+@import std.concurrent.channel
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+func fill(ch: Channel<*Holder>) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    m := Maybe.Some((*s).h)
+    (*(*s).h).rows = local[0..4]
+    match m { Some(y) => { chan_send(ch, y).ignore() } None => { } }
+}
+func main() -> int32 {
+    ch: Channel<*Holder> = chan_new(4)
+    fill(ch)
+    r, e := chan_recv(ch)
+    e.ignore()
+    println((*r).rows[0])
+    return 0
+}

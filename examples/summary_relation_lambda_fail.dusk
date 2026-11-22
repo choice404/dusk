@@ -1,0 +1,37 @@
+// Compile-fail: inside a lambda a fresh sink is relinked to the captured holder through
+// a passthrough call, then a method stores a view of the lambda's own frame through
+// it. The lambda body gets the same relation as a function body
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+func same(s: *Sink) -> *Sink { return s }
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fill(h: *Holder) -> void {
+    f := lambda () -> void {
+        local: int64[4] = [111, 222, 333, 444]
+        s: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+        relink(same(s), h)
+        s.keep(local[0..4])
+    }
+    f()
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println((*h).rows[0])
+    return 0
+}

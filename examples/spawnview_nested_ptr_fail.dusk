@@ -1,0 +1,23 @@
+// Compile-fail: the function field sits behind a second pointer. The capture
+// rule follows every pointer the captured one reaches, not just the first.
+@paradigm procedural
+
+struct Srv { handler: (int64) -> int64, hits: int64 }
+
+struct Link { srv: *Srv, id: int64 }
+
+func twice(x: int64) -> int64 { return x * 2 }
+
+func main() -> int32 {
+    s: *Srv = alloc(Srv { handler: twice, hits: 0 })
+    l: *Link = alloc(Link { srv: s, id: 7 })
+    t, e := spawn(lambda () -> void {
+        println((*l).id)
+    })
+    if e.exists() { return 1 }
+    je := join(t)
+    je.ignore()
+    free(l)
+    free(s)
+    return 0
+}

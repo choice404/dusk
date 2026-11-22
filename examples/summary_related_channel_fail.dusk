@@ -1,0 +1,47 @@
+// Compile-fail: a helper stores its parameter's view into a fresh sink, then sends a
+// second sink sharing the first one's holder across a channel. The receiver may read
+// the view after the caller's frame ends
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+@import std.concurrent.channel
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+    func point(h: *Holder) -> void { self.h = h }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func send_it(ch: Channel<*Sink>, xs: int64[]) -> void {
+    s: *Sink = fresh()
+    t: *Sink = alloc(Sink { h: (*s).h })
+    s.keep(xs)
+    e := chan_send(ch, t)
+    e.ignore()
+}
+
+func fill(ch: Channel<*Sink>) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    send_it(ch, local[0..4])
+}
+
+func main() -> int32 {
+    ch: Channel<*Sink> = chan_new(1)
+    fill(ch)
+    x, e := chan_recv(ch)
+    e.ignore()
+    println((*(*x).h).rows[0])
+    return 0
+}

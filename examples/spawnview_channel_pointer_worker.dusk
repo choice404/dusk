@@ -1,0 +1,32 @@
+// A pointer to a channel handle keeps the element transfer boundary
+@paradigm procedural
+@paradigm functional
+@import std.concurrent.channel
+
+struct Job { rows: int64[], id: int64 }
+
+func heap4() -> int64[] {
+    seed: int64[4] = [10, 20, 30, 40]
+    return map(seed[0..4], lambda (x: int64) -> int64 { return x })
+}
+
+func main() -> int32 {
+    channel: Channel<*Job> = chan_new(4)
+    handle: *Channel<*Job> = alloc(channel)
+    t, e := spawn(lambda () -> void {
+        j, re := chan_recv(*handle)
+        re.ignore()
+        println((*j).rows[3] + (*j).id)
+        free(j)
+    })
+    if e.exists() { return 1 }
+    j: *Job = alloc(Job { rows: heap4(), id: 2 })
+    se := chan_send(channel, move(j))
+    se.ignore()
+    je := join(t)
+    je.ignore()
+    chan_close(channel)
+    chan_free(channel)
+    free(handle)
+    return 0
+}

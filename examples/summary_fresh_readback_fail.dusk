@@ -1,0 +1,27 @@
+// Compile-fail: helpers that return their slice argument read back out of a holder
+// they build in place, a fresh allocation dereferenced and a struct literal read by
+// value. Each returns its argument, so a caller returning either over a frame array
+// is refused at the call
+@paradigm procedural
+
+struct Holder { rows: int64[] }
+
+func pass_alloc(xs: int64[]) -> int64[] { return (*alloc(Holder { rows: xs })).rows }
+
+func pass_literal(xs: int64[]) -> int64[] { return Holder { rows: xs }.rows }
+
+func outer_alloc() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return pass_alloc(local[0..4])
+}
+
+func outer_literal() -> int64[] {
+    local: int64[4] = [111, 222, 333, 444]
+    return pass_literal(local[0..4])
+}
+
+func main() -> int32 {
+    println(outer_alloc()[0])
+    println(outer_literal()[0])
+    return 0
+}

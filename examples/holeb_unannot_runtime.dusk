@@ -1,14 +1,10 @@
-// Hole B, the documented residual (design R6). An unannotated bind of a generic
-// returning call leaves the element type unsubstituted on the surface pass, so
-// vec_get's result gets no ownership entry and the free of q below passes the checker
-// even though q is a borrow of a container element, not an owner. Closing this needs
-// surface substitution of generic returns, which the two-pass architecture defers to
-// the ground pass, where ownership never runs; so the slip stays a documented residual
-// rather than a silent corruption. The proof it is backstopped, not silent: after the
-// stray free, the container still holds the freed pointer, and reading it back and
-// dereferencing it faults named. Annotating the bind (`q: *int64 = vec_get(v, 0)`)
-// would make the checker reject the free instead; the residual is exactly the
-// unannotated spelling.
+// Compile-fail: an unannotated bind of a generic returning call leaves the element
+// type open on the surface pass, but a single binding whose type is still open records
+// a borrow when its callee reads the result back out of an argument, so q below is a
+// borrow of the container's element and its free is refused at check, `cannot free a
+// borrowed pointer; only its owner frees it`. Through 1.17.2 this free passed the
+// checker and the stale read of r after it was the runtime's named fault; the lines
+// past the free stay to show what the refusal now prevents.
 @paradigm procedural
 @import std.vector
 
@@ -17,8 +13,8 @@ func main() -> int32 {
     vec_push(v, alloc(5))
     q := vec_get(v, 0)             // unannotated: surface leaves the return type open
     println(*q)                    // reads 5, still live
-    free(q)                        // ACCEPTED (hole B): q had no ownership entry
-    r: *int64 = vec_get(v, 0)      // the container still holds the freed pointer
-    println(*r)                    // fault: stale read of the freed block
+    free(q)                        // refused: q is a borrow of the container's element
+    r: *int64 = vec_get(v, 0)      // the container still holds the pointer
+    println(*r)                    // would read the freed block had the free passed
     return 0
 }

@@ -105,6 +105,33 @@ export func fault_call(s: *GenFuncState, name: string) -> void {
     free(t)
 }
 
+/** Emits the bound check for one string index, `call void @cool_str_index_at(ptr
+ *  <base>, i64 <index>, ptr <loc>)`, ahead of the element address. The runtime
+ *  faults an index below zero or past the string's first NUL, and a null base,
+ *  naming the current statement's "path:line"; an index at the NUL itself reads.
+ *  The runtime entry is declared on demand, so a module that never indexes a string
+ *  carries no reference to it.
+ *  @param s the function state holding the module and the current statement
+ *  @param base the operand carrying the string's pointer
+ *  @param index the operand carrying the index, already an i64 */
+export func str_index_call(s: *GenFuncState, base: string, index: string) -> void {
+    emit_declare((*s).module, "void @cool_str_index_at(ptr, i64, ptr)")
+    loc: string = fault_loc(s)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @cool_str_index_at(ptr ")
+    sb_push(b, base)
+    sb_push(b, ", i64 ")
+    sb_push(b, index)
+    sb_push(b, ", ptr ")
+    sb_push(b, loc)
+    sb_push_char(b, 41)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
+}
+
 /** Allocates storage through the entry funnel so loop-body bindings do not emit a
  *  dynamic alloca at the binding site. */
 export func gen_alloca(s: *GenFuncState, ty: int64) -> string {
@@ -241,8 +268,8 @@ export func gen_store_slot(s: *GenFuncState, ty: int64, val: string, ptr: string
 // widening uses sext.
 // Emits one LLVM conversion instruction, `<dest> = <opcode> <fromll> <op> to
 // <toll>`, into the current block and returns the fresh destination temporary. The
-// fromll and toll strings are owned and freed here. Used for the integer and float
-// conversions coerce lowers a numeric cast through.
+// fromll and toll strings are only read; the caller frees them. Used for the integer
+// and float conversions coerce lowers a numeric cast through.
 func emit_conv(s: *GenFuncState, opcode: string, fromll: string, op: string, toll: string) -> string {
     dest: string = next_tmp((*s).fb)
     b: *StringBuilder = alloc(sb_new())
@@ -260,8 +287,6 @@ func emit_conv(s: *GenFuncState, opcode: string, fromll: string, op: string, tol
     free(b)
     line((*s).fb, text)
     free(text)
-    free(fromll)
-    free(toll)
     return dest
 }
 
@@ -392,7 +417,12 @@ export func coerce(s: *GenFuncState, from: int64, op: string, to: int64) -> stri
             mut fop: string = "sitofp"
             if fk.kind == ctyk_char() || fk.kind == ctyk_bool() { fop = "uitofp" }
             if cty_is_unsigned(c, from) { fop = "uitofp" }
-            return emit_conv(s, fop, cty_ll(c, from), op, cty_ll(c, to))
+            ffromll: string = cty_ll(c, from)
+            ftoll: string = cty_ll(c, to)
+            fdest: string = emit_conv(s, fop, ffromll, op, ftoll)
+            free(ffromll)
+            free(ftoll)
+            return fdest
         }
     }
     if cty_is_float(c, from) {

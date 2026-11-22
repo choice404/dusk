@@ -1,0 +1,289 @@
+/** tcgroundcall: the ground pass's result for a call the ordinary call inference
+ *  leaves open. Once mono has made every signature concrete, a method call, a call
+ *  through a function typed field, and the map, filter, fold, and reduce builtins each
+ *  have a result the module states outright, and a binding or an index over one needs
+ *  it: a string index is bounds checked by the class the ground pass records from its
+ *  base's type, and an open base is a build error rather than a guess. Nothing here
+ *  emits a diagnostic or infers an expression a second time; an operand's type is read
+ *  back from the scope, the signature tables, or the memo every expression fills. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import ty
+@import tysigs
+@import tcstate
+@import tcscope
+@import tciface
+@import tcown
+
+/** Keeps every expression's ground type for a later call that takes it as
+ *  its receiver or operand, preserving erased branch types in the memo. The latest inference
+ *  of a node always replaces an earlier one, an open answer included, so a reader
+ *  never sees a type the node no longer has. The surface pass keeps nothing.
+ *  @param tc the type checker
+ *  @param id the expression's id
+ *  @param result the type the expression inferred to
+ *  @return result */
+export func remember_ground_ty(tc: *TypeChecker, id: int64, result: int64) -> int64 {
+    if !(*tc).types_only { return result }
+    ground: int64 = ground_result_ty(tc, id, result)
+    map_put((*tc).ground_tys, id, ground)
+    map_put((*tc).ground_ifaces, id, ground_iface_name(tc, id, ground))
+    return result
+}
+
+// An erased branch can determine the result's layout. A concrete sibling must not
+// lend its fields or methods to a value codegen dispatches through an interface
+func ground_result_ty(tc: *TypeChecker, id: int64, result: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    expr: ExprNode = vec_get((*a).exprs, id)
+    if expr.kind != xk_ifexpr() && expr.kind != xk_match() { return result }
+    for i in 0..branch_count(a, expr) {
+        tail: int64 = branch_tail_at(a, expr, i)
+        if tail >= 0 && ty_get((*tc).ty, ground_operand_ty(tc, tail)).kind == tyk_unknown() {
+            return ty_unknown((*tc).ty)
+        }
+    }
+    return result
+}
+
+// Interface types erase to unknown in the inference arena. Keep their identity
+// before a branch scope pops, including concrete branches boxed into that interface
+func ground_iface_name(tc: *TypeChecker, id: int64, result: int64) -> string {
+    if ty_get((*tc).ty, result).kind != tyk_unknown() { return "" }
+    a: *Ast = (*tc).ast
+    expr: ExprNode = vec_get((*a).exprs, id)
+    if expr.kind != xk_ifexpr() && expr.kind != xk_match() {
+        declared: string = named_under_pointers(tc, written_place_ty(tc, id))
+        if tc_has_iface(tc, declared) { return declared }
+        if expr.kind == xk_ident() { return innermost_iface_bind(tc, ast_name(a, expr.a)) }
+        return ""
+    }
+    return ground_branch_iface(tc, expr)
+}
+
+// Codegen takes the first yielding branch's layout. Later branches must name the
+// same interface or be concrete structs that can box into it
+func ground_branch_iface(tc: *TypeChecker, expr: ExprNode) -> string {
+    a: *Ast = (*tc).ast
+    mut common: string = ""
+    for i in 0..branch_count(a, expr) {
+        tail: int64 = branch_tail_at(a, expr, i)
+        if tail >= 0 {
+            name: string = unwrap_or(map_get((*tc).ground_ifaces, tail), "")
+            if str_len(common) == 0 {
+                if str_len(name) == 0 { return "" }
+                common = name
+            } else if str_len(name) > 0 {
+                if !str_eq(common, name) { return "" }
+            } else if !ground_branch_boxes(tc, tail, common) { return "" }
+        }
+    }
+    return common
+}
+
+func ground_branch_boxes(tc: *TypeChecker, id: int64, iface: string) -> bool {
+    concrete: int64 = ground_operand_ty(tc, id)
+    if ty_get((*tc).ty, concrete).kind != tyk_named() { return false }
+    name: string = ty_name((*tc).ty, concrete)
+    if !tc_has_struct(tc, name) { return false }
+    return map_has((*tc).impls, sig_pair_key(iface, name))
+}
+
+/** The ground result of a call whose ordinary inference came back open: the declared
+ *  return of the method or function typed field it calls, or the slice, element, or
+ *  accumulator a higher order builtin yields. Any other call, and any call on the
+ *  surface pass, keeps the type it inferred.
+ *  @param tc the type checker
+ *  @param call the call expression
+ *  @param inferred the type the ordinary call inference answered
+ *  @return the resolved type, or inferred when nothing resolves it */
+export func ground_call_result(tc: *TypeChecker, call: ExprNode, inferred: int64) -> int64 {
+    if !(*tc).types_only { return inferred }
+    if ty_get((*tc).ty, inferred).kind != tyk_unknown() { return inferred }
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    if callee.kind == xk_field() { return member_call_result(tc, callee) }
+    if callee.kind == xk_ident() { return builtin_call_result(tc, ast_name(a, callee.a), call) }
+    return inferred
+}
+
+// Read the last inference, including an unresolved answer, without walking the
+// expression again. A direct callee may not have been inferred, so it reads the scope
+func ground_operand_ty(tc: *TypeChecker, id: int64) -> int64 {
+    if map_has((*tc).ground_tys, id) {
+        return unwrap_or(map_get((*tc).ground_tys, id), ty_unknown((*tc).ty))
+    }
+    return chain_ty(tc, id)
+}
+
+func member_call_result(tc: *TypeChecker, callee: ExprNode) -> int64 {
+    a: *Ast = (*tc).ast
+    unknown: int64 = ty_unknown((*tc).ty)
+    member: string = ast_name(a, callee.b)
+    base_ty: int64 = ground_operand_ty(tc, callee.a)
+    // Codegen calls a function typed field of a struct value ahead of any method of
+    // the same name, so the field answers first
+    has_field, field := struct_field(tc, base_ty, member)
+    if has_field {
+        field_ty: TyNode = ty_get((*tc).ty, field.ty)
+        if field_ty.kind == tyk_func() { return field_ty.a }
+    }
+    receiver: string = receiver_name(tc, callee.a, base_ty)
+    if str_len(receiver) == 0 { return unknown }
+    return unwrap_or(map_get((*tc).method_returns, sig_pair_key(receiver, member)), unknown)
+}
+
+// The type a method call dispatches on: the named type under any pointers or a
+// collector, or else the interface the receiver was declared with, since the ground
+// arena erases an interface to the wildcard
+func receiver_name(tc: *TypeChecker, base_id: int64, base_ty: int64) -> string {
+    named: string = named_under_pointers(tc, base_ty)
+    if str_len(named) > 0 { return named }
+    if map_has((*tc).ground_ifaces, base_id) {
+        return unwrap_or(map_get((*tc).ground_ifaces, base_id), "")
+    }
+    a: *Ast = (*tc).ast
+    base: ExprNode = vec_get((*a).exprs, base_id)
+    if base.kind == xk_ident() {
+        bound: string = innermost_iface_bind(tc, ast_name(a, base.a))
+        if str_len(bound) > 0 { return bound }
+    }
+    declared: string = named_under_pointers(tc, written_place_ty(tc, base_id))
+    if !tc_has_iface(tc, declared) { return "" }
+    return declared
+}
+
+func named_under_pointers(tc: *TypeChecker, start: int64) -> string {
+    arena: *TyArena = (*tc).ty
+    mut t: int64 = start
+    mut n: TyNode = ty_get(arena, t)
+    while n.kind == tyk_ptr() || n.kind == tyk_rawptr() || n.kind == tyk_collector() {
+        t = n.a
+        n = ty_get(arena, t)
+    }
+    if n.kind != tyk_named() { return "" }
+    return ty_name(arena, t)
+}
+
+// A place's type as written, before the ground arena erases an interface: a binding's
+// annotation, a struct field's declared type, and an element or a pointee of either
+func written_place_ty(tc: *TypeChecker, id: int64) -> int64 {
+    a: *Ast = (*tc).ast
+    arena: *TyArena = (*tc).ty
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_ident() {
+        declared: int64 = innermost_binding_ast(tc, ast_name(a, e.a))
+        if declared < 0 { return ty_unknown(arena) }
+        return tc_raw_type(tc, declared)
+    }
+    if e.kind == xk_field() {
+        has_field, field := struct_field(tc, ground_operand_ty(tc, e.a), ast_name(a, e.b))
+        if has_field { return field.raw }
+        return ty_unknown(arena)
+    }
+    if e.kind == xk_index() {
+        index: ExprNode = vec_get((*a).exprs, e.b)
+        if index.kind == xk_range() { return ty_unknown(arena) }
+        base_ty: int64 = written_place_ty(tc, e.a)
+        base: TyNode = ty_get(arena, base_ty)
+        if base.kind == tyk_ptr() || base.kind == tyk_rawptr() { return base.a }
+        return elem_of(arena, base_ty)
+    }
+    if e.kind == xk_unary() && e.a == uop_deref() {
+        pointer: TyNode = ty_get(arena, written_place_ty(tc, e.b))
+        if pointer.kind == tyk_ptr() || pointer.kind == tyk_rawptr() { return pointer.a }
+    }
+    return ty_unknown(arena)
+}
+
+// The scope that binds a name, innermost first, so a record an outer binding of the
+// same name left behind is never read for an inner one
+func binding_scope(tc: *TypeChecker, name: string) -> int64 {
+    scopes: *Vector<*Map<string, int64>> = (*tc).scopes
+    mut i: int64 = vec_len(scopes) - 1
+    while i >= 0 {
+        if map_has(vec_get(scopes, i), name) { return i }
+        i--
+    }
+    return -1
+}
+
+func innermost_iface_bind(tc: *TypeChecker, name: string) -> string {
+    i: int64 = binding_scope(tc, name)
+    if i < 0 { return "" }
+    return unwrap_or(map_get(vec_get((*tc).iface_binds, i), name), "")
+}
+
+func innermost_binding_ast(tc: *TypeChecker, name: string) -> int64 {
+    i: int64 = binding_scope(tc, name)
+    if i < 0 { return -1 }
+    return unwrap_or(map_get(vec_get((*tc).binding_ast_ty, i), name), -1)
+}
+
+// The declared field of a struct value's type, found by name
+func struct_field(tc: *TypeChecker, owner_ty: int64, name: string) -> (bool, FieldSig) {
+    arena: *TyArena = (*tc).ty
+    missing: FieldSig = FieldSig { name: "", ty: ty_unknown(arena), raw: ty_unknown(arena) }
+    if ty_get(arena, owner_ty).kind != tyk_named() { return (false, missing) }
+    owner: string = ty_name(arena, owner_ty)
+    if !tc_has_struct(tc, owner) { return (false, missing) }
+    sigs: *TypeSigs = (*tc).sigtab
+    shape: StructSig = sig_struct(sigs, owner)
+    for i in 0..shape.len {
+        field: FieldSig = vec_get((*sigs).fields, shape.off + i)
+        if str_eq(field.name, name) { return (true, field) }
+    }
+    return (false, missing)
+}
+
+// The higher order builtins, which the call inference checks for arity and leaves
+// open. Each result is the one codegen builds: map a slice of the callback's result,
+// filter a slice of the collection's element, fold the callback's result, and reduce
+// the collection's element beside the error an empty collection reports
+func builtin_call_result(tc: *TypeChecker, name: string, call: ExprNode) -> int64 {
+    unknown: int64 = ty_unknown((*tc).ty)
+    if is_local(tc, name) || sig_has_fn((*tc).sigtab, name) { return unknown }
+    a: *Ast = (*tc).ast
+    if str_eq(name, "map") && call.c == 2 {
+        return slice_of(tc, callback_result(tc, vec_get((*a).kids, call.b + 1)))
+    }
+    if str_eq(name, "filter") && call.c == 2 {
+        return slice_of(tc, collection_elem(tc, vec_get((*a).kids, call.b)))
+    }
+    if str_eq(name, "fold") && call.c == 3 { return callback_result(tc, vec_get((*a).kids, call.b + 2)) }
+    if str_eq(name, "reduce") && call.c == 2 { return reduce_result(tc, collection_elem(tc, vec_get((*a).kids, call.b))) }
+    return unknown
+}
+
+func reduce_result(tc: *TypeChecker, elem: int64) -> int64 {
+    arena: *TyArena = (*tc).ty
+    if ty_get(arena, elem).kind == tyk_unknown() { return elem }
+    members: *Vector<int64> = alloc(vec_new())
+    vec_push(members, elem)
+    vec_push(members, ty_error(arena))
+    return ty_tuple(arena, members)
+}
+
+func callback_result(tc: *TypeChecker, callback_id: int64) -> int64 {
+    callback: TyNode = ty_get((*tc).ty, ground_operand_ty(tc, callback_id))
+    if callback.kind == tyk_func() { return callback.a }
+    return ty_unknown((*tc).ty)
+}
+
+// A higher order builtin walks a slice or an array and nothing else
+func collection_elem(tc: *TypeChecker, collection_id: int64) -> int64 {
+    collection: TyNode = ty_get((*tc).ty, ground_operand_ty(tc, collection_id))
+    if collection.kind == tyk_slice() || collection.kind == tyk_array() { return collection.a }
+    return ty_unknown((*tc).ty)
+}
+
+func slice_of(tc: *TypeChecker, elem: int64) -> int64 {
+    if ty_get((*tc).ty, elem).kind == tyk_unknown() { return elem }
+    return ty_slice((*tc).ty, elem)
+}

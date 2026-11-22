@@ -96,15 +96,16 @@ func csource_key(resolved: string) -> string {
 
 // Folds one resolved csource path into the module wide table, first appearance winning.
 // The resolved path is what reaches clang; the key is only ever the dedup's own.
-func add_csource(csources: *Vector<string>, seen_csources: *Map<string, int64>, resolved: string) -> void {
+// Returns whether the table kept the path, so a caller frees one already seen.
+func add_csource(csources: *Vector<string>, seen_csources: *Map<string, int64>, resolved: string) -> bool {
     key: string = csource_key(resolved)
     if map_has(seen_csources, key) {
         free(key)
-        free(resolved)
-        return
+        return false
     }
     map_put(seen_csources, key, 1)
     vec_push(csources, resolved)
+    return true
 }
 
 // The fault a dependency's @csource earns by naming a file outside the checkout the
@@ -180,8 +181,8 @@ export func collect_pkg_directives(ps: *PkgSet, pkg: int64, links: *Vector<strin
                 free(resolved)
             }
         }
-        if usable {
-            add_csource(csources, seen_csources, resolved)
+        if usable && !add_csource(csources, seen_csources, resolved) {
+            free(resolved)
         }
     }
 }
@@ -219,7 +220,10 @@ export func collect_directives(src: string, len: int64, file: string, disp: stri
     cv: *Vector<string> = p.csources
     dir: string = dir_of(file)
     for j in 0..vec_len(cv) {
-        add_csource(csources, seen_csources, resolve_csource(dir, vec_get(cv, j)))
+        resolved: string = resolve_csource(dir, vec_get(cv, j))
+        if !add_csource(csources, seen_csources, resolved) {
+            free(resolved)
+        }
     }
 }
 

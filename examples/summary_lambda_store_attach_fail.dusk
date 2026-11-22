@@ -1,0 +1,39 @@
+// Compile-fail: a lambda stores the helper's view into a fresh holder, and only
+// after it runs is that holder attached to the caller's sink. The stored view ends
+// up in the caller's sink, so a caller handing a view of a frame array is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func relink(s: *Sink, h: *Holder) -> void { (*s).h = h }
+
+func keepvia(q: *Sink, xs: int64[]) -> void {
+    inner: *Holder = alloc(Holder { rows: heap_rows() })
+    s: *Sink = alloc(Sink { h: inner })
+    one: int64[1] = [1]
+    foreach(one[0..1], lambda (x: int64) -> void { s.keep(xs) })
+    relink(q, inner)
+}
+
+func fill(q: *Sink) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    keepvia(q, local[0..4])
+}
+
+func main() -> int32 {
+    q: *Sink = alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+    fill(q)
+    println((*(*q).h).rows[0])
+    return 0
+}

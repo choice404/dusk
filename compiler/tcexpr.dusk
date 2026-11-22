@@ -13,6 +13,7 @@
 @import tcbin
 @import tcfit
 @import tccall
+@import tcgroundcall
 @import tciface
 @import tcmatch
 @import tcown
@@ -250,7 +251,38 @@ export func check_branch_lit_fits(tc: *TypeChecker, e: ExprNode, ref_ty: int64) 
     }
 }
 
+/** Records on an index node, ground pass only, whether its base is a string, in the
+ *  node's otherwise unused d field. Codegen lowers a string and a raw char pointer to
+ *  the same pointer, and only the string carries a length the index can be held to,
+ *  so it reads this to decide whether to bound the read: 1 is a string, 2 any other
+ *  resolved base. An unresolved base leaves the 0 every rewrite mints, which codegen
+ *  refuses by name over a char pointer rather than guessing either way.
+ *  @param tc the ground type checker
+ *  @param id the index expression's id
+ *  @param base_id the index's base expression id
+ *  @param base_ty the type inferred for the index's base */
+func record_index_class(tc: *TypeChecker, id: int64, base_id: int64, base_ty: int64) -> void {
+    if !(*tc).types_only { return }
+    mut bt: int64 = base_ty
+    if ty_get((*tc).ty, bt).kind == tyk_unknown() { bt = own_chain_ty(tc, base_id) }
+    kind: int64 = ty_get((*tc).ty, bt).kind
+    if kind == tyk_unknown() { return }
+    mut cls: int64 = 2
+    if kind == tyk_str() { cls = 1 }
+    // The node is read again rather than taken from the caller's copy, so the write
+    // can never put back a field the base or index inference changed in between
+    a: *Ast = (*tc).ast
+    mut n: ExprNode = vec_get((*a).exprs, id)
+    if n.d == cls { return }
+    n.d = cls
+    vec_set((*a).exprs, id, n)
+}
+
 export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
+    return remember_ground_ty(tc, id, infer_expr_inner(tc, id))
+}
+
+func infer_expr_inner(tc: *TypeChecker, id: int64) -> int64 {
     a: *Ast = (*tc).ast
     e: ExprNode = vec_get((*a).exprs, id)
     if e.kind == xk_int() {
@@ -363,7 +395,11 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
     }
     if e.kind == xk_call() {
         enforce_call_escape(tc, e.a, e.b, e.c, e.lo, e.hi)
-        return infer_call(tc, e.a, e.b, e.c)
+        // The ground pass resolves what the call inference leaves open, a method's or a
+        // function typed field's return or a higher order builtin's result, and keeps
+        // the answer for a call that takes this one as its receiver or operand
+        inferred: int64 = infer_call(tc, e.a, e.b, e.c)
+        return ground_call_result(tc, e, inferred)
     }
     if e.kind == xk_field() {
         base_ty: int64 = infer_expr(tc, e.a)
@@ -481,13 +517,14 @@ export func infer_expr(tc: *TypeChecker, id: int64) -> int64 {
             }
             return ty_slice((*tc).ty, elem_of((*tc).ty, base_ty2))
         }
+        record_index_class(tc, id, e.a, base_ty2)
         if bn2.kind == tyk_slice() || bn2.kind == tyk_array() || bn2.kind == tyk_str() || bn2.kind == tyk_collector() || bn2.kind == tyk_unknown() {
             return elem_of((*tc).ty, base_ty2)
         }
-        // What is left is a pointer, which indexes as pointer arithmetic over its
-        // pointee, or a named type, a tuple, a future, or a handle, each of which reads
-        // through its own accessors instead. None of them has an element type to name
-        // here, so the index answers unknown rather than fabricating one.
+        // A ground pointer index reads its pointee, so a method on that value has
+        // the same receiver type as an explicit dereference
+        if (*tc).types_only && (bn2.kind == tyk_ptr() || bn2.kind == tyk_rawptr()) { return bn2.a }
+        // Named types, tuples, futures, and handles read through their accessors
         return ty_unknown((*tc).ty)
     }
     if e.kind == xk_range() {

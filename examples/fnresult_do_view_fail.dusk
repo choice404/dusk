@@ -1,0 +1,25 @@
+// Compile-fail: a do block's last line is a slice of a local array, and the block's
+// result is a Maybe<int64[]>. That result may hold a view, so the bind call the block
+// desugars to returns what its steps captured, and returning it hands the caller a
+// view of a frame that is gone
+@paradigm procedural
+@paradigm functional
+@import std.functional.maybe
+func half(x: int64) -> Maybe<int64> {
+    if x % 2 == 0 { return Maybe.Some(x / 2) }
+    return Maybe.None
+}
+func leak(a: int64) -> Maybe<int64[]> {
+    local: int64[4] = [1, 2, 3, 4]
+    return do Maybe {
+        x <- half(a)
+        local[0..2]
+    }
+}
+func main() -> int32 {
+    match leak(4) {
+        Some(xs) => { println(xs[0]) }
+        None => { println(0) }
+    }
+    return 0
+}

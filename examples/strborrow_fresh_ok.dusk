@@ -1,0 +1,49 @@
+// Every string here is fresh text its binding owns, so each free is legal: a substring,
+// a concatenation, an f-string, a value taken out of a vector, a call that hands back
+// the caller's own string, a field freed through a parameter, and a mut string that
+// began as a literal and was reassigned before the free.
+@paradigm procedural
+@import std.string
+@import std.vector
+
+struct Rec { name: string }
+
+func pass(s: string) -> string {
+    return s
+}
+
+func drop_name(p: *Rec) -> void {
+    free((*p).name)
+}
+
+func main() -> int32 {
+    a := substring("hello world", 0, 5)
+    println(a)
+    b := a + "!"
+    free(a)
+    println(b)
+    free(b)
+    n: int64 = 7
+    c := f"n is {n}"
+    println(c)
+    free(c)
+    v: *Vector<string> = alloc(vec_new())
+    vec_push(v, substring("taken", 0, 5))
+    d: string = vec_take(v, 0)
+    println(d)
+    free(d)
+    vec_free(v)
+    free(v)
+    mine := substring("mine", 0, 4)
+    e := pass(mine)
+    println(e)
+    free(e)
+    r: *Rec = alloc(Rec { name: substring("field", 0, 5) })
+    drop_name(r)
+    free(r)
+    mut m: string = "literal"
+    m = substring("reassigned", 0, 10)
+    println(m)
+    free(m)
+    return 0
+}

@@ -85,12 +85,15 @@ be writing one of those payloads, a future record a completer thread is filling
 being the plain case. That read races the write in the C11 sense.
 
 It is benign by construction. A generational block is never returned to libc; a
-freed block is parked on the size matched free list and stays mapped, so the
-scan reads live memory, never a fault. The bytes it reads are only tested as
-candidate pointers, so a stale or half written word at worst names a collected
-block that is then over retained for one cycle, which is safe. This is not
-suppressed. `gcprobe`, the floor's smoke probe, is single threaded and runs TSan
-clean with no report.
+freed block is parked on the free list of its size class and stays mapped, so
+the scan reads live memory, never a fault. Since 1.17.3 a block may be reused at
+any size its class holds, so the copy taken under the lock records the size in
+the block's own header, the current tenant's, bounded by the capacity the block
+was minted with, and a header that reads outside that capacity scans the whole
+capacity. The bytes it reads are only tested as candidate pointers, so a stale or
+half written word at worst names a collected block that is then over retained
+for one cycle, which is safe. This is not suppressed. `gcprobe`, the floor's
+smoke probe, is single threaded and runs TSan clean with no report.
 
 ## Coverage for the 0.5.1 collector
 

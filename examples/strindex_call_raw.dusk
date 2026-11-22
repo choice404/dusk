@@ -1,0 +1,50 @@
+// A *raw char a method, an interface method, a function typed field, or a map or
+// filter callback returns is a pointer with no length, not a string, so an index
+// through it reads past an embedded NUL without a check.
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+interface Buffer { bytes() -> *raw char }
+
+struct RawBuffer { data: *raw char }
+
+struct RawFactory { make: (*raw char) -> *raw char }
+
+impl Buffer for RawBuffer {
+    func bytes() -> *raw char { return self.data }
+    func pair() -> (*raw char, int64) { return (self.data, 4) }
+}
+
+func pass_buffer(data: *raw char) -> *raw char { return data }
+
+func read_buffer(buffer: Buffer) -> int64 {
+    data := buffer.bytes()
+    return int64(data[4])
+}
+
+func main() -> int32 {
+    data: *raw char = alloc_bytes(8)
+    data[0] = 0
+    data[4] = 90
+    buffer: RawBuffer = RawBuffer { data: data }
+    bytes := buffer.bytes()
+    println(int64(bytes[4]))
+    println(read_buffer(buffer))
+    boxed: *RawBuffer = alloc(RawBuffer { data: data })
+    pointed := (*boxed).bytes()
+    println(int64(pointed[4]))
+    member, index := buffer.pair()
+    println(int64(member[index]))
+    factory: RawFactory = RawFactory { make: pass_buffer }
+    made := factory.make(data)
+    println(int64(made[4]))
+    inputs: (*raw char)[1] = [data]
+    mapped := map(inputs[0..1], lambda (value: *raw char) -> *raw char { return value })
+    println(int64(mapped[0][4]))
+    filtered := filter(inputs[0..1], lambda (value: *raw char) -> bool { return true })
+    println(int64(filtered[0][4]))
+    free(boxed)
+    free(data)
+    return 0
+}

@@ -1,0 +1,38 @@
+// Compile-fail: a generic helper's type parameter spelled like a scalar, `int64`,
+// stands for any type, so a method called on a value of it keeps that value rather
+// than reading it as an integer. `give` hands a struct holding the caller's frame
+// slice to a method that copies the slice into the caller's holder, which is refused
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Rows { rows: int64[] }
+impl Rows {
+    func attach(h: *Holder) -> void { (*h).rows = self.rows }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func give<int64>(q: int64, h: *Holder) -> void { q.attach(h) }
+
+func fill(h: *Holder) -> void {
+    local: int64[4] = [111, 222, 333, 444]
+    give(Rows { rows: local[0..4] }, h)
+}
+
+func noise(a: int64, b: int64) -> int64 {
+    e: int64[8] = [9, 9, 9, 9, 9, 9, 9, 9]
+    return a + b + e[0]
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { rows: heap_rows() })
+    fill(h)
+    println(noise(1, 2))
+    println((*h).rows[0])
+    return 0
+}

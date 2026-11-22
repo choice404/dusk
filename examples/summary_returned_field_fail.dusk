@@ -1,0 +1,38 @@
+// Compile-fail: a helper stores its argument through its sink's holder and returns
+// that holder by reading the field again. The result carries the stored view, so a
+// caller handing it out with a view of its frame array inside is refused at the
+// return
+@paradigm procedural
+@paradigm oop
+@paradigm functional
+
+struct Holder { rows: int64[] }
+struct Sink { h: *Holder }
+impl Sink {
+    func keep(xs: int64[]) -> void { (*self.h).rows = xs }
+}
+
+func heap_rows() -> int64[] {
+    seed: int64[4] = [1, 2, 3, 4]
+    return map(seed[0..4], lambda (value: int64) -> int64 { return value })
+}
+
+func fresh() -> *Sink {
+    return alloc(Sink { h: alloc(Holder { rows: heap_rows() }) })
+}
+
+func helper(xs: int64[]) -> *Holder {
+    s: *Sink = fresh()
+    (*(*s).h).rows = xs
+    return (*s).h
+}
+
+func outer() -> *Holder {
+    local: int64[4] = [111, 222, 333, 444]
+    return helper(local[0..4])
+}
+
+func main() -> int32 {
+    println((*outer()).rows[0])
+    return 0
+}

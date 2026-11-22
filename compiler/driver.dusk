@@ -71,7 +71,7 @@ export func run_demo(prog: string) -> int32 {
 
     header_code: int64 = run("printf '[dusk] emitted IR : target/dusk-out/demo.ll\\n[dusk] linked bin : target/dusk-out/demo\\n[dusk] running ->\\n\\n'")
     if header_code != 0 { return 1 }
-    rt_inputs: *Vector<string> = runtime_inputs(home, out, "")
+    rt_inputs: *Vector<string> = runtime_inputs(home, out, runtime_opt_flag())
     code: int64 = link_and_run(ll, bin, rt_inputs)
     free_runtime_inputs(rt_inputs)
     free(rt_inputs)
@@ -90,8 +90,9 @@ export func run_demo(prog: string) -> int32 {
 
 /** Builds a source file through the shared IR spine, writes target/dusk-out, and
  *  links the runtime. The run flag controls whether the linked binary is executed.
- *  release asks clang to optimize the module, the runtime, and every @csource at -O2;
- *  without it all three compile at clang's own default. This is the compiler's own
+ *  release asks clang to optimize the module and every @csource at -O2; without it
+ *  both compile at clang's own default. The runtime compiles at -O2 either way, see
+ *  runtime_opt_flag. This is the compiler's own
  *  entry; it pins the output to out_dir(), the stage0 parallel target/dusk-out. */
 export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, from_manifest: bool, release: bool) -> int32 {
     return build_module_to_pkg(prog, path, run_it, argv, arg_start, out_dir(), from_manifest, release)
@@ -127,8 +128,9 @@ export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: 
     home: string = dusk_home(prog)
     // The runtime is resolved before the link line is written: one cached object per
     // runtime source when the cache is usable, the sources themselves when it is not.
+    // The runtime compiles at its own fixed level; opt is the module's and @csource's.
     opt: string = opt_flag(release)
-    rt_inputs: *Vector<string> = runtime_inputs(home, out, opt)
+    rt_inputs: *Vector<string> = runtime_inputs(home, out, runtime_opt_flag())
     code: int64 = link_only(ll, bin, rt_inputs, ir.links, ir.csources, opt)
     free_runtime_inputs(rt_inputs)
     free(rt_inputs)

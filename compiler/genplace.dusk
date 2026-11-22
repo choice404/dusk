@@ -316,7 +316,46 @@ func field_ptr(s: *GenFuncState, sty: int64, base: string, index: int64) -> stri
     return d
 }
 
-export func elem_addr(s: *GenFuncState, base_id: int64, index: string) -> Place {
+// Refuses an index over a char pointer whose base the ground pass left untyped. A
+// string and a raw char pointer lower alike, and only the string's read is bounded,
+// so guessing either way would drop a check or fault a correct raw buffer read; the
+// build stops at the line instead.
+func unclassified_index(s: *GenFuncState) -> void {
+    loc: string = genctx_loc_text((*s).ctx, (*s).cur_lo)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "an index over a char pointer was left unclassified at ")
+    sb_push(b, loc)
+    sb_push(b, "; annotate the base")
+    msg: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    free(loc)
+    emit_error((*s).module, msg)
+    free(msg)
+}
+
+// Guards one index read through a char pointer by the class the ground pass wrote
+// on the index node: 1, a string, is bound checked before its element address is
+// formed; 2, a raw char pointer or any other resolved base, reads unchecked; 0 was
+// never classified and is a build error by name.
+func guard_char_index(s: *GenFuncState, cls: int64, data: string, index: string) -> void {
+    if cls == 1 {
+        str_index_call(s, data, index)
+        return
+    }
+    if cls == 0 { unclassified_index(s) }
+}
+
+/** The address of one element of base_id at index, the place an index expression
+ *  reads or writes. An array or slice base is bound checked against its length; a
+ *  char pointer base is guarded by cls, the class the ground pass recorded on the
+ *  index node (see guard_char_index).
+ *  @param s the function state
+ *  @param base_id the indexed expression's id
+ *  @param index the operand carrying the index, already an i64
+ *  @param cls the index node's base class: 1 string, 2 other, 0 unclassified
+ *  @return the element's place, or ok false when the base has no element address */
+export func elem_addr(s: *GenFuncState, base_id: int64, index: string, cls: int64) -> Place {
     c: *CTyArena = genctx_ctys((*s).ctx)
     bp: Place = gen_place(s, base_id)
     if bp.ok {
@@ -350,6 +389,7 @@ export func elem_addr(s: *GenFuncState, base_id: int64, index: string) -> Place 
             data = fat_checked(s, fatv2)
         } else if n.kind == ctyk_rawptr() {
             data = gen_load_slot(s, bp.ty, bp.ptr)
+            if vec_get(cty_nodes(c), elem).kind == ctyk_char() { guard_char_index(s, cls, data, index) }
         } else {
             return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") }
         }
@@ -445,7 +485,7 @@ export func gen_place(s: *GenFuncState, id: int64) -> Place {
         if idx.kind == xk_range() { return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") } }
         iv: Val = gen_expr(s, e.b)
         io: string = coerce(s, iv.ty, iv.op, cty_int(c, 64))
-        return elem_addr(s, e.a, io)
+        return elem_addr(s, e.a, io, e.d)
     }
     return Place { ok: false, ty: cty_void(c), ptr: gs_copy("") }
 }

@@ -1,0 +1,41 @@
+@paradigm procedural
+@paradigm functional
+@import std.vector
+
+struct Cell { rows: int64[] }
+struct Outer { inner: *Cell }
+
+func heap_rows() -> int64[] {
+    values: int64[2] = [11, 22]
+    return map(values[0..2], lambda (value: int64) -> int64 { return value * 10 })
+}
+
+func main() -> int32 {
+    cell: *Cell = alloc(Cell { rows: [] })
+    outer: *Outer = alloc(Outer { inner: cell })
+    holders: (*Cell, int64) = (cell, 7)
+    cells: *Vector<*Cell> = alloc(vec_new())
+    vec_push(cells, cell)
+    mut copy: Cell = Cell { rows: [] }
+    fill := lambda () -> void {
+        ref direct := cell
+        (*direct).rows = heap_rows()
+        ref projected := (*outer).inner
+        (*projected).rows = heap_rows()
+        unpacked, count := holders
+        (*unpacked).rows = heap_rows()
+        ref fetched := vec_get(cells, 0)
+        (*fetched).rows = heap_rows()
+        local: int64[2] = [1, 2]
+        copy.rows = local[0..2]
+        println(count)
+    }
+    fill()
+    println((*cell).rows[0])
+    println((*cell).rows[1])
+    vec_free(cells)
+    free(cells)
+    free(outer)
+    free(cell)
+    return 0
+}

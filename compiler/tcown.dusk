@@ -11,6 +11,8 @@
 @import tysigs
 @import tcstate
 @import tcscope
+@import summary
+@import tcesc2
 
 /** Whether an expression names storage a write can reach: a binding, a field chain, a
  *  scalar index (a range mints an rvalue slice), or a dereference. Everything else has
@@ -45,6 +47,25 @@ export func is_managed_ty(tc: *TypeChecker, tyid: int64) -> bool {
     if n.kind != tyk_ptr() { return false }
     inner: TyNode = ty_get((*tc).ty, n.a)
     return inner.kind != tyk_unit()
+}
+
+/** Whether a lowered type is a string, the second kind the borrow side tracks.
+ *  @param tc the type checker holding the type arena
+ *  @param tyid the lowered type id to test
+ *  @return true when tyid is a string */
+export func is_str_ty(tc: *TypeChecker, tyid: int64) -> bool {
+    return ty_get((*tc).ty, tyid).kind == tyk_str()
+}
+
+/** Whether a borrow of a value of this type is recorded: a managed pointer or a string.
+ *  Only the borrow side asks it. A string is never recorded an owner, since a copy
+ *  `t := s` is how the language passes text around, so the owner side keeps asking
+ *  is_managed_ty alone.
+ *  @param tc the type checker holding the type arena
+ *  @param tyid the lowered type id to test
+ *  @return true when a parameter or capture of this type is a recorded borrow */
+export func is_borrowable_ty(tc: *TypeChecker, tyid: int64) -> bool {
+    return is_managed_ty(tc, tyid) || is_str_ty(tc, tyid)
 }
 
 /** Whether an AST type node is a bare type parameter of the function under check: a
@@ -180,6 +201,82 @@ export func is_owning_call(tc: *TypeChecker, e: ExprNode) -> bool {
     if is_local(tc, n) { return false }
     if !sig_has_fn((*tc).sigtab, n) { return false }
     return sig_fn((*tc).sigtab, n).owning
+}
+
+/** The borrow verdict for the string a call hands back: own_borrow() when the result may
+ *  be a string some argument still owns, 0 otherwise. An owning callee hands over its
+ *  result. A callee with no static summary, a closure value, a function parameter, or
+ *  an interface method, answers 0, since nothing says what it returns. Otherwise the
+ *  alias summary decides: a result read back out of an argument borrows, and so does a
+ *  result that is an argument which itself borrows, a name with a borrow record or a
+ *  call whose own verdict borrows. A method summary counts its receiver as index 0.
+ *  @param tc the type checker holding the alias summaries and ownership scope
+ *  @param call the call expression whose string result is judged
+ *  @return own_borrow() or 0 */
+export func str_call_verdict(tc: *TypeChecker, call: ExprNode) -> int64 {
+    if (*tc).types_only || call.kind != xk_call() { return 0 }
+    if is_owning_call(tc, call) { return 0 }
+    ce: CalleeEsc = tc_callee_alias(tc, call.a)
+    if ce.opaque { return 0 }
+    if ce.sum.reads_through != 0 { return own_borrow() }
+    a: *Ast = (*tc).ast
+    callee: ExprNode = vec_get((*a).exprs, call.a)
+    mut shift: int64 = 0
+    if callee.kind == xk_field() { shift = 1 }
+    for i in 0..64 {
+        if ps_has(ce.sum.returns_alias, i) && arg_borrows(tc, call, callee, i - shift) { return own_borrow() }
+    }
+    return 0
+}
+
+// Whether the value at one summary index of a call is a borrow: index -1 is a method's
+// receiver, every other index an argument. A name borrows by its record, a nested call
+// by its own verdict. A string inside an aggregate place remains held there, including
+// a slice of an array place; a fresh aggregate call result has no such storage
+func arg_borrows(tc: *TypeChecker, call: ExprNode, callee: ExprNode, idx: int64) -> bool {
+    if idx >= call.c { return false }
+    a: *Ast = (*tc).ast
+    mut arg_id: int64 = callee.a
+    if idx >= 0 { arg_id = vec_get((*a).kids, call.b + idx) }
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if arg.kind == xk_ident() && own_of(tc, ast_name(a, arg.a)) == own_borrow() { return true }
+    if arg.kind == xk_call() { return str_call_verdict(tc, arg) == own_borrow() }
+    mut is_place: bool = is_place_expr(a, arg_id)
+    if arg.kind == xk_index() { is_place = is_place || is_place_expr(a, arg.a) }
+    if !is_place { return false }
+    tyid: int64 = own_chain_ty(tc, arg_id)
+    kind: int64 = ty_get((*tc).ty, tyid).kind
+    if kind != tyk_named() && kind != tyk_tuple() && kind != tyk_array() && kind != tyk_slice() { return false }
+    seen: *Map<string, int64> = alloc(map_new())
+    return aggregate_holds_string(tc, tyid, seen)
+}
+
+func aggregate_holds_string(tc: *TypeChecker, tyid: int64, seen: *Map<string, int64>) -> bool {
+    node: TyNode = ty_get((*tc).ty, tyid)
+    if node.kind == tyk_str() || node.kind == tyk_unknown() { return true }
+    if node.kind == tyk_array() || node.kind == tyk_slice() { return aggregate_holds_string(tc, node.a, seen) }
+    if node.kind == tyk_tuple() {
+        for i in 0..node.len {
+            if aggregate_holds_string(tc, vec_get((*(*tc).ty).kids, node.off + i), seen) { return true }
+        }
+    }
+    if node.kind != tyk_named() { return false }
+    name: string = ty_name((*tc).ty, tyid)
+    if map_has(seen, name) { return false }
+    map_put(seen, name, 1)
+    record: StructSig = sig_struct((*tc).sigtab, name)
+    for i in 0..record.len {
+        field: FieldSig = vec_get((*(*tc).sigtab).fields, record.off + i)
+        if aggregate_holds_string(tc, field.ty, seen) { return true }
+    }
+    variants: EnumSig = unwrap_or(map_get((*tc).enums, name), EnumSig { off: 0, len: 0 })
+    for i in 0..variants.len {
+        variant: VariantSig = sig_variant_at((*tc).sigtab, variants.off + i)
+        for j in 0..variant.len {
+            if aggregate_holds_string(tc, sig_ty_at((*tc).sigtab, TyList { off: variant.off, len: variant.len }, j), seen) { return true }
+        }
+    }
+    return false
 }
 
 /** The ownership a value expression hands to the binding it initializes. A call hands
