@@ -173,3 +173,23 @@ export func genctx_loc_text(ctx: *GenCtx, off: int64) -> string {
     }
     return genctx_copy("?:0")
 }
+
+/** Whether a merged source offset falls in a file the standard library supplied,
+ *  by the same walk genctx_loc_text takes to name the file. A --heap-sites build
+ *  brackets no call in such a file, so an allocation inside the standard library is
+ *  attributed to the innermost call of the program's own code.
+ *  @param ctx the module context
+ *  @param off the merged source offset
+ *  @return true for a standard library file */
+export func genctx_loc_is_std(ctx: *GenCtx, off: int64) -> bool {
+    fls: *Vector<FileSrc> = (*ctx).files
+    mut i: int64 = vec_len(fls) - 1
+    while i >= 0 {
+        f: FileSrc = vec_get(fls, i)
+        if off >= f.base {
+            return f.is_std
+        }
+        i--
+    }
+    return false
+}

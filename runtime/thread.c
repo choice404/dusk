@@ -113,7 +113,7 @@ void cool_sleep_ms(int64_t ms) {
     struct timespec ts;
     ts.tv_sec = ms / 1000;
     ts.tv_nsec = (ms % 1000) * 1000000L;
-    nanosleep(&ts, NULL);
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
 }
 
 /* Sequentially consistent int64 atomics, the only ordering 0.3.x offers. */

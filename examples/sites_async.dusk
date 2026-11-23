@@ -1,0 +1,26 @@
+@paradigm procedural
+
+@import std.async.future
+@import std.async.loop
+@import std.async.time
+
+// A task that allocates after an await runs inside async_run on the main thread, so
+// its block names its own line with the async_run line beneath, and a block from
+// before the await the same.
+async func task() -> int64 {
+    before := "before" + "!"
+    v := await sleep_async(1)
+    after := "after" + "!"
+    println(before)
+    println(after)
+    return v
+}
+
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    r := async_run(task())
+    loop_free()
+    println(r)
+    return 0
+}

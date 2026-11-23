@@ -1,14 +1,13 @@
-/** drivercs: the check that no @csource reaches a dusk function by its bare name.
- *  A dusk function's symbol is internal and carries a suffix no C identifier can
- *  spell, so a C file that calls one by the name it has in dusk calls something
- *  else: nothing at all, a link error, or a C library function of the same name,
- *  which links and runs the wrong code without a word. A library archive is worse,
- *  since `ld -r` never complains about an undefined symbol and the failure moves to
- *  the host's link. So after a @csource is compiled to an object, the names it
- *  leaves undefined are read with llvm-nm and any that a dusk function of the
- *  module also takes is refused by name, in an executable build and a library
- *  build alike. An `export "C"` function keeps its C name and is the way a C file
- *  calls dusk by name. */
+/** drivercs: what a failed link says about a C source that called a dusk function
+ *  by its bare name. A dusk function's symbol is internal and carries a suffix no C
+ *  identifier can spell, so a C call by the name it has in dusk reaches C: the C
+ *  library, the runtime, or another C source, whichever defines it. Only when nothing
+ *  does is the call unresolved, and then the linker's undefined reference to a name a
+ *  dusk function takes is turned into a named build error at the first place a C
+ *  source spells it. An executable reads its own link's report; a library build,
+ *  whose `ld -r` never complains, reads the report of a trial link of its object
+ *  against the runtime and the C library. An `export "C"` function keeps its C name
+ *  and is the way a C file calls dusk by name. */
 
 @paradigm procedural
 
@@ -16,30 +15,50 @@
 @import std.vector
 @import std.map
 @import std.os
-@import std.process
-@import home
 @import diag
 @import source
-@import driverlink
 
-// The names an object leaves undefined, one per line of llvm-nm's output, and
-// whether llvm-nm could read the object at all.
-func undefined_names(obj: string) -> (*Vector<string>, bool) {
-    q: string = quote(obj)
-    cmd: string = "llvm-nm --undefined-only --just-symbol-name " + q + " 2>/dev/null"
-    free(q)
-    text, code, e := run_capture(cmd)
-    free(cmd)
-    if e.exists() || code != 0 {
-        if code >= 0 {
-            free(text)
+// The name a linker line reports undefined, from ld's "undefined reference to `X'"
+// or lld's and mold's "undefined symbol: X", or an empty string for any other line.
+func undefined_name(line: string) -> string {
+    bfd: int64 = str_find(line, "undefined reference to `")
+    if bfd >= 0 {
+        lo: int64 = bfd + 24
+        mut hi: int64 = lo
+        while hi < str_len(line) && line[hi] != 39 {
+            hi++
         }
-        empty: *Vector<string> = alloc(vec_new())
-        return (empty, false)
+        return substring(line, lo, hi)
     }
-    names: *Vector<string> = str_split(text, "\n")
-    free(text)
-    return (names, true)
+    lld: int64 = str_find(line, "undefined symbol: ")
+    if lld >= 0 {
+        lo2: int64 = lld + 18
+        mut hi2: int64 = lo2
+        while hi2 < str_len(line) && line[hi2] != 32 {
+            hi2++
+        }
+        return substring(line, lo2, hi2)
+    }
+    return substring(line, 0, 0)
+}
+
+/** The names a linker's report leaves undefined, each once, in first report order.
+ *  @param report the linker's stderr
+ *  @return the names, a fresh vector the caller frees */
+export func undefined_refs(report: string) -> *Vector<string> {
+    names: *Vector<string> = alloc(vec_new())
+    seen: *Map<string, int64> = alloc(map_new())
+    lines: *Vector<string> = str_split(report, "\n")
+    for one in lines {
+        name: string = undefined_name(one)
+        if str_len(name) > 0 && !map_has(seen, name) {
+            map_put(seen, substring(name, 0, str_len(name)), 1)
+            vec_push(names, name)
+        } else {
+            free(name)
+        }
+    }
+    return names
 }
 
 // Whether the byte is one a C identifier may hold.
@@ -147,73 +166,41 @@ func word_at(text: string, len: int64, i: int64, name: string, n: int64) -> bool
     return i + n == len || !is_ident_byte(text[i + n])
 }
 
-/** Reports every dusk function a compiled @csource object calls by its bare name,
- *  pointing at the first place the C source spells it.
- *  @param src the C source the object was compiled from
- *  @param obj the object
+/** Reports every name a linker left undefined that a dusk function of the module
+ *  takes, each at the first place a C source spells it, or, when none does, as a
+ *  library call the compiler made for a C source.
+ *  @param report the linker's stderr
+ *  @param csources the @csource paths
  *  @param fn_names the module's internal top level functions, by their dusk names
- *  @return true when the source calls none of them */
-export func csource_bare_calls_ok(src: string, obj: string, fn_names: *Vector<string>) -> bool {
+ *  @return how many names were reported */
+export func report_dusk_undefined(report: string, csources: *Vector<string>, fn_names: *Vector<string>) -> int64 {
     dusk_fns: *Map<string, int64> = alloc(map_new())
     for fname in fn_names {
         map_put(dusk_fns, fname, 1)
     }
-    undefined, read := undefined_names(obj)
-    if !read {
-        diag_emit(diag_new(src, 0, 0, "llvm-nm could not read the object of this C source, which the build reads for a dusk function the source calls by its bare name"))
-        return false
-    }
-    mut ok: bool = true
-    for sym in undefined {
+    names: *Vector<string> = undefined_refs(report)
+    mut reported: int64 = 0
+    for sym in names {
         if map_has(dusk_fns, sym) {
-            line, col := first_mention(src, sym)
+            report_one(sym, csources)
+            reported++
+        }
+    }
+    return reported
+}
+
+// One unresolved call of a dusk function's name, at the first C source that spells it
+func report_one(sym: string, csources: *Vector<string>) -> void {
+    for src in csources {
+        line, col := first_mention(src, sym)
+        if line > 0 {
             msg: string = "C source calls dusk function '" + sym + "' by name; declare it export \"C\""
             diag_emit(diag_new(src, line, col, msg))
             free(msg)
-            ok = false
+            return
         }
     }
-    return ok
-}
-
-/** The executable build's form of the check: each @csource is compiled to an object
- *  beside the build's other output with the module's flags, read, and removed again,
- *  since the link line compiles the sources itself. A source that does not compile
- *  is left to the link, which reports it the way it always has.
- *  @param out the build's output directory
- *  @param stem the output stem, which names the objects
- *  @param csources the @csource paths
- *  @param fn_names the module's internal top level functions
- *  @param flags the module's flags
- *  @return true when no source calls a dusk function by its bare name */
-export func csources_bare_calls_ok(out: string, stem: string, csources: *Vector<string>, fn_names: *Vector<string>, flags: string) -> bool {
-    mut ok: bool = true
-    for ci in 0..vec_len(csources) {
-        src: string = vec_get(csources, ci)
-        obj: string = path_join(out, f"{stem}.cs{ci}.o")
-        cmd: *StringBuilder = alloc(sb_new())
-        sb_push(cmd, "clang -c -pthread")
-        if str_len(flags) > 0 {
-            sb_push_char(cmd, 32)
-            sb_push(cmd, flags)
-        }
-        push_arg(cmd, src)
-        sb_push(cmd, " -o")
-        push_arg(cmd, obj)
-        sb_push(cmd, " 2>/dev/null")
-        line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
-        sb_free(cmd)
-        free(cmd)
-        if run(line) == 0 && !csource_bare_calls_ok(src, obj, fn_names) {
-            ok = false
-        }
-        free(line)
-        qobj: string = quote(obj)
-        rm: string = "rm -f " + qobj
-        run(rm)
-        free(rm)
-        free(qobj)
-        free(obj)
-    }
-    return ok
+    msg2: string = "dusk: nothing the link reads defines '" + sym + "', a library call clang made for a C source; the dusk function of that name is internal and cannot answer it"
+    printerr(msg2)
+    free(msg2)
 }

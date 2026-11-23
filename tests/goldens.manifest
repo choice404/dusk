@@ -5850,6 +5850,20 @@ mode run
 file examples/capshadow_ok.dusk
 out 1\n42\n
 ---
+# Codegen builds a closure's capture set with the checker's scoping: a for binder in
+# the lambda that repeats a frame slice's name captures nothing, so no environment
+# is left in the frame the stored closure outlives, and a read of an enclosing name
+# before the lambda binds its own captures the enclosing one.
+test a_shadowing_for_binder_is_not_a_capture_in_codegen
+mode run
+file examples/capshadow_for_ok.dusk
+out 1\n3\n
+---
+test a_read_before_a_shadowing_let_captures_the_enclosing_name
+mode run
+file examples/capture_read_then_shadow_ok.dusk
+out 108\n7\n
+---
 # A collected array whose element is a constructor holding a pointer to an object that
 # stores a frame view. The embed walk descended into array, tuple, and struct literals
 # but not into a constructor call, so the pointer's frame view never reached the mint's
@@ -10905,20 +10919,39 @@ mode run
 file examples/link_libm_names_ok.dusk
 out 5\n97\n2.75\n
 ---
-# A C source that calls a plain export func by name is refused by name: export is
-# visibility between dusk files, and the function's symbol is internal, so the C
-# call could only reach something else. One that calls a C library name the dusk
-# file also defines is refused the same way rather than linking to the library.
+# A C source that calls a plain export func by name, which nothing in C defines,
+# fails the link, and the build names the call at the C source: export is
+# visibility between dusk files, and the function's symbol is internal.
 test link_csource_bare_fail
 mode build_fail
 file examples/link_csource_bare_fail.dusk
 err_has link_csource_call.c: 6:9: error: C source calls dusk function 'dusk_twice' by name; declare it export "C"
 err_absent clang failed
+err_absent undefined reference
 ---
-test link_csource_libc_name_fail
-mode build_fail
-file examples/link_csource_libc_name_fail.dusk
-err_has link_csource_libc_name.c: 4:5: error: C source calls dusk function 'getuid' by name; declare it export "C"
+# A C call by a name a dusk function also takes reaches C whenever C defines it: the
+# C library's getuid, the memcpy clang emits for a struct copy, a helper another C
+# source defines, and the runtime's own allocator, each beside a dusk function of the
+# same name that dusk calls still reach.
+test link_csource_libc_name_ok
+mode run
+file examples/link_csource_libc_name_ok.dusk
+out -7\nfalse\n
+---
+test link_csource_libcall_ok
+mode run
+file examples/link_csource_libcall_ok.dusk
+out 41\n2\n
+---
+test link_csource_sibling_ok
+mode run
+file examples/link_csource_sibling_ok.dusk
+out 6\n70\n
+---
+test link_csource_runtime_ok
+mode run
+file examples/link_csource_runtime_ok.dusk
+out 9\n2\n
 ---
 test link_csource_exportc_ok
 mode run
@@ -10979,7 +11012,7 @@ err_has name_foreign_main_fail.dusk: 6:10: error: 'main' is the program's C entr
 test name_foreign_runtime_fail
 mode check_fail
 file examples/name_foreign_runtime_fail.dusk
-err_has name_foreign_runtime_fail.dusk: 7:10: error: foreign 'cool_gen_alloc' differs from the compiler's own declaration of it
+err_has name_foreign_runtime_fail.dusk: 7:10: error: foreign 'cool_gen_alloc' differs from the compiler's own declaration of it, which takes an int64 and returns a raw pointer; declare it the same way or take another name
 ---
 test name_foreign_restate_ok
 mode run
@@ -10990,6 +11023,44 @@ test name_foreign_mismatch_fail
 mode check_fail
 file examples/name_foreign_mismatch_fail.dusk
 err_has name_foreign_mismatch_mod.dusk: 4:10: error: foreign 'getpid' differs from its declaration in examples/name_foreign_mismatch_fail.dusk; every foreign declaration of a name must say the same
+---
+# A declaration that returns or takes a struct by value is compared with another of
+# its name by the types it spells, so two that agree build and two that differ are
+# refused at check, where both built through 1.17.3 and the call bound to one.
+test name_foreign_shape_ok
+mode run
+file examples/name_foreign_shape_ok.dusk
+out 3\n2\n
+---
+test name_foreign_shape_fail
+mode check_fail
+file examples/name_foreign_shape_fail.dusk
+err_has name_foreign_shape_mod.dusk: 10:10: error: foreign 'div' differs from its declaration in examples/name_foreign_shape_fail.dusk; every foreign declaration of a name must say the same
+---
+# Two declarations of one name are compared by the dusk types they spell, so an
+# int32 against a uint32, which lower alike, and a variadic tail against none are
+# refused at check, and two that spell the same build.
+test name_foreign_sign_fail
+mode check_fail
+file examples/name_foreign_sign_fail.dusk
+err_has name_foreign_sign_mod.dusk: 5:10: error: foreign 'abs' differs from its declaration in examples/name_foreign_sign_fail.dusk; every foreign declaration of a name must say the same
+---
+test name_foreign_variadic_fail
+mode check_fail
+file examples/name_foreign_variadic_fail.dusk
+err_has name_foreign_variadic_mod.dusk: 5:10: error: foreign 'snprintf' differs from its declaration in examples/name_foreign_variadic_fail.dusk; every foreign declaration of a name must say the same
+---
+test name_foreign_same_ok
+mode run
+file examples/name_foreign_same_ok.dusk
+out 3\n4\n2\n
+---
+# An interface table's symbol never meets the symbol of a method of a struct named
+# vtable, which through the first 2.0.0 work both spelled vtable.m.d.
+test name_vtable_method_ok
+mode run
+file examples/name_vtable_method_ok.dusk
+out 5\n7\n8\n
 ---
 # An imported file's private helper is judged by the name it was written with, so a
 # private cool beside the root's own cool builds and each call reaches its own.

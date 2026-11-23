@@ -1,0 +1,25 @@
+@paradigm procedural
+
+// Two threads adding to one generational heap block with no lock are a data race
+// ThreadSanitizer reports in the dusk function that writes it; under thread the
+// heap still parks its blocks, and every access a dusk function makes is seen.
+func bump(p: *int64, n: int64) -> void {
+    for i in 0..n {
+        *p = *p + 1
+    }
+}
+
+func main() -> int32 {
+    p: *int64 = alloc(0)
+    t1, e1 := spawn(lambda () -> void { bump(p, 20000) })
+    e1.ignore()
+    t2, e2 := spawn(lambda () -> void { bump(p, 20000) })
+    e2.ignore()
+    j1 := join(t1)
+    j1.ignore()
+    j2 := join(t2)
+    j2.ignore()
+    println(*p > 0)
+    free(p)
+    return 0
+}

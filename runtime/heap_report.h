@@ -12,12 +12,17 @@
      DUSK_HEAP_DEPTH=1..8  how many call sites of a chain the report groups by,
                            eight by default; 1 groups by the line alone
      DUSK_HEAP_SIGNAL=USR1 a signal, by name or number, that prints a report; off
-                           unless set
+                           unless set. A signal that cannot be caught or that a
+                           fault raises is refused by name. The handler wakes a
+                           report thread through a pipe, and no signal mask changes
 
    The report holds the heap lock while it prints, so a report written into a pipe
    nobody reads stalls every allocation. A fault aborts and prints no report. */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <unistd.h>
 
 static int64_t cool_report_depth = COOL_SITE_CHAIN;
 
@@ -62,7 +67,8 @@ static int cool_live_cmp(const void *x, const void *y) {
     return cool_chain_key_cmp(((const cool_live_rec *)x)->chain, ((const cool_live_rec *)y)->chain);
 }
 
-/* Orders two location texts, a missing one last. */
+/* Orders two location texts, path:line, by path and then by line as a number, so
+   line 12 sorts before line 100; a missing one last. */
 static int cool_loc_text_cmp(const char *a, const char *b) {
     if (a == b) {
         return 0;
@@ -73,7 +79,23 @@ static int cool_loc_text_cmp(const char *a, const char *b) {
     if (!b) {
         return -1;
     }
-    return strcmp(a, b);
+    const char *ca = strrchr(a, ':');
+    const char *cb = strrchr(b, ':');
+    if (!ca || !cb) {
+        return strcmp(a, b);
+    }
+    size_t la = (size_t)(ca - a);
+    size_t lb = (size_t)(cb - b);
+    int c = strncmp(a, b, la < lb ? la : lb);
+    if (c != 0 || la != lb) {
+        return c != 0 ? c : (la < lb ? -1 : 1);
+    }
+    long long na = atoll(ca + 1);
+    long long nb = atoll(cb + 1);
+    if (na != nb) {
+        return na < nb ? -1 : 1;
+    }
+    return strcmp(ca, cb);
 }
 
 /* Orders the chains of two groups by their texts, so the order of the report never
@@ -216,26 +238,47 @@ static void cool_heap_exit_report(void) {
     }
 }
 
-static sigset_t cool_heap_sigset;
+/* The report signal's pipe. The handler only writes one byte to it, which is async
+   signal safe, and the report thread reads it and prints, so no report code runs in
+   signal context. No signal mask is touched, so a child process inherits none, and a
+   caught signal's disposition resets to the default at exec. Both ends close at
+   exec, and the write end never blocks, so a burst of signals with the pipe full
+   folds into the reports already pending. */
+static int cool_heap_sigpipe[2] = {-1, -1};
 
-/* The report thread's loop. sigwait takes the signal off the blocked set, so no
-   handler ever runs and nothing here is in signal context. */
+static void cool_heap_signal_handler(int sig) {
+    (void)sig;
+    int saved = errno;
+    char one = 1;
+    ssize_t w = write(cool_heap_sigpipe[1], &one, 1);
+    (void)w;
+    errno = saved;
+}
+
+/* The report thread's loop: one report per byte the handler wrote. */
 static void *cool_heap_signal_loop(void *arg) {
     (void)arg;
     for (;;) {
-        int sig = 0;
-        if (sigwait(&cool_heap_sigset, &sig) == 0) {
+        char one = 0;
+        ssize_t r = read(cool_heap_sigpipe[0], &one, 1);
+        if (r == 1) {
             cool_heap_report();
+        } else if (r == 0 || errno != EINTR) {
+            return NULL;
         }
     }
-    return NULL;
 }
 
 /* The signal DUSK_HEAP_SIGNAL names, by number or by name with or without SIG,
-   or 0 for a name it does not know. */
+   or 0 for text that names none. A number is all digits. */
 static int cool_heap_signal_number(const char *spec) {
     if (spec[0] >= '0' && spec[0] <= '9') {
-        return atoi(spec);
+        for (const char *c = spec; *c; c++) {
+            if (*c < '0' || *c > '9') {
+                return 0;
+            }
+        }
+        return strlen(spec) > 3 ? 0 : atoi(spec);
     }
     const char *name = strncmp(spec, "SIG", 3) == 0 ? spec + 3 : spec;
     if (strcmp(name, "USR1") == 0) return SIGUSR1;
@@ -247,26 +290,63 @@ static int cool_heap_signal_number(const char *spec) {
     return 0;
 }
 
-/* Blocks the report signal in the main thread before any other thread exists, so
-   every thread inherits the mask, and starts the one detached thread that waits
-   for it. A name it does not know is said once and leaves the signal alone. */
+/* Whether a signal number is one the report may take: a signal a handler can catch
+   that no fault or the runtime's own machinery raises. */
+static int cool_heap_signal_usable(int sig) {
+    switch (sig) {
+    case SIGKILL: case SIGSTOP: case SIGSEGV: case SIGBUS: case SIGFPE:
+    case SIGILL: case SIGTRAP: case SIGABRT: case SIGPIPE: case SIGCHLD:
+        return 0;
+    default:
+        return sig > 0 && sig < NSIG;
+    }
+}
+
+/* Opens the pipe, both ends closed at exec and the write end nonblocking. */
+static int cool_heap_sigpipe_open(void) {
+    if (pipe(cool_heap_sigpipe) != 0) {
+        return 0;
+    }
+    for (int i = 0; i < 2; i++) {
+        fcntl(cool_heap_sigpipe[i], F_SETFD, FD_CLOEXEC);
+    }
+    fcntl(cool_heap_sigpipe[1], F_SETFL, fcntl(cool_heap_sigpipe[1], F_GETFL) | O_NONBLOCK);
+    return 1;
+}
+
+/* Starts the report thread and installs the handler that wakes it. Text that names
+   no signal, or a signal the report may not take, is said once and leaves every
+   signal alone. */
 static void cool_heap_signal_start(const char *spec) {
     int sig = cool_heap_signal_number(spec);
-    if (sig <= 0 || sig >= 65) {
+    if (sig == 0) {
         fprintf(stderr, "dusk heap: DUSK_HEAP_SIGNAL '%s' names no signal; no report signal\n", spec);
         return;
     }
-    sigemptyset(&cool_heap_sigset);
-    sigaddset(&cool_heap_sigset, sig);
-    pthread_sigmask(SIG_BLOCK, &cool_heap_sigset, NULL);
+    if (!cool_heap_signal_usable(sig)) {
+        fprintf(stderr, "dusk heap: DUSK_HEAP_SIGNAL '%s' names a signal the report cannot take; use USR1, USR2, HUP, INT, QUIT, or TERM\n", spec);
+        return;
+    }
+    if (!cool_heap_sigpipe_open()) {
+        fputs("dusk heap: could not open the report signal's pipe\n", stderr);
+        return;
+    }
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_t t;
-    if (pthread_create(&t, &attr, cool_heap_signal_loop, NULL) != 0) {
-        fputs("dusk heap: could not start the report signal thread\n", stderr);
-    }
+    int started = pthread_create(&t, &attr, cool_heap_signal_loop, NULL) == 0;
     pthread_attr_destroy(&attr);
+    if (!started) {
+        fputs("dusk heap: could not start the report signal thread\n", stderr);
+        return;
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = cool_heap_signal_handler;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(sig, &sa, NULL);
 }
 
 /* Reads the three variables once, before main, and registers the exit report. */
@@ -274,6 +354,8 @@ __attribute__((constructor)) static void cool_heap_sites_init(void) {
     const char *depth = getenv("DUSK_HEAP_DEPTH");
     if (depth && depth[0] >= '1' && depth[0] <= '8' && depth[1] == 0) {
         cool_report_depth = depth[0] - '0';
+    } else if (depth && depth[0]) {
+        fprintf(stderr, "dusk heap: DUSK_HEAP_DEPTH '%s' is not a depth from 1 to 8; the report reads 8\n", depth);
     }
     const char *at_exit = getenv("DUSK_HEAP_EXIT");
     if (!at_exit || strcmp(at_exit, "0") != 0) {

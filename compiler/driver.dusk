@@ -24,7 +24,6 @@
 @import driverrt
 @import genopts
 @import buildopts
-@import drivercs
 
 /** The output stem for a source path: its basename with the extension dropped, the
  *  name the driver gives the emitted binary under target/dusk-out. Falls back to
@@ -137,17 +136,13 @@ export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: 
     if !check_ir_written(ll) { return 1 }
     home: string = dusk_home(prog)
     // The module's flags reach the module, every @csource, and the link line; the
-    // runtime compiles with its own. Every @csource is read for a dusk function it
-    // calls by its bare name before the link, which could only bind that call to
-    // something else.
+    // runtime compiles with its own. A C source's bare call of a dusk function's name
+    // reaches C when C defines it, and is named by the link when nothing does.
     opt: string = module_flags(bo)
-    if !csources_bare_calls_ok(out, stem, ir.csources, ir.fn_names, opt) {
-        return 1
-    }
     // The runtime is resolved before the link line is written: one cached object per
     // runtime source when the cache is usable, the sources themselves when it is not.
     rt_inputs: *Vector<string> = runtime_inputs(home, out, runtime_flags(bo))
-    code: int64 = link_only(ll, bin, rt_inputs, ir.links, ir.csources, opt)
+    code: int64 = link_only(ll, bin, rt_inputs, ir.links, ir.csources, ir.fn_names, opt)
     free_runtime_inputs(rt_inputs)
     free(rt_inputs)
     if code != 0 { return 1 }
@@ -204,7 +199,7 @@ export func build_lib_named(prog: string, path: string, stem: string, from_manif
     }
     if !check_ir_written(ll) { return 1 }
     home: string = dusk_home(prog)
-    code: int64 = archive_lib(home, ll, stem, out, ir.csources, ir.exports, ir.fn_names, opt_flag(release))
+    code: int64 = archive_lib(home, ll, stem, out, ir.csources, ir.links, ir.exports, ir.fn_names, opt_flag(release))
     if code != 0 { return 1 }
     if !write_lib_header(out, stem, ir.exports, ir.links) { return 1 }
 

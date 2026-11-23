@@ -24,6 +24,17 @@ FILE *popen(const char *command, const char *type);
 int pclose(FILE *stream);
 #endif
 
+/* AddressSanitizer's own sign that it instruments this file, which turns the
+   generational heap's real free on, see heap_asan.h. No -D is needed, so a hand
+   build under the sanitizer gets the same heap the driver's does. */
+#if defined(__SANITIZE_ADDRESS__)
+#define COOL_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define COOL_ASAN 1
+#endif
+#endif
+
 static pthread_mutex_t cool_heap_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void cool_gen_fault(void);
@@ -454,113 +465,15 @@ void cool_free(void *p) {
 #include "heap_class.h"
 #include "heap_sites.h"
 
-/* Block registry. One entry per generational block the heap has ever minted,
-   with its payload capacity, so the collector can scan every live generational
-   block as a root region.
+/* The block registry, its counters, and the collector's snapshot of it, then the
+   real free of an AddressSanitizer build. */
+#include "heap_registry.h"
+#include "heap_asan.h"
 
-   The table is append only. A block's address never goes back to libc and its
-   class never changes, so a block's address and capacity are fixed for the life
-   of the process and one entry describes it forever. What changes across reuse
-   is the size of the payload the current tenant asked for, and that lives in the
-   block's own size word, as does liveness: the parked bit says it. So a mint
-   appends, a reuse touches nothing, and a free touches nothing.
-
-   The collector copies a snapshot under the lock, keeping only the live
-   entries, and scans it released, so a block another thread frees mid scan is
-   still mapped, parked not returned, and reads only over retain. */
-static void **cool_reg_ptr = NULL;
-static int64_t *cool_reg_room = NULL;
-static int64_t cool_reg_n = 0;
-static int64_t cool_reg_cap = 0;
-
-/* The gauge's counters: live blocks, the bytes their tenants asked for, and the
-   capacity of every block minted, live or parked. Written only with the heap
-   lock held, on paths that already take it; heap_gauge.h reads them. */
-static int64_t cool_heap_blocks = 0;
-static int64_t cool_heap_bytes = 0;
-static int64_t cool_heap_held = 0;
-
-/* Appends a freshly minted payload and its capacity with the heap lock held.
-   Growth failure is out of memory, fatal, since dropping an entry would under
-   root the collector and free a still reachable block. */
-static void cool_reg_add_locked(void *p, int64_t room) {
-    if (cool_reg_n == cool_reg_cap) {
-        int64_t ncap = cool_reg_cap ? cool_reg_cap * 2 : 128;
-        void **np = realloc(cool_reg_ptr, (size_t)ncap * sizeof(void *));
-        if (np) {
-            cool_reg_ptr = np;
-        }
-        int64_t *nr = realloc(cool_reg_room, (size_t)ncap * sizeof(int64_t));
-        if (nr) {
-            cool_reg_room = nr;
-        }
-        if (!np || !nr) {
-            fflush(stdout);
-            fputs("fatal: out of memory\n", stderr);
-            abort();
-        }
-        cool_reg_cap = ncap;
-    }
-    cool_reg_ptr[cool_reg_n] = p;
-    cool_reg_room[cool_reg_n] = room;
-    cool_reg_n++;
-}
-
-/* The byte count the collector scans in a live block: the size its current
-   tenant asked for, read from the header under the heap lock, since a block
-   reused by a larger request in its class holds live words past the size it was
-   minted at. The capacity bounds it, so a scribbled header can never widen the
-   scan past the block, and a size the header cannot hold reads as the whole
-   capacity, over retaining rather than dropping a root. */
-static int64_t cool_reg_scan_len_locked(void *p, int64_t room) {
-    int64_t size = *COOL_GEN_SIZE_WORD(p);
-    if (size < 0 || size > room) {
-        return room;
-    }
-    return size;
-}
-
-/* Copies the live registry for the collector. Allocates both arrays, which the
-   caller frees, and returns the count. Taken under the heap lock so the copy is
-   consistent, then released before the collector scans it. */
-int64_t cool_gen_registry_snapshot(void ***ptrs, int64_t **sizes) {
-    pthread_mutex_lock(&cool_heap_lock);
-    int64_t n = cool_reg_n;
-    void **pp = malloc((size_t)(n > 0 ? n : 1) * sizeof(void *));
-    int64_t *ss = malloc((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
-    if (!pp || !ss) {
-        // A short snapshot would drop roots and let the collector sweep a block
-        // still reachable through a generational block, so an incomplete
-        // snapshot is fatal rather than an empty root set the sweep proceeds on.
-        free(pp);
-        free(ss);
-        pthread_mutex_unlock(&cool_heap_lock);
-        fflush(stdout);
-        fputs("fatal: out of memory\n", stderr);
-        abort();
-    }
-    // A parked block is not a root: its payload is whatever the program left
-    // there before the free, and scanning it would mint references out of dead
-    // bytes. The parked bit and the size word are set and cleared under this
-    // same lock, so the live set and the lengths the copy names are the ones at
-    // the moment of the copy.
-    int64_t m = 0;
-    for (int64_t i = 0; i < n; i++) {
-        void *p = cool_reg_ptr[i];
-        if (*COOL_GEN_SIZE_WORD(p) & COOL_GEN_FREED_TAG) {
-            continue;
-        }
-        pp[m] = p;
-        ss[m] = cool_reg_scan_len_locked(p, cool_reg_room[i]);
-        m++;
-    }
-    pthread_mutex_unlock(&cool_heap_lock);
-    *ptrs = pp;
-    *sizes = ss;
-    return m;
-}
-
-void *cool_gen_alloc(int64_t size) {
+/* The parking allocation path: a block of the request's class, reused from its
+   class list or minted. Every generational block takes it in a plain build, and
+   only the runtime's own records under AddressSanitizer. */
+static void *cool_gen_alloc_parked(int64_t size) {
     /* A size the header cannot carry beside its reserved bit is answered the way
        a failed malloc is, since no such allocation could succeed anyway. */
     if (size < 0 || size >= COOL_GEN_SIZE_MAX) {
@@ -590,7 +503,8 @@ void *cool_gen_alloc(int64_t size) {
     void *q = base + COOL_GEN_PRE + COOL_GEN_HDR;
     int64_t *hdr = COOL_GEN_SIZE_WORD(q);
     hdr[0] = size;
-    __atomic_store_n(&hdr[1], 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&hdr[1], cool_gen_first(), __ATOMIC_SEQ_CST);
+    cool_gen_mark_record(q);
     pthread_mutex_lock(&cool_heap_lock);
     cool_site_record_locked(q);
     cool_reg_add_locked(q, room);
@@ -599,6 +513,14 @@ void *cool_gen_alloc(int64_t size) {
     cool_heap_held += room;
     pthread_mutex_unlock(&cool_heap_lock);
     return q;
+}
+
+void *cool_gen_alloc(int64_t size) {
+#ifdef COOL_ASAN
+    return cool_asan_alloc(size);
+#else
+    return cool_gen_alloc_parked(size);
+#endif
 }
 
 /* The retire path with the heap lock already held. loc names the free in the
@@ -657,9 +579,14 @@ void cool_gen_free_at(void *p, const char *loc) {
     if (cool_gc_is_collected(p)) {
         return;
     }
+#ifdef COOL_ASAN
+    (void)loc;
+    cool_asan_free(p);
+#else
     pthread_mutex_lock(&cool_heap_lock);
     cool_gen_free_locked(p, loc);
     pthread_mutex_unlock(&cool_heap_lock);
+#endif
 }
 
 /* The free with no location, kept for IR that calls it by this name. */
@@ -673,14 +600,24 @@ void cool_gen_free(void *p) {
    registry, and the same counters, so a record the program never awaited or
    joined shows as a live block. They are named apart because a retired record's
    generation is still read as defined behavior, a late complete or a second
-   join, so a heap that one day really frees the program's blocks must keep these
-   on the parking path. */
+   join, so under AddressSanitizer, where the program's blocks really go back to
+   libc, these stay on the parking path. */
 void *cool_handle_alloc(int64_t size) {
-    return cool_gen_alloc(size);
+    return cool_gen_alloc_parked(size);
 }
 
 void cool_handle_free(void *p) {
+#ifdef COOL_ASAN
+    if (!p) {
+        return;
+    }
+    pthread_mutex_lock(&cool_heap_lock);
+    cool_gen_record_check_locked(p);
+    cool_gen_free_locked(p, NULL);
+    pthread_mutex_unlock(&cool_heap_lock);
+#else
     cool_gen_free_at(p, NULL);
+#endif
 }
 
 /* Checks the remembered generation and retires the block in one critical
@@ -701,6 +638,7 @@ int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n) {
         return 1;
     }
     pthread_mutex_lock(&cool_heap_lock);
+    cool_gen_record_check_locked(p);
     int64_t *g = COOL_GEN_GEN_WORD(p);
     if (gen != 0 && __atomic_load_n(g, __ATOMIC_SEQ_CST) != gen) {
         pthread_mutex_unlock(&cool_heap_lock);

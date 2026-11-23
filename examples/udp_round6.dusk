@@ -29,13 +29,16 @@ func main() -> int32 {
     if sent != 4 {
         printerr("short send")
     }
+    // One byte past the largest receive is kept for the terminator, so the bytes
+    // read as a string end where the datagram does
     buf: *raw char = alloc_bytes(64)
-    got, from, re := udp_recv_from(b, buf, 64)
+    got, from, re := udp_recv_from(b, buf, 63)
     if re.exists() {
         free(buf)
         printerr(re)
         return 1
     }
+    buf[got] = 0
     text: string = substring(cstr(buf), 0, got)
     free(buf)
     println(got)

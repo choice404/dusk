@@ -1,0 +1,18 @@
+@paradigm procedural
+
+// alloc_bytes(5) is exactly five bytes under --sanitize=address, so a write to the
+// sixth is AddressSanitizer's heap buffer overflow report in the dusk function that
+// makes it. A plain build rounds the block up to its size class and the write lands
+// unseen.
+func poke(b: *raw char, i: int64) -> void {
+    b[i] = 66
+}
+
+func main() -> int32 {
+    b: *raw char = alloc_bytes(5)
+    b[0] = 65
+    poke(b, 5)
+    println(b[0])
+    free(b)
+    return 0
+}

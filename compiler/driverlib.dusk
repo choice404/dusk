@@ -266,6 +266,49 @@ func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, 
     return run(oline)
 }
 
+// A library's link happens at the host, and ld -r never complains about a name
+// left undefined, so a C source's bare call of a dusk function's name, which no C
+// defines, would ride the archive to the host's link and bind there to whatever the
+// host defines. A trial link of the merged object against the runtime objects, the
+// @link libraries, and the C library, with no start files, finds every name left
+// undefined; one a dusk function takes is refused by name, see drivercs, and any
+// other is the host's to provide. The trial's output and report are removed.
+func trial_link_ok(out: string, stem: string, objs: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, fn_names: *Vector<string>) -> bool {
+    if vec_len(csources) == 0 {
+        return true
+    }
+    trial: string = path_join(out, f"{stem}.trial")
+    report_path: string = trial + ".txt"
+    cmd: *StringBuilder = alloc(sb_new())
+    sb_push(cmd, "clang -nostartfiles")
+    for one in objs {
+        push_arg(cmd, one)
+    }
+    for li in 0..vec_len(links) {
+        push_link(cmd, vec_get(links, li))
+    }
+    sb_push(cmd, " -pthread -lm -o")
+    push_arg(cmd, trial)
+    sb_push(cmd, " 2>")
+    push_arg(cmd, report_path)
+    line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
+    sb_free(cmd)
+    free(cmd)
+    run(line)
+    free(line)
+    report: string = take_report(report_path)
+    q: string = quote(trial)
+    rm: string = "rm -f " + q
+    run(rm)
+    free(rm)
+    free(q)
+    free(trial)
+    free(report_path)
+    reported: int64 = report_dusk_undefined(report, csources, fn_names)
+    free(report)
+    return reported == 0
+}
+
 // Compiles the emitted IR and every @csource to objects at the build's own
 // optimization level, and the runtime at runtime_opt_flag the way an executable
 // link's cached runtime is, and bundles them into a deterministic static
@@ -275,7 +318,7 @@ func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, 
 // the host's own symbols. @link libraries are not archived: they stay external
 // dependencies the host links, named in the header. Returns 0 on success, non-zero
 // on the first tool failure.
-export func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, exports: *Vector<string>, fn_names: *Vector<string>, opt: string) -> int64 {
+export func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, links: *Vector<string>, exports: *Vector<string>, fn_names: *Vector<string>, opt: string) -> int64 {
     rt: string = path_join(home, "runtime")
     objs: *Vector<string> = alloc(vec_new())
 
@@ -296,12 +339,6 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
             d: Diagnostic = diag_new(src2, 0, 0, "clang failed to compile a @csource file")
             diag_emit(d)
             return cc
-        }
-        // A @csource that calls a dusk function by its bare name leaves that name
-        // undefined in the object, and ld -r would carry it into the archive for the
-        // host's link to bind to whatever it finds, so it is refused here.
-        if !csource_bare_calls_ok(src2, obj2, fn_names) {
-            return 1
         }
         vec_push(cs_objs, obj2)
     }
@@ -326,6 +363,10 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
             return rc
         }
         vec_push(objs, obj)
+    }
+
+    if !trial_link_ok(out, stem, objs, links, csources, fn_names) {
+        return 1
     }
 
     ar: string = path_join(out, archive_name(stem))

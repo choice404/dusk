@@ -13,7 +13,9 @@
 #     or a table slot, is read under the old name;
 #   - a heap free calls cool_gen_free_at with a location constant from its own
 #     @.loc.N family, so the call is read as the old cool_gen_free and the
-#     location constants and their declare are dropped.
+#     location constants and their declare are dropped;
+#   - an interface table's symbol gained a .vt suffix, so it can never meet the
+#     symbol of a method of a struct named vtable, and is read without it.
 # A reference rewritten here cannot hide a wrong target: a suffixed symbol that
 # names no define fails clang's parse of the module, and the suite runs every
 # program. A dropped line can leave two blank lines where a section ended, so
@@ -23,6 +25,7 @@
 sed -e 's/^define internal \([^@]*\) @main\.d(/define \1 @dusk__main(/' \
     -e 's/^define internal \([^@]*\) @\([-A-Za-z0-9_$.]*\)\.d(/define \1 @\2(/' \
     -e 's/) nobuiltin {$/) {/' \
+    -e 's/@\(vtable\.[-A-Za-z0-9_$]*\.[-A-Za-z0-9_$]*\)\.vt\([^-A-Za-z0-9_$.]\)/@\1\2/g' \
     -e 's/@main\.d\([^-A-Za-z0-9_$.]\)/@dusk__main\1/g' \
     -e 's/@\([-A-Za-z0-9_$.]*[-A-Za-z0-9_$]\)\.d\([^-A-Za-z0-9_$.]\)/@\1\2/g' \
     -e 's/^\(  call void @cool_gen_free\)_at(ptr \(.*\), ptr @\.loc\.[0-9]*)$/\1(ptr \2)/' \

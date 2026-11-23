@@ -7,15 +7,15 @@
    behind it, so the generation stays at payload minus eight and the size at minus
    sixteen and no offset the emitted IR reads moves:
 
-       default            [size][gen] payload                COOL_GEN_PRE = 0
-       --heap-sites       [site][chain][size][gen] payload   COOL_GEN_PRE = 16
+       default            [size][gen] payload                COOL_SITE_PRE = 0
+       --heap-sites       [site][chain][size][gen] payload   COOL_SITE_PRE = 16
 
    site is the innermost recorded location, a "path:line" constant of the program,
    or null. chain is an index into an interned table of up to eight locations,
    innermost first. The prefix is sixteen bytes, so the payload keeps the sixteen
-   byte alignment malloc hands back. Only the mint knows where a block starts, and
-   COOL_GEN_BASE below is the one inverse of its arithmetic for any path that
-   needs the address malloc handed back.
+   byte alignment malloc hands back. An AddressSanitizer build puts two words more
+   in front of these, see heap_registry.h, which also writes COOL_GEN_BASE, the one
+   inverse of the mint's arithmetic.
 
    The locations come from a stack each thread keeps. Codegen pushes the location of
    a call in the program's own files before the call and pops it after, one
@@ -25,7 +25,7 @@
 
 #ifdef COOL_HEAP_SITES
 
-#define COOL_GEN_PRE 16
+#define COOL_SITE_PRE 16
 #define COOL_SITE_CAP 1024
 #define COOL_SITE_CHAIN 8
 
@@ -187,13 +187,10 @@ static void cool_site_record_locked(void *p) {
 
 #else
 
-#define COOL_GEN_PRE 0
+#define COOL_SITE_PRE 0
 
 static inline void cool_site_record_locked(void *p) {
     (void)p;
 }
 
 #endif
-
-/* The address malloc handed back for a block, from its payload. */
-#define COOL_GEN_BASE(p) ((char *)(p) - COOL_GEN_HDR - COOL_GEN_PRE)

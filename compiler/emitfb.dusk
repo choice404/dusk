@@ -14,6 +14,11 @@ export struct FuncBuilder {
     entry_allocas: *StringBuilder,
     tmp: int64,
     label: int64,
+    // The location label, @.loc.N, of the statement being lowered in a --heap-sites
+    // build, which line brackets each call with; empty when brackets are off: in a
+    // build without the flag, in a standard library function, and before the first
+    // statement of a body
+    site: string,
 }
 
 func fb_built_string(b: *StringBuilder) -> string {
@@ -38,13 +43,14 @@ export func func_new_head(head: string) -> *FuncBuilder {
         entry_allocas: allocas,
         tmp: 0,
         label: 0,
+        site: "",
     })
 }
 
 export func func_async_new() -> *FuncBuilder {
     body: *StringBuilder = alloc(sb_new())
     allocas: *StringBuilder = alloc(sb_new())
-    return alloc(FuncBuilder { header: fb_copy_string(""), body: body, entry_allocas: allocas, tmp: 0, label: 0 })
+    return alloc(FuncBuilder { header: fb_copy_string(""), body: body, entry_allocas: allocas, tmp: 0, label: 0, site: "" })
 }
 
 export func next_tmp(f: *FuncBuilder) -> string {
@@ -58,10 +64,147 @@ export func next_tmp(f: *FuncBuilder) -> string {
     return out
 }
 
-export func line(f: *FuncBuilder, text: string) -> void {
+/** The location label the builder brackets calls with, empty when it brackets none.
+ *  @param f the builder
+ *  @return the label, borrowed from the module */
+export func fb_site(f: *FuncBuilder) -> string {
+    return (*f).site
+}
+
+/** Sets the location label every later call is bracketed with, or the empty string
+ *  to stop bracketing. The label is an interned @.loc.N the module owns.
+ *  @param f the builder
+ *  @param site the label, or empty */
+export func fb_set_site(f: *FuncBuilder, site: string) -> void {
+    (*f).site = site
+}
+
+// Writes one instruction line into the body, indented
+func fb_write(f: *FuncBuilder, text: string) -> void {
     sb_push((*f).body, "  ")
     sb_push((*f).body, text)
     sb_push_char((*f).body, 10)
+}
+
+/** Writes one instruction into the body. Every instruction a lowering emits passes
+ *  through here, so this is the one place a --heap-sites build brackets a call: when
+ *  the builder carries a site and the instruction is a call to anything but an exempt
+ *  callee, a push of the site goes before it and a pop after it, three consecutive
+ *  instructions. The bracket holds no branch, return, suspension, or defer, so the
+ *  site stack is balanced on every path out of the call, and a call a lowering adds
+ *  later is bracketed without anyone remembering to.
+ *  @param f the builder
+ *  @param text one instruction, without indent or newline */
+export func line(f: *FuncBuilder, text: string) -> void {
+    if str_len((*f).site) == 0 || !fb_is_site_call(text) {
+        fb_write(f, text)
+        return
+    }
+    body: *StringBuilder = (*f).body
+    sb_push(body, "  call void @cool_site_push(ptr ")
+    sb_push(body, (*f).site)
+    sb_push(body, ")\n")
+    fb_write(f, text)
+    sb_push(body, "  call void @cool_site_pop()\n")
+}
+
+// Whether an instruction is a call the site stack brackets: a call, with or without
+// a result name, whose callee is not exempt
+func fb_is_site_call(text: string) -> bool {
+    start: int64 = fb_call_start(text)
+    if start < 0 {
+        return false
+    }
+    callee: string = fb_callee(text, start)
+    exempt: bool = fb_site_exempt(callee)
+    free(callee)
+    return !exempt
+}
+
+// The index just past the call keyword when an instruction is a call, else -1. A
+// call starts the line, or follows a result name and " = "
+func fb_call_start(text: string) -> int64 {
+    if starts_with(text, "call ") {
+        return 5
+    }
+    if !starts_with(text, "%") {
+        return -1
+    }
+    eq: int64 = str_find(text, " = call ")
+    if eq < 0 {
+        return -1
+    }
+    for i in 1..eq {
+        if text[i] == 32 {
+            return -1
+        }
+    }
+    return eq + 8
+}
+
+// The callee of a call, its name with the @ or % sigil, or the empty string: the
+// first global or local name past the call keyword that an argument list follows
+// directly. A return type such as %Pair or { ptr, i64 } is followed by a space, and a
+// global passed as an argument comes after the callee's own parenthesis
+func fb_callee(text: string, start: int64) -> string {
+    n: int64 = str_len(text)
+    mut i: int64 = start
+    while i < n {
+        c: int64 = text[i]
+        if c != 64 && c != 37 {
+            i++
+            continue
+        }
+        end: int64 = fb_name_end(text, i + 1, n)
+        if end < n && text[end] == 40 {
+            return substring(text, i, end)
+        }
+        i = end
+    }
+    return substring(text, 0, 0)
+}
+
+// The index just past an LLVM name starting at i, a quoted one included
+func fb_name_end(text: string, i: int64, n: int64) -> int64 {
+    mut j: int64 = i
+    if j < n && text[j] == 34 {
+        j++
+        while j < n && text[j] != 34 {
+            j++
+        }
+        if j < n {
+            return j + 1
+        }
+        return j
+    }
+    while j < n && fb_name_byte(text[j]) {
+        j++
+    }
+    return j
+}
+
+// Whether a byte can continue an unquoted LLVM name: a letter, a digit, or one of
+// . _ $ -
+func fb_name_byte(c: int64) -> bool {
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) {
+        return true
+    }
+    return c == 46 || c == 95 || c == 36 || c == 45
+}
+
+// The callees a site bracket never wraps: an LLVM intrinsic, the site functions
+// themselves, the string index check, and the runtime's fault functions, which end
+// the process. A runtime symbol never holds a dot, so a dusk function, whose symbol
+// carries the .d suffix, is never exempt whatever it is called. A call with no
+// callee the scan can name is left alone
+func fb_site_exempt(callee: string) -> bool {
+    if str_len(callee) == 0 || starts_with(callee, "@llvm.") {
+        return true
+    }
+    if str_eq(callee, "@cool_site_push") || str_eq(callee, "@cool_site_pop") || str_eq(callee, "@cool_str_index_at") {
+        return true
+    }
+    return starts_with(callee, "@cool_") && str_contains(callee, "_fault") && !str_contains(callee, ".")
 }
 
 export func call_void(f: *FuncBuilder, callee_and_args: string) -> void {

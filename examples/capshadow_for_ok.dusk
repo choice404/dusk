@@ -1,0 +1,29 @@
+@paradigm procedural
+
+// A for binder inside the lambda that repeats the name of a frame slice outside it
+// binds only inside its loop, so the closure captures nothing and may be stored
+// through the parameter. Codegen builds its capture set by the same scoping the
+// checker does, so the closure carries no environment in fill's frame either.
+struct Holder { f: () -> int64 }
+
+func fill(dst: *Holder) -> void {
+    arr: int64[4] = [1, 2, 3, 4]
+    v: int64[] = arr[0..4]
+    println(v[0])
+    g := lambda () -> int64 {
+        mut total: int64 = 0
+        for v in 0..3 {
+            total = total + v
+        }
+        return total
+    }
+    (*dst).f = g
+}
+
+func main() -> int32 {
+    h: *Holder = alloc(Holder { f: lambda () -> int64 { return 0 } })
+    fill(h)
+    println(((*h).f)())
+    free(h)
+    return 0
+}

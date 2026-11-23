@@ -1112,6 +1112,38 @@ gc_collect()
 println(t() + gc_collections())
 ```
 
+## std.memory.heap
+
+Gauges for the generational heap, the heap every `alloc`, string, and container draws from when no allocator is named with `using`. The runtime keeps the counters under the lock it already takes, so a reading is cheap and one consistent moment of the heap across threads. Take a reading, run the code under suspicion, take another, and a delta that never returns to zero is a leak. The counters cover the runtime's own records of a future or a spawned thread too, which are live until awaited or joined. A `using` allocator's blocks, the collected heap, task frames, closure environments, and channel rings are outside them.
+
+| Function                       | Description                                                                                                     |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `heap_live_blocks() -> int64`  | How many blocks are allocated and not yet freed.                                                                 |
+| `heap_live_bytes() -> int64`   | The bytes the live blocks asked for, a string's terminator included, so `"abc" + "def"` is 7.                   |
+| `heap_held_bytes() -> int64`   | The capacity of every block the heap holds, live or parked for reuse. Never shrinks, except under `--sanitize=address`, where a freed block leaves the heap. |
+| `heap_report() -> void`        | Print the live totals to stderr after flushing stdout, checked against a walk of the heap.                      |
+
+```text
+@import std.memory.heap
+
+before := heap_live_blocks()
+s := "abc" + "def"
+println(heap_live_blocks() - before)
+free(s)
+println(heap_live_blocks() - before)
+```
+
+This prints `1` and then `0`. `heap_report()` recomputes the totals from the heap itself and prints a drift line if they disagree with the counters. In a build with `--heap-sites` it also groups the live blocks by the line of the program that allocated each and the calls that led there, and prints the same report at exit whenever a block is still live:
+
+```text
+dusk heap: 5 blocks, 86 bytes live, 3 sites
+      1 block        32 bytes  examples/sites_basic.dusk:14
+      3 blocks       30 bytes  examples/sites_basic.dusk:10
+      1 block        24 bytes  examples/sites_basic.dusk:13
+```
+
+Without the flag the report prints the totals and `dusk heap: build with --heap-sites to see allocation sites`. The spec's Heap Sites section covers the report's environment variables, `DUSK_HEAP_EXIT`, `DUSK_HEAP_DEPTH`, and `DUSK_HEAP_SIGNAL`.
+
 ## std.unicode
 
 UTF-8 decode, encode, and validation over the string's existing byte view. A string's representation is unchanged: it is still a NUL terminated byte buffer, `s[i]` still reads one byte, and this module is what walks that buffer scalar by scalar. Every function is total, no fault and no unbounded read; a malformed byte or an invalid scalar resyncs to the standard replacement character U+FFFD rather than stopping the walk. Case folding, normalization, and grapheme clustering sit outside this layer.

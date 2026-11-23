@@ -37,7 +37,8 @@ export func heap_live_bytes() -> int64 {
 /** The capacity of every block the heap has taken from the C allocator and still
  *  holds, live or freed and kept for reuse. A freed block stays with the heap, so
  *  this never shrinks; it is the number resident memory follows, and it is always
- *  at least heap_live_bytes.
+ *  at least heap_live_bytes. Under --sanitize=address the heap hands a freed block
+ *  back to the C allocator, so there it drops with every free.
  *  @return the bytes the heap holds */
 export func heap_held_bytes() -> int64 {
     return cool_heap_held_bytes()
@@ -45,7 +46,9 @@ export func heap_held_bytes() -> int64 {
 
 /** Prints the live block and byte totals to stderr, after flushing stdout. The
  *  totals are recomputed from the heap itself and checked against the counters, so
- *  a disagreement prints a drift line. */
+ *  a disagreement prints a drift line. In a --heap-sites build the report also
+ *  groups the live blocks by the line of the program that allocated each and the
+ *  calls that led there; without the flag it says how to get that. */
 export func heap_report() -> void {
     cool_heap_report()
 }

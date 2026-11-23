@@ -103,6 +103,11 @@ func combination_msg(release: bool, lib: bool, gen: GenOpts, cmd: string) -> str
     return ""
 }
 
+// The refusal of a second file, which build and ir would otherwise drop unread.
+func second_file_msg(cmd: string, first: string, second: string) -> string {
+    return f"dusk: {cmd} takes one file; {cmd} '{first}' and '{second}' one at a time"
+}
+
 // The options with a refusal recorded, unless an earlier one already was.
 func with_bad(bo: BuildOpts, msg: string) -> BuildOpts {
     if bo.has_bad {
@@ -160,6 +165,9 @@ export func parse_build_words(argv: string[], start: int64, cmd: string) -> (Bui
                 rest = i + 1
                 i = argv.len
             }
+        } else if !has_bad {
+            bad = second_file_msg(cmd, file, a)
+            has_bad = true
         }
         i++
     }
@@ -316,6 +324,8 @@ export func parse_ir_words(argv: string[], start: int64) -> IrOpts {
         } else if !has_file {
             file = a
             has_file = true
+        } else if str_len(bad) == 0 {
+            bad = second_file_msg("ir", file, a)
         }
     }
     gen: GenOpts = GenOpts { sanitize: sanitize, heap_sites: heap_sites }

@@ -1,0 +1,25 @@
+@paradigm procedural
+
+@import std.async.future
+@import std.async.loop
+
+// A completion that arrives after the awaiter consumed the future is refused as a
+// value, and the runtime reads the retired future's generation to say so. A future
+// is a runtime record that stays on the parking heap under --sanitize=address, so
+// that read is defined and AddressSanitizer stays quiet.
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    f: Future<int64> = future_new()
+    c1 := complete(f, 4, error {})
+    c1.ignore()
+    v, e := await(f)
+    e.ignore()
+    println(v)
+    c2 := complete(f, 5, error {})
+    if c2.exists() {
+        println(c2.toString())
+    }
+    loop_free()
+    return 0
+}

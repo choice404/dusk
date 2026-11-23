@@ -34,8 +34,16 @@ func clos_bound_clone(m: *Map<string, int64>) -> *Map<string, int64> {
 func clos_collect_expr(s: *GenFuncState, eid: int64, used: *Vector<string>, bound: *Map<string, int64>) -> void {
     a: *Ast = (*(*s).ctx).ast
     e: ExprNode = vec_get((*a).exprs, eid)
+    // A use is a capture when no binder of the lambda's own scopes is visible at it,
+    // decided here rather than against the lambda's outermost bindings after the
+    // walk: a name a nested block binds must not capture the enclosing frame's local
+    // of that name, and a read that comes before the lambda binds the name itself is
+    // still a read of the enclosing one
     if e.kind == xk_ident() {
-        vec_push(used, ast_name(a, e.a))
+        name: string = ast_name(a, e.a)
+        if !map_has(bound, name) {
+            vec_push(used, name)
+        }
         return
     }
     if e.kind == xk_unary() {
@@ -227,7 +235,7 @@ export func clos_captures(s: *GenFuncState, e: ExprNode) -> *Vector<LocalVal> {
     caps: *Vector<LocalVal> = alloc(vec_new())
     seen: *Map<string, int64> = alloc(map_new())
     for name in used {
-        if !map_has(bound, name) && !map_has(seen, name) {
+        if !map_has(seen, name) {
             map_put(seen, gs_copy(name), 1)
             ok, lv := gs_lookup(s, name)
             if ok {
@@ -306,6 +314,9 @@ func clos_emit_lambda_ex(s: *GenFuncState, e: ExprNode, name: string, env_ty: st
     free(sigb)
     retll: string = cty_ll(c, ret_ty)
     fb: *FuncBuilder = func_new_head(emit_fn_head((*s).module, false, retll, name, sig))
+    // The lambda's body starts at the enclosing statement's location, so the calls
+    // ahead of its first statement are bracketed too
+    fb_set_site(fb, fb_site((*s).fb))
     scopes: *Vector<*Map<string, LocalVal>> = alloc(vec_new())
     vec_push(scopes, alloc(map_new()))
     defers: *Vector<int64> = alloc(vec_new())

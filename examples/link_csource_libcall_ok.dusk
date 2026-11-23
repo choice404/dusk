@@ -1,0 +1,22 @@
+@paradigm procedural
+
+// A C source's struct copy is a memcpy clang emits, and it reaches the C library's
+// memcpy beside a dusk function of that name.
+@csource "link_csource_libcall.c"
+
+foreign "C" {
+    func c_copy(src: *raw int64) -> int64
+}
+
+func memcpy(n: int64) -> int64 {
+    return n + 1
+}
+
+func main() -> int32 {
+    buf: *raw int64 = alloc_bytes(512)
+    buf[3] = 41
+    println(c_copy(buf))
+    println(memcpy(1))
+    free(buf)
+    return 0
+}

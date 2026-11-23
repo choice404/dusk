@@ -204,13 +204,13 @@ export func gen_emit_defers(s: *GenFuncState) -> void {
     while i >= 0 {
         did: int64 = vec_get(ds, i)
         de: ExprNode = vec_get((*a).exprs, did)
-        (*s).cur_lo = de.lo
+        gs_set_lo(s, de.lo)
         gen_expr(s, did)
         i--
     }
     (*s).defer_replay = saved_replay
     (*s).replay_base = saved_base
-    (*s).cur_lo = saved
+    gs_set_lo(s, saved)
 }
 
 /** The zero of a type, spelled for the LLVM type rather than guessed from the ctype
@@ -400,7 +400,7 @@ export func gen_stmt(s: *GenFuncState, sid: int64) -> void {
     a: *Ast = (*(*s).ctx).ast
     st: StmtNode = vec_get((*a).stmts, sid)
     lo: int64 = gen_stmt_lo(a, st)
-    if lo >= 0 { (*s).cur_lo = lo }
+    if lo >= 0 { gs_set_lo(s, lo) }
     if st.kind == sk_let() {
         init: ExprNode = vec_get((*a).exprs, st.c)
         if init.kind == xk_await() { gen_await_let(s, sid) }

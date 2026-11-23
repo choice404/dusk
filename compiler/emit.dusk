@@ -131,17 +131,28 @@ export func emit_push_fn_ref(b: *StringBuilder, m: *EmitModule, name: string) ->
     free(sym)
 }
 
-// Records a define's symbol, and reports a symbol defined twice, which clang would
-// refuse as a redefinition against the IR. The checker leaves no program that can
-// reach it; it turns a miss into a named build error.
+// Records the symbol of a define or a global, and reports a symbol defined twice,
+// which clang would refuse as a redefinition against the IR. Functions and globals
+// share one table, since an interface table, @vtable.I.T, and a method of a struct
+// named vtable can spell one symbol. It turns what the checker leaves into a named
+// build error.
 func record_define(m: *EmitModule, sym: string) -> void {
     if map_has((*m).defined, sym) {
-        msg: string = "function '" + sym + "' is defined twice in the emitted module; rename one of them"
+        msg: string = "symbol '" + sym + "' is defined twice in the emitted module; rename one of the two names that make it"
         emit_error(m, msg)
         free(msg)
         return
     }
     map_put((*m).defined, copy_string(sym), 1)
+}
+
+// The symbol a global line defines: the text between its @ and the " = " after it
+func global_symbol(g: string) -> string {
+    eq: int64 = str_find(g, " = ")
+    if !starts_with(g, "@") || eq < 1 {
+        return substring(g, 0, 0)
+    }
+    return substring(g, 1, eq)
 }
 
 /** The head line of one function definition, the only place a define is spelled.
@@ -538,7 +549,16 @@ export func emit_push_function(m: *EmitModule, f: string) -> void {
     vec_push((*m).funcs, copy_string(f))
 }
 
+/** Adds one global definition line, `@name = ...`, recording its symbol beside the
+ *  function symbols so a clash between the two is a named build error.
+ *  @param m the module under construction
+ *  @param g the whole global line */
 export func emit_global(m: *EmitModule, g: string) -> void {
+    sym: string = global_symbol(g)
+    if str_len(sym) > 0 {
+        record_define(m, sym)
+    }
+    free(sym)
     vec_push((*m).globals, copy_string(g))
 }
 

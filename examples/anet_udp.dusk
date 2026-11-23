@@ -11,12 +11,15 @@
 @import std.async.loop
 
 async func receiver(fd: int64, from_want: Addr) -> (int64, error) {
+    // One byte past the largest receive is kept for the terminator, so the bytes
+    // read as a string end where the datagram does
     buf: *raw char = alloc_bytes(16)
-    n, from, e := await udp_recv_async(fd, buf, 16)
+    n, from, e := await udp_recv_async(fd, buf, 15)
     if e.exists() {
         free(buf)
         return (0, e)
     }
+    buf[n] = 0
     text: string = substring(cstr(buf), 0, n)
     free(buf)
     println(n)

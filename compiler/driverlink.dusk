@@ -6,6 +6,7 @@
 @import diag
 @import emit
 @import emitfb
+@import drivercs
 
 // The directory the scaffold writes its artifacts to, parallel to the stage0
 // compiler's target/dusk-out. Returned as a literal, never freed.
@@ -117,7 +118,7 @@ export func link_is_file(v: string) -> bool {
 // Appends one @link value: a file value is passed verbatim as a quoted path, a
 // bare library name is passed as a quoted -lNAME flag. Both survive the shell as
 // one word, matching the runtime source quoting convention.
-func push_link(cmd: *StringBuilder, val: string) -> void {
+export func push_link(cmd: *StringBuilder, val: string) -> void {
     if link_is_file(val) {
         push_arg(cmd, val)
         return
@@ -147,17 +148,19 @@ export func runtime_sources() -> *Vector<string> {
     return v
 }
 
-// Links the IR at ll against the C runtime, writing the executable to bin, then
-// runs it and returns its exit code. The clang line mirrors the stage0 linker:
-// every runtime input, -pthread for toolchains where pthreads is not yet in libc,
-// and -lm for the math intrinsics. rt_inputs is what the runtime contributes, one
-// cached object per source or the sources themselves, resolved by the caller;
-// either way clang is handed the same runtime. opt is the optimization flag, empty
-// for the default build, and it applies to the module and every @csource on the
-// line; cached runtime objects were already compiled at runtime_opt_flag, and only a
-// fallback runtime source on this line takes opt. A clang failure reports a
-// diagnostic and returns its code.
-export func link_only(ll: string, bin: string, rt_inputs: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, opt: string) -> int64 {
+// Links the IR at ll against the C runtime, writing the executable to bin. The clang
+// line mirrors the stage0 linker: every runtime input, -pthread for toolchains where
+// pthreads is not yet in libc, and -lm for the math intrinsics. rt_inputs is what
+// the runtime contributes, one cached object per source or the sources themselves,
+// resolved by the caller; either way clang is handed the same runtime. opt is the
+// optimization flag, empty for the default build, and it applies to the module and
+// every @csource on the line; cached runtime objects were already compiled at
+// runtime_opt_flag, and only a fallback runtime source on this line takes opt.
+// clang's stderr is read back after the link. A link that fails only because a C
+// source calls a dusk function by its bare name, which nothing else defines, is
+// reported by name at the C source, see drivercs; any other failure prints what
+// clang said and a diagnostic. Returns 0 or clang's code.
+export func link_only(ll: string, bin: string, rt_inputs: *Vector<string>, links: *Vector<string>, csources: *Vector<string>, fn_names: *Vector<string>, opt: string) -> int64 {
     cmd: *StringBuilder = alloc(sb_new())
     sb_push(cmd, "clang")
     if str_len(opt) > 0 {
@@ -179,18 +182,58 @@ export func link_only(ll: string, bin: string, rt_inputs: *Vector<string>, links
     }
     sb_push(cmd, " -pthread -lm -o")
     push_arg(cmd, bin)
+    report_path: string = bin + ".link.txt"
+    sb_push(cmd, " 2>")
+    push_arg(cmd, report_path)
     line: string = substring(sb_cstr(cmd), 0, sb_size(cmd))
     sb_free(cmd)
     free(cmd)
 
     code: int64 = run(line)
     free(line)
-    if code != 0 {
+    report: string = take_report(report_path)
+    free(report_path)
+    if code == 0 {
+        if str_len(report) > 0 {
+            printerr(report)
+        }
+        free(report)
+        return 0
+    }
+    reported: int64 = report_dusk_undefined(report, csources, fn_names)
+    names: *Vector<string> = undefined_refs(report)
+    if reported == 0 || reported < vec_len(names) {
+        if str_len(report) > 0 {
+            printerr(report)
+        }
         d: Diagnostic = diag_new(bin, 0, 0, "clang failed to link the module")
         diag_emit(d)
-        return code
     }
-    return 0
+    free(report)
+    return code
+}
+
+/** Reads what a tool wrote to a report file and removes the file, the text without
+ *  its last newline, or an empty string when the file is missing or empty.
+ *  @param path the report file
+ *  @return the text, a fresh string the caller frees */
+export func take_report(path: string) -> string {
+    src, e := source_load(path)
+    q: string = quote(path)
+    rm: string = "rm -f " + q
+    run(rm)
+    free(rm)
+    free(q)
+    if e.exists() {
+        return substring("", 0, 0)
+    }
+    mut n: int64 = src.len
+    if n > 0 && src.text[n - 1] == 10 {
+        n--
+    }
+    text: string = substring(src.text, 0, n)
+    source_free(src)
+    return text
 }
 
 export func run_linked(bin: string, argv: string[], start: int64) -> int64 {
@@ -212,7 +255,7 @@ export func run_linked(bin: string, argv: string[], start: int64) -> int64 {
 export func link_and_run(ll: string, bin: string, rt_inputs: *Vector<string>) -> int64 {
     no_links: *Vector<string> = alloc(vec_new())
     no_csources: *Vector<string> = alloc(vec_new())
-    code: int64 = link_only(ll, bin, rt_inputs, no_links, no_csources, "")
+    code: int64 = link_only(ll, bin, rt_inputs, no_links, no_csources, no_links, "")
     if code != 0 { return code }
     empty: string[] = []
     return run_linked(bin, empty, 0)

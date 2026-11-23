@@ -46,6 +46,12 @@
    generational heap under its own lock and released before the scan. */
 extern int64_t cool_gen_registry_snapshot(void ***ptrs, int64_t **sizes);
 
+/* The free gate around the snapshot and its scan. Under AddressSanitizer the
+   generational heap really frees, so no block the snapshot names may go back to
+   libc until the scan is done; in any other build both are empty. */
+extern void cool_gen_scan_begin(void);
+extern void cool_gen_scan_end(void);
+
 /* The string index bound's lifetime stamp, bumped when a block is retired or
    reused so a remembered length never answers for another tenant. Defined in
    runtime.c. */
@@ -326,13 +332,17 @@ static void gc_mark_word(void *vp) {
 /* Conservative word aligned scan of a byte range. lo is rounded up to the word
    size and each aligned word is read as a candidate pointer. Every stack and
    payload pointer is word aligned by the ABI, so the rounding never skips a
-   real root, and reading only whole words that fit keeps the scan in bounds. */
+   real root, and reading only whole words that fit keeps the scan in bounds.
+
+   The scan reads stack redzones and the bytes of other threads' blocks by design,
+   so a sanitized build leaves it uninstrumented, and each word is one plain load
+   rather than a memcpy call a sanitizer's interceptor would check. */
+__attribute__((no_sanitize("address", "thread")))
 static void gc_scan_range(char *lo, char *hi) {
     uintptr_t a = ((uintptr_t)lo + (sizeof(void *) - 1)) & ~(uintptr_t)(sizeof(void *) - 1);
     char *p = (char *)a;
     while (p + sizeof(void *) <= hi) {
-        void *v;
-        memcpy(&v, p, sizeof(void *));
+        void *v = *(void *volatile *)p;
         gc_mark_word(v);
         p += sizeof(void *);
     }
@@ -386,11 +396,13 @@ static void gc_collect_locked(void) {
 
     void **snap_ptr = NULL;
     int64_t *snap_sz = NULL;
+    cool_gen_scan_begin();
     int64_t snap_n = cool_gen_registry_snapshot(&snap_ptr, &snap_sz);
     for (int64_t i = 0; i < snap_n; i++) {
         char *pl = (char *)snap_ptr[i];
         gc_scan_range(pl, pl + snap_sz[i]);
     }
+    cool_gen_scan_end();
     free(snap_ptr);
     free(snap_sz);
 

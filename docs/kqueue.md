@@ -91,9 +91,10 @@ DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/golde
 
 ## ThreadSanitizer
 
-The reactor is a thread, so a clean golden run is not enough. Run the
-ThreadSanitizer recipe in [tsan.md](tsan.md) with `reactor_kqueue.c` on the
-link line in place of `reactor_epoll.c`. The kqueue backend moves no lock
+The reactor is a thread, so a clean golden run is not enough. Build a reactor
+golden with `--sanitize=thread` on the BSD or macOS machine, where the runtime
+compiles `reactor_kqueue.c` in place of `reactor_epoll.c`, and run it in the loop
+[sanitize.md](sanitize.md) gives. The kqueue backend moves no lock
 boundary and keeps no state the portable core cannot see, so it should run as
 clean as epoll does, twenty iterations with no `WARNING: ThreadSanitizer` and
 exit code 0 every time. If it does not, the backend has introduced a race the

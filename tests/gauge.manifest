@@ -63,6 +63,11 @@ flags --lib
 file examples/link_csource_bare_fail.dusk
 err_has link_csource_call.c: 6:9: error: C source calls dusk function 'dusk_twice' by name; declare it export "C"
 ---
+test link_csource_libc_name_lib_ok
+mode tool
+argv build --lib examples/link_csource_libc_name_ok.dusk
+code 0
+---
 # The build flags are refused by name when they cannot build.
 test flag_unknown_sanitizer_fail
 mode build_fail
@@ -87,6 +92,18 @@ mode build_fail
 flags --heap-site
 file examples/hello.dusk
 err_has dusk: unknown build flag '--heap-site'; build takes --release, --lib, --heap-sites, and --sanitize=<list>
+---
+# build and ir take one file, and a second one is refused rather than dropped unread.
+test flag_second_file_fail
+mode build_fail
+flags examples/sites_basic.dusk
+file examples/hello.dusk
+err_has dusk: build takes one file; build 'examples/sites_basic.dusk' and 'examples/hello.dusk' one at a time
+---
+test flag_ir_second_file_fail
+mode tool
+argv ir examples/hello.dusk examples/sites_basic.dusk
+code 1
 ---
 test flag_run_unknown_fail
 mode run_raw
@@ -168,3 +185,113 @@ out kept!\n
 err_has dusk heap: 0 blocks, 0 bytes live
 err_absent counter drift
 ---
+---
+# Codegen brackets every call in the program's own files with a push and a pop of
+# its line, so a block left live at exit is reported under the line that allocated
+# it and the chain of calls that led there.
+test sites_basic
+mode run_raw
+flags --heap-sites
+file examples/sites_basic.dusk
+ok true
+out leftright\nleftright\nleftright\n1\n
+err_eq dusk heap: 5 blocks, 86 bytes live, 3 sites\n      1 block        32 bytes  examples/sites_basic.dusk:14\n      3 blocks       30 bytes  examples/sites_basic.dusk:10\n      1 block        24 bytes  examples/sites_basic.dusk:13\n
+---
+# Standard library code is never bracketed, so a concatenation, an f-string, a
+# split, and a map are each attributed to the program's line that asked for them.
+test sites_std_attribution
+mode run_raw
+flags --heap-sites
+file examples/sites_attribution.dusk
+ok true
+out abcd\nn is 42\n3\n1\n
+err_eq dusk heap: 13 blocks, 323 bytes live, 5 sites\n      5 blocks      216 bytes  examples/sites_attribution.dusk:15\n      5 blocks       62 bytes  examples/sites_attribution.dusk:14\n      1 block        32 bytes  examples/sites_attribution.dusk:16\n      1 block         8 bytes  examples/sites_attribution.dusk:13\n      1 block         5 bytes  examples/sites_attribution.dusk:11\n
+err_absent lib/std
+---
+test sites_chain_helper
+mode run_raw
+flags --heap-sites
+file examples/sites_chain_helper.dusk
+ok true
+out first!\nsecond!\n
+err_eq dusk heap: 2 blocks, 15 bytes live, 2 sites\n      1 block         8 bytes  examples/sites_chain_helper.dusk:6\n        from examples/sites_chain_helper.dusk:14\n        from examples/sites_chain_helper.dusk:19\n      1 block         7 bytes  examples/sites_chain_helper.dusk:6\n        from examples/sites_chain_helper.dusk:10\n        from examples/sites_chain_helper.dusk:18\n
+---
+# A bracket is one instruction wide, so an early return, a deferred call, a lambda
+# run by the standard library, a method, an interface call, a thread, a pool task,
+# an async task across an await, and a recursion deeper than the site stack all
+# leave the stack where they found it.
+test sites_early_return
+mode run_raw
+flags --heap-sites
+file examples/sites_early_return.dusk
+ok true
+out early!\nlate!\nafter!\n
+err_eq dusk heap: 3 blocks, 20 bytes live, 3 sites\n      1 block         7 bytes  examples/sites_early_return.dusk:7\n        from examples/sites_early_return.dusk:13\n      1 block         7 bytes  examples/sites_early_return.dusk:15\n      1 block         6 bytes  examples/sites_early_return.dusk:9\n        from examples/sites_early_return.dusk:14\n
+---
+test sites_defer
+mode run_raw
+flags --heap-sites
+file examples/sites_defer.dusk
+ok true
+out body!\ndeferred!\n1\nafter!\n
+err_eq dusk heap: 2 blocks, 17 bytes live, 2 sites\n      1 block        10 bytes  examples/sites_defer.dusk:6\n        from examples/sites_defer.dusk:11\n        from examples/sites_defer.dusk:19\n      1 block         7 bytes  examples/sites_defer.dusk:20\n
+---
+test sites_lambda
+mode run_raw
+flags --heap-sites
+file examples/sites_lambda.dusk
+ok true
+out 2\n
+err_eq dusk heap: 6 blocks, 66 bytes live, 2 sites\n      2 blocks       56 bytes  examples/sites_lambda.dusk:12\n      4 blocks       10 bytes  examples/sites_lambda.dusk:13\n        from examples/sites_lambda.dusk:12\n
+---
+test sites_method_iface
+mode run_raw
+flags --heap-sites
+file examples/sites_method.dusk
+ok true
+out tag!\ndog!\n
+err_eq dusk heap: 2 blocks, 10 bytes live, 2 sites\n      1 block         5 bytes  examples/sites_method.dusk:16\n        from examples/sites_method.dusk:27\n        from examples/sites_method.dusk:33\n      1 block         5 bytes  examples/sites_method.dusk:22\n        from examples/sites_method.dusk:32\n
+---
+test sites_spawn
+mode run_raw
+flags --heap-sites
+file examples/sites_spawn.dusk
+ok true
+out thread!\n
+err_eq dusk heap: 1 block, 8 bytes live, 1 site\n      1 block         8 bytes  examples/sites_spawn.dusk:7\n
+---
+test sites_pool
+mode run_raw
+flags --heap-sites
+file examples/sites_pool.dusk
+ok true
+out pool!\n
+err_eq dusk heap: 1 block, 6 bytes live, 1 site\n      1 block         6 bytes  examples/sites_pool.dusk:14\n
+---
+test sites_async
+mode run_raw
+flags --heap-sites
+file examples/sites_async.dusk
+ok true
+out before!\nafter!\n0\n
+err_eq dusk heap: 2 blocks, 15 bytes live, 2 sites\n      1 block         8 bytes  examples/sites_async.dusk:11\n        from examples/sites_async.dusk:22\n      1 block         7 bytes  examples/sites_async.dusk:13\n        from examples/sites_async.dusk:22\n
+---
+test sites_deep_recursion
+mode run_raw
+flags --heap-sites
+file examples/sites_deep_recursion.dusk
+ok true
+out bottom!\nafter!\n
+err_has       1 block         8 bytes  examples/sites_deep_recursion.dusk:10\n        from examples/sites_deep_recursion.dusk:10\n
+err_has       1 block         7 bytes  examples/sites_deep_recursion.dusk:15\n
+---
+# run_capture freed none of the lines it read and joined, so every call left one
+# block per line of output live; a heap sites build of a program that frees what
+# run_capture hands back now prints no report.
+test sites_run_capture_clean
+mode run_raw
+flags --heap-sites
+file examples/sites_run_capture_clean.dusk
+ok true
+out one\ntwo\nthree\n0\n
+err_eq 

@@ -15,6 +15,7 @@
 @import std.functional.maybe
 @import ast
 @import diag
+@import docty
 @import resolveexpr
 @import rtdecl
 
@@ -173,9 +174,102 @@ func entry_msg(name: string) -> string {
 }
 
 // The refusal for a foreign declaration whose signature differs from the one the
-// compiler declares for the same runtime or C function itself.
+// compiler declares for the same runtime or C function itself, which it states in
+// dusk's words rather than as the declare line
 func runtime_mismatch_msg(name: string, want: string) -> string {
-    return "foreign '" + name + "' differs from the compiler's own declaration of it, " + want + "; declare it the same way or take another name"
+    words: string = decl_in_words(want)
+    msg: string = "foreign '" + name + "' differs from the compiler's own declaration of it, which " + words + "; declare it the same way or take another name"
+    free(words)
+    return msg
+}
+
+// A declare line, `i64 @name(ptr, i64)`, read out as what the function takes and
+// returns in dusk's type names, "takes a raw pointer and an int64 and returns an
+// int64"
+func decl_in_words(line: string) -> string {
+    at: int64 = str_find(line, " @")
+    open: int64 = str_find(line, "(")
+    close: int64 = str_rfind(line, ")")
+    if at < 0 || open < 0 || close < open {
+        return substring(line, 0, str_len(line))
+    }
+    ret: string = substring(line, 0, at)
+    inner: string = substring(line, open + 1, close)
+    params: string = params_in_words(inner)
+    rw: string = ll_in_words(ret)
+    out: string = "takes " + params + " and returns " + rw
+    free(ret)
+    free(inner)
+    free(params)
+    free(rw)
+    return out
+}
+
+// A declare line's parameter list, `ptr, i64`, as an English list of dusk types
+func params_in_words(inner: string) -> string {
+    if str_len(inner) == 0 {
+        return substring("no arguments", 0, 12)
+    }
+    parts: *Vector<string> = str_split(inner, ", ")
+    n: int64 = vec_len(parts)
+    b: *StringBuilder = alloc(sb_new())
+    for i in 0..n {
+        if i > 0 && n > 2 { sb_push(b, ",") }
+        if i > 0 { sb_push_char(b, 32) }
+        if i > 0 && i == n - 1 { sb_push(b, "and ") }
+        w: string = ll_in_words(vec_get(parts, i))
+        sb_push(b, w)
+        free(w)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// One LLVM type a runtime declaration uses, named as the dusk type a foreign
+// declaration writes for it. A ptr is any pointer shaped type the C boundary takes,
+// a *raw T, a *void, or a function, so it reads as a raw pointer
+func ll_in_words(ll: string) -> string {
+    if str_eq(ll, "i64") { return substring("an int64", 0, 8) }
+    if str_eq(ll, "i32") { return substring("an int32", 0, 8) }
+    if str_eq(ll, "i16") { return substring("an int16", 0, 8) }
+    if str_eq(ll, "i8") { return substring("an int8", 0, 7) }
+    if str_eq(ll, "i1") { return substring("a bool", 0, 6) }
+    if str_eq(ll, "double") { return substring("a float64", 0, 9) }
+    if str_eq(ll, "float") { return substring("a float32", 0, 9) }
+    if str_eq(ll, "ptr") { return substring("a raw pointer", 0, 13) }
+    if str_eq(ll, "void") { return substring("nothing", 0, 7) }
+    return substring(ll, 0, str_len(ll))
+}
+
+// The key two foreign declarations of one name are compared by: the dusk types the
+// declaration spells, its parameters, a variadic tail, and its result. Every call
+// of the name binds to one declaration, so two that only lower alike, an int32 and
+// a uint32, would retype one file's calls by the other's words
+func foreign_shape_key(a: *Ast, ff: ForeignFuncNode) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "(")
+    for i in 0..ff.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + i))
+        if i > 0 { sb_push(b, ", ") }
+        t: string = docty_type(a, p.ty)
+        sb_push(b, t)
+        free(t)
+    }
+    if ff.variadic { sb_push(b, ", ...") }
+    sb_push(b, ") -> ")
+    if ff.ret < 0 {
+        sb_push(b, "void")
+    } else {
+        rt: string = docty_type(a, ff.ret)
+        sb_push(b, rt)
+        free(rt)
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
 }
 
 // The refusal for a second foreign declaration of a name whose signature differs
@@ -189,8 +283,8 @@ func foreign_mismatch_msg(files: *Vector<FileSrc>, name: string, first_lo: int64
 
 /** Judges every foreign declaration of the program and appends each refusal, pointing
  *  at the declaration: a C entry symbol; a runtime function the compiler declares
- *  with other types; a second declaration of a name with other types than the first.
- *  A declaration whose shape lowers through the C ABI is compared only by name.
+ *  with another prototype; a second declaration of a name whose dusk types differ
+ *  from the first's, a variadic tail and a struct by value included.
  *  @param a the merged program
  *  @param files the loaded files
  *  @param errors the diagnostics to append to */
@@ -221,20 +315,23 @@ func foreign_decl_msg(a: *Ast, files: *Vector<FileSrc>, table: *Map<string, stri
     if str_len(entry) > 0 {
         return entry
     }
-    line: string = foreign_decl_line(a, ff)
     if map_has(table, name) {
         want: string = unwrap_or(map_get(table, name), "")
-        if !str_eq(line, want) {
+        lowered: string = foreign_decl_line(a, ff)
+        same: bool = str_eq(lowered, want)
+        free(lowered)
+        if !same {
             return runtime_mismatch_msg(name, want)
         }
     }
+    line: string = foreign_shape_key(a, ff)
     if !map_has(firsts, name) {
         map_put(firsts, name, ff.lo)
         map_put(lines, name, line)
         return ""
     }
     prior: string = unwrap_or(map_get(lines, name), "")
-    if str_len(prior) == 0 || str_len(line) == 0 || str_eq(prior, line) {
+    if str_eq(prior, line) {
         return ""
     }
     return foreign_mismatch_msg(files, name, unwrap_or(map_get(firsts, name), 0), ff.lo)

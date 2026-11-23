@@ -1,0 +1,20 @@
+@paradigm procedural
+
+@import std.concurrent.pool
+
+// A pool task runs on a worker with an empty site stack, so a block it allocates
+// names the submitted lambda's line alone.
+func main() -> int32 {
+    pe := pool_start(2)
+    if pe.exists() {
+        printerr(pe)
+        return 1
+    }
+    s := submit(lambda () -> void {
+        kept := "pool" + "!"
+        println(kept)
+    })
+    s.ignore()
+    pool_shutdown()
+    return 0
+}

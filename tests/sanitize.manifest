@@ -70,3 +70,149 @@ ok true
 out -2147483648\n
 err_has ubsan_csource.c:3:14: runtime error: signed integer overflow
 ---
+# Under address the program's generational heap really frees at the exact size it
+# was asked for, so AddressSanitizer sees a read after a free, a byte past a raw
+# block, and a second free, each with the dusk functions on its stacks.
+test asan_string_uaf
+mode run_raw
+flags --sanitize=address
+file examples/asan_string_uaf.dusk
+ok false
+err_has AddressSanitizer: heap-use-after-free
+err_has in reader.d
+err_has freed by thread T0 here
+---
+test asan_raw_overflow
+mode run_raw
+flags --sanitize=address
+file examples/asan_raw_overflow.dusk
+ok false
+out 
+err_has AddressSanitizer: heap-buffer-overflow
+err_has in poke.d
+err_has 0 bytes after
+---
+test asan_double_free
+mode run_raw
+flags --sanitize=address
+file examples/asan_double_free.dusk
+ok false
+out 
+err_has AddressSanitizer: heap-use-after-free
+err_has in cool_gen_free_at
+err_has in twice.d
+err_absent unreachable
+---
+test asan_managed_uaf
+mode run_raw
+flags --sanitize=address
+file examples/asan_managed_uaf.dusk
+ok false
+out 
+err_has AddressSanitizer: heap-use-after-free
+err_absent use of a freed or stale pointer
+---
+# The runtime's own records stay on the parking heap, so the reads of a retired
+# future and a retired join record that are defined behavior stay quiet, and a
+# second join is still the named fault.
+test asan_late_complete_ok
+mode run_raw
+flags --sanitize=address
+file examples/asan_late_complete_ok.dusk
+ok true
+out 4\nfuture already completed\n
+err_absent AddressSanitizer
+---
+test asan_double_join_fault
+mode run_raw
+flags --sanitize=address
+file examples/doublejoin.dusk
+ok false
+out once\n
+err_has use of a freed or stale pointer
+err_absent AddressSanitizer
+---
+# The collector's scan reads stack redzones and other threads' blocks by design and
+# is left uninstrumented, the sanitizer's fake stacks are off by default so a root
+# on the stack is seen, and a real free waits for a scan in progress.
+test asan_collector_stress_ok
+mode run_raw
+flags --sanitize=address
+file examples/gcstress.dusk
+ok true
+out 19900\n
+err_absent AddressSanitizer
+---
+test asan_collector_async_ok
+mode run_raw
+flags --sanitize=address
+file examples/gcasync.dusk
+ok true
+out 100\n20\n3\n123\n
+err_absent AddressSanitizer
+---
+test asan_collector_root_ok
+mode run_raw
+flags --sanitize=address
+file examples/stdcollector.dusk
+ok true
+out 9\n72\n1\n28\n99\nok\n
+err_absent AddressSanitizer
+---
+# The two flags compose: the leak report of a --heap-sites build is unchanged under
+# address.
+test asan_sites_report
+mode run_raw
+flags --sanitize=address --heap-sites
+file examples/sites_basic.dusk
+ok true
+out leftright\nleftright\nleftright\n1\n
+err_eq dusk heap: 5 blocks, 86 bytes live, 3 sites\n      1 block        32 bytes  examples/sites_basic.dusk:14\n      3 blocks       30 bytes  examples/sites_basic.dusk:10\n      1 block        24 bytes  examples/sites_basic.dusk:13\n
+---
+# Under thread the heap still parks its blocks, and a race on a generational heap
+# block is reported in the dusk function that writes it.
+test tsan_heap_race
+mode run_raw
+flags --sanitize=thread
+file examples/tsan_heap_race.dusk
+ok false
+out true\n
+err_has ThreadSanitizer: data race
+err_has bump.d
+---
+---
+# A closure's capture set follows the checker's scoping, so a stored closure whose
+# only use of a frame slice's name is its own binder carries no environment in the
+# frame it outlives, and AddressSanitizer sees no read after that frame returned.
+test asan_capture_scoped_ok
+mode run_raw
+flags --sanitize=address
+file examples/capshadow_for_ok.dusk
+ok true
+out 1\n3\n
+err_absent AddressSanitizer
+---
+test asan_capshadow_ok
+mode run_raw
+flags --sanitize=address
+file examples/capshadow_ok.dusk
+ok true
+out 1\n42\n
+err_absent AddressSanitizer
+---
+# A datagram read as a string is terminated inside its buffer.
+test asan_udp_round6_ok
+mode run_raw
+flags --sanitize=address
+file examples/udp_round6.dusk
+ok true
+out 4\ntrue\nping\n
+err_absent AddressSanitizer
+---
+test asan_anet_udp_ok
+mode run_raw
+flags --sanitize=address
+file examples/anet_udp.dusk
+ok true
+out 4\ntrue\npong\n
+err_absent AddressSanitizer

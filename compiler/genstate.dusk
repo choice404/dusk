@@ -87,6 +87,39 @@ func fault_loc(s: *GenFuncState) -> string {
     return label
 }
 
+/** Stamps the statement being lowered: its merged source offset, which every fault
+ *  location reads, and in a --heap-sites build the location the function builder
+ *  brackets each call with. A statement of a standard library file stamps no
+ *  location, so std code runs unbracketed and an allocation inside it is attributed
+ *  to the innermost call of the program's own code. Every write of cur_lo goes
+ *  through here, so a deferred call carries its defer's location and the flushing
+ *  statement's is restored after it.
+ *  @param s the function state
+ *  @param lo the statement's merged source offset */
+export func gs_set_lo(s: *GenFuncState, lo: int64) -> void {
+    (*s).cur_lo = lo
+    m: *EmitModule = (*s).module
+    if !(*m).opts.heap_sites {
+        return
+    }
+    fb_set_site((*s).fb, site_label(s, lo))
+}
+
+// The location label a --heap-sites build pushes around the calls of the statement
+// at lo, or the empty string for a standard library file. The two site functions
+// are declared with the first label handed out
+func site_label(s: *GenFuncState, lo: int64) -> string {
+    if genctx_loc_is_std((*s).ctx, lo) {
+        return ""
+    }
+    emit_declare((*s).module, "void @cool_site_push(ptr)")
+    emit_declare((*s).module, "void @cool_site_pop()")
+    text: string = genctx_loc_text((*s).ctx, lo)
+    label: string = emit_loc((*s).module, text)
+    free(text)
+    return label
+}
+
 /** Emits a located fault call `call void @<name>(ptr <loc>)`, interning the
  *  current statement's "path:line" as it goes. Every guarded read and pointer
  *  check routes its fault through here so the site names its source line. */
@@ -603,7 +636,7 @@ export func adapt(s: *GenFuncState, v: Val, target: int64) -> Val {
         sb_push(b1, to.text)
         sb_push_char(b1, 46)
         sb_push(b1, from.text)
-        sb_push(b1, ", 1")
+        sb_push(b1, ".vt, 1")
         text1: string = gs_built(b1)
         sb_free(b1)
         free(b1)
