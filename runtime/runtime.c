@@ -365,6 +365,32 @@ static void cool_const_free_fault(void) {
     abort();
 }
 
+/* Lifetime stamps for the string index bound. A block freed and handed out again
+   holds a new string at the old address, so a length measured for the old one
+   must not answer for it. Every path that retires or reuses a block bumps the
+   stamp its payload address hashes to, and a remembered measurement holds only
+   while that stamp is unchanged.
+
+   The table is shared by every thread and touched only through relaxed atomics,
+   which is enough: a bump is sequenced before the block can be handed out again,
+   and the new string reaches another thread only through a hand off that
+   synchronizes, so a reader that can see the new string sees the bump. Two
+   addresses sharing a slot only cost a rescan, never a fault, since a fault is
+   raised only from a fresh scan of the live bytes. */
+#define COOL_SX_STAMPS 4096
+static uint64_t cool_sx_stamp[COOL_SX_STAMPS];
+
+/* The stamp slot of an address, from the top bits of a multiplicative hash so
+   addresses one page or one block apart land in unrelated slots. */
+__attribute__((always_inline)) static inline uint64_t *cool_sx_stamp_of(const void *p) {
+    uint64_t h = (uint64_t)((uintptr_t)p >> 4) * 0x9E3779B97F4A7C15ull;
+    return &cool_sx_stamp[h >> 52];
+}
+
+void cool_str_stamp_bump(const void *p) {
+    __atomic_fetch_add(cool_sx_stamp_of(p), 1, __ATOMIC_RELAXED);
+}
+
 void *cool_alloc(size_t n) {
     return malloc(n);
 }
@@ -380,6 +406,9 @@ void cool_free(void *p) {
     if (cool_gc_is_collected(p)) {
         return;
     }
+    // libc may hand this address out again from any thread, so the stamp moves
+    // before the block leaves.
+    cool_str_stamp_bump(p);
     free(p);
 }
 
@@ -418,6 +447,7 @@ void cool_debug_free(void *p) {
                 return;
             }
             cool_dbg_freed[i] = 1;
+            cool_str_stamp_bump(p);
             memset(p, 0xDD, (size_t)cool_dbg_size[i]);
             pthread_mutex_unlock(&cool_heap_lock);
             return;
@@ -449,11 +479,12 @@ int64_t cool_debug_double_frees(void) {
 /* Generational heap for managed pointers. Each managed allocation carries a
    header in front of the data holding the payload size and a generation, with
    the generation in the word right before the data so a check is a single load
-   at p minus 8. free bumps the generation and parks the block on a size matched
-   free list. A later allocation of the same size reuses the block with its now
-   advanced generation, so a stale reference still holding the old generation
-   mismatches and faults at its next dereference. The generation never resets
-   for a block, which is what keeps reuse sound.
+   at p minus 8. free bumps the generation and parks the block on the free list
+   of its size class. A later allocation of any size in that class reuses the
+   block with its now advanced generation, so a stale reference still holding
+   the old generation mismatches and faults at its next dereference whatever the
+   block was reused for. The generation never resets for a block, which is what
+   keeps reuse sound.
 
    The header is two words, [i64 size][i64 gen], and stays two words. The
    collected heap in collect.c mints blocks with the same shape so one
@@ -475,29 +506,47 @@ int64_t cool_debug_double_frees(void) {
 #define COOL_GEN_SIZE_WORD(p) ((int64_t *)((char *)(p) - COOL_GEN_HDR))
 #define COOL_GEN_GEN_WORD(p) ((int64_t *)((char *)(p) - 8))
 
-/* Size matched free lists. A parked block is found by its exact payload size,
-   the same match the linear list made, but through a table rather than a scan:
-   sizes up to COOL_GEN_BIN_MAX index a direct array, larger sizes hash into an
-   open addressed table of the same head slots. Both park and unpark are a
-   handful of loads.
+/* Size classes. A block is minted with the capacity of its request's class and
+   any later request of that class may reuse it, so retained memory is bounded by
+   the peak live bytes per class rather than by the count of distinct sizes a
+   program ever asked for. Up to 1016 bytes a class spans sixteen sizes and holds
+   16k + 8 bytes, which with the header is exactly the chunk glibc hands an exact
+   request of any size in it, so nothing is wasted that malloc was not already
+   rounding away. Past that each doubling splits into eight classes, wasting at
+   most an eighth of a request. Class 487 reaches the largest size the header
+   carries, so the table is one static array of 488 list heads.
 
    The list nodes live in their own arrays, never in the parked payload. A use
    after free that writes through a stale pointer therefore cannot corrupt the
    allocator; it only scribbles on a block whose generation already faults the
-   next managed dereference, which is the property the previous static array
-   had and the one worth keeping. Node index zero is the empty list, so the
-   zeroed bin table starts out empty with no initialization pass. */
-#define COOL_GEN_BIN_MAX 4096
-static int64_t cool_gen_bin[COOL_GEN_BIN_MAX + 1];
+   next managed dereference. Node index zero is the empty list, so the zeroed bin
+   table starts out empty with no initialization pass. */
+#define COOL_GEN_SMALL_MAX 1016
+#define COOL_GEN_CLASSES 488
+static int64_t cool_gen_bin[COOL_GEN_CLASSES];
 
-typedef struct {
-    int64_t size;
-    int64_t head;
-} cool_gen_big_bin;
+/* The class of a payload size in [0, COOL_GEN_SIZE_MAX). Small sizes step by
+   sixteen; above COOL_GEN_SMALL_MAX the top bit of size - 1 picks the doubling
+   and the three bits under it pick one of its eight classes. */
+static int64_t cool_gen_class(int64_t size) {
+    if (size <= COOL_GEN_SMALL_MAX) {
+        return (size + 7) >> 4;
+    }
+    uint64_t m = (uint64_t)size - 1;
+    int64_t e = 63 - (int64_t)__builtin_clzll(m);
+    int64_t j = (int64_t)((m >> (e - 3)) & 7);
+    return 64 + 8 * (e - 9) + j;
+}
 
-static cool_gen_big_bin *cool_gen_big = NULL;
-static int64_t cool_gen_big_cap = 0;
-static int64_t cool_gen_big_n = 0;
+/* The payload capacity of a class, at least every size the class holds. */
+static int64_t cool_gen_cap(int64_t cls) {
+    if (cls < 64) {
+        return 16 * cls + 8;
+    }
+    int64_t e = 9 + (cls - 64) / 8;
+    int64_t j = (cls - 64) % 8;
+    return (9 + j) << (e - 3);
+}
 
 static void **cool_fl_ptr = NULL;
 static int64_t *cool_fl_next = NULL;
@@ -536,155 +585,88 @@ static int64_t cool_fl_node_locked(void) {
     return cool_fl_n++;
 }
 
-/* Locates the head slot for a large size in the open addressed table, growing
-   it when it passes half full. An entry is never removed, so a size class that
-   empties keeps its slot with an empty head and costs one probe. Returns NULL
-   when the size has no slot and none can be made. Held with the heap lock. */
-static int64_t *cool_gen_big_slot_locked(int64_t size, int create) {
-    if (cool_gen_big_cap == 0) {
-        if (!create) {
-            return NULL;
-        }
-        int64_t ncap = 256;
-        cool_gen_big_bin *nb = calloc((size_t)ncap, sizeof(cool_gen_big_bin));
-        if (!nb) {
-            return NULL;
-        }
-        cool_gen_big = nb;
-        cool_gen_big_cap = ncap;
-        cool_gen_big_n = 0;
-    }
-    for (;;) {
-        uint64_t h = (uint64_t)size * 0x9E3779B97F4A7C15ull;
-        h ^= h >> 29;
-        int64_t mask = cool_gen_big_cap - 1;
-        int64_t i = (int64_t)(h & (uint64_t)mask);
-        for (;;) {
-            if (cool_gen_big[i].size == size) {
-                return &cool_gen_big[i].head;
-            }
-            if (cool_gen_big[i].size == 0) {
-                break;
-            }
-            i = (i + 1) & mask;
-        }
-        if (!create) {
-            return NULL;
-        }
-        if ((cool_gen_big_n + 1) * 2 <= cool_gen_big_cap) {
-            cool_gen_big[i].size = size;
-            cool_gen_big[i].head = 0;
-            cool_gen_big_n++;
-            return &cool_gen_big[i].head;
-        }
-        int64_t ncap = cool_gen_big_cap * 2;
-        cool_gen_big_bin *nb = calloc((size_t)ncap, sizeof(cool_gen_big_bin));
-        if (!nb) {
-            return NULL;
-        }
-        for (int64_t k = 0; k < cool_gen_big_cap; k++) {
-            if (cool_gen_big[k].size == 0) {
-                continue;
-            }
-            uint64_t g = (uint64_t)cool_gen_big[k].size * 0x9E3779B97F4A7C15ull;
-            g ^= g >> 29;
-            int64_t j = (int64_t)(g & (uint64_t)(ncap - 1));
-            while (nb[j].size != 0) {
-                j = (j + 1) & (ncap - 1);
-            }
-            nb[j] = cool_gen_big[k];
-        }
-        free(cool_gen_big);
-        cool_gen_big = nb;
-        cool_gen_big_cap = ncap;
-        /* Retry the probe against the grown table. */
-    }
-}
-
-/* The head slot for an exact payload size, or NULL when there is none. A size
-   outside the representable range belongs to no class: it can only come from a
-   corrupt or foreign header, and refusing it here keeps a bad size out of the
-   bin index rather than letting it address the table. Held with the heap lock. */
-static int64_t *cool_gen_bin_slot_locked(int64_t size, int create) {
-    if (size < 0 || size >= COOL_GEN_SIZE_MAX) {
-        return NULL;
-    }
-    if (size <= COOL_GEN_BIN_MAX) {
-        return &cool_gen_bin[size];
-    }
-    return cool_gen_big_slot_locked(size, create);
-}
-
-/* Parks a retired block on its size class. Held with the heap lock. */
-static void cool_gen_park_locked(void *p, int64_t size) {
-    int64_t *head = cool_gen_bin_slot_locked(size, 1);
-    if (!head) {
-        return;
-    }
+/* Parks a retired block on the list of its class. Held with the heap lock. */
+static void cool_gen_park_locked(void *p, int64_t cls) {
     int64_t node = cool_fl_node_locked();
     if (node == 0) {
         return;
     }
     cool_fl_ptr[node] = p;
-    cool_fl_next[node] = *head;
-    *head = node;
+    cool_fl_next[node] = cool_gen_bin[cls];
+    cool_gen_bin[cls] = node;
 }
 
-/* Pops a parked block of exactly this payload size, or NULL when the class is
-   empty. Held with the heap lock. */
-static void *cool_gen_unpark_locked(int64_t size) {
-    int64_t *head = cool_gen_bin_slot_locked(size, 0);
-    if (!head || *head == 0) {
+/* Pops a parked block of this class, or NULL when the class is empty. Held with
+   the heap lock. */
+static void *cool_gen_unpark_locked(int64_t cls) {
+    int64_t node = cool_gen_bin[cls];
+    if (node == 0) {
         return NULL;
     }
-    int64_t node = *head;
     void *p = cool_fl_ptr[node];
-    *head = cool_fl_next[node];
+    cool_gen_bin[cls] = cool_fl_next[node];
     cool_fl_next[node] = cool_fl_recycle;
     cool_fl_recycle = node;
     return p;
 }
 
 /* Block registry. One entry per generational block the heap has ever minted,
-   with its payload size, so the collector can scan every live generational
+   with its payload capacity, so the collector can scan every live generational
    block as a root region.
 
-   The table is append only. A block's address never goes back to libc, and
-   reuse is size matched exactly, so a block's address and size are fixed for
-   the life of the process and one entry describes it forever. Which entries are
-   live is not stored twice: the parked bit in each block's own size word already
-   says it, and the snapshot reads that bit. So a mint appends, a reuse touches
-   nothing, and a free touches nothing, where the dense table this replaced
-   walked itself on every free looking for the entry to swap out.
+   The table is append only. A block's address never goes back to libc and its
+   class never changes, so a block's address and capacity are fixed for the life
+   of the process and one entry describes it forever. What changes across reuse
+   is the size of the payload the current tenant asked for, and that lives in the
+   block's own size word, as does liveness: the parked bit says it. So a mint
+   appends, a reuse touches nothing, and a free touches nothing.
 
    The collector copies a snapshot under the lock, keeping only the live
    entries, and scans it released, so a block another thread frees mid scan is
    still mapped, parked not returned, and reads only over retain. */
 static void **cool_reg_ptr = NULL;
-static int64_t *cool_reg_size = NULL;
+static int64_t *cool_reg_room = NULL;
 static int64_t cool_reg_n = 0;
 static int64_t cool_reg_cap = 0;
 
-/* Appends a freshly minted payload with the heap lock held. Growth failure is
-   out of memory, fatal, since dropping an entry would under root the collector
-   and free a still reachable block. */
-static void cool_reg_add_locked(void *p, int64_t size) {
+/* Appends a freshly minted payload and its capacity with the heap lock held.
+   Growth failure is out of memory, fatal, since dropping an entry would under
+   root the collector and free a still reachable block. */
+static void cool_reg_add_locked(void *p, int64_t room) {
     if (cool_reg_n == cool_reg_cap) {
         int64_t ncap = cool_reg_cap ? cool_reg_cap * 2 : 128;
         void **np = realloc(cool_reg_ptr, (size_t)ncap * sizeof(void *));
-        int64_t *ns = realloc(cool_reg_size, (size_t)ncap * sizeof(int64_t));
-        if (!np || !ns) {
+        if (np) {
+            cool_reg_ptr = np;
+        }
+        int64_t *nr = realloc(cool_reg_room, (size_t)ncap * sizeof(int64_t));
+        if (nr) {
+            cool_reg_room = nr;
+        }
+        if (!np || !nr) {
             fflush(stdout);
             fputs("fatal: out of memory\n", stderr);
             abort();
         }
-        cool_reg_ptr = np;
-        cool_reg_size = ns;
         cool_reg_cap = ncap;
     }
     cool_reg_ptr[cool_reg_n] = p;
-    cool_reg_size[cool_reg_n] = size;
+    cool_reg_room[cool_reg_n] = room;
     cool_reg_n++;
+}
+
+/* The byte count the collector scans in a live block: the size its current
+   tenant asked for, read from the header under the heap lock, since a block
+   reused by a larger request in its class holds live words past the size it was
+   minted at. The capacity bounds it, so a scribbled header can never widen the
+   scan past the block, and a size the header cannot hold reads as the whole
+   capacity, over retaining rather than dropping a root. */
+static int64_t cool_reg_scan_len_locked(void *p, int64_t room) {
+    int64_t size = *COOL_GEN_SIZE_WORD(p);
+    if (size < 0 || size > room) {
+        return room;
+    }
+    return size;
 }
 
 /* Copies the live registry for the collector. Allocates both arrays, which the
@@ -708,8 +690,9 @@ int64_t cool_gen_registry_snapshot(void ***ptrs, int64_t **sizes) {
     }
     // A parked block is not a root: its payload is whatever the program left
     // there before the free, and scanning it would mint references out of dead
-    // bytes. The parked bit is set and cleared under this same lock, so the
-    // live set the copy names is the live set at the moment of the copy.
+    // bytes. The parked bit and the size word are set and cleared under this
+    // same lock, so the live set and the lengths the copy names are the ones at
+    // the moment of the copy.
     int64_t m = 0;
     for (int64_t i = 0; i < n; i++) {
         void *p = cool_reg_ptr[i];
@@ -717,7 +700,7 @@ int64_t cool_gen_registry_snapshot(void ***ptrs, int64_t **sizes) {
             continue;
         }
         pp[m] = p;
-        ss[m] = cool_reg_size[i];
+        ss[m] = cool_reg_scan_len_locked(p, cool_reg_room[i]);
         m++;
     }
     pthread_mutex_unlock(&cool_heap_lock);
@@ -732,18 +715,21 @@ void *cool_gen_alloc(int64_t size) {
     if (size < 0 || size >= COOL_GEN_SIZE_MAX) {
         return NULL;
     }
+    int64_t cls = cool_gen_class(size);
     pthread_mutex_lock(&cool_heap_lock);
-    void *p = cool_gen_unpark_locked(size);
+    void *p = cool_gen_unpark_locked(cls);
     if (p) {
-        /* Rewriting the size clears the parked bit, so the block is live again
-           and a free of it is a first free rather than a double. The size itself
-           is unchanged: the class matched it exactly. */
+        /* Writing the new tenant's size clears the parked bit, so the block is
+           live again and a free of it is a first free rather than a double. The
+           class guarantees the block's capacity covers the size. */
+        cool_str_stamp_bump(p);
         *COOL_GEN_SIZE_WORD(p) = size;
         pthread_mutex_unlock(&cool_heap_lock);
         return p;
     }
     pthread_mutex_unlock(&cool_heap_lock);
-    char *base = malloc(COOL_GEN_HDR + (size_t)size);
+    int64_t room = cool_gen_cap(cls);
+    char *base = malloc(COOL_GEN_HDR + (size_t)room);
     if (!base) {
         return NULL;
     }
@@ -752,7 +738,7 @@ void *cool_gen_alloc(int64_t size) {
     __atomic_store_n(&hdr[1], 1, __ATOMIC_SEQ_CST);
     void *q = base + COOL_GEN_HDR;
     pthread_mutex_lock(&cool_heap_lock);
-    cool_reg_add_locked(q, size);
+    cool_reg_add_locked(q, room);
     pthread_mutex_unlock(&cool_heap_lock);
     return q;
 }
@@ -779,7 +765,12 @@ static void cool_gen_free_locked(void *p) {
     int64_t *gen = COOL_GEN_GEN_WORD(p);
     __atomic_fetch_add(gen, 1, __ATOMIC_SEQ_CST);
     *hdr = size | COOL_GEN_FREED_TAG;
-    cool_gen_park_locked(p, size);
+    cool_str_stamp_bump(p);
+    // A negative size can only come from a corrupt header and belongs to no
+    // class, so that block is retired but never handed out again.
+    if (size >= 0) {
+        cool_gen_park_locked(p, cool_gen_class(size));
+    }
 }
 
 void cool_gen_free(void *p) {
@@ -888,6 +879,142 @@ void cool_shift_fault(void) {
     fflush(stdout);
     fputs("fatal: shift amount out of range\n", stderr);
     abort();
+}
+
+/* The string index bound. s[i] on a string is legal when i is at most the offset
+   of the string's first NUL: s[len] reads the NUL, the language's own walk, and
+   anything past it faults. Measuring that offset at every index would make a
+   forward walk quadratic, so each thread remembers, for eight strings it indexed
+   recently, how many leading bytes it has already seen free of NUL, and scans only
+   past that, at least doubling the window each time, so a walk costs at most twice
+   its length in scanned bytes and a logarithmic number of slow calls.
+
+   A remembered measurement can only let an index through. A fault is raised only
+   after a fresh scan of the bytes as they are at that moment finds a NUL before
+   the index, so a stale or racing measurement can miss a fault but can never
+   fault a correct program. A string is immutable, so a measurement goes stale
+   only when its block is retired and the address handed out again, which the
+   retire stamps catch, or when bytes are rewritten through a raw pointer under a
+   live view, the residual the language states.
+
+   The eight entries are four sets of two ways, with one bit per set naming the
+   way used less recently. Two ways mean two strings walked together, the shape of
+   every comparison, never evict each other wherever they sit. The set mixes
+   address bits from above the page offset with those below it, since every block
+   large enough to be mapped on its own starts at the same offset into its page,
+   and bits below the page would put all of those in one set. */
+#define COOL_SX_SETS 4
+#define COOL_SX_WAYS 2
+#define COOL_SX_WINDOW 64
+
+typedef struct {
+    const char *p;
+    uint64_t k;
+    uint64_t stamp;
+    uint64_t *slot;
+    int32_t exact;
+    int32_t immortal;
+} cool_sx_entry;
+
+static __thread cool_sx_entry cool_sx_cache[COOL_SX_SETS * COOL_SX_WAYS];
+static __thread uint8_t cool_sx_older[COOL_SX_SETS];
+
+__attribute__((always_inline)) static inline uint32_t cool_sx_set(const char *s) {
+    uintptr_t q = (uintptr_t)s;
+    return (uint32_t)((q >> 4) ^ (q >> 12) ^ (q >> 20)) & (COOL_SX_SETS - 1);
+}
+
+/* The entry for s: the way of its set already holding it, or else the way used
+   less recently, which the caller overwrites. Either becomes the more recent. */
+static cool_sx_entry *cool_sx_pick(const char *s) {
+    uint32_t set = cool_sx_set(s);
+    cool_sx_entry *ways = &cool_sx_cache[set * COOL_SX_WAYS];
+    uint32_t way = cool_sx_older[set];
+    if (ways[0].p == s) {
+        way = 0;
+    } else if (ways[1].p == s) {
+        way = 1;
+    }
+    cool_sx_older[set] = (uint8_t)(way ^ 1);
+    return &ways[way];
+}
+
+/* Records that the first k bytes of s are free of NUL, measured under stamp st,
+   with exact set when the byte at k is known to be the NUL. */
+static void cool_sx_note(cool_sx_entry *e, const char *s, uint64_t k, int exact, uint64_t *slot,
+                         uint64_t st) {
+    e->p = s;
+    e->k = k;
+    e->exact = exact;
+    e->slot = slot;
+    e->stamp = st;
+    e->immortal = cool_in_image(s);
+}
+
+/* The only place an index is found out of bounds: a fresh scan of the live bytes
+   up to u. Finding no NUL means the bytes grew under a view since they were last
+   measured, and the longer run is remembered. */
+static int cool_sx_confirm(cool_sx_entry *e, const char *s, uint64_t u, uint64_t *slot, uint64_t st) {
+    if (strnlen(s, (size_t)u) < (size_t)u) {
+        return 0;
+    }
+    cool_sx_note(e, s, u, 0, slot, st);
+    return 1;
+}
+
+/* Whether s[i] is in bounds, for an index the fast path could not answer. The
+   stamp is read before any byte is scanned, so a retire racing the scan leaves
+   the entry stale rather than trusted. A negative index is out of bounds without
+   a scan; an index the address space cannot hold is too. */
+static __attribute__((noinline)) int cool_sx_measure(const char *s, int64_t i) {
+    if (i < 0 || (uint64_t)i >= (uint64_t)SIZE_MAX) {
+        return 0;
+    }
+    uint64_t u = (uint64_t)i;
+    uint64_t *slot = cool_sx_stamp_of(s);
+    uint64_t st = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    cool_sx_entry *e = cool_sx_pick(s);
+    int known = e->p == s && (e->immortal || e->stamp == st);
+    if (known && u <= e->k) {
+        return 1;
+    }
+    if (known && e->exact) {
+        return cool_sx_confirm(e, s, u, slot, st);
+    }
+    uint64_t k = known ? e->k : 0;
+    uint64_t want = u - k;
+    if (want < k) {
+        want = k;
+    }
+    if (want < COOL_SX_WINDOW) {
+        want = COOL_SX_WINDOW;
+    }
+    uint64_t r = (uint64_t)strnlen(s + k, (size_t)want);
+    cool_sx_note(e, s, k + r, r < want, slot, st);
+    if (u <= k + r) {
+        return 1;
+    }
+    return cool_sx_confirm(e, s, u, slot, st);
+}
+
+/* Checks one string index before it is read. Codegen calls this ahead of the
+   element address with the path:line of the index, so the fault names it. */
+void cool_str_index_at(const char *s, int64_t i, const char *loc) {
+    if (!s) {
+        cool_null_fault_at(loc);
+    }
+    uint32_t set = cool_sx_set(s);
+    const cool_sx_entry *ways = &cool_sx_cache[set * COOL_SX_WAYS];
+    uint32_t way = ways[0].p == s ? 0 : 1;
+    const cool_sx_entry *e = &ways[way];
+    if (e->p == s && (uint64_t)i <= e->k &&
+        (e->immortal || __atomic_load_n(e->slot, __ATOMIC_RELAXED) == e->stamp)) {
+        cool_sx_older[set] = (uint8_t)(way ^ 1);
+        return;
+    }
+    if (!cool_sx_measure(s, i)) {
+        cool_bounds_fault_at(loc);
+    }
 }
 
 /* Integer exponent by repeated squaring, entirely in uint64_t so the wrap is

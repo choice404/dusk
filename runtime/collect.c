@@ -46,6 +46,11 @@
    generational heap under its own lock and released before the scan. */
 extern int64_t cool_gen_registry_snapshot(void ***ptrs, int64_t **sizes);
 
+/* The string index bound's lifetime stamp, bumped when a block is retired or
+   reused so a remembered length never answers for another tenant. Defined in
+   runtime.c. */
+extern void cool_str_stamp_bump(const void *p);
+
 static pthread_mutex_t gc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* One descriptor per collected block, in append order. base is the malloc base,
@@ -402,13 +407,15 @@ static void gc_collect_locked(void) {
     }
 
     /* Sweep. A live but unmarked block is unreachable: bump its generation so a
-       stale managed reference faults, mark it dead, and park it for reuse. The
-       generation bump is atomic because the dereference check reads that word
-       without any lock from any thread. The block is never returned to libc. */
+       stale managed reference faults, bump its retire stamp, mark it dead, and
+       park it for reuse. The generation bump is atomic because the dereference
+       check reads that word without any lock from any thread. The block is never
+       returned to libc. */
     for (int64_t i = 0; i < gc_ndesc; i++) {
         if (gc_descs[i].live && !gc_descs[i].mark) {
             int64_t *gen = (int64_t *)(gc_descs[i].base + 8);
             __atomic_fetch_add(gen, 1, __ATOMIC_SEQ_CST);
+            cool_str_stamp_bump(gc_descs[i].base + COOL_GC_HDR);
             gc_descs[i].live = 0;
             gc_live_bytes -= gc_descs[i].size;
             gc_free_push(i);
@@ -443,6 +450,7 @@ void *cool_collect_alloc(int64_t size) {
         int64_t di = gc_free[i];
         if (gc_descs[di].size == size) {
             base = gc_descs[di].base;
+            cool_str_stamp_bump(base + COOL_GC_HDR);
             gc_descs[di].live = 1;
             gc_descs[di].mark = 0;
             gc_free[i] = gc_free[--gc_free_n];
