@@ -1,0 +1,40 @@
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.memory.heap
+
+// The generational heap counts its live blocks and the bytes they asked for.
+// Reading the gauges around a piece of code gives its net allocation: an alloc of
+// one int64 is one block of 8 bytes, a concatenation of two three byte literals is
+// one block of 7 bytes with its terminator, and every freed block leaves the count
+// where it started. A str_split vector left unfreed stays counted.
+func main() -> int32 {
+    b0 := heap_live_blocks()
+    y0 := heap_live_bytes()
+    p: *int64 = alloc(5)
+    println(heap_live_blocks() - b0)
+    println(heap_live_bytes() - y0)
+    free(p)
+    println(heap_live_blocks() - b0)
+    s := "abc" + "def"
+    println(heap_live_blocks() - b0)
+    println(heap_live_bytes() - y0)
+    free(s)
+    println(heap_live_bytes() - y0)
+    parts := str_split("a,b,c", ",")
+    split_blocks := heap_live_blocks() - b0
+    println(split_blocks > 0)
+    while vec_len(parts) > 0 {
+        free(vec_take(parts, vec_len(parts) - 1))
+    }
+    vec_free(parts)
+    free(parts)
+    println(heap_live_blocks() - b0)
+    println(heap_live_bytes() - y0)
+    kept := str_split("x,y", ",")
+    println(heap_live_blocks() - b0 > 0)
+    println(vec_len(kept))
+    println(heap_held_bytes() >= heap_live_bytes())
+    return 0
+}

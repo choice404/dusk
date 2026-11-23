@@ -7,13 +7,15 @@
 // with no name on it. The runtime now tests the pointer against the loaded image
 // before it touches the block, so the misuse aborts by name at the free itself.
 // The heap string frees normally right above it, which is the point: the guard
-// names the constant and leaves every real allocation alone.
+// names the constant and leaves every real allocation alone. The literal sits in a
+// mut binding, since a free of an immutable binding a literal initialized is
+// refused at check; a mut binding's value at the free is known only at run time.
 func main() -> int32 {
     heap: string = "ab" + "cd"
     println(heap)
     free(heap)
     println("heap ok")
-    lit: string = "lit"
+    mut lit: string = "lit"
     println(lit)
     free(lit)                  // fault: a constant was never allocated
     println("unreachable")

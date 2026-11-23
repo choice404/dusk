@@ -19,8 +19,8 @@ struct Line {
 
 // One parsed test case. The has_ flags mark a field whose empty value is still
 // meaningful: an empty out expects empty stdout, distinct from no out field. A
-// file, argv, or special that is absent is left as the empty string, since none
-// of the three is ever legitimately empty.
+// file, argv, special, or flags that is absent is left as the empty string, since
+// none of the four is ever legitimately empty.
 export struct Record {
     name: string,
     mode: string,
@@ -40,6 +40,7 @@ export struct Record {
     code: int64,
     has_code: bool,
     special: string,
+    flags: string,
     line: int64,
 }
 
@@ -72,6 +73,7 @@ struct BlockState {
     code: int64,
     has_code: bool,
     special: string,
+    flags: string,
     valid: bool,
     keys_seen: *Vector<string>,
     start_line: int64,
@@ -187,6 +189,7 @@ func known_key(key: string) -> bool {
     if str_eq(key, "argv") { return true }
     if str_eq(key, "code") { return true }
     if str_eq(key, "special") { return true }
+    if str_eq(key, "flags") { return true }
     return false
 }
 
@@ -202,6 +205,12 @@ export func known_mode(mode: string) -> bool {
     return false
 }
 
+// Whether a mode builds a program and so can take build flags: the words placed
+// between the subcommand and the file.
+func takes_flags(mode: string) -> bool {
+    return str_eq(mode, "run") || str_eq(mode, "run_raw") || str_eq(mode, "build_fail")
+}
+
 func new_block(start_line: int64) -> *BlockState {
     eh: *Vector<string> = alloc(vec_new())
     ea: *Vector<string> = alloc(vec_new())
@@ -210,7 +219,7 @@ func new_block(start_line: int64) -> *BlockState {
         name: "", mode: "", file: "", args: "", stdin: "",
         has_stdin: false, out: "", has_out: false, ok: false, has_ok: false,
         err_has: eh, err_absent: ea, err_eq: "", has_err_eq: false, argv: "",
-        code: 0, has_code: false, special: "", valid: true,
+        code: 0, has_code: false, special: "", flags: "", valid: true,
         keys_seen: ks, start_line: start_line,
     })
 }
@@ -263,6 +272,10 @@ func apply_field(st: *BlockState, key: string, rawval: string, no: int64, errors
     }
     if str_eq(key, "special") {
         (*st).special = v
+        return
+    }
+    if str_eq(key, "flags") {
+        (*st).flags = v
         return
     }
     if str_eq(key, "stdin") {
@@ -349,6 +362,10 @@ func finalize(st: *BlockState, records: *Vector<Record>, errors: *Vector<string>
         push_err(errors, line, "mode 'special' needs a 'special' name")
         (*st).valid = false
     }
+    if vec_has((*st).keys_seen, "flags") && !takes_flags(mode) {
+        push_err(errors, line, "mode '" + mode + "' takes no 'flags'; only run, run_raw, and build_fail do")
+        (*st).valid = false
+    }
     if vec_has(seen, name) {
         push_err(errors, line, "duplicate test name '" + name + "'")
         (*st).valid = false
@@ -365,7 +382,7 @@ func finalize(st: *BlockState, records: *Vector<Record>, errors: *Vector<string>
         err_has: (*st).err_has, err_absent: (*st).err_absent,
         err_eq: (*st).err_eq, has_err_eq: (*st).has_err_eq,
         argv: (*st).argv, code: (*st).code, has_code: (*st).has_code,
-        special: (*st).special, line: line,
+        special: (*st).special, flags: (*st).flags, line: line,
     })
 }
 

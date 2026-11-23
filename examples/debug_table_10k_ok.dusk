@@ -1,0 +1,31 @@
+@paradigm procedural
+
+@import std.vector
+@import std.memory.allocator
+
+// The Debug allocator tracks every block it hands out, with no cap: ten thousand
+// blocks through it, every one freed but three, leave exactly three leaks and no
+// double free. Through 1.17.3 the table stopped tracking past 4096 blocks, so the
+// free of every block past the cap was counted as a double free.
+func make_all(v: *Vector<*int64>, n: int64, using a: Debug) -> void {
+    for i in 0..n {
+        vec_push(v, alloc(i))
+    }
+}
+
+func free_down_to(v: *Vector<*int64>, keep: int64, using a: Debug) -> void {
+    while vec_len(v) > keep {
+        free(vec_take(v, vec_len(v) - 1))
+    }
+}
+
+func main() -> int32 {
+    mut d := debug()
+    v: *Vector<*int64> = alloc(vec_new())
+    make_all(v, 10000, d)
+    free_down_to(v, 3, d)
+    println(vec_len(v))
+    println(debug_leaks())
+    println(debug_double_frees())
+    return 0
+}

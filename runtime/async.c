@@ -15,7 +15,7 @@
 #include <string.h>
 #include <time.h>
 
-extern void *cool_gen_alloc(int64_t size);
+extern void *cool_handle_alloc(int64_t size);
 extern int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n);
 extern int64_t cool_live_threads(void);
 extern int64_t cool_pool_inflight(void);
@@ -306,7 +306,7 @@ void *cool_future_new(int64_t elem_size) {
     if (elem_size < 1) {
         cool_async_fatal("fatal: future element size must be at least 1\n");
     }
-    cool_future *fut = (cool_future *)cool_gen_alloc((int64_t)sizeof(cool_future) + elem_size);
+    cool_future *fut = (cool_future *)cool_handle_alloc((int64_t)sizeof(cool_future) + elem_size);
     if (!fut) {
         cool_async_fatal("fatal: out of memory\n");
     }
@@ -515,7 +515,7 @@ void cool_future_release(void *f, int64_t gen) {
 void *cool_timer_new(int64_t ms) {
     cool_loop_assert_owner();
     cool_loop *l = &cool_the_loop;
-    cool_future *fut = (cool_future *)cool_gen_alloc((int64_t)sizeof(cool_future) + 8);
+    cool_future *fut = (cool_future *)cool_handle_alloc((int64_t)sizeof(cool_future) + 8);
     if (!fut) {
         cool_async_fatal("fatal: out of memory\n");
     }
@@ -548,7 +548,7 @@ _Static_assert(sizeof(cool_task) == 48, "the task header must be exactly 48 byte
 void *cool_task_new(void *poll, int64_t frame_size, int64_t result_size) {
     cool_loop_assert_owner();
     int64_t elem_size = result_size < 1 ? 1 : result_size;
-    cool_future *fut = (cool_future *)cool_gen_alloc((int64_t)sizeof(cool_future) + elem_size);
+    cool_future *fut = (cool_future *)cool_handle_alloc((int64_t)sizeof(cool_future) + elem_size);
     if (!fut) {
         cool_async_fatal("fatal: out of memory\n");
     }

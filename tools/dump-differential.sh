@@ -16,7 +16,12 @@
 # byte, since compile-fail programs are part of the set; the tally also prints
 # how many runs succeeded on the new side so a double failure cannot hide.
 #
-# Usage: tools/dump-differential.sh <old-dusk> <new-dusk> [allow-file] [source-list]
+# A release line whose IR change touches nearly every module names a normalizer
+# instead of thousands of allow rows: when DUSK_DUMP_NORM names an executable
+# filter, both sides of the ir and ir --target=wasm32 commands pass through it
+# before the compare, so the tally counts only what the filter does not explain.
+#
+# Usage: [DUSK_DUMP_NORM=filter] tools/dump-differential.sh <old-dusk> <new-dusk> [allow-file] [source-list]
 #   source-list defaults to every .dusk under examples/, tests/dawn/*/src/main.dusk,
 #   lib/std/*.dusk, tests/runner/testrun.dusk, compiler/dusk.dusk, compiler/dawn.dusk.
 # Runs serially and caged; never start one beside a self build.
@@ -26,9 +31,14 @@ OLD=${1:?usage: dump-differential.sh <old-dusk> <new-dusk> [allow-file] [source-
 NEW=${2:?usage: dump-differential.sh <old-dusk> <new-dusk> [allow-file] [source-list]}
 ALLOW=${3:-}
 LIST=${4:-}
+NORM=${DUSK_DUMP_NORM:-}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 OLD=$(realpath "$OLD"); NEW=$(realpath "$NEW")
+if [[ -n "$NORM" ]]; then
+  NORM=$(realpath "$NORM")
+  [[ -x "$NORM" ]] || { echo "dump-differential: DUSK_DUMP_NORM is not executable: $NORM" >&2; exit 2; }
+fi
 export DUSK_HOME="$ROOT"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -39,6 +49,12 @@ if [[ -z "$LIST" ]]; then
 fi
 
 allowed() { [[ -n "$ALLOW" ]] && grep -Fqx -- "$1 $2" "$ALLOW"; }
+
+normalize() { # <file> <cmd>: rewrite an ir capture in place through the normalizer
+  [[ -n "$NORM" ]] || return 0
+  case "$2" in ir|"ir --target=wasm32") ;; *) return 0 ;; esac
+  "$NORM" < "$1" > "$1.norm" && mv "$1.norm" "$1"
+}
 
 run_one() { # <bin> <cmd...> -> stdout+stderr file, exit code appended
   local bin=$1; shift
@@ -56,6 +72,7 @@ while read -r f; do
     # shellcheck disable=SC2086
     run_one "$NEW" $cmd "$f"; mv "$WORK/out" "$WORK/new"
     grep -qx 'exit=0' "$WORK/new" && okruns=$((okruns+1))
+    normalize "$WORK/old" "$cmd"; normalize "$WORK/new" "$cmd"
     if cmp -s "$WORK/old" "$WORK/new"; then
       same=$((same+1))
     elif allowed "$stem" "${cmd// /_}"; then

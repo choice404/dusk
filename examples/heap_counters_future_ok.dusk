@@ -1,0 +1,27 @@
+@paradigm procedural
+
+@import std.async.future
+@import std.async.loop
+@import std.memory.heap
+
+// A future is a runtime block on the same heap, so the gauge sees it: one made,
+// completed, and awaited is consumed and leaves the count where it started, and
+// one made and dropped stays live, one block, until it is freed.
+func main() -> int32 {
+    le := loop_init()
+    le.ignore()
+    b0 := heap_live_blocks()
+    f: Future<int64> = future_new()
+    println(heap_live_blocks() - b0)
+    ce := complete(f, 4, error {})
+    ce.ignore()
+    v, e := await(f)
+    e.ignore()
+    println(v)
+    println(heap_live_blocks() - b0)
+    g: Future<int64> = future_new()
+    println(heap_live_blocks() - b0)
+    future_free(g)
+    println(heap_live_blocks() - b0)
+    return 0
+}

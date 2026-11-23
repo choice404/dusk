@@ -1,0 +1,37 @@
+@paradigm procedural
+
+@import std.vector
+@import std.memory.allocator
+
+// A second free of one block among thousands is found by one probe of the table:
+// the 5000th block freed twice counts one double free, and every other block is
+// freed once and tracked, so nothing leaks.
+func make_all(v: *Vector<*int64>, n: int64, using a: Debug) -> void {
+    for i in 0..n {
+        vec_push(v, alloc(i))
+    }
+}
+
+func free_all(v: *Vector<*int64>, twice: int64, using a: Debug) -> void {
+    while vec_len(v) > 0 {
+        p := vec_take(v, vec_len(v) - 1)
+        if vec_len(v) == twice {
+            free(p)
+            free(p)
+        } else {
+            free(p)
+        }
+    }
+}
+
+func main() -> int32 {
+    mut d := debug()
+    v: *Vector<*int64> = alloc(vec_new())
+    make_all(v, 6000, d)
+    free_all(v, 4999, d)
+    println(debug_leaks())
+    println(debug_double_frees())
+    vec_free(v)
+    free(v)
+    return 0
+}

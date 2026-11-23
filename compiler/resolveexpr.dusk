@@ -5,11 +5,15 @@
 @import std.string
 @import std.vector
 
+// One binding in a resolver scope. lit marks an immutable single binder whose
+// initializer is a string literal on every path, the binding free can never
+// release, so the resolver refuses a free of it by name.
 export struct Var {
     mutable: bool,
     depth: int64,
     used: bool,
     is_let: bool,
+    lit: bool,
     lo: int64,
     hi: int64,
 }
@@ -20,7 +24,7 @@ export struct PendingUnused {
 }
 
 export func zero_var() -> Var {
-    return Var { mutable: false, depth: 0, used: false, is_let: false, lo: 0, hi: 0 }
+    return Var { mutable: false, depth: 0, used: false, is_let: false, lit: false, lo: 0, hi: 0 }
 }
 
 export func quoted_msg(prefix: string, name: string, suffix: string) -> string {
@@ -79,6 +83,34 @@ export func is_builtin_name(name: string) -> bool {
     if str_eq(name, "submit") { return true }
     if str_eq(name, "async_run") { return true }
     return false
+}
+
+/** Whether a function name is one the emitted module claims for itself. This mirrors
+ *  declare_prelude in gen.dusk and the runtime functions codegen declares on demand:
+ *  every runtime symbol starts with cool_, strlen is the one C library function the
+ *  prelude declares under its own name, and dusk__main is the body main is renamed
+ *  to when a wrapper takes the C entry. A top level function under one of these
+ *  would meet the module's own declare of the same symbol.
+ *  @param name a top level function name
+ *  @return true when the name is reserved for the emitted module */
+export func is_emit_reserved_name(name: string) -> bool {
+    if starts_with(name, "cool_") { return true }
+    if str_eq(name, "strlen") { return true }
+    if str_eq(name, "dusk__main") { return true }
+    return false
+}
+
+/** The sentence refusing a reserved function name, one per reason.
+ *  @param name a name is_emit_reserved_name accepted
+ *  @return the diagnostic text */
+export func emit_reserved_msg(name: string) -> string {
+    if starts_with(name, "cool_") {
+        return quoted_msg("", name, " starts with 'cool_', which is reserved for the runtime; a function cannot take it")
+    }
+    if str_eq(name, "strlen") {
+        return quoted_msg("", name, " is a C function the compiler calls itself; a function cannot take its name")
+    }
+    return quoted_msg("", name, " is the name the compiler gives the body of main; a function cannot take it")
 }
 
 export func is_type_name(name: string) -> bool {

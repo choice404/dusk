@@ -10,6 +10,7 @@
 @import std.vector
 @import std.map
 @import std.functional.maybe
+@import genopts
 
 struct EncodedCString {
     text: string,
@@ -28,6 +29,8 @@ export struct EmitModule {
     lambda_count: int64,
     funcval_thunks: *Map<string, int64>,
     faults: *Vector<string>,
+    opts: GenOpts,
+    defined: *Map<string, int64>,
 }
 
 func copy_string(s: string) -> string {
@@ -46,6 +49,7 @@ export func emit_module_new(name: string, triple: string) -> *EmitModule {
     strings: *Map<string, string> = alloc(map_new())
     thunks: *Map<string, int64> = alloc(map_new())
     faults: *Vector<string> = alloc(vec_new())
+    defined: *Map<string, int64> = alloc(map_new())
     return alloc(EmitModule {
         name: copy_string(name),
         triple: copy_string(triple),
@@ -58,7 +62,92 @@ export func emit_module_new(name: string, triple: string) -> *EmitModule {
         lambda_count: 0,
         funcval_thunks: thunks,
         faults: faults,
+        opts: genopts_none(),
+        defined: defined,
     })
+}
+
+/** Sets the build options the module's function heads read.
+ *  @param m the module under construction
+ *  @param opts the options the build asked for */
+export func emit_set_opts(m: *EmitModule, opts: GenOpts) -> void {
+    (*m).opts = opts
+}
+
+/** The head line of one function definition, the only place a define is spelled.
+ *  Every function is internal unless it is a C entry point: main, the wasm entry,
+ *  an `export "C"` function, or the demo's main. Internal linkage keeps a dusk name
+ *  from replacing or answering for a C symbol at link time, and nobuiltin tells the
+ *  optimizer that a call to the function is a call to this body, never a library
+ *  function of the same name it may fold. The symbol is recorded so a name the
+ *  module also declares is caught before clang sees the pair.
+ *  @param m the module the function belongs to
+ *  @param external true for a C entry point, false for every other function
+ *  @param ret the LLVM return type
+ *  @param sym the symbol, without the leading @
+ *  @param params the LLVM parameter list, without the parentheses
+ *  @return the head line, ending in the opening brace */
+export func emit_fn_head(m: *EmitModule, external: bool, ret: string, sym: string, params: string) -> string {
+    map_put((*m).defined, copy_string(sym), 1)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "define ")
+    if !external {
+        sb_push(b, "internal ")
+    }
+    sb_push(b, ret)
+    sb_push(b, " @")
+    sb_push(b, sym)
+    sb_push_char(b, 40)
+    sb_push(b, params)
+    sb_push(b, ") nobuiltin {")
+    head: string = built_string(b)
+    sb_free(b)
+    free(b)
+    return head
+}
+
+// The symbol a declare line names: the text between its @ and the opening
+// parenthesis of the parameter list, or an empty string for a line with no @.
+// Always a fresh heap string, so the caller frees it either way.
+func declared_symbol(line: string) -> string {
+    n: int64 = str_len(line)
+    mut at: int64 = 0
+    while at < n && line[at] != 64 {
+        at++
+    }
+    if at >= n {
+        return substring(line, 0, 0)
+    }
+    mut end: int64 = at + 1
+    while end < n && line[end] != 40 {
+        end++
+    }
+    return substring(line, at + 1, end)
+}
+
+/** Reports every symbol the module both defines and declares, in declaration order.
+ *  The checker refuses a function named for a runtime or foreign symbol, so this is
+ *  the backstop that turns a name the rule missed into a named build error rather
+ *  than a redefinition clang reports against the IR.
+ *  @param m the finished module */
+export func emit_check_names(m: *EmitModule) -> void {
+    defined: *Map<string, int64> = (*m).defined
+    externs: *Vector<string> = (*m).externs
+    for ext in externs {
+        sym: string = declared_symbol(ext)
+        if str_len(sym) > 0 && map_has(defined, sym) {
+            b: *StringBuilder = alloc(sb_new())
+            sb_push(b, "function '")
+            sb_push(b, sym)
+            sb_push(b, "' takes a name the emitted module also declares; rename the function")
+            msg: string = built_string(b)
+            sb_free(b)
+            free(b)
+            emit_error(m, msg)
+            free(msg)
+        }
+        free(sym)
+    }
 }
 
 export func emit_error(m: *EmitModule, msg: string) -> void {

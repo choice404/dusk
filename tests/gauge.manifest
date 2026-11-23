@@ -1,0 +1,69 @@
+# The 2.0.0 records that need what the runner learned in 2.0.0: the flags field,
+# placed between the subcommand and the file, and the release_out and
+# symbols_internal specials. They live apart from goldens.manifest so the previous
+# release's runner, which refuses a field it does not know, still reads that one.
+#
+# DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/gauge.manifest
+---
+# At -O2 a dusk sqrt, abs, and floor still keep their own bodies; through 1.17.3 the
+# optimizer folded each call as the library function and this printed 2, 3, and 2.
+test link_libm_names_release
+mode special
+special release_out
+file examples/link_libm_names_ok.dusk
+out 5\n97\n2.75\n
+---
+# Only main is an external symbol of a built program; the dusk functions, named for
+# C library functions or not, are local.
+test link_symbols_internal
+mode special
+special symbols_internal
+file examples/link_libc_names_ok.dusk
+args getpid sync write reboot mount
+---
+test link_symbols_internal_wrapped_main
+mode special
+special symbols_internal
+file examples/voidmain_argv_exit0.dusk
+args dusk__main
+---
+# The build flags are refused by name when they cannot build.
+test flag_unknown_sanitizer_fail
+mode build_fail
+flags --sanitize=adress
+file examples/hello.dusk
+err_has dusk: unknown sanitizer 'adress'; --sanitize takes address, undefined, and thread
+---
+test flag_address_thread_fail
+mode build_fail
+flags --sanitize=address,thread
+file examples/hello.dusk
+err_has dusk: --sanitize=address and --sanitize=thread cannot be combined; build one binary for each
+---
+test flag_lib_sites_fail
+mode build_fail
+flags --lib --heap-sites
+file examples/embed_lib.dusk
+err_has dusk: build --lib takes no --sanitize and no --heap-sites yet
+---
+test flag_unknown_build_flag_fail
+mode build_fail
+flags --heap-site
+file examples/hello.dusk
+err_has dusk: unknown build flag '--heap-site'; build takes --release, --lib, --heap-sites, and --sanitize=<list>
+---
+test flag_run_unknown_fail
+mode run_raw
+flags --bogus
+file examples/hello.dusk
+ok false
+err_has dusk: unknown run flag '--bogus'; run takes --heap-sites and --sanitize=<list> before the file
+---
+# run reads its flags before the file and hands every word after the file to the
+# program untouched.
+test flag_run_stops_at_the_file
+mode run
+flags --heap-sites
+file examples/voidmain_argv_exit0.dusk
+args --heap-sites b
+out 3\n--heap-sites\nb\n

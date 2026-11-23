@@ -1,0 +1,152 @@
+// testrun linkspecial: the specials that look at a built binary rather than at one
+// run of the compiler. release_out builds a record's file at -O2 and compares what
+// the binary prints, the general form of release_collector, so a program whose
+// output the optimizer could change is pinned at both levels. symbols_internal
+// builds a file and reads the binary's symbol table, so the linkage the compiler
+// gives a dusk function is checked where the linker sees it.
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.os
+@import manifest
+@import exec
+
+// The output stem the compiler gives a source path: its basename with the
+// extension dropped, the name the binary takes under target/dusk-out.
+func source_stem(path: string) -> string {
+    n: int64 = str_len(path)
+    mut start: int64 = 0
+    for i in 0..n {
+        if path[i] == 47 {
+            start = i + 1
+        }
+    }
+    mut end: int64 = n
+    for j in start + 1..n {
+        if path[j] == 46 {
+            end = j
+        }
+    }
+    return substring(path, start, end)
+}
+
+// Builds the record's file with the compiler under test, with the build flags
+// given, and returns the empty string or a named failure carrying clang's or the
+// compiler's own output.
+func build_file(bin: string, flags: string, file: string, log: string) -> string {
+    qbin: string = quote(bin)
+    qfile: string = quote(file)
+    cmd: string = qbin + " build " + flags + " " + qfile + " > " + log + " 2>&1"
+    rc: int64 = run(cmd)
+    free(cmd)
+    free(qbin)
+    free(qfile)
+    if rc != 0 {
+        return "dusk build " + flags + " failed: " + slurp(log)
+    }
+    return ""
+}
+
+/** Builds the record's file with build --release, runs the binary with no
+ *  arguments, and compares its stdout with the record's out byte for byte. A
+ *  build failure, a non zero exit, or a different output each fail by name.
+ *  @param rec the record, which needs a file and an out
+ *  @param bin the compiler under test
+ *  @return the empty string on success, else the reason */
+export func release_out(rec: Record, bin: string) -> string {
+    if str_eq(rec.file, "") || !rec.has_out {
+        return "release_out needs a 'file' and an 'out'"
+    }
+    md: int64 = run("mkdir -p target/testrun")
+    if md != 0 {
+        return "could not make target/testrun"
+    }
+    berr: string = build_file(bin, "--release", rec.file, "target/testrun/relout_build.txt")
+    if str_len(berr) > 0 {
+        return berr
+    }
+    stem: string = source_stem(rec.file)
+    qexe: string = quote("target/dusk-out/" + stem)
+    rc: int64 = run(qexe + " > target/testrun/relout_out.txt 2> target/testrun/relout_err.txt < /dev/null; echo $? > target/testrun/relout_code.txt")
+    free(qexe)
+    if rc != 0 {
+        return "the harness could not run the release build"
+    }
+    code: int64 = slurp_int("target/testrun/relout_code.txt")
+    if code != 0 {
+        return f"the release build exited with code {code}: " + slurp("target/testrun/relout_err.txt")
+    }
+    out: string = slurp("target/testrun/relout_out.txt")
+    if !str_eq(out, rec.out) {
+        return f"the release build printed '{out}', want '{rec.out}'"
+    }
+    return ""
+}
+
+// Whether one line of llvm-nm output names the symbol sym: the last space
+// separated field of the line is the name.
+func nm_line_names(line: string, sym: string) -> bool {
+    n: int64 = str_len(line)
+    mut start: int64 = 0
+    for i in 0..n {
+        if line[i] == 32 {
+            start = i + 1
+        }
+    }
+    name: string = substring(line, start, n)
+    hit: bool = str_eq(name, sym)
+    free(name)
+    return hit
+}
+
+// Whether any line of the symbol listing names sym.
+func nm_lists(lines: *Vector<string>, sym: string) -> bool {
+    for line in lines {
+        if nm_line_names(line, sym) {
+            return true
+        }
+    }
+    return false
+}
+
+/** Builds the record's file and lists the binary's defined external symbols with
+ *  llvm-nm. The check passes when main is listed and none of the function names
+ *  in the record's args is: every dusk function but the C entry has internal
+ *  linkage, so a dusk name never reaches the global symbol table.
+ *  @param rec the record, which needs a file and lists the source's functions in args
+ *  @param bin the compiler under test
+ *  @return the empty string on success, else the reason */
+export func symbols_internal(rec: Record, bin: string) -> string {
+    if str_eq(rec.file, "") {
+        return "symbols_internal needs a 'file'"
+    }
+    md: int64 = run("mkdir -p target/testrun")
+    if md != 0 {
+        return "could not make target/testrun"
+    }
+    berr: string = build_file(bin, "", rec.file, "target/testrun/syms_build.txt")
+    if str_len(berr) > 0 {
+        return berr
+    }
+    stem: string = source_stem(rec.file)
+    qexe: string = quote("target/dusk-out/" + stem)
+    rc: int64 = run("llvm-nm --defined-only --extern-only " + qexe + " > target/testrun/syms_nm.txt 2>&1")
+    free(qexe)
+    listing: string = slurp("target/testrun/syms_nm.txt")
+    if rc != 0 {
+        return "llvm-nm could not read the binary: " + listing
+    }
+    lines: *Vector<string> = str_split(listing, "\n")
+    if !nm_lists(lines, "main") {
+        return "main is not a defined external symbol of the binary"
+    }
+    names: *Vector<string> = split_ws(rec.args)
+    for name in names {
+        if nm_lists(lines, name) {
+            return f"the dusk function '{name}' is an external symbol of the binary"
+        }
+    }
+    return ""
+}

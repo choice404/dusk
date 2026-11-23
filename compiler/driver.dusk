@@ -22,6 +22,8 @@
 @import driverlink
 @import driverlib
 @import driverrt
+@import genopts
+@import buildopts
 
 /** The output stem for a source path: its basename with the extension dropped, the
  *  name the driver gives the emitted binary under target/dusk-out. Falls back to
@@ -90,20 +92,21 @@ export func run_demo(prog: string) -> int32 {
 
 /** Builds a source file through the shared IR spine, writes target/dusk-out, and
  *  links the runtime. The run flag controls whether the linked binary is executed.
- *  release asks clang to optimize the module and every @csource at -O2; without it
- *  both compile at clang's own default. The runtime compiles at -O2 either way, see
- *  runtime_opt_flag. This is the compiler's own
- *  entry; it pins the output to out_dir(), the stage0 parallel target/dusk-out. */
-export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, from_manifest: bool, release: bool) -> int32 {
-    return build_module_to_pkg(prog, path, run_it, argv, arg_start, out_dir(), from_manifest, release)
+ *  bo.release asks clang to optimize the module and every @csource at -O2; without
+ *  it both compile at clang's own default. The runtime compiles at -O2 either way,
+ *  see runtime_opt_flag. bo.gen is what codegen is asked for beyond plain IR. This
+ *  is the compiler's own entry; it pins the output to out_dir(), the stage0
+ *  parallel target/dusk-out. */
+export func build_module(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, from_manifest: bool, bo: BuildOpts) -> int32 {
+    return build_module_to_pkg(prog, path, run_it, argv, arg_start, out_dir(), from_manifest, bo)
 }
 
 /** The same build, told whether the path came from a package.dawn rather than from the
  *  command line. A build from a manifest registers the project's own files under a
  *  manifest relative spelling, so two checkouts of one project emit identical bytes;
  *  a build of a named file keeps that file's spelling. */
-export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string, from_manifest: bool, release: bool) -> int32 {
-    ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest)
+export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string, from_manifest: bool, bo: BuildOpts) -> int32 {
+    ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest, bo.gen)
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
         return 1
@@ -129,7 +132,7 @@ export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: 
     // The runtime is resolved before the link line is written: one cached object per
     // runtime source when the cache is usable, the sources themselves when it is not.
     // The runtime compiles at its own fixed level; opt is the module's and @csource's.
-    opt: string = opt_flag(release)
+    opt: string = opt_flag(bo.release)
     rt_inputs: *Vector<string> = runtime_inputs(home, out, runtime_opt_flag())
     code: int64 = link_only(ll, bin, rt_inputs, ir.links, ir.csources, opt)
     free_runtime_inputs(rt_inputs)
@@ -167,7 +170,7 @@ export func build_lib(prog: string, path: string, release: bool) -> int32 {
  *  its @root happened to be. */
 export func build_lib_named(prog: string, path: string, stem: string, from_manifest: bool, release: bool) -> int32 {
     out: string = out_dir()
-    ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest)
+    ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest, genopts_none())
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
         return 1

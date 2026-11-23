@@ -24,24 +24,16 @@ func fb_copy_string(s: string) -> string {
     return substring(s, 0, str_len(s))
 }
 
-export func func_new(ret: string, name: string, params: string) -> *FuncBuilder {
-    h: *StringBuilder = alloc(sb_new())
-    sb_push(h, "define ")
-    sb_push(h, ret)
-    sb_push(h, " @")
-    sb_push(h, name)
-    sb_push_char(h, 40)
-    sb_push(h, params)
-    sb_push(h, ") {")
-    header: string = fb_built_string(h)
-    sb_free(h)
-    free(h)
-
+/** A builder for one function whose head line is already written. The head comes
+ *  from emit_fn_head, the one writer of a define, so no builder spells its own.
+ *  @param head the finished head line, ending in the opening brace
+ *  @return a builder positioned at the entry block */
+export func func_new_head(head: string) -> *FuncBuilder {
     body: *StringBuilder = alloc(sb_new())
     sb_push(body, "entry:\n")
     allocas: *StringBuilder = alloc(sb_new())
     return alloc(FuncBuilder {
-        header: header,
+        header: head,
         body: body,
         entry_allocas: allocas,
         tmp: 0,

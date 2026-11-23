@@ -358,10 +358,15 @@ __attribute__((always_inline)) static inline int cool_in_image(const void *p) {
 /* Reports a free of an address inside the program image. Both free entry points
    test the range before they touch the block, so the misuse aborts by name at the
    free itself instead of faulting namelessly one word ahead of the pointer the
-   program handed in. */
-static void cool_const_free_fault(void) {
+   program handed in. loc is the "path:line" of the free when codegen passed one,
+   or null for a caller that has none, which keeps the sentence without a place. */
+static void cool_const_free_fault(const char *loc) {
     fflush(stdout);
-    fputs("fatal: free of a string literal or other constant; it was never allocated\n", stderr);
+    if (loc) {
+        fprintf(stderr, "fatal: free of a string literal or other constant at %s; it was never allocated\n", loc);
+    } else {
+        fputs("fatal: free of a string literal or other constant; it was never allocated\n", stderr);
+    }
     abort();
 }
 
@@ -399,7 +404,7 @@ void cool_free(void *p) {
     // A constant was never allocated, so libc has no block to reclaim and the
     // misuse gets a name here rather than an allocator abort or worse.
     if (cool_in_image(p)) {
-        cool_const_free_fault();
+        cool_const_free_fault(NULL);
     }
     // A collected address is owned by the collector, not libc; freeing one here
     // would hand a live collected block back to the allocator.
@@ -412,69 +417,8 @@ void cool_free(void *p) {
     free(p);
 }
 
-/* Debug allocator. Tracks every allocation in a table so it can report leaks
-   and catch a double free. A freed block is poisoned with 0xDD and kept, not
-   returned to libc, so a use after free reads poison and its address is never
-   handed out again. This trades memory for detection, which is the point in a
-   debug build. */
-#define COOL_DBG_MAX 4096
-static void *cool_dbg_ptr[COOL_DBG_MAX];
-static int64_t cool_dbg_size[COOL_DBG_MAX];
-static int cool_dbg_freed[COOL_DBG_MAX];
-static int cool_dbg_count = 0;
-static int64_t cool_dbg_double = 0;
-
-void *cool_debug_alloc(int64_t n) {
-    void *p = malloc(n);
-    pthread_mutex_lock(&cool_heap_lock);
-    if (cool_dbg_count < COOL_DBG_MAX) {
-        cool_dbg_ptr[cool_dbg_count] = p;
-        cool_dbg_size[cool_dbg_count] = n;
-        cool_dbg_freed[cool_dbg_count] = 0;
-        cool_dbg_count++;
-    }
-    pthread_mutex_unlock(&cool_heap_lock);
-    return p;
-}
-
-void cool_debug_free(void *p) {
-    pthread_mutex_lock(&cool_heap_lock);
-    for (int i = 0; i < cool_dbg_count; i++) {
-        if (cool_dbg_ptr[i] == p) {
-            if (cool_dbg_freed[i]) {
-                cool_dbg_double++;
-                pthread_mutex_unlock(&cool_heap_lock);
-                return;
-            }
-            cool_dbg_freed[i] = 1;
-            cool_str_stamp_bump(p);
-            memset(p, 0xDD, (size_t)cool_dbg_size[i]);
-            pthread_mutex_unlock(&cool_heap_lock);
-            return;
-        }
-    }
-    cool_dbg_double++;
-    pthread_mutex_unlock(&cool_heap_lock);
-}
-
-int64_t cool_debug_leaks(void) {
-    pthread_mutex_lock(&cool_heap_lock);
-    int64_t n = 0;
-    for (int i = 0; i < cool_dbg_count; i++) {
-        if (!cool_dbg_freed[i]) {
-            n++;
-        }
-    }
-    pthread_mutex_unlock(&cool_heap_lock);
-    return n;
-}
-
-int64_t cool_debug_double_frees(void) {
-    pthread_mutex_lock(&cool_heap_lock);
-    int64_t n = cool_dbg_double;
-    pthread_mutex_unlock(&cool_heap_lock);
-    return n;
-}
+/* The Debug allocator, an open addressed table with no cap. */
+#include "heap_debug.h"
 
 /* Generational heap for managed pointers. Each managed allocation carries a
    header in front of the data holding the payload size and a generation, with
@@ -629,6 +573,13 @@ static int64_t *cool_reg_room = NULL;
 static int64_t cool_reg_n = 0;
 static int64_t cool_reg_cap = 0;
 
+/* The gauge's counters: live blocks, the bytes their tenants asked for, and the
+   capacity of every block minted, live or parked. Written only with the heap
+   lock held, on paths that already take it; heap_gauge.h reads them. */
+static int64_t cool_heap_blocks = 0;
+static int64_t cool_heap_bytes = 0;
+static int64_t cool_heap_held = 0;
+
 /* Appends a freshly minted payload and its capacity with the heap lock held.
    Growth failure is out of memory, fatal, since dropping an entry would under
    root the collector and free a still reachable block. */
@@ -724,6 +675,8 @@ void *cool_gen_alloc(int64_t size) {
            class guarantees the block's capacity covers the size. */
         cool_str_stamp_bump(p);
         *COOL_GEN_SIZE_WORD(p) = size;
+        cool_heap_blocks += 1;
+        cool_heap_bytes += size;
         pthread_mutex_unlock(&cool_heap_lock);
         return p;
     }
@@ -739,12 +692,16 @@ void *cool_gen_alloc(int64_t size) {
     void *q = base + COOL_GEN_HDR;
     pthread_mutex_lock(&cool_heap_lock);
     cool_reg_add_locked(q, room);
+    cool_heap_blocks += 1;
+    cool_heap_bytes += size;
+    cool_heap_held += room;
     pthread_mutex_unlock(&cool_heap_lock);
     return q;
 }
 
-/* The retire path with the heap lock already held. */
-static void cool_gen_free_locked(void *p) {
+/* The retire path with the heap lock already held. loc names the free in the
+   double free fault, or is null for a caller with no location. */
+static void cool_gen_free_locked(void *p, const char *loc) {
     // Double free guard: a block already parked must not be parked again, or a
     // later allocation could hand the same address out twice. The parked bit in
     // the size word answers that in one load, and it answers for every parked
@@ -757,8 +714,16 @@ static void cool_gen_free_locked(void *p) {
     int64_t size = *hdr;
     if (size & COOL_GEN_FREED_TAG) {
         fflush(stdout);
-        fputs("fatal: double free\n", stderr);
+        if (loc) {
+            fprintf(stderr, "fatal: double free at %s\n", loc);
+        } else {
+            fputs("fatal: double free\n", stderr);
+        }
         abort();
+    }
+    cool_heap_blocks -= 1;
+    if (size >= 0) {
+        cool_heap_bytes -= size;
     }
     // The generation bump is atomic because the dereference check reads the
     // word without the heap lock, from any thread.
@@ -773,14 +738,17 @@ static void cool_gen_free_locked(void *p) {
     }
 }
 
-void cool_gen_free(void *p) {
+/* Frees a generational block, naming the free's source line in either fault it
+   can raise. Codegen passes the "path:line" of the statement; null keeps the
+   sentences without a place. */
+void cool_gen_free_at(void *p, const char *loc) {
     if (!p) {
         return;
     }
     // A string literal or other constant has no header in front of it, so the
     // retire below would read a size and bump a generation in read only memory.
     if (cool_in_image(p)) {
-        cool_const_free_fault();
+        cool_const_free_fault(loc);
     }
     // A collected address is reclaimed by the collector's sweep, never parked on
     // the generational free list, so retiring one here is a no op.
@@ -788,8 +756,29 @@ void cool_gen_free(void *p) {
         return;
     }
     pthread_mutex_lock(&cool_heap_lock);
-    cool_gen_free_locked(p);
+    cool_gen_free_locked(p, loc);
     pthread_mutex_unlock(&cool_heap_lock);
+}
+
+/* The free with no location, kept for IR that calls it by this name. */
+void cool_gen_free(void *p) {
+    cool_gen_free_at(p, NULL);
+}
+
+/* The runtime's own generation checked records, a future or a thread's join
+   record, are allocated and freed through these rather than through the program's
+   entry points. In this build they are the same heap, the same classes, the same
+   registry, and the same counters, so a record the program never awaited or
+   joined shows as a live block. They are named apart because a retired record's
+   generation is still read as defined behavior, a late complete or a second
+   join, so a heap that one day really frees the program's blocks must keep these
+   on the parking path. */
+void *cool_handle_alloc(int64_t size) {
+    return cool_gen_alloc(size);
+}
+
+void cool_handle_free(void *p) {
+    cool_gen_free_at(p, NULL);
 }
 
 /* Checks the remembered generation and retires the block in one critical
@@ -816,10 +805,13 @@ int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n) {
         cool_gen_fault();
     }
     memcpy(out, p, (size_t)n);
-    cool_gen_free_locked(p);
+    cool_gen_free_locked(p, NULL);
     pthread_mutex_unlock(&cool_heap_lock);
     return 0;
 }
+
+/* The heap gauge: counter reads and the live report. */
+#include "heap_gauge.h"
 
 void cool_gen_fault(void) {
     fflush(stdout);

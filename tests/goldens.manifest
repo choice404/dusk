@@ -3495,7 +3495,7 @@ special installed_layout
 ---
 test bootstrap_scaffold_demo__version
 mode tool
-out dusk 1.17.3\n
+out dusk 2.0.0-dev\n
 argv version
 code 0
 ---
@@ -10875,3 +10875,211 @@ test fnresult_using_mid_fail
 mode check_fail
 file examples/fnresult_using_mid_fail.dusk
 err_has argument 2's view is stored into argument 1 and may outlive this frame
+---
+# A dusk name means the dusk function. Every function but the C entry and an
+# export "C" function has internal linkage, so a dusk getenv never answers the
+# runtime's own call to the C library's getenv; a dusk call to it still reaches it.
+test link_getenv_ok
+mode run
+file examples/link_getenv_ok.dusk
+out hijacked\nthe dusk getenv\n1\n
+---
+# Dusk functions named getpid, sync, write, reboot, and mount each answer with their
+# own value, and the runtime's write(2) loop on a duplicated descriptor still reaches
+# the C library's write.
+test link_libc_names_ok
+mode run
+file examples/link_libc_names_ok.dusk
+out 7\ndusk sync\n7\n42\n5\nthe C write still writes\n
+---
+# A dusk sqrt, abs, and floor keep their own bodies; nobuiltin on every function
+# keeps the optimizer from folding a call to them as the library's. The -O2 half of
+# this pair lives in tests/gauge.manifest.
+test link_libm_names_ok
+mode run
+file examples/link_libm_names_ok.dusk
+out 5\n97\n2.75\n
+---
+# A C source that calls a plain export func by name no longer links: export is
+# visibility between dusk files, and the function's symbol is internal.
+test link_csource_bare_fail
+mode build_fail
+file examples/link_csource_bare_fail.dusk
+err_has clang failed to link the module
+---
+test link_csource_exportc_ok
+mode run
+file examples/link_csource_exportc_ok.dusk
+out 41\n
+---
+# A top level function cannot take a name the emitted module declares for itself:
+# the runtime's cool_ prefix, the strlen the prelude calls, main's dusk__main body,
+# or any name a foreign block of the program declares, the standard library's too.
+test name_cool_prefix_fail
+mode check_fail
+file examples/name_cool_prefix_fail.dusk
+err_has 'cool_helper' starts with 'cool_', which is reserved for the runtime; a function cannot take it
+---
+test name_strlen_fail
+mode check_fail
+file examples/name_strlen_fail.dusk
+err_has 'strlen' is a C function the compiler calls itself; a function cannot take its name
+---
+test name_dusk_main_fail
+mode check_fail
+file examples/name_dusk_main_fail.dusk
+err_has 'dusk__main' is the name the compiler gives the body of main; a function cannot take it
+---
+test name_foreign_same_file_fail
+mode check_fail
+file examples/name_foreign_same_file_fail.dusk
+err_has 'getpid' is declared foreign in this program; a function cannot take a foreign function's name
+---
+test name_foreign_std_fail
+mode check_fail
+file examples/name_foreign_std_fail.dusk
+err_has 'abort' is declared foreign in this program; a function cannot take a foreign function's name
+---
+# Methods and an imported file's private helpers never meet a C symbol, so they may
+# use the names a top level function cannot.
+test name_method_ok
+mode check_ok
+file examples/name_method_ok.dusk
+---
+test name_method_ok_runs
+mode run
+file examples/name_method_ok.dusk
+out 4\n8\n
+---
+test name_private_import_ok
+mode run
+file examples/name_private_import_ok.dusk
+out 4\n
+---
+# A void main exits 0, nullary or argc/argv, from the end of its body or from a bare
+# return, natively and through the wasm entry.
+test voidmain_exit0
+mode run
+file examples/voidmain_exit0.dusk
+out void main\n
+---
+test voidmain_argv_exit0
+mode run
+file examples/voidmain_argv_exit0.dusk
+args a b
+out 3\na\nb\n
+---
+test voidmain_early_return
+mode run
+file examples/voidmain_early_return.dusk
+out 0\n1\n2\nleaving at 3\n
+---
+test voidmain_wasm_ir
+mode tool
+argv ir --target=wasm32 examples/voidmain_exit0.dusk
+code 0
+---
+test voidmain_argv_bad_fail
+mode check_fail
+file examples/voidmain_argv_bad_fail.dusk
+err_has main takes no parameters or (argc: int32, argv: string[])
+---
+# A free of a string literal, or of an immutable binding a literal initialized on
+# every path, is refused at check: the literal was never allocated.
+test free_lit_direct_fail
+mode check_fail
+file examples/free_lit_direct_fail.dusk
+err_has cannot free a string literal; a literal was never allocated
+---
+test free_lit_bound_fail
+mode check_fail
+file examples/free_lit_bound_fail.dusk
+err_has cannot free 's', which holds a string literal; a literal was never allocated
+---
+test free_lit_typed_fail
+mode check_fail
+file examples/free_lit_typed_fail.dusk
+err_has cannot free 's', which holds a string literal; a literal was never allocated
+---
+test free_lit_ifexpr_fail
+mode check_fail
+file examples/free_lit_ifexpr_fail.dusk
+err_has cannot free 's', which holds a string literal; a literal was never allocated
+err_has cannot free 't', which holds a string literal; a literal was never allocated
+---
+test free_lit_match_fail
+mode check_fail
+file examples/free_lit_match_fail.dusk
+err_has cannot free 'name', which holds a string literal; a literal was never allocated
+---
+test free_lit_defer_fail
+mode check_fail
+file examples/free_lit_defer_fail.dusk
+err_has cannot free 's', which holds a string literal; a literal was never allocated
+---
+# The rule follows the binding a name resolves to, and only a literal on every path
+# counts: an inner heap binding of the same name, a concatenation, an if expression
+# with an allocating branch, and an f-string are all freed as usual.
+test free_lit_inner_shadow_ok
+mode run
+file examples/free_lit_inner_shadow_ok.dusk
+out inner heap\nouter literal\n
+---
+test free_concat_ok
+mode run
+file examples/free_concat_ok.dusk
+out concat\nheap branch\n
+---
+test free_fstr_ok
+mode run
+file examples/free_fstr_ok.dusk
+out n is 3\n
+---
+# A helper that may return a literal is judged at run time: the free of the literal
+# it returned is the named fault.
+test free_lit_helper_fault
+mode run_raw
+file examples/free_lit_helper_fault.dusk
+out heap\nlit\n
+ok false
+err_has fatal: free of a string literal or other constant
+err_absent unreachable
+---
+# The generational heap's gauges: live blocks, the bytes they asked for, and the
+# bytes the heap holds, exact around an alloc, a concatenation, and a str_split
+# vector, exact under four threads, and counting a future until it is consumed.
+test heap_counters_ok
+mode run
+file examples/heap_counters_ok.dusk
+out 1\n8\n0\n1\n7\n0\ntrue\n0\n0\ntrue\n2\ntrue\n
+---
+test heap_counters_thread_ok
+mode run
+file examples/heap_counters_thread_ok.dusk
+out 0\n0\n
+---
+test heap_counters_future_ok
+mode run
+file examples/heap_counters_future_ok.dusk
+out 1\n4\n0\n1\n0\n
+---
+test heap_report_plain
+mode run_raw
+file examples/heap_report_plain.dusk
+out report\n
+ok true
+err_has dusk heap: 1 block, 7 bytes live
+err_has build with --heap-sites to see allocation sites
+err_absent counter drift
+---
+# The Debug allocator's table has no cap: ten thousand blocks are all tracked, and a
+# second free among six thousand is one double free with nothing lost.
+test debug_table_10k_ok
+mode run
+file examples/debug_table_10k_ok.dusk
+out 3\n3\n0\n
+---
+test debug_table_double_ok
+mode run
+file examples/debug_table_double_ok.dusk
+out 0\n1\n

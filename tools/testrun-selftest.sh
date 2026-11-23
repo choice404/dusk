@@ -1,9 +1,9 @@
 #!/bin/sh
 # testrun-selftest.sh: prove the dusk test runner itself. Builds the runner, runs
 # it against tests/selftest.manifest, and asserts that the set of failing records
-# is exactly the deliberate _bad set and that the tally is eight passed, eight
+# is exactly the deliberate _bad set and that the tally is nine passed, nine
 # failed. A green run here means the runner accepts a correct expectation and
-# rejects a wrong one across every mode.
+# rejects a wrong one across every mode and the flags field.
 #
 # Run from anywhere; the script places itself at the repository root, which the
 # runner requires since manifest paths are relative to it.
@@ -39,7 +39,7 @@ if [ "$CODE" -eq 0 ]; then
     FAILS=0
 fi
 
-EXPECTED="buildfail_bad checkfail_bad checkok_bad errabsent_bad run_bad runraw_bad special_bad tool_bad"
+EXPECTED="buildfail_bad checkfail_bad checkok_bad errabsent_bad flags_bad run_bad runraw_bad special_bad tool_bad"
 GOT=$(grep '^FAIL ' "$OUT" | awk '{print $2}' | sort | tr '\n' ' ' | sed 's/ *$//')
 if [ "$GOT" != "$EXPECTED" ]; then
     echo "selftest: FAIL: failing set mismatch" >&2
@@ -48,8 +48,8 @@ if [ "$GOT" != "$EXPECTED" ]; then
     FAILS=0
 fi
 
-if ! grep -q '^testrun: 16 tests, 8 passed, 8 failed$' "$OUT"; then
-    echo "selftest: FAIL: summary line is not '16 tests, 8 passed, 8 failed'" >&2
+if ! grep -q '^testrun: 18 tests, 9 passed, 9 failed$' "$OUT"; then
+    echo "selftest: FAIL: summary line is not '18 tests, 9 passed, 9 failed'" >&2
     FAILS=0
 fi
 

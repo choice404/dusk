@@ -13,8 +13,8 @@
 #include <time.h>
 #include <unistd.h>
 
-extern void *cool_gen_alloc(int64_t size);
-extern void cool_gen_free(void *p);
+extern void *cool_handle_alloc(int64_t size);
+extern void cool_handle_free(void *p);
 extern int64_t cool_gen_retire_checked(void *p, int64_t gen, void *out, int64_t n);
 extern void cool_loop_kick(void);
 extern void *cool_future_new(int64_t elem_size);
@@ -63,7 +63,7 @@ void *cool_thread_spawn(void *fn, void *env) {
     }
     task->fn = (void (*)(void *))fn;
     task->env = env;
-    pthread_t *rec = (pthread_t *)cool_gen_alloc((int64_t)sizeof(pthread_t));
+    pthread_t *rec = (pthread_t *)cool_handle_alloc((int64_t)sizeof(pthread_t));
     if (!rec) {
         free(task);
         free(env);
@@ -76,7 +76,7 @@ void *cool_thread_spawn(void *fn, void *env) {
         __atomic_fetch_sub(&cool_live_threads_n, 1, __ATOMIC_SEQ_CST);
         free(task);
         free(env);
-        cool_gen_free(rec);
+        cool_handle_free(rec);
         return NULL;
     }
     return rec;

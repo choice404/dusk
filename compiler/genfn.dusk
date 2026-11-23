@@ -101,7 +101,8 @@ func bind_params(s: *GenFuncState, f: FuncNode) -> void {
 
 // Emits one non-method function body. Scalar signatures enter the shared lowering
 // path while aggregate values still fault before any partial body is trusted.
-export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) -> string {
+// external is true only for a C entry point, main or an `export "C"` function.
+export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string, external: bool) -> string {
     a: *Ast = (*ctx).ast
     c: *CTyArena = genctx_ctys(ctx)
     ret_ty: int64 = cty_lower_ast(c, a, f.ret)
@@ -114,7 +115,7 @@ export func gen_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, name: string) ->
     }
     ret_ll: string = cty_ll(c, ret_ty)
     sig: string = param_sig(ctx, a, f)
-    fb: *FuncBuilder = func_new(ret_ll, name, sig)
+    fb: *FuncBuilder = func_new_head(emit_fn_head(m, external, ret_ll, name, sig))
     if (str_eq(name, "main") || str_eq(name, "dusk__main")) && !f.abi_export {
         slot: string = next_tmp(fb)
         b: *StringBuilder = alloc(sb_new())
@@ -201,7 +202,7 @@ export func gen_method_func(m: *EmitModule, ctx: *GenCtx, f: FuncNode, owner: st
  sb_free(sb)
  free(sb)
     ret_ll: string = cty_ll(c, ret_ty)
-    fb: *FuncBuilder = func_new(ret_ll, name, sig)
+    fb: *FuncBuilder = func_new_head(emit_fn_head(m, false, ret_ll, name, sig))
     scopes: *Vector<*Map<string, LocalVal>> = alloc(vec_new())
     vec_push(scopes, alloc(map_new()))
     defers: *Vector<int64> = alloc(vec_new())
@@ -297,60 +298,130 @@ export func entry_name_for(wasm: bool) -> string {
     return "main"
 }
 
+// Whether main's body returns nothing, the form whose C entry still owes the
+// process an exit code.
+func main_returns_void(ctx: *GenCtx, f: FuncNode) -> bool {
+    c: *CTyArena = genctx_ctys(ctx)
+    n: CTyNode = vec_get(cty_nodes(c), cty_lower_ast(c, (*ctx).ast, f.ret))
+    return n.kind == ctyk_void()
+}
+
+// The call to the renamed body and the return that closes every main wrapper. A
+// body with a value hands it back as the exit code, as it always has; a void body
+// is called with no result name, which LLVM refuses on a void call, and the
+// wrapper exits 0 so a void main never leaves a stray register as its status.
+func push_wrapper_tail(b: *StringBuilder, rty: string, args: string) -> void {
+    if str_eq(rty, "void") {
+        sb_push(b, "  call void @dusk__main(")
+        sb_push(b, args)
+        sb_push(b, ")\n  ret i32 0\n}")
+        return
+    }
+    sb_push(b, "  %r = call ")
+    sb_push(b, rty)
+    sb_push(b, " @dusk__main(")
+    sb_push(b, args)
+    sb_push(b, ")\n  ret ")
+    sb_push(b, rty)
+    sb_push(b, " %r\n}")
+}
+
+// The return type a wrapper's head carries: the body's own for a main with a value,
+// i32 for a void main, since a C entry returns its exit code.
+func wrapper_ret(rty: string) -> string {
+    if str_eq(rty, "void") {
+        return gf_copy("i32")
+    }
+    return gf_copy(rty)
+}
+
 // Emits the C ABI wrapper for an argc/argv main after the user body was renamed
 // to dusk__main. entry_name is the exported symbol: "main" for a native link,
 // where the C runtime's crt calls main, or "__main_argc_argv" for wasm, the
 // symbol wasi-libc's crt1 calls (its __main_void forwards to it). The parameter
 // list stays (i32, ptr), which is (i32, i32) on wasm where a pointer is 32 bit,
 // matching the signature wasi expects.
-export func emit_main_wrapper(ctx: *GenCtx, f: FuncNode, entry_name: string) -> string {
+export func emit_main_wrapper(m: *EmitModule, ctx: *GenCtx, f: FuncNode, entry_name: string) -> string {
     a: *Ast = (*ctx).ast
     rty: string = cty_ll(genctx_ctys(ctx), cty_lower_ast(genctx_ctys(ctx), a, f.ret))
+    hret: string = wrapper_ret(rty)
+    head: string = emit_fn_head(m, true, hret, entry_name, "i32 %argc, ptr %argv")
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, "define ")
-    sb_push(b, rty)
-    sb_push(b, " @")
-    sb_push(b, entry_name)
-    sb_push(b, "(i32 %argc, ptr %argv) {\n")
-    sb_push(b, "entry:\n")
+    sb_push(b, head)
+    sb_push(b, "\nentry:\n")
     sb_push(b, "  %len = sext i32 %argc to i64\n")
     sb_push(b, "  %s0 = insertvalue { ptr, i64 } undef, ptr %argv, 0\n")
     sb_push(b, "  %s1 = insertvalue { ptr, i64 } %s0, i64 %len, 1\n")
-    sb_push(b, "  %r = call ")
-    sb_push(b, rty)
-    sb_push(b, " @dusk__main(i32 %argc, { ptr, i64 } %s1)\n")
-    sb_push(b, "  ret ")
-    sb_push(b, rty)
-    sb_push(b, " %r\n}")
+    push_wrapper_tail(b, rty, "i32 %argc, { ptr, i64 } %s1")
     out: string = gf_built(b)
     sb_free(b)
     free(b)
+    free(head)
+    free(hret)
     free(rty)
     return out
 }
 
-// The wasm entry wrapper for a nullary main. wasi-libc's crt1 always calls
-// __main_argc_argv(i32, i32), so even a main() with no parameters must present
-// that two-argument entry; this wrapper takes the argc/argv wasi hands it,
-// ignores both, and calls the parameterless dusk__main. Native keeps emitting a
-// bare @main() and needs no wrapper, so this form is wasm only.
-export func emit_main_wrapper_void(ctx: *GenCtx, f: FuncNode) -> string {
+// The head of a nullary main's entry: the two argument wasi entry on wasm, a
+// parameterless main natively.
+func nullary_entry_head(m: *EmitModule, hret: string, wasm: bool) -> string {
+    if wasm {
+        return emit_fn_head(m, true, hret, "__main_argc_argv", "i32 %argc, ptr %argv")
+    }
+    return emit_fn_head(m, true, hret, "main", "")
+}
+
+// The entry wrapper for a nullary main. wasi-libc's crt1 always calls
+// __main_argc_argv(i32, i32), so on wasm even a main() with no parameters must
+// present that two argument entry; the wrapper takes the argc/argv wasi hands it,
+// ignores both, and calls the parameterless dusk__main. Natively a nullary main
+// with a value is emitted as main itself and needs no wrapper, so the native form
+// here exists for a void main alone, a parameterless main that exits 0.
+export func emit_main_wrapper_nullary(m: *EmitModule, ctx: *GenCtx, f: FuncNode, wasm: bool) -> string {
     a: *Ast = (*ctx).ast
     rty: string = cty_ll(genctx_ctys(ctx), cty_lower_ast(genctx_ctys(ctx), a, f.ret))
+    hret: string = wrapper_ret(rty)
+    head: string = nullary_entry_head(m, hret, wasm)
     b: *StringBuilder = alloc(sb_new())
-    sb_push(b, "define ")
-    sb_push(b, rty)
-    sb_push(b, " @__main_argc_argv(i32 %argc, ptr %argv) {\n")
-    sb_push(b, "entry:\n")
-    sb_push(b, "  %r = call ")
-    sb_push(b, rty)
-    sb_push(b, " @dusk__main()\n")
-    sb_push(b, "  ret ")
-    sb_push(b, rty)
-    sb_push(b, " %r\n}")
+    sb_push(b, head)
+    sb_push(b, "\nentry:\n")
+    push_wrapper_tail(b, rty, "")
     out: string = gf_built(b)
     sb_free(b)
     free(b)
+    free(head)
+    free(hret)
     free(rty)
     return out
+}
+
+/** Emits main and the C entry that reaches it. An argc/argv main, any main on wasm,
+ *  and a void main are lowered as the internal body dusk__main plus an external
+ *  wrapper under the entry symbol; a native nullary main with a value is the entry
+ *  itself, as it always was.
+ *  @param m the module to push the functions into
+ *  @param ctx the codegen context
+ *  @param f the main function
+ *  @param target the LLVM target triple */
+export func gen_main(m: *EmitModule, ctx: *GenCtx, f: FuncNode, target: string) -> void {
+    wasm: bool = target_is_wasm(target)
+    argc_argv: bool = main_is_argc_argv(ctx, f)
+    if !argc_argv && !wasm && !main_returns_void(ctx, f) {
+        body: string = gen_func(m, ctx, f, "main", true)
+        emit_push_function(m, body)
+        free(body)
+        return
+    }
+    inner: string = gen_func(m, ctx, f, "dusk__main", false)
+    emit_push_function(m, inner)
+    free(inner)
+    if argc_argv {
+        wrapper: string = emit_main_wrapper(m, ctx, f, entry_name_for(wasm))
+        emit_push_function(m, wrapper)
+        free(wrapper)
+        return
+    }
+    nullary: string = emit_main_wrapper_nullary(m, ctx, f, wasm)
+    emit_push_function(m, nullary)
+    free(nullary)
 }

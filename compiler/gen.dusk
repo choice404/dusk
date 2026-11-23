@@ -13,6 +13,7 @@
 @import genctx
 @import genfn
 @import genasync
+@import genopts
 
 export struct GenResult { ok: bool, text: string, exports: *Vector<string> }
 
@@ -195,6 +196,26 @@ func emit_ground_types(m: *EmitModule, ctx: *GenCtx) -> void {
     }
 }
 
+// The parameter list of an interface thunk: the receiver as ptr %d, then each
+// method parameter as %a0, %a1, and so on.
+func iface_thunk_params(c: *CTyArena, a: *Ast, ms: MethodSigNode) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "ptr %d")
+    for pi in 0..ms.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ms.params_off + pi))
+        pll: string = cty_ll(c, cty_lower_ast(c, a, p.ty))
+        sb_push(b, ", ")
+        sb_push(b, pll)
+        sb_push(b, " %a")
+        sb_push_int(b, pi)
+        free(pll)
+    }
+    out: string = gen_built(b)
+    sb_free(b)
+    free(b)
+    return out
+}
+
 func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
     a: *Ast = (*ctx).ast
     c: *CTyArena = genctx_ctys(ctx)
@@ -232,23 +253,15 @@ func emit_iface_vtables(m: *EmitModule, ctx: *GenCtx) -> void {
                         sb_push(slots, thunk)
                         ret_ty: int64 = cty_lower_ast(c, a, ms.ret)
                         retll: string = cty_ll(c, ret_ty)
+                        tparams: string = iface_thunk_params(c, a, ms)
+                        tsym: string = substring(thunk, 1, str_len(thunk))
+                        thead: string = emit_fn_head(m, false, retll, tsym, tparams)
                         fb: *StringBuilder = alloc(sb_new())
-                        sb_push(fb, "define ")
-                        sb_push(fb, retll)
-                        sb_push_char(fb, 32)
-                        sb_push(fb, thunk)
-                        sb_push(fb, "(ptr %d")
-                        for pi in 0..ms.params_len {
-                            pid: int64 = vec_get((*a).kids, ms.params_off + pi)
-                            p: ParamNode = vec_get((*a).params, pid)
-                            pll: string = cty_ll(c, cty_lower_ast(c, a, p.ty))
-                            sb_push(fb, ", ")
-                            sb_push(fb, pll)
-                            sb_push(fb, " %a")
-                            sb_push_int(fb, pi)
-                            free(pll)
-                        }
-                        sb_push(fb, ") {\nentry:\n")
+                        sb_push(fb, thead)
+                        sb_push(fb, "\nentry:\n")
+                        free(thead)
+                        free(tsym)
+                        free(tparams)
                         if !str_eq(retll, "void") { sb_push(fb, "  %r = ") } else { sb_push(fb, "  ") }
                         sb_push(fb, "call ")
                         sb_push(fb, retll)
@@ -412,9 +425,10 @@ func foreign_declare(m: *EmitModule, ctx: *GenCtx, ff: ForeignFuncNode) -> void 
 
 // Lowers a ground, monomorphized AST to textual LLVM IR. Unsupported Phase A
 // constructs record faults so callers never observe a malformed partial module.
-export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> GenResult {
+export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string, opts: GenOpts) -> GenResult {
     ctx: *GenCtx = genctx_new(a, files)
     m: *EmitModule = emit_module_new("dusk", target)
+    emit_set_opts(m, opts)
     declare_prelude(m)
     emit_ground_types(m, ctx)
     exports: *Vector<string> = alloc(vec_new())
@@ -428,33 +442,12 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> Gen
                 emit_push_function(m, abody)
                 free(abody)
             } else if str_eq(name, "main") {
-                wasm: bool = target_is_wasm(target)
-                if main_is_argc_argv(ctx, f) {
-                    body: string = gen_func(m, ctx, f, "dusk__main")
-                    emit_push_function(m, body)
-                    free(body)
-                    wrapper: string = emit_main_wrapper(ctx, f, entry_name_for(wasm))
-                    emit_push_function(m, wrapper)
-                    free(wrapper)
-                } else if wasm {
-                    // A nullary main still needs the two-argument wasi entry, so
-                    // emit the body as dusk__main and a wrapper that drops the args.
-                    bodyw: string = gen_func(m, ctx, f, "dusk__main")
-                    emit_push_function(m, bodyw)
-                    free(bodyw)
-                    vw: string = emit_main_wrapper_void(ctx, f)
-                    emit_push_function(m, vw)
-                    free(vw)
-                } else {
-                    body2: string = gen_func(m, ctx, f, name)
-                    emit_push_function(m, body2)
-                    free(body2)
-                }
+                gen_main(m, ctx, f, target)
             } else {
                 if f.abi_export {
                     vec_push(exports, export_prototype(genctx_ctys(ctx), a, f))
                 }
-                body3: string = gen_func(m, ctx, f, name)
+                body3: string = gen_func(m, ctx, f, name, f.abi_export)
                 emit_push_function(m, body3)
                 free(body3)
             }
@@ -484,6 +477,7 @@ export func gen_compile(a: *Ast, files: *Vector<FileSrc>, target: string) -> Gen
         emit_declare(m, "void @cool_lib_init()")
     }
     emit_iface_vtables(m, ctx)
+    emit_check_names(m)
     errs: *Vector<string> = emit_errors(m)
     if vec_len(errs) > 0 {
         return GenResult { ok: false, text: joined_faults(errs), exports: exports }

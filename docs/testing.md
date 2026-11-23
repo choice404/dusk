@@ -111,9 +111,12 @@ that does not begin with a `test` field are each named with the line they sit on
 | `argv` | the words passed to the compiler in `tool` mode |
 | `code` | the expected exit code in `tool` mode |
 | `special` | the name of a builtin check for `special` mode |
+| `flags` | build flags placed between the subcommand and the file, split on spaces; `run`, `run_raw`, and `build_fail` only |
 
 The `test` field is required and must be the first field of a record. Depending on
-the mode, `file`, `argv`, or `special` is also required. A field whose empty value
+the mode, `file`, `argv`, or `special` is also required. A `flags` field on a mode
+that builds nothing, `check_fail`, `check_ok`, `tool`, or `special`, is a lint
+error, since the words would have nowhere to go. A field whose empty value
 still means something, `out`, `stdin`, and `err_eq`, is distinguished from an
 absent field: an empty `out` expects empty stdout, which is not the same as no
 `out` field at all.
@@ -145,11 +148,11 @@ never inspects stderr, and a check mode never inspects stdout.
 
 | mode | command | passes when |
 |---|---|---|
-| `run` | `<bin> run <file> <args>` | exit is 0 and `out` matches when present |
-| `run_raw` | `<bin> run <file> <args>` | the clean bit matches `ok`, `out` matches when present, every `err_has` is present, no `err_absent` appears, and `err_eq` matches when present |
+| `run` | `<bin> run <flags> <file> <args>` | exit is 0 and `out` matches when present |
+| `run_raw` | `<bin> run <flags> <file> <args>` | the clean bit matches `ok`, `out` matches when present, every `err_has` is present, no `err_absent` appears, and `err_eq` matches when present |
 | `check_fail` | `<bin> check <file>` | exit is non zero, every `err_has` is present, and no `err_absent` appears |
 | `check_ok` | `<bin> check <file>` | exit is 0 |
-| `build_fail` | `<bin> build <file>` | exit is non zero, every `err_has` is present, and no `err_absent` appears |
+| `build_fail` | `<bin> build <flags> <file>` | exit is non zero, every `err_has` is present, and no `err_absent` appears |
 | `tool` | `<bin> <argv>` | exit matches `code` when present and `out` matches when present |
 | `special` | a builtin | the builtin reports success |
 
@@ -161,7 +164,22 @@ and its fault message is then matched with `err_has`.
 
 A `stdin` field writes its value to a file and redirects it into the command, for
 any mode. An `args` field appends its words to a `run` command as the program's own
-argv, after the file.
+argv, after the file. A `flags` field places its words before the file, where `run`
+and `build` read their own flags, so a record can build with `--heap-sites` or a
+sanitizer and still hand the program the words after the file.
+
+## Manifests
+
+`tests/goldens.manifest` is the golden suite, and it holds only records the
+previous release's runner can read, since `tools/runner-differential.sh` runs
+that runner over it: no `flags` field and no special newer than the release.
+`tests/gauge.manifest` holds the records that need the runner's 2.0.0 additions,
+the `flags` field and the `release_out` and `symbols_internal` specials. Run it
+the same way:
+
+```sh
+DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/gauge.manifest
+```
 
 ## Specials
 
@@ -187,6 +205,15 @@ single run line. The special's name selects its handler.
   to the stack base, and a base read out of a slot in main's own frame is right at
   `-O0` and wrong at `-O2`, where the slot can land under every other local main
   holds and the scan stops below the roots it was meant to cover.
+- `release_out` builds the record's `file` with `build --release`, runs the binary
+  with no arguments, and compares its stdout with the record's `out`, the general
+  form of `release_collector` for any program whose output the optimizer could
+  change.
+- `symbols_internal` builds the record's `file`, lists the binary's defined
+  external symbols with `llvm-nm --defined-only --extern-only`, and passes when
+  `main` is listed and none of the function names in the record's `args` is. Every
+  dusk function but the C entry has internal linkage, so a dusk name never reaches
+  the global symbol table.
 - The `dawn_*` family drives the dawn package tool against a project, a directory
   holding a `package.dawn` manifest. Each of these builds its own git fixture
   repositories and its own consuming project under `target/testrun/dawn_<name>/`,
@@ -261,9 +288,10 @@ show.
 `tools/testrun-selftest.sh` proves the runner itself. It builds the runner and
 runs it against `tests/selftest.manifest`, which carries one passing record and one
 deliberately failing record for every mode, plus a pair for the `err_absent`
-assertion. The script asserts that the failing set is exactly the deliberate one
-and that the tally is eight passed and eight failed, so a green run means the
-runner accepts a correct expectation and rejects a wrong one across every mode.
+assertion and a pair for the `flags` field. The script asserts that the failing set
+is exactly the deliberate one and that the tally is nine passed and nine failed, so
+a green run means the runner accepts a correct expectation and rejects a wrong one
+across every mode.
 
 ```sh
 tools/testrun-selftest.sh
@@ -333,6 +361,19 @@ fixtures declaring a `@dusk` floor no compiler meets print the running version
 in their refusal, so `tools/dump-allow-1.15.0.txt` carries those pairs and
 nothing else. An allow list that is growing past that is the sign that a change
 is not the invisible one it was described as.
+
+A change that touches nearly every emitted module names a normalizer instead.
+When `DUSK_DUMP_NORM` names an executable filter, both sides of the `ir` and
+`ir --target=wasm32` commands pass through it before the compare, so the tally
+counts only what the filter cannot explain. The 2.0.0 line compares against 1.17.3
+through `tools/dump-norm-2.0.0.sh`, which reads every function head as it was
+before internal linkage and `nobuiltin`, and its allow list,
+`tools/dump-allow-2.0.0.txt`, names the programs whose IR moved for another reason
+and the new refusals the old compiler accepted.
+
+```sh
+DUSK_DUMP_NORM=tools/dump-norm-2.0.0.sh tools/dump-differential.sh /path/to/v1.17.3/dusk target/dusk-out/dusk tools/dump-allow-2.0.0.txt
+```
 
 Each command runs caged, under an address space limit, a timeout, and low
 priority, and the whole script runs serially. It compiles the compiler's own

@@ -123,7 +123,9 @@ export func ensure_out_dir() -> void {
 }
 
 // Writes the timeout, compiler, subcommand, and arguments of the core command for
-// a record's mode. The redirections and the exit capture are added by the caller.
+// a record's mode. A record's flags sit between the subcommand and the file, where
+// run reads its own flags, so the words after the file stay the program's. The
+// redirections and the exit capture are added by the caller.
 func append_core(cmd: *StringBuilder, rec: Record, bin: string, timeout: int64) -> void {
     sb_push(cmd, "timeout ")
     sb_push_int(cmd, timeout)
@@ -131,6 +133,7 @@ func append_core(cmd: *StringBuilder, rec: Record, bin: string, timeout: int64) 
     mode: string = rec.mode
     if str_eq(mode, "run") || str_eq(mode, "run_raw") {
         sb_push(cmd, " run")
+        push_words(cmd, rec.flags)
         push_word(cmd, rec.file)
         push_words(cmd, rec.args)
         return
@@ -142,6 +145,7 @@ func append_core(cmd: *StringBuilder, rec: Record, bin: string, timeout: int64) 
     }
     if str_eq(mode, "build_fail") {
         sb_push(cmd, " build")
+        push_words(cmd, rec.flags)
         push_word(cmd, rec.file)
         return
     }

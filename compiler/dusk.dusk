@@ -13,6 +13,7 @@
 @import cli
 @import clidoc
 @import genfn
+@import buildopts
 
 // The version string the version command prints. The number itself lives in
 // version.dusk, the one place a release bumps it.
@@ -40,7 +41,10 @@ func usage() -> void {
     printerr("  build <file>  lower, link, and write target/dusk-out")
     printerr("  build --release <file>  the same build at -O2, slower to link and faster to run")
     printerr("  build --lib <file>  archive the module and its runtime into libstem.a + stem.h")
+    printerr("  build --heap-sites <file>  record where every heap block was allocated")
+    printerr("  build --sanitize=<list> <file>  instrument with address, undefined, or thread")
     printerr("  run <file>    build and run, forwarding trailing args")
+    printerr("  run [--heap-sites] [--sanitize=<list>] <file>  run takes those two before the file")
     printerr("  esc <file>    dump native escape summaries")
     printerr("  doc <file>     render a module's doc comments as markdown")
     printerr("  doc --json <file>  emit the module's doc model as JSON")
@@ -48,13 +52,12 @@ func usage() -> void {
     printerr("found by walking up from the working directory.")
 }
 
-// Whether a command compiles a project rather than one named file, which is what lets
-// it run with no file argument at all. ir is here with the three because it compiles a
-// whole program too, and reading a project's IR without naming its root is how the
-// emitted bytes of a build get compared.
+// Whether a command that reached here with no file compiles a project rather than one
+// named file. ir is here beside check because it compiles a whole program too, and
+// reading a project's IR without naming its root is how the emitted bytes of a build
+// get compared. build and run take a project as well, through project_build, once
+// their flags are read.
 func takes_project(cmd: string) -> bool {
-    if str_eq(cmd, "build") { return true }
-    if str_eq(cmd, "run") { return true }
     if str_eq(cmd, "check") { return true }
     if str_eq(cmd, "ir") { return true }
     return false
@@ -72,19 +75,20 @@ func no_project(pr: ProjectRoot) -> int32 {
     return 1
 }
 
-// Builds the project the working directory sits under: the @root of the package.dawn
-// found by walking up from it. This is `dusk build` with no file named, with or
-// without the flags build takes.
-func project_build(prog: string, argv: string[], release: bool) -> int32 {
+// Builds or runs the project the working directory sits under: the @root of the
+// package.dawn found by walking up from it. This is `dusk build` or `dusk run` with
+// no file named, with or without the flags either takes.
+func project_build(prog: string, argv: string[], run_it: bool, bo: BuildOpts) -> int32 {
     pr: ProjectRoot = project_root()
     if !pr.ok {
         return no_project(pr)
     }
-    return build_module(prog, pr.path, false, argv, 3, true, release)
+    return build_module(prog, pr.path, run_it, argv, argv.len, true, bo)
 }
 
-// Runs build, run, or check over the project the working directory sits in. Every
-// other command is asked about one file, so it still says so.
+// Checks or emits the IR of the project the working directory sits in. Every other
+// command is asked about one file, so it still says so; build and run read their
+// own flags first and reach the project through project_build.
 func run_project_cmd(cmd: string, argv: string[]) -> int32 {
     if !takes_project(cmd) {
         printerr("dusk: this command needs a file argument")
@@ -98,13 +102,7 @@ func run_project_cmd(cmd: string, argv: string[]) -> int32 {
     if str_eq(cmd, "check") {
         return cmd_check(pr.path, argv[0], true)
     }
-    if str_eq(cmd, "ir") {
-        return cmd_ir(pr.path, argv[0], default_target(), true)
-    }
-    if str_eq(cmd, "run") {
-        return build_module(argv[0], pr.path, true, argv, 3, true, false)
-    }
-    return build_module(argv[0], pr.path, false, argv, 3, true, false)
+    return cmd_ir(pr.path, argv[0], default_target(), true)
 }
 
 // `dusk build --lib` with no file archives the project: the manifest's @root is the
@@ -120,65 +118,13 @@ func project_lib(prog: string, release: bool) -> int32 {
     return build_lib_named(prog, pr.path, stem_of(pr.path), true, release)
 }
 
-// What `build` was asked for, read off the words after the command. --release links
-// the module and the runtime at -O2 and --lib writes an archive instead of an
-// executable, in either order and either one alone; the first word that is neither is
-// the file, and with no file at all the build is the project's. A word that opens
-// with two dashes and names neither flag is held here rather than taken for a file
-// name, since a mistyped flag is a mistake worth naming.
-struct BuildArgs {
-    release: bool,
-    lib: bool,
-    file: string,
-    has_file: bool,
-    bad: string,
-    has_bad: bool,
-}
-
-// Whether a command line word is written as a flag rather than as a path.
-func is_flag_word(a: string) -> bool {
-    if str_len(a) < 2 {
-        return false
-    }
-    if a[0] != 45 {
-        return false
-    }
-    return a[1] == 45
-}
-
-func parse_build_args(argv: string[]) -> BuildArgs {
-    mut release: bool = false
-    mut lib: bool = false
-    mut file: string = ""
-    mut has_file: bool = false
-    mut bad: string = ""
-    mut has_bad: bool = false
-    for i in 2..argv.len {
-        a: string = argv[i]
-        if str_eq(a, "--release") {
-            release = true
-        } else if str_eq(a, "--lib") {
-            lib = true
-        } else if is_flag_word(a) {
-            if !has_bad {
-                bad = a
-                has_bad = true
-            }
-        } else if !has_file {
-            file = a
-            has_file = true
-        }
-    }
-    return BuildArgs { release: release, lib: lib, file: file, has_file: has_file, bad: bad, has_bad: has_bad }
-}
-
 // Dispatches `build` on the flags it was given: an archive or an executable, of a
-// named file or of the project the working directory sits under.
+// named file or of the project the working directory sits under. The flags may sit
+// anywhere among the words, in any order.
 func run_build_cmd(argv: string[]) -> int32 {
-    b: BuildArgs = parse_build_args(argv)
+    b, rest := parse_build_words(argv, 2, "build")
     if b.has_bad {
-        printerr(f"dusk: unknown build flag '{b.bad}'; build takes --release and --lib")
-        usage()
+        printerr(b.bad)
         return 1
     }
     if b.lib {
@@ -188,9 +134,24 @@ func run_build_cmd(argv: string[]) -> int32 {
         return project_lib(argv[0], b.release)
     }
     if !b.has_file {
-        return project_build(argv[0], argv, b.release)
+        return project_build(argv[0], argv, false, b)
     }
-    return build_module(argv[0], b.file, false, argv, 3, false, b.release)
+    return build_module(argv[0], b.file, false, argv, rest, false, b)
+}
+
+// Dispatches `run`: its flags sit before the file, and every word after the file is
+// the program's own argv, forwarded untouched. run builds at -O0, so --release is
+// refused by name rather than read as a file.
+func run_run_cmd(argv: string[]) -> int32 {
+    b, rest := parse_build_words(argv, 2, "run")
+    if b.has_bad {
+        printerr(b.bad)
+        return 1
+    }
+    if !b.has_file {
+        return project_build(argv[0], argv, true, b)
+    }
+    return build_module(argv[0], b.file, true, argv, rest, false, b)
 }
 
 // Dispatches a command that takes a source file argument, reporting a usage error
@@ -232,19 +193,6 @@ func run_file_cmd(cmd: string, argv: string[]) -> int32 {
             return cmd_ir(argv[3], argv[0], wasm_target(), false)
         }
         return cmd_ir(path, argv[0], default_target(), false)
-    }
-    if str_eq(cmd, "build") {
-        return run_build_cmd(argv)
-    }
-    if str_eq(cmd, "run") {
-        // run builds at -O0 and forwards everything after the file to the program, so
-        // --release in front of the file is a build flag on a command that does not
-        // take one rather than a file named for it.
-        if str_eq(path, "--release") {
-            printerr("dusk: run takes no --release; build --release <file>, then run target/dusk-out/<stem>")
-            return 1
-        }
-        return build_module(argv[0], path, true, argv, 3, false, false)
     }
     if str_eq(cmd, "esc") {
         return cmd_esc(path, argv[0])
@@ -299,10 +247,10 @@ func main(argc: int32, argv: string[]) -> int32 {
         return run_file_cmd(cmd, argv)
     }
     if str_eq(cmd, "build") {
-        return run_file_cmd(cmd, argv)
+        return run_build_cmd(argv)
     }
     if str_eq(cmd, "run") {
-        return run_file_cmd(cmd, argv)
+        return run_run_cmd(argv)
     }
     if str_eq(cmd, "esc") {
         return run_file_cmd(cmd, argv)

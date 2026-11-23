@@ -1,0 +1,172 @@
+/** buildopts: the flags build and run read, and every refusal of a flag they do
+ *  not take. --release links at -O2, --lib writes an archive instead of an
+ *  executable, --heap-sites records the call site of every generational
+ *  allocation, and --sanitize=<list> asks for sanitizer instrumentation, the list a
+ *  comma separated subset of address, undefined, and thread. A word that is not
+ *  one of these is refused by name rather than ignored or taken for a file, and a
+ *  combination the toolchain cannot build is refused before anything compiles. */
+
+@paradigm procedural
+
+@import std.string
+@import genopts
+
+/** What a build or run command was asked for, read off its words. gen is what
+ *  reaches codegen. file is the source named, when has_file says one was. bad is
+ *  the full refusal sentence of the first problem found, when has_bad says there
+ *  is one; a command that finds one prints it and stops. */
+export struct BuildOpts {
+    release: bool,
+    lib: bool,
+    gen: GenOpts,
+    file: string,
+    has_file: bool,
+    bad: string,
+    has_bad: bool,
+}
+
+/** The options of a plain build, optionally at -O2, with nothing else asked for.
+ *  The package tool builds this way.
+ *  @param release whether to link at -O2
+ *  @return the options */
+export func build_opts_release(release: bool) -> BuildOpts {
+    return BuildOpts { release: release, lib: false, gen: genopts_none(), file: "", has_file: false, bad: "", has_bad: false }
+}
+
+// Whether a command line word is written as a flag rather than as a path.
+func is_flag_word(a: string) -> bool {
+    if str_len(a) < 2 {
+        return false
+    }
+    if a[0] != 45 {
+        return false
+    }
+    return a[1] == 45
+}
+
+// The sanitizer bit one word of a --sanitize list names, or 0 for a word that names
+// none.
+func sanitizer_bit(word: string) -> int64 {
+    if str_eq(word, "address") { return san_address() }
+    if str_eq(word, "undefined") { return san_undefined() }
+    if str_eq(word, "thread") { return san_thread() }
+    return 0
+}
+
+/** Reads the list after --sanitize= into a bit set. Every comma separated word
+ *  must name a sanitizer; the first one that does not is handed back so the
+ *  refusal can quote it, and an empty list is refused the same way.
+ *  @param list the text after --sanitize=
+ *  @return the bit set, and the first word naming no sanitizer or an empty string */
+export func parse_sanitize_list(list: string) -> (int64, string) {
+    n: int64 = str_len(list)
+    mut mask: int64 = 0
+    mut start: int64 = 0
+    for i in 0..n + 1 {
+        if i == n || list[i] == 44 {
+            word: string = substring(list, start, i)
+            bit: int64 = sanitizer_bit(word)
+            if bit == 0 {
+                return (0, word)
+            }
+            free(word)
+            mask = mask | bit
+            start = i + 1
+        }
+    }
+    return (mask, substring(list, 0, 0))
+}
+
+// The refusal for a word that opens with two dashes and is no flag the command
+// takes, naming the flags it does take.
+func unknown_flag_msg(cmd: string, word: string) -> string {
+    if str_eq(cmd, "run") {
+        return f"dusk: unknown run flag '{word}'; run takes --heap-sites and --sanitize=<list> before the file"
+    }
+    return f"dusk: unknown build flag '{word}'; build takes --release, --lib, --heap-sites, and --sanitize=<list>"
+}
+
+// The refusal for options that parsed but cannot build together, or an empty
+// string when they can.
+func combination_msg(release: bool, lib: bool, gen: GenOpts, cmd: string) -> string {
+    both: int64 = san_address() | san_thread()
+    if (gen.sanitize & both) == both {
+        return "dusk: --sanitize=address and --sanitize=thread cannot be combined; build one binary for each"
+    }
+    if lib && (gen.sanitize != 0 || gen.heap_sites) {
+        return "dusk: build --lib takes no --sanitize and no --heap-sites yet"
+    }
+    if release && str_eq(cmd, "run") {
+        return "dusk: run takes no --release; build --release <file>, then run target/dusk-out/<stem>"
+    }
+    return ""
+}
+
+// The options with a refusal recorded, unless an earlier one already was.
+func with_bad(bo: BuildOpts, msg: string) -> BuildOpts {
+    if bo.has_bad {
+        return bo
+    }
+    return BuildOpts { release: bo.release, lib: bo.lib, gen: bo.gen, file: bo.file, has_file: bo.has_file, bad: msg, has_bad: true }
+}
+
+/** Reads the flags and the file from argv[start..]. For build the flags may sit
+ *  anywhere and the first word that is not a flag is the file. For run the flags
+ *  stop at the file, since every word after it belongs to the program; the index
+ *  of the first program word is handed back. --lib is a build flag only. The first
+ *  problem found, an unknown flag, a sanitizer the list does not name, or a
+ *  combination that cannot build, is recorded as the refusal sentence.
+ *  @param argv the command line
+ *  @param start the index of the first word after the command
+ *  @param cmd "build" or "run"
+ *  @return the options, and the index of the first word after the file for run */
+export func parse_build_words(argv: string[], start: int64, cmd: string) -> (BuildOpts, int64) {
+    is_run: bool = str_eq(cmd, "run")
+    mut release: bool = false
+    mut lib: bool = false
+    mut sanitize: int64 = 0
+    mut heap_sites: bool = false
+    mut bad: string = ""
+    mut has_bad: bool = false
+    mut file: string = ""
+    mut has_file: bool = false
+    mut rest: int64 = argv.len
+    mut i: int64 = start
+    while i < argv.len {
+        a: string = argv[i]
+        if str_eq(a, "--release") {
+            release = true
+        } else if str_eq(a, "--lib") && !is_run {
+            lib = true
+        } else if str_eq(a, "--heap-sites") {
+            heap_sites = true
+        } else if starts_with(a, "--sanitize=") {
+            mask, word := parse_sanitize_list(substring(a, 11, str_len(a)))
+            if mask == 0 && !has_bad {
+                bad = f"dusk: unknown sanitizer '{word}'; --sanitize takes address, undefined, and thread"
+                has_bad = true
+            }
+            sanitize = sanitize | mask
+        } else if is_flag_word(a) {
+            if !has_bad {
+                bad = unknown_flag_msg(cmd, a)
+                has_bad = true
+            }
+        } else if !has_file {
+            file = a
+            has_file = true
+            if is_run {
+                rest = i + 1
+                i = argv.len
+            }
+        }
+        i++
+    }
+    gen: GenOpts = GenOpts { sanitize: sanitize, heap_sites: heap_sites }
+    bo: BuildOpts = BuildOpts { release: release, lib: lib, gen: gen, file: file, has_file: has_file, bad: bad, has_bad: has_bad }
+    combo: string = combination_msg(release, lib, gen, cmd)
+    if str_len(combo) > 0 {
+        return (with_bad(bo, combo), rest)
+    }
+    return (bo, rest)
+}

@@ -9,6 +9,7 @@
 @import ast
 @import diag
 @import resolveexpr
+@import tcown
 
 struct Resolver {
     ast: *Ast,
@@ -32,8 +33,42 @@ func emit(r: *Resolver, msg: string, lo: int64, hi: int64) -> void {
     vec_push((*r).errors, span_diag(lo, hi, msg))
 }
 
+// Every function name a foreign block declares anywhere in the merged program, the
+// standard library's included. A top level function under one of these names would
+// be defined and declared in the same module, so the reserved name rule reads the
+// whole set before judging any function.
+func collect_foreign_names(a: *Ast) -> *Map<string, int64> {
+    names: *Map<string, int64> = new_set()
+    items: *Vector<ItemNode> = (*a).items
+    for it in items {
+        if it.kind == ik_foreign() {
+            fb: ForeignNode = vec_get((*a).foreigns, it.id)
+            for k in 0..fb.funcs_len {
+                ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
+                map_put(names, ast_name(a, ff.name), 1)
+            }
+        }
+    }
+    return names
+}
+
+// Whether the reserved name rule judges this function. An `export "C"` function with
+// the runtime prefix or named for main's body already draws the export rule's own
+// sentence in the type pass, so the resolver leaves those two to it and judges only
+// strlen there.
+func reserved_applies(f: FuncNode, fname: string) -> bool {
+    if !is_emit_reserved_name(fname) {
+        return false
+    }
+    if !f.abi_export {
+        return true
+    }
+    return str_eq(fname, "strlen")
+}
+
 func collect_globals(r: *Resolver) -> void {
     a: *Ast = (*r).ast
+    foreigns: *Map<string, int64> = collect_foreign_names(a)
     items: *Vector<ItemNode> = (*a).items
     for i in 0..vec_len(items) {
         it: ItemNode = vec_get(items, i)
@@ -56,6 +91,18 @@ func collect_globals(r: *Resolver) -> void {
                 // members live under ik_impl and ik_interface, not ik_func, so a type's
                 // own alloc or free method is untouched.
                 emit(r, quoted_msg("", fname, " is a builtin; a function cannot take its name"), f.lo, f.hi)
+            } else if reserved_applies(f, fname) {
+                // A name the emitted module declares for itself, a runtime symbol, the
+                // strlen the prelude calls, or the dusk__main body of a wrapped main,
+                // would be both defined and declared, so refuse it here rather than
+                // leave clang to report a redefinition against the IR.
+                emit(r, emit_reserved_msg(fname), f.lo, f.hi)
+            } else if map_has(foreigns, fname) {
+                // A foreign function is a C symbol the module declares, so a dusk
+                // function of the same name collides with it the same way. A private
+                // function in an imported file carries its file suffix by now and
+                // cannot meet a foreign name.
+                emit(r, quoted_msg("", fname, " is declared foreign in this program; a function cannot take a foreign function's name"), f.lo, f.hi)
             }
             map_put((*r).globals, fname, 1)
         } else if it.kind == ik_struct() {
@@ -134,6 +181,12 @@ func pop_scope(r: *Resolver) -> void {
 }
 
 func declare(r: *Resolver, name: string, mutable: bool, is_let: bool, lo: int64, hi: int64) -> void {
+    declare_var(r, name, mutable, is_let, false, lo, hi)
+}
+
+// Declares one binding in the innermost scope. lit is true only for an immutable
+// single binder whose initializer is literal valued, see lit_valued.
+func declare_var(r: *Resolver, name: string, mutable: bool, is_let: bool, lit: bool, lo: int64, hi: int64) -> void {
     if str_len(name) == 0 {
         return
     }
@@ -147,6 +200,7 @@ func declare(r: *Resolver, name: string, mutable: bool, is_let: bool, lo: int64,
         depth: (*r).depth,
         used: false,
         is_let: is_let,
+        lit: lit,
         lo: lo,
         hi: hi,
     })
@@ -324,6 +378,92 @@ func rs_type_spelling(r: *Resolver, id: int64) -> bool {
     return false
 }
 
+// The binding a name resolves to in the scope stack, innermost first, and whether
+// one was found at all; a name bound nowhere is a global, an import, or undefined.
+func find_local(r: *Resolver, name: string) -> (Var, bool) {
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
+    mut i: int64 = vec_len(scopes) - 1
+    while i >= 0 {
+        scope: *Map<string, Var> = vec_get(scopes, i)
+        if map_has(scope, name) {
+            return (unwrap_or(map_get(scope, name), zero_var()), true)
+        }
+        i--
+    }
+    return (zero_var(), false)
+}
+
+// Whether any scope on the stack binds the name.
+func has_local(r: *Resolver, name: string) -> bool {
+    scopes: *Vector<*Map<string, Var>> = (*r).scopes
+    for scope in scopes {
+        if map_has(scope, name) {
+            return true
+        }
+    }
+    return false
+}
+
+// Whether an expression's value is a string literal on every path: a literal itself,
+// or an if or match expression whose every branch ends in one. A concatenation or an
+// f-string allocates, and a call may return anything, so neither counts.
+func lit_valued(a: *Ast, id: int64) -> bool {
+    e: ExprNode = vec_get((*a).exprs, id)
+    if e.kind == xk_str() {
+        return true
+    }
+    if e.kind != xk_ifexpr() && e.kind != xk_match() {
+        return false
+    }
+    n: int64 = branch_count(a, e)
+    if n == 0 {
+        return false
+    }
+    for i in 0..n {
+        tail: int64 = branch_tail_at(a, e, i)
+        if tail < 0 || !lit_valued(a, tail) {
+            return false
+        }
+    }
+    return true
+}
+
+// Refuses a free whose one argument can only be a string literal: a literal written
+// in place, or an immutable binding a literal initialized. A literal lives in the
+// program image and was never allocated, so the free could only fault at run time.
+// A mut binding, a field, or a helper that may return a literal stays the run time
+// fault, since the value it holds at the free is not known here.
+func check_free_literal(r: *Resolver, arg_id: int64) -> void {
+    a: *Ast = (*r).ast
+    arg: ExprNode = vec_get((*a).exprs, arg_id)
+    if lit_valued(a, arg_id) {
+        emit(r, "cannot free a string literal; a literal was never allocated", arg.lo, arg.hi)
+        return
+    }
+    if arg.kind != xk_ident() {
+        return
+    }
+    name: string = ast_name(a, arg.a)
+    v, found := find_local(r, name)
+    if found && v.lit {
+        emit(r, quoted_msg("cannot free ", name, ", which holds a string literal; a literal was never allocated"), arg.lo, arg.hi)
+    }
+}
+
+// Whether a call is the free builtin with one argument: the bare name free, not
+// shadowed by a local of that name.
+func is_free_builtin_call(r: *Resolver, e: ExprNode) -> bool {
+    a: *Ast = (*r).ast
+    callee: ExprNode = vec_get((*a).exprs, e.a)
+    if callee.kind != xk_ident() || e.c != 1 {
+        return false
+    }
+    if !str_eq(ast_name(a, callee.a), "free") {
+        return false
+    }
+    return !has_local(r, "free")
+}
+
 func resolve_expr(r: *Resolver, id: int64) -> void {
     a: *Ast = (*r).ast
     e: ExprNode = vec_get((*a).exprs, id)
@@ -365,6 +505,9 @@ func resolve_expr(r: *Resolver, id: int64) -> void {
             if walk_arg {
                 resolve_expr(r, arg_id)
             }
+        }
+        if is_free_builtin_call(r, e) {
+            check_free_literal(r, vec_get((*a).kids, e.b))
         }
     } else if e.kind == xk_field() {
         resolve_expr(r, e.a)
@@ -416,9 +559,11 @@ func resolve_stmt(r: *Resolver, id: int64) -> void {
     if s.kind == sk_let() {
         resolve_expr(r, s.c)
         val: ExprNode = vec_get((*a).exprs, s.c)
+        is_mut: bool = (s.d & 1) != 0
+        lit: bool = s.b == 1 && !is_mut && lit_valued(a, s.c)
         for i in 0..s.b {
             b: BindNode = vec_get((*a).binds, vec_get((*a).kids, s.a + i))
-            declare(r, ast_name(a, b.name), (s.d & 1) != 0, true, val.lo, val.hi)
+            declare_var(r, ast_name(a, b.name), is_mut, true, lit, val.lo, val.hi)
         }
     } else if s.kind == sk_assign() {
         resolve_expr(r, s.b)

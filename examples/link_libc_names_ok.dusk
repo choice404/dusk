@@ -1,0 +1,54 @@
+@paradigm procedural
+
+@import std.string
+@import std.io
+
+foreign "C" {
+    func dup(fd: int32) -> int32
+}
+
+// Dusk functions may take the names of C library functions. Each one here is
+// called by dusk and answers with its own value, and none of them replaces the C
+// library's symbol: the runtime's own write(2) loop, reached through a writer on a
+// duplicated descriptor, still writes, since this write has internal linkage.
+func getpid() -> int32 {
+    return 7
+}
+
+func sync() -> void {
+    println("dusk sync")
+}
+
+func write(fd: int32, n: int64) -> int64 {
+    return n + int64(fd)
+}
+
+func reboot(cmd: int32) -> int32 {
+    return cmd * 2
+}
+
+func mount(source: string) -> int64 {
+    return str_len(source)
+}
+
+func main() -> int32 {
+    println(getpid())
+    sync()
+    println(write(3, 4))
+    println(reboot(21))
+    println(mount("tmpfs"))
+    ferr := flush(stdout_writer())
+    if ferr.exists() {
+        return 1
+    }
+    w := fd_writer(int64(dup(1)))
+    werr := write_string(w, "the C write still writes\n")
+    if werr.exists() {
+        return 1
+    }
+    cerr := writer_close(w)
+    if cerr.exists() {
+        return 1
+    }
+    return 0
+}
