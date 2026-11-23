@@ -36,7 +36,7 @@
 /** The outcome of lowering a program to IR: ok gates codegen, text is the LLVM IR,
  *  and links, csources, and exports carry the linker directives the driver threads
  *  to clang. The seam compile_ir_text hands to both the ir command and the build path. */
-export struct CliIrResult { ok: bool, text: string, links: *Vector<string>, csources: *Vector<string>, exports: *Vector<string> }
+export struct CliIrResult { ok: bool, text: string, links: *Vector<string>, csources: *Vector<string>, exports: *Vector<string>, fn_names: *Vector<string> }
 
 func emit_errors(errs: *Vector<LoadDiag>) -> void {
     for i in 0..vec_len(errs) {
@@ -299,7 +299,7 @@ func run_check_spine(path: string, prog: string, from_manifest: bool) -> CheckOu
     // The surface passes run unconditionally and their diagnostics concatenate,
     // resolve first, then the type pass; only monomorphization is gated on the
     // combined set being empty, mirroring sema's own ordering.
-    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
+    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module, p.files)
     tc: *TypeChecker = typeck_run_with_info(p.module, info)
     type_errs: *Vector<SpanDiagnostic> = (*tc).errors
     if vec_len(resolve_errs) > 0 || vec_len(type_errs) > 0 {
@@ -424,7 +424,7 @@ export func cmd_mono(path: string, prog: string) -> int32 {
     desugar(p.module)
     info: EscapeInfo = compute_escape_info(p.module)
     // Same spine as check: both surface passes run and print before any exit.
-    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
+    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module, p.files)
     emit_span_errors(p.files, resolve_errs)
     tc: *TypeChecker = typeck_run_with_info(p.module, info)
     type_errs: *Vector<SpanDiagnostic> = (*tc).errors
@@ -461,23 +461,23 @@ export func compile_ir_text(path: string, prog: string, target: string, from_man
     errs: *Vector<LoadDiag> = p.errors
     emit_errors(errs)
     if vec_len(errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp, fn_names: no_exp }
     }
     if !p.has_module {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp, fn_names: no_exp }
     }
     desugar(p.module)
     info: EscapeInfo = compute_escape_info(p.module)
-    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module)
+    resolve_errs: *Vector<SpanDiagnostic> = resolve_check(p.module, p.files)
     emit_span_errors(p.files, resolve_errs)
     tc: *TypeChecker = typeck_run_with_info(p.module, info)
     type_errs: *Vector<SpanDiagnostic> = (*tc).errors
     emit_span_errors(p.files, type_errs)
     if vec_len(resolve_errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp, fn_names: no_exp }
     }
     if vec_len(type_errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp, fn_names: no_exp }
     }
     foriter(p.module, (*tc).for_iters, (*tc).for_iter_asts)
     m: *Mono = mono_expand(p.module, (*tc).ty, (*tc).mut_tuple_types)
@@ -485,24 +485,24 @@ export func compile_ir_text(path: string, prog: string, target: string, from_man
     emit_span_errors(p.files, mono_errs)
     ground_new: int64 = emit_ground_pass(p.files, m, mono_errs)
     if vec_len(mono_errs) > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp, fn_names: no_exp }
     }
     if ground_new > 0 {
-        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp }
+        return CliIrResult { ok: false, text: "", links: p.links, csources: p.csources, exports: no_exp, fn_names: no_exp }
     }
     ground: *Ast = mono_ground(m)
     res: GenResult = gen_compile(ground, p.files, target, opts)
     if !res.ok {
-        return CliIrResult { ok: false, text: res.text, links: p.links, csources: p.csources, exports: no_exp }
+        return CliIrResult { ok: false, text: res.text, links: p.links, csources: p.csources, exports: no_exp, fn_names: no_exp }
     }
-    return CliIrResult { ok: true, text: res.text, links: p.links, csources: p.csources, exports: res.exports }
+    return CliIrResult { ok: true, text: res.text, links: p.links, csources: p.csources, exports: res.exports, fn_names: res.fn_names }
 }
 
 /** Emits the shared IR text to stdout, preserving the oracle-facing ir command.
  *  target is the LLVM triple to emit for: the native default, or the wasm triple
  *  when `ir --target=wasm32` is used to cross-emit the compiler for the browser. */
-export func cmd_ir(path: string, prog: string, target: string, from_manifest: bool) -> int32 {
-    res: CliIrResult = compile_ir_text(path, prog, target, from_manifest, genopts_none())
+export func cmd_ir(path: string, prog: string, target: string, from_manifest: bool, opts: GenOpts) -> int32 {
+    res: CliIrResult = compile_ir_text(path, prog, target, from_manifest, opts)
     if !res.ok {
         if str_len(res.text) > 0 { printerr(res.text) }
         return 1

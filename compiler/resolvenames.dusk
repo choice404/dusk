@@ -1,0 +1,241 @@
+/** resolvenames: the names a top level function and a foreign declaration cannot
+ *  take. A dusk function's symbol carries a suffix no C identifier can spell, so no
+ *  dusk name meets a C symbol, at link time or inside the module. What is left to
+ *  refuse is what dusk itself cannot resolve one way or what the module cannot hold
+ *  twice: a function and a foreign function of one name, which a call could mean
+ *  either of; an `export "C"` function under a C name the compiler declares itself;
+ *  a foreign declaration of the C entry; and a foreign declaration that restates a
+ *  runtime function, or another foreign declaration, with other types. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+@import std.functional.maybe
+@import ast
+@import diag
+@import resolveexpr
+@import rtdecl
+
+/** Every function name a foreign block declares anywhere in the merged program, the
+ *  standard library's included, each mapped to the span start of its first
+ *  declaration, so a refusal can name the module that declares it.
+ *  @param a the merged program
+ *  @return the names and where each is first declared */
+export func collect_foreign_names(a: *Ast) -> *Map<string, int64> {
+    names: *Map<string, int64> = alloc(map_new())
+    items: *Vector<ItemNode> = (*a).items
+    for it in items {
+        if it.kind == ik_foreign() {
+            fb: ForeignNode = vec_get((*a).foreigns, it.id)
+            for k in 0..fb.funcs_len {
+                ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
+                name: string = ast_name(a, ff.name)
+                if !map_has(names, name) {
+                    map_put(names, name, ff.lo)
+                }
+            }
+        }
+    }
+    return names
+}
+
+// Where a span sits, as a person would name it: "this file" when it is the file of
+// the span it is named from, otherwise the module an import spelled, std.math, or
+// the display path of the root file.
+func place_of(files: *Vector<FileSrc>, at: int64, from: int64) -> string {
+    fi: int64 = file_for_span(files, at)
+    if fi < 0 {
+        return substring("this program", 0, 12)
+    }
+    if fi == file_for_span(files, from) {
+        return substring("this file", 0, 9)
+    }
+    f: FileSrc = vec_get(files, fi)
+    return substring(f.module, 0, str_len(f.module))
+}
+
+/** The refusal for a top level function under a name the program declares foreign,
+ *  naming where the foreign declaration is. A call of the name could mean either
+ *  function, and dusk has no overloading, so the function takes another name.
+ *  @param files the loaded files
+ *  @param fname the function's name
+ *  @param decl_lo the span start of the foreign declaration
+ *  @param fn_lo the span start of the function
+ *  @return the diagnostic text */
+export func foreign_clash_msg(files: *Vector<FileSrc>, fname: string, decl_lo: int64, fn_lo: int64) -> string {
+    place: string = place_of(files, decl_lo, fn_lo)
+    msg: string = "'" + fname + "' is declared foreign in " + place + "; a function cannot take a foreign function's name"
+    free(place)
+    return msg
+}
+
+/** Whether an `export "C"` function's name is a C function the compiler declares for
+ *  itself under the same name, which the module would then both define and declare.
+ *  A runtime name starting cool_ draws the export rule's own sentence in the type
+ *  pass, so this answers only for the others, strlen today.
+ *  @param table the runtime declaration table
+ *  @param fname the exported function's name
+ *  @return true when the export is refused here */
+export func export_takes_runtime_name(table: *Map<string, string>, fname: string) -> bool {
+    if starts_with(fname, "cool_") {
+        return false
+    }
+    return map_has(table, fname)
+}
+
+/** The refusal for an `export "C"` function under a C name the compiler declares.
+ *  @param fname the exported function's name
+ *  @return the diagnostic text */
+export func export_runtime_msg(fname: string) -> string {
+    return quoted_msg("", fname, " is a C function the compiler calls itself; an export \"C\" function cannot take its name")
+}
+
+// The LLVM type a foreign parameter or return lowers to, for the shapes a runtime
+// function can have: an integer of a width, a float, a bool, a pointer of any kind,
+// and void. Anything else, a struct by value, a slice, a fat pointer, lowers through
+// the C ABI and answers the empty string, which never matches a runtime signature.
+func foreign_scalar_ll(a: *Ast, id: int64) -> string {
+    if id < 0 {
+        return "void"
+    }
+    t: TypeNode = vec_get((*a).types, id)
+    if t.kind == tk_unit() { return "void" }
+    if t.kind == tk_rawptr() || t.kind == tk_func() { return "ptr" }
+    if t.kind == tk_ptr() {
+        inner: TypeNode = vec_get((*a).types, t.a)
+        if inner.kind == tk_unit() { return "ptr" }
+        return ""
+    }
+    if t.kind != tk_named() || t.c != 0 { return "" }
+    return named_scalar_ll(ast_name(a, t.a))
+}
+
+// The LLVM type of a scalar type spelled by name, or the empty string.
+func named_scalar_ll(name: string) -> string {
+    if str_eq(name, "int8") || str_eq(name, "uint8") || str_eq(name, "char") { return "i8" }
+    if str_eq(name, "int16") || str_eq(name, "uint16") { return "i16" }
+    if str_eq(name, "int32") || str_eq(name, "uint32") || str_eq(name, "rune") { return "i32" }
+    if str_eq(name, "int64") || str_eq(name, "uint64") { return "i64" }
+    if str_eq(name, "bool") { return "i1" }
+    if str_eq(name, "float64") { return "double" }
+    if str_eq(name, "float32") { return "float" }
+    if str_eq(name, "string") || str_eq(name, "error") { return "ptr" }
+    return ""
+}
+
+/** The declare line a foreign function lowers to, in the form emit_declare takes,
+ *  when every parameter and the return are scalars or pointers, else the empty
+ *  string. A variadic declaration answers the empty string too.
+ *  @param a the merged program
+ *  @param ff the foreign function
+ *  @return the line, a fresh string */
+export func foreign_decl_line(a: *Ast, ff: ForeignFuncNode) -> string {
+    ret: string = foreign_scalar_ll(a, ff.ret)
+    if str_len(ret) == 0 || ff.variadic {
+        return substring("", 0, 0)
+    }
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, ret)
+    sb_push(b, " @")
+    sb_push(b, ast_name(a, ff.name))
+    sb_push_char(b, 40)
+    for i in 0..ff.params_len {
+        p: ParamNode = vec_get((*a).params, vec_get((*a).kids, ff.params_off + i))
+        pll: string = foreign_scalar_ll(a, p.ty)
+        if str_len(pll) == 0 {
+            sb_free(b)
+            free(b)
+            return substring("", 0, 0)
+        }
+        if i > 0 { sb_push(b, ", ") }
+        sb_push(b, pll)
+    }
+    sb_push_char(b, 41)
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// The refusal for a foreign declaration of a C entry symbol, or the empty string
+// for any other name. The module defines main natively and __main_argc_argv on
+// wasm, so a declaration of either would meet that definition.
+func entry_msg(name: string) -> string {
+    if str_eq(name, "main") {
+        return "'main' is the program's C entry point; a foreign function cannot take its name"
+    }
+    if str_eq(name, "__main_argc_argv") {
+        return "'__main_argc_argv' is the C entry point of a wasm build; a foreign function cannot take its name"
+    }
+    return ""
+}
+
+// The refusal for a foreign declaration whose signature differs from the one the
+// compiler declares for the same runtime or C function itself.
+func runtime_mismatch_msg(name: string, want: string) -> string {
+    return "foreign '" + name + "' differs from the compiler's own declaration of it, " + want + "; declare it the same way or take another name"
+}
+
+// The refusal for a second foreign declaration of a name whose signature differs
+// from the first one's.
+func foreign_mismatch_msg(files: *Vector<FileSrc>, name: string, first_lo: int64, lo: int64) -> string {
+    place: string = place_of(files, first_lo, lo)
+    msg: string = "foreign '" + name + "' differs from its declaration in " + place + "; every foreign declaration of a name must say the same"
+    free(place)
+    return msg
+}
+
+/** Judges every foreign declaration of the program and appends each refusal, pointing
+ *  at the declaration: a C entry symbol; a runtime function the compiler declares
+ *  with other types; a second declaration of a name with other types than the first.
+ *  A declaration whose shape lowers through the C ABI is compared only by name.
+ *  @param a the merged program
+ *  @param files the loaded files
+ *  @param errors the diagnostics to append to */
+export func check_foreign_decls(a: *Ast, files: *Vector<FileSrc>, errors: *Vector<SpanDiagnostic>) -> void {
+    table: *Map<string, string> = runtime_decl_table()
+    lines: *Map<string, string> = alloc(map_new())
+    firsts: *Map<string, int64> = alloc(map_new())
+    items: *Vector<ItemNode> = (*a).items
+    for it in items {
+        if it.kind == ik_foreign() {
+            fb: ForeignNode = vec_get((*a).foreigns, it.id)
+            for k in 0..fb.funcs_len {
+                ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
+                msg: string = foreign_decl_msg(a, files, table, lines, firsts, ff)
+                if str_len(msg) > 0 {
+                    vec_push(errors, span_diag(ff.lo, ff.hi, msg))
+                }
+            }
+        }
+    }
+}
+
+// The refusal for one foreign declaration, or the empty string, recording the
+// declaration as the first of its name when it is.
+func foreign_decl_msg(a: *Ast, files: *Vector<FileSrc>, table: *Map<string, string>, lines: *Map<string, string>, firsts: *Map<string, int64>, ff: ForeignFuncNode) -> string {
+    name: string = ast_name(a, ff.name)
+    entry: string = entry_msg(name)
+    if str_len(entry) > 0 {
+        return entry
+    }
+    line: string = foreign_decl_line(a, ff)
+    if map_has(table, name) {
+        want: string = unwrap_or(map_get(table, name), "")
+        if !str_eq(line, want) {
+            return runtime_mismatch_msg(name, want)
+        }
+    }
+    if !map_has(firsts, name) {
+        map_put(firsts, name, ff.lo)
+        map_put(lines, name, line)
+        return ""
+    }
+    prior: string = unwrap_or(map_get(lines, name), "")
+    if str_len(prior) == 0 || str_len(line) == 0 || str_eq(prior, line) {
+        return ""
+    }
+    return foreign_mismatch_msg(files, name, unwrap_or(map_get(firsts, name), 0), ff.lo)
+}

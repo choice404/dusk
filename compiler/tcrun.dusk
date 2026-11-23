@@ -222,7 +222,7 @@ func export_bool_msg(what: string, name: string) -> string {
 }
 
 // Validates the signature and name of an `export "C"` function: non-generic, not
-// named main, no cool_ runtime prefix, and every parameter and the return a C-legal
+// named for a C entry point, no cool_ runtime prefix, and every parameter and the return a C-legal
 // scalar or raw pointer (void return allowed). Runs on the surface pass; a reject
 // here stops the pipeline before mono, so the ground pass never re-emits it.
 func check_export_sig(tc: *TypeChecker, f: FuncNode) -> void {
@@ -231,8 +231,13 @@ func check_export_sig(tc: *TypeChecker, f: FuncNode) -> void {
     if f.generics_len != 0 {
         tc_emit(tc, "an exported C function cannot be generic", f.lo, f.hi)
     }
-    if str_eq(name, "main") || str_eq(name, "dusk__main") {
+    if str_eq(name, "main") {
         tc_emit(tc, "an exported C function cannot be named 'main'", f.lo, f.hi)
+    }
+    // A wasm build's C entry takes this name, so an export of it would be the
+    // module's second definition there.
+    if str_eq(name, "__main_argc_argv") {
+        tc_emit(tc, "an exported C function cannot be named '__main_argc_argv', the C entry point of a wasm build", f.lo, f.hi)
     }
     if str_find(name, "cool_") == 0 {
         tc_emit(tc, "an exported C function name cannot start with 'cool_', which is reserved for the runtime", f.lo, f.hi)

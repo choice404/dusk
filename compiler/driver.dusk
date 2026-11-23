@@ -24,6 +24,7 @@
 @import driverrt
 @import genopts
 @import buildopts
+@import drivercs
 
 /** The output stem for a source path: its basename with the extension dropped, the
  *  name the driver gives the emitted binary under target/dusk-out. Falls back to
@@ -106,6 +107,12 @@ export func build_module(prog: string, path: string, run_it: bool, argv: string[
  *  manifest relative spelling, so two checkouts of one project emit identical bytes;
  *  a build of a named file keeps that file's spelling. */
 export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: string[], arg_start: int64, out: string, from_manifest: bool, bo: BuildOpts) -> int32 {
+    // A sanitized build needs clang's sanitizer runtimes, so their absence is named
+    // before anything compiles rather than at the link.
+    if bo.gen.sanitize != 0 && !san_preflight(bo.gen.sanitize) {
+        printerr(san_preflight_msg(bo.gen.sanitize))
+        return 1
+    }
     ir: CliIrResult = compile_ir_text(path, prog, default_target(), from_manifest, bo.gen)
     if !ir.ok {
         if str_len(ir.text) > 0 { printerr(ir.text) }
@@ -129,11 +136,17 @@ export func build_module_to_pkg(prog: string, path: string, run_it: bool, argv: 
     }
     if !check_ir_written(ll) { return 1 }
     home: string = dusk_home(prog)
+    // The module's flags reach the module, every @csource, and the link line; the
+    // runtime compiles with its own. Every @csource is read for a dusk function it
+    // calls by its bare name before the link, which could only bind that call to
+    // something else.
+    opt: string = module_flags(bo)
+    if !csources_bare_calls_ok(out, stem, ir.csources, ir.fn_names, opt) {
+        return 1
+    }
     // The runtime is resolved before the link line is written: one cached object per
     // runtime source when the cache is usable, the sources themselves when it is not.
-    // The runtime compiles at its own fixed level; opt is the module's and @csource's.
-    opt: string = opt_flag(bo.release)
-    rt_inputs: *Vector<string> = runtime_inputs(home, out, runtime_opt_flag())
+    rt_inputs: *Vector<string> = runtime_inputs(home, out, runtime_flags(bo))
     code: int64 = link_only(ll, bin, rt_inputs, ir.links, ir.csources, opt)
     free_runtime_inputs(rt_inputs)
     free(rt_inputs)
@@ -191,7 +204,7 @@ export func build_lib_named(prog: string, path: string, stem: string, from_manif
     }
     if !check_ir_written(ll) { return 1 }
     home: string = dusk_home(prog)
-    code: int64 = archive_lib(home, ll, stem, out, ir.csources, ir.exports, opt_flag(release))
+    code: int64 = archive_lib(home, ll, stem, out, ir.csources, ir.exports, ir.fn_names, opt_flag(release))
     if code != 0 { return 1 }
     if !write_lib_header(out, stem, ir.exports, ir.links) { return 1 }
 

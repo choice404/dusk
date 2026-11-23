@@ -181,6 +181,15 @@ the same way:
 DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/gauge.manifest
 ```
 
+`tests/sanitize.manifest` holds the records that build with `--sanitize` and so
+need clang's sanitizer runtimes, the compiler-rt package. A sanitized binary
+reserves far more address space than a `ulimit -v` cage allows, so run it under a
+CPU limit and a timeout only:
+
+```sh
+DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/sanitize.manifest
+```
+
 ## Specials
 
 A special is a check that needs more than one command and so cannot be written as a
@@ -209,11 +218,16 @@ single run line. The special's name selects its handler.
   with no arguments, and compares its stdout with the record's `out`, the general
   form of `release_collector` for any program whose output the optimizer could
   change.
-- `symbols_internal` builds the record's `file`, lists the binary's defined
-  external symbols with `llvm-nm --defined-only --extern-only`, and passes when
-  `main` is listed and none of the function names in the record's `args` is. Every
-  dusk function but the C entry has internal linkage, so a dusk name never reaches
-  the global symbol table.
+- `symbols_internal` builds the record's `file` and a baseline program that
+  defines `main` alone, lists both binaries' defined external symbols with
+  `llvm-nm --defined-only --extern-only`, and passes when `main` is an external
+  function of the record's binary and the binary has no external function the
+  baseline lacks, so no function of the source reached the global symbol table,
+  whatever it is named. Each function the record's `args` names must also be in the
+  binary's full listing as a local function under its internal symbol, the name
+  with the `.d` suffix, so a record pins the symbol form as well. Every dusk
+  function but the C entry and an `export "C"` function has internal linkage and
+  that suffix.
 - The `dawn_*` family drives the dawn package tool against a project, a directory
   holding a `package.dawn` manifest. Each of these builds its own git fixture
   repositories and its own consuming project under `target/testrun/dawn_<name>/`,

@@ -173,8 +173,8 @@ export func alloc_of(s: *GenFuncState, pointee: int64, has_value: bool, value: V
             sb_push(b, slot.data)
         } else if an.kind == ctyk_struct() {
             sb_push(b, " = call ptr @")
-            sb_push(b, an.text)
-            sb_push(b, ".alloc(ptr ")
+            push_alloc_method(b, (*s).module, an.text, ".alloc")
+            sb_push(b, "(ptr ")
             sb_push(b, lv.op)
         } else {
             emit_error((*s).module, "unsupported allocator type")
@@ -251,8 +251,8 @@ export func gen_alloc_call_raw(s: *GenFuncState, size: string, align: int64) -> 
         if !found { lv = LocalVal { ty: cty_void(c), op: gs_copy("") } }
         if an.kind == ctyk_struct() {
             sb_push(b, " = call ptr @")
-            sb_push(b, an.text)
-            sb_push(b, ".alloc(ptr ")
+            push_alloc_method(b, (*s).module, an.text, ".alloc")
+            sb_push(b, "(ptr ")
             sb_push(b, lv.op)
             sb_push(b, ", i64 ")
             sb_push(b, size)
@@ -285,6 +285,14 @@ export func gen_alloc_call_raw(s: *GenFuncState, size: string, align: int64) -> 
     line((*s).fb, text)
     free(text)
     return p
+}
+
+// Pushes the symbol of an allocator struct's alloc or free method, Type.alloc or
+// Type.free, which is internal like every other method.
+func push_alloc_method(b: *StringBuilder, m: *EmitModule, ty: string, method: string) -> void {
+    name: string = ty + method
+    emit_push_fn_ref(b, m, name)
+    free(name)
 }
 
 export func gen_alloc(s: *GenFuncState, off: int64, len: int64) -> Val {
@@ -322,15 +330,20 @@ export func gen_free(s: *GenFuncState, off: int64, len: int64) -> Val {
                 sb_push(b, ", ptr ")
             } else if an.kind == ctyk_struct() {
                 sb_push(b, "call void @")
-                sb_push(b, an.text)
-                sb_push(b, ".free(ptr ")
+                push_alloc_method(b, (*s).module, an.text, ".free")
+                sb_push(b, "(ptr ")
                 sb_push(b, lv.op)
                 sb_push(b, ", ptr ")
             } else {
                 emit_error((*s).module, "unsupported allocator type")
                 sb_push(b, "call void @cool_gen_free(ptr ")
             }
-        } else { sb_push(b, "call void @cool_gen_free(ptr ") }
+        } else {
+            sb_free(b)
+            free(b)
+            free_call(s, p)
+            return Val { ty: cty_void(c), op: gs_copy("") }
+        }
         sb_push(b, p)
         sb_push_char(b, 41)
         t: string = gs_built(b)
@@ -340,6 +353,29 @@ export func gen_free(s: *GenFuncState, off: int64, len: int64) -> Val {
         free(t)
     }
     return Val { ty: cty_void(c), op: gs_copy("") }
+}
+
+// Emits a free of the default heap, `call void @cool_gen_free_at(ptr <p>, ptr <loc>)`,
+// where loc is the "path:line" of the statement being lowered in the location label
+// family. The runtime names that place in the double free fault and in the fault for
+// a free of a literal or other constant. The entry is declared on demand, so a
+// module that frees nothing carries no reference to it.
+func free_call(s: *GenFuncState, p: string) -> void {
+    emit_declare((*s).module, "void @cool_gen_free_at(ptr, ptr)")
+    text: string = genctx_loc_text((*s).ctx, (*s).cur_lo)
+    loc: string = emit_loc((*s).module, text)
+    free(text)
+    b: *StringBuilder = alloc(sb_new())
+    sb_push(b, "call void @cool_gen_free_at(ptr ")
+    sb_push(b, p)
+    sb_push(b, ", ptr ")
+    sb_push(b, loc)
+    sb_push_char(b, 41)
+    t: string = gs_built(b)
+    sb_free(b)
+    free(b)
+    line((*s).fb, t)
+    free(t)
 }
 
 export func gen_alloc_bytes(s: *GenFuncState, off: int64, len: int64) -> Val {

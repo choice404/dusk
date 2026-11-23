@@ -31,6 +31,10 @@ export struct EmitModule {
     faults: *Vector<string>,
     opts: GenOpts,
     defined: *Map<string, int64>,
+    cnames: *Map<string, int64>,
+    declared: *Map<string, string>,
+    locs: *Map<string, string>,
+    loc_lines: *Vector<string>,
 }
 
 func copy_string(s: string) -> string {
@@ -50,6 +54,10 @@ export func emit_module_new(name: string, triple: string) -> *EmitModule {
     thunks: *Map<string, int64> = alloc(map_new())
     faults: *Vector<string> = alloc(vec_new())
     defined: *Map<string, int64> = alloc(map_new())
+    cnames: *Map<string, int64> = alloc(map_new())
+    declared: *Map<string, string> = alloc(map_new())
+    locs: *Map<string, string> = alloc(map_new())
+    loc_lines: *Vector<string> = alloc(vec_new())
     return alloc(EmitModule {
         name: copy_string(name),
         triple: copy_string(triple),
@@ -64,6 +72,10 @@ export func emit_module_new(name: string, triple: string) -> *EmitModule {
         faults: faults,
         opts: genopts_none(),
         defined: defined,
+        cnames: cnames,
+        declared: declared,
+        locs: locs,
+        loc_lines: loc_lines,
     })
 }
 
@@ -74,21 +86,90 @@ export func emit_set_opts(m: *EmitModule, opts: GenOpts) -> void {
     (*m).opts = opts
 }
 
+// The symbol of a function with internal linkage: its dusk name and the suffix
+// .d. A C identifier cannot spell a dot, so no C library function, no runtime
+// function, and no function a backend lowering calls by name, the memcpy an
+// aggregate copy becomes or the fmod a float remainder becomes, can ever meet a
+// dusk function's symbol, whatever the function is called. This is the one place
+// the suffix is written.
+func internal_sym(name: string) -> string {
+    return name + ".d"
+}
+
+/** Records a name dusk code calls under its own C spelling: a foreign function, an
+ *  `export "C"` function, or main when main is the C entry itself. A reference to any
+ *  other function carries the internal suffix. Codegen registers every such name
+ *  before it lowers a body, so a call lowered ahead of the callee's own define
+ *  reads the same symbol the define writes.
+ *  @param m the module under construction
+ *  @param name the C name */
+export func emit_c_name(m: *EmitModule, name: string) -> void {
+    map_put((*m).cnames, copy_string(name), 1)
+}
+
+/** The symbol a call or an address of the named function writes after its @: the
+ *  name itself for a C name, see emit_c_name, and the internal symbol for every
+ *  other function, a top level one, a method, a lambda, a thunk, or a poll function.
+ *  @param m the module under construction
+ *  @param name the function's dusk name, a method as Type.name
+ *  @return the symbol as a fresh string the caller frees */
+export func emit_fn_ref(m: *EmitModule, name: string) -> string {
+    if map_has((*m).cnames, name) {
+        return copy_string(name)
+    }
+    return internal_sym(name)
+}
+
+/** Pushes the symbol of a function reference onto a line under construction, the
+ *  text that follows its @, see emit_fn_ref.
+ *  @param b the line under construction
+ *  @param m the module under construction
+ *  @param name the function's dusk name */
+export func emit_push_fn_ref(b: *StringBuilder, m: *EmitModule, name: string) -> void {
+    sym: string = emit_fn_ref(m, name)
+    sb_push(b, sym)
+    free(sym)
+}
+
+// Records a define's symbol, and reports a symbol defined twice, which clang would
+// refuse as a redefinition against the IR. The checker leaves no program that can
+// reach it; it turns a miss into a named build error.
+func record_define(m: *EmitModule, sym: string) -> void {
+    if map_has((*m).defined, sym) {
+        msg: string = "function '" + sym + "' is defined twice in the emitted module; rename one of them"
+        emit_error(m, msg)
+        free(msg)
+        return
+    }
+    map_put((*m).defined, copy_string(sym), 1)
+}
+
 /** The head line of one function definition, the only place a define is spelled.
  *  Every function is internal unless it is a C entry point: main, the wasm entry,
- *  an `export "C"` function, or the demo's main. Internal linkage keeps a dusk name
- *  from replacing or answering for a C symbol at link time, and nobuiltin tells the
- *  optimizer that a call to the function is a call to this body, never a library
- *  function of the same name it may fold. The symbol is recorded so a name the
- *  module also declares is caught before clang sees the pair.
+ *  an `export "C"` function, or the demo's main. An internal function's symbol
+ *  carries the suffix of internal_sym, so a dusk name never meets a C symbol, at
+ *  link time or inside the module, and nobuiltin tells the optimizer that a call to
+ *  the function is a call to this body, never a library function it may fold. A C
+ *  entry point keeps its name exactly.
  *  @param m the module the function belongs to
  *  @param external true for a C entry point, false for every other function
  *  @param ret the LLVM return type
- *  @param sym the symbol, without the leading @
+ *  @param sym the function's dusk name, without the leading @
  *  @param params the LLVM parameter list, without the parentheses
  *  @return the head line, ending in the opening brace */
 export func emit_fn_head(m: *EmitModule, external: bool, ret: string, sym: string, params: string) -> string {
-    map_put((*m).defined, copy_string(sym), 1)
+    mut full: string = ""
+    if external {
+        full = copy_string(sym)
+    } else {
+        if map_has((*m).cnames, sym) {
+            msg: string = "function '" + sym + "' shares its name with a C function the module calls by that name; rename the function"
+            emit_error(m, msg)
+            free(msg)
+        }
+        full = internal_sym(sym)
+    }
+    record_define(m, full)
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "define ")
     if !external {
@@ -96,14 +177,38 @@ export func emit_fn_head(m: *EmitModule, external: bool, ret: string, sym: strin
     }
     sb_push(b, ret)
     sb_push(b, " @")
-    sb_push(b, sym)
+    sb_push(b, full)
     sb_push_char(b, 40)
     sb_push(b, params)
-    sb_push(b, ") nobuiltin {")
+    sb_push(b, ") nobuiltin")
+    push_fn_attrs(b, (*m).opts)
+    sb_push(b, " {")
     head: string = built_string(b)
     sb_free(b)
     free(b)
+    free(full)
     return head
+}
+
+// The attributes a sanitized build puts on every define after nobuiltin: the
+// sanitizer's own attribute, so every load and store of a dusk function is checked
+// under AddressSanitizer or reported under ThreadSanitizer, and with either a frame
+// pointer and an unwind table, which is what lets a report's stacks walk through
+// dusk frames. UndefinedBehaviorSanitizer is inserted by clang's C front end and a
+// .ll has none, so its bit adds nothing here.
+func push_fn_attrs(b: *StringBuilder, opts: GenOpts) -> void {
+    mut any: bool = false
+    if (opts.sanitize & san_address()) != 0 {
+        sb_push(b, " sanitize_address")
+        any = true
+    }
+    if (opts.sanitize & san_thread()) != 0 {
+        sb_push(b, " sanitize_thread")
+        any = true
+    }
+    if any {
+        sb_push(b, " \"frame-pointer\"=\"all\" uwtable")
+    }
 }
 
 // The symbol a declare line names: the text between its @ and the opening
@@ -185,6 +290,14 @@ export func emit_define_type(m: *EmitModule, name: string, body: string) -> void
     vec_push((*m).types, line)
 }
 
+/** Declares one external function by its full signature line, `ret @name(params)`.
+ *  A line already declared is kept once. A second line naming the same symbol with
+ *  another signature, a foreign declaration restating a runtime function the
+ *  compiler declares itself with other types, would reach clang as a redefinition,
+ *  so it is reported as a named build error instead; the checker refuses every such
+ *  foreign declaration first.
+ *  @param m the module under construction
+ *  @param sig the signature, without the leading declare */
 export func emit_declare(m: *EmitModule, sig: string) -> void {
     b: *StringBuilder = alloc(sb_new())
     sb_push(b, "declare ")
@@ -193,14 +306,21 @@ export func emit_declare(m: *EmitModule, sig: string) -> void {
     sb_free(b)
     free(b)
 
-    externs: *Vector<string> = (*m).externs
-    for ext in externs {
-        if str_eq(ext, line) {
-            free(line)
-            return
+    sym: string = declared_symbol(line)
+    declared: *Map<string, string> = (*m).declared
+    if map_has(declared, sym) {
+        prior: string = unwrap_or(map_get(declared, sym), "")
+        if !str_eq(prior, line) {
+            msg: string = "function '" + sym + "' is declared twice with different signatures; a foreign declaration must match the one the compiler makes"
+            emit_error(m, msg)
+            free(msg)
         }
+        free(sym)
+        free(line)
+        return
     }
-    vec_push(externs, line)
+    map_put(declared, sym, copy_string(line))
+    vec_push((*m).externs, line)
 }
 
 func hex_digit(nib: int64) -> int64 {
@@ -288,6 +408,41 @@ export func emit_cstring(m: *EmitModule, text: string) -> string {
     enc: EncodedCString = encode_cstring(text)
     label: string = emit_intern_cstr(m, enc.text, enc.len)
     free(enc.text)
+    return label
+}
+
+/** Interns a source location constant, the "path:line" a free passes the runtime,
+ *  under its own label family, @.loc.N, rendered after every other global. The
+ *  family is apart from @.str.N so a location never renumbers a string constant,
+ *  which keeps the IR of everything else in a module where it was.
+ *  @param m the module under construction
+ *  @param text the location text
+ *  @return the label, owned by the module, which the caller must not free */
+export func emit_loc(m: *EmitModule, text: string) -> string {
+    locs: *Map<string, string> = (*m).locs
+    if map_has(locs, text) {
+        return unwrap_or(map_get(locs, text), "")
+    }
+    lines: *Vector<string> = (*m).loc_lines
+    lb: *StringBuilder = alloc(sb_new())
+    sb_push(lb, "@.loc.")
+    sb_push_int(lb, vec_len(lines))
+    label: string = built_string(lb)
+    sb_free(lb)
+    free(lb)
+    enc: EncodedCString = encode_cstring(text)
+    gb: *StringBuilder = alloc(sb_new())
+    sb_push(gb, label)
+    sb_push(gb, " = private unnamed_addr constant [")
+    sb_push_int(gb, enc.len)
+    sb_push(gb, " x i8] c\"")
+    sb_push(gb, enc.text)
+    sb_push_char(gb, 34)
+    vec_push(lines, built_string(gb))
+    sb_free(gb)
+    free(gb)
+    free(enc.text)
+    map_put(locs, copy_string(text), label)
     return label
 }
 
@@ -398,6 +553,24 @@ func emit_section(out: *StringBuilder, lines: *Vector<string>) -> void {
     sb_push_char(out, 10)
 }
 
+// The globals section, with the location constants at its end. A module with no
+// location renders exactly as it did before locations had a family of their own.
+func emit_globals(out: *StringBuilder, globals: *Vector<string>, locs: *Vector<string>) -> void {
+    if vec_len(locs) == 0 {
+        emit_section(out, globals)
+        return
+    }
+    for g in globals {
+        sb_push(out, g)
+        sb_push_char(out, 10)
+    }
+    for l in locs {
+        sb_push(out, l)
+        sb_push_char(out, 10)
+    }
+    sb_push_char(out, 10)
+}
+
 export func emit_render(m: *EmitModule) -> string {
     out: *StringBuilder = alloc(sb_new())
     sb_push(out, "; ModuleID = '")
@@ -409,7 +582,7 @@ export func emit_render(m: *EmitModule) -> string {
     sb_push_char(out, 10)
 
     emit_section(out, (*m).types)
-    emit_section(out, (*m).globals)
+    emit_globals(out, (*m).globals, (*m).loc_lines)
     emit_section(out, (*m).externs)
 
     funcs: *Vector<string> = (*m).funcs

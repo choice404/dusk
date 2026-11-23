@@ -1,0 +1,126 @@
+/** rtdecl: the functions every emitted module declares for itself, written once.
+ *  The prelude is the list codegen declares at the head of every module, in the
+ *  order it always has; the on demand list is every other runtime function a
+ *  lowering declares the first time it calls one. The checker reads both, so a
+ *  foreign declaration that restates one of these names with other types is refused
+ *  at check rather than reaching clang as a redefinition. A runtime function codegen
+ *  starts declaring joins one of the two lists here. */
+
+@paradigm procedural
+
+@import std.string
+@import std.vector
+@import std.map
+
+/** The prelude every module declares, each line the signature emit_declare takes,
+ *  in declaration order.
+ *  @return the lines, a fresh vector the caller owns */
+export func prelude_decls() -> *Vector<string> {
+    v: *Vector<string> = alloc(vec_new())
+    vec_push(v, "void @cool_print_i64(i64)")
+    vec_push(v, "void @cool_println_i64(i64)")
+    vec_push(v, "void @cool_print_f64(double)")
+    vec_push(v, "void @cool_println_f64(double)")
+    vec_push(v, "void @cool_print_cstr(ptr)")
+    vec_push(v, "void @cool_println_cstr(ptr)")
+    vec_push(v, "void @cool_eprint_i64(i64)")
+    vec_push(v, "void @cool_eprint_f64(double)")
+    vec_push(v, "void @cool_eprint_cstr(ptr)")
+    vec_push(v, "void @cool_print_bytes(ptr, i64)")
+    vec_push(v, "void @cool_eprint_bytes(ptr, i64)")
+    vec_push(v, "ptr @cool_alloc(i64)")
+    vec_push(v, "void @cool_free(ptr)")
+    vec_push(v, "ptr @cool_gen_alloc(i64)")
+    vec_push(v, "void @cool_gen_free(ptr)")
+    vec_push(v, "void @cool_gen_fault_at(ptr)")
+    vec_push(v, "void @cool_null_fault_at(ptr)")
+    vec_push(v, "void @cool_bounds_fault_at(ptr)")
+    vec_push(v, "void @cool_shift_fault_at(ptr)")
+    vec_push(v, "i64 @cool_pow_i64(i64, i64)")
+    vec_push(v, "double @llvm.pow.f64(double, double)")
+    vec_push(v, "float @llvm.pow.f32(float, float)")
+    vec_push(v, "void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)")
+    vec_push(v, "i64 @strlen(ptr)")
+    vec_push(v, "i64 @cool_str_eq(ptr, ptr)")
+    vec_push(v, "ptr @cool_str_concat(ptr, ptr)")
+    vec_push(v, "ptr @cool_debug_alloc(i64)")
+    vec_push(v, "void @cool_debug_free(ptr)")
+    vec_push(v, "i64 @cool_debug_leaks()")
+    vec_push(v, "i64 @cool_debug_double_frees()")
+    vec_push(v, "ptr @cool_thread_spawn(ptr, ptr)")
+    vec_push(v, "i64 @cool_thread_join(ptr, i64)")
+    vec_push(v, "i64 @cool_pool_submit(ptr, ptr)")
+    vec_push(v, "ptr @cool_alloc_env(i64)")
+    vec_push(v, "ptr @cool_task_new(ptr, i64, i64)")
+    vec_push(v, "ptr @cool_task_frame(ptr)")
+    vec_push(v, "void @cool_task_start(ptr)")
+    vec_push(v, "void @cool_task_await(ptr, ptr, i64)")
+    vec_push(v, "void @cool_task_return(ptr, ptr, i64)")
+    vec_push(v, "ptr @cool_task_env_alloc(ptr, i64)")
+    vec_push(v, "void @cool_future_take(ptr, i64, ptr, ptr)")
+    vec_push(v, "void @cool_loop_run(ptr, i64, ptr, i64)")
+    vec_push(v, "void @cool_task_state_fault()")
+    vec_push(v, "void @cool_gc_anchor(ptr)")
+    vec_push(v, "ptr @cool_collect_alloc(i64)")
+    vec_push(v, "void @cool_gc_collect()")
+    vec_push(v, "i64 @cool_gc_live_blocks()")
+    vec_push(v, "i64 @cool_gc_live_bytes()")
+    vec_push(v, "i64 @cool_gc_collections()")
+    vec_push(v, "void @cool_gc_add_region(ptr, i64)")
+    vec_push(v, "void @cool_gc_del_region(ptr)")
+    vec_push(v, "ptr @cool_read_file(ptr)")
+    vec_push(v, "i64 @cool_write_file(ptr, ptr)")
+    vec_push(v, "ptr @cool_read_line()")
+    vec_push(v, "ptr @cool_read_all()")
+    vec_push(v, "double @cool_parse_float(ptr, ptr)")
+    return v
+}
+
+// The runtime functions a lowering declares the first time it calls one, beside the
+// prelude. Each line here is the literal the lowering passes emit_declare.
+func on_demand_decls() -> *Vector<string> {
+    v: *Vector<string> = alloc(vec_new())
+    vec_push(v, "void @cool_print_u64(i64)")
+    vec_push(v, "void @cool_println_u64(i64)")
+    vec_push(v, "void @cool_eprint_u64(i64)")
+    vec_push(v, "i64 @cool_pow_u64(i64, i64)")
+    vec_push(v, "i64 @cool_hash_str(ptr)")
+    vec_push(v, "void @cool_str_index_at(ptr, i64, ptr)")
+    vec_push(v, "ptr @cool_fsb_new()")
+    vec_push(v, "ptr @cool_fsb_fin(ptr)")
+    vec_push(v, "void @cool_fsb_bytes(ptr, ptr, i64)")
+    vec_push(v, "void @cool_fsb_cstr(ptr, ptr)")
+    vec_push(v, "void @cool_fsb_f64(ptr, double)")
+    vec_push(v, "void @cool_fsb_i64(ptr, i64)")
+    vec_push(v, "void @cool_fsb_u64(ptr, i64)")
+    vec_push(v, "void @cool_lib_init()")
+    vec_push(v, "void @cool_gen_free_at(ptr, ptr)")
+    return v
+}
+
+// The symbol of one declare line, the text between its @ and the opening
+// parenthesis.
+func decl_symbol(line: string) -> string {
+    at: int64 = str_find(line, "@")
+    open: int64 = str_find(line, "(")
+    if at < 0 || open <= at {
+        return substring(line, 0, 0)
+    }
+    return substring(line, at + 1, open)
+}
+
+/** Every function the compiler declares for itself, keyed by symbol, each mapped to
+ *  the declare line it writes.
+ *  @return the table, a fresh map the caller owns */
+export func runtime_decl_table() -> *Map<string, string> {
+    table: *Map<string, string> = alloc(map_new())
+    lists: *Vector<*Vector<string>> = alloc(vec_new())
+    vec_push(lists, prelude_decls())
+    vec_push(lists, on_demand_decls())
+    for list in lists {
+        for line in list {
+            map_put(table, decl_symbol(line), line)
+        }
+    }
+    return table
+}

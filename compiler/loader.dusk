@@ -427,10 +427,10 @@ func shift_item_spans(a: *Ast, base: int64) -> void {
     }
 }
 
-func register_file(files: *Vector<FileSrc>, base: int64, path: string, src: Source, a: *Ast) -> int64 {
+func register_file(files: *Vector<FileSrc>, base: int64, path: string, module: string, is_std: bool, src: Source, a: *Ast) -> int64 {
     load_shift_module(a, base)
     shift_item_spans(a, base)
-    vec_push(files, FileSrc { path: path, base: base, src: src.text, len: src.len, lines: line_table_new() })
+    vec_push(files, FileSrc { path: path, base: base, src: src.text, len: src.len, lines: line_table_new(), module: module, is_std: is_std })
     return base + src.len + 1
 }
 
@@ -572,7 +572,7 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
         return empty_program(errors, files, links, csources)
     }
     map_put(visited, canon(root_path), 1)
-    base = register_file(files, base, root_disp, root.src, root.ast)
+    base = register_file(files, base, root_disp, root_disp, false, root.src, root.ast)
     collect_pkg_directives(ps, 0, links, csources, seen_links, seen_csources, errors)
     collect_directives(root.src.text, root.src.len, root_path, root_disp, errors, links, csources, seen_links, seen_csources)
     // The root belongs to the project, which is one package with the standard library as
@@ -630,7 +630,7 @@ export func load_project(root_path: string, prog: string, from_manifest: bool) -
                         suffix: string = suffix_for(r.file, idx)
                         privatize(parsed.ast, suffix, esuf)
                         push_work(work, ast_import_strings(parsed.ast), dir_of(r.file), disp, r.pkg, idx)
-                        base = register_file(files, base, disp, parsed.src, parsed.ast)
+                        base = register_file(files, base, disp, substring(mod_ns, 0, str_len(mod_ns)), r.from_std, parsed.src, parsed.ast)
                         collect_pkg_directives(ps, r.pkg, links, csources, seen_links, seen_csources, errors)
                         collect_directives(parsed.src.text, parsed.src.len, r.file, disp, errors, links, csources, seen_links, seen_csources)
                         items_lo: int64 = vec_len((*root.ast).items)

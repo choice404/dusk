@@ -1,5 +1,12 @@
 # ThreadSanitizer, a local recipe
 
+Since 2.0.0 `dusk build --sanitize=thread <file>` does this in one step, and it
+instruments every dusk function as well as the runtime; the spec's Sanitizer
+Builds section has the details. The hand recipe below predates the flag and
+instruments the C runtime alone, since the IR it compiles carries no
+`sanitize_thread` attribute, so every run on record that used it checked the
+runtime's accesses and never a dusk one.
+
 There is no CI configuration for this in the repository. This is the recipe run
 by hand before a release that touches thread safety, most recently the 0.4.1
 reactor. It rebuilds one golden's emitted LLVM IR alongside the runtime's C

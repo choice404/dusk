@@ -9,10 +9,13 @@
 @import ast
 @import diag
 @import resolveexpr
+@import resolvenames
+@import rtdecl
 @import tcown
 
 struct Resolver {
     ast: *Ast,
+    files: *Vector<FileSrc>,
     globals: *Map<string, int64>,
     imports: *Map<string, int64>,
     scopes: *Vector<*Map<string, Var>>,
@@ -33,42 +36,10 @@ func emit(r: *Resolver, msg: string, lo: int64, hi: int64) -> void {
     vec_push((*r).errors, span_diag(lo, hi, msg))
 }
 
-// Every function name a foreign block declares anywhere in the merged program, the
-// standard library's included. A top level function under one of these names would
-// be defined and declared in the same module, so the reserved name rule reads the
-// whole set before judging any function.
-func collect_foreign_names(a: *Ast) -> *Map<string, int64> {
-    names: *Map<string, int64> = new_set()
-    items: *Vector<ItemNode> = (*a).items
-    for it in items {
-        if it.kind == ik_foreign() {
-            fb: ForeignNode = vec_get((*a).foreigns, it.id)
-            for k in 0..fb.funcs_len {
-                ff: ForeignFuncNode = vec_get((*a).foreign_funcs, vec_get((*a).kids, fb.funcs_off + k))
-                map_put(names, ast_name(a, ff.name), 1)
-            }
-        }
-    }
-    return names
-}
-
-// Whether the reserved name rule judges this function. An `export "C"` function with
-// the runtime prefix or named for main's body already draws the export rule's own
-// sentence in the type pass, so the resolver leaves those two to it and judges only
-// strlen there.
-func reserved_applies(f: FuncNode, fname: string) -> bool {
-    if !is_emit_reserved_name(fname) {
-        return false
-    }
-    if !f.abi_export {
-        return true
-    }
-    return str_eq(fname, "strlen")
-}
-
 func collect_globals(r: *Resolver) -> void {
     a: *Ast = (*r).ast
     foreigns: *Map<string, int64> = collect_foreign_names(a)
+    runtime: *Map<string, string> = runtime_decl_table()
     items: *Vector<ItemNode> = (*a).items
     for i in 0..vec_len(items) {
         it: ItemNode = vec_get(items, i)
@@ -91,18 +62,17 @@ func collect_globals(r: *Resolver) -> void {
                 // members live under ik_impl and ik_interface, not ik_func, so a type's
                 // own alloc or free method is untouched.
                 emit(r, quoted_msg("", fname, " is a builtin; a function cannot take its name"), f.lo, f.hi)
-            } else if reserved_applies(f, fname) {
-                // A name the emitted module declares for itself, a runtime symbol, the
-                // strlen the prelude calls, or the dusk__main body of a wrapped main,
-                // would be both defined and declared, so refuse it here rather than
-                // leave clang to report a redefinition against the IR.
-                emit(r, emit_reserved_msg(fname), f.lo, f.hi)
+            } else if f.abi_export && export_takes_runtime_name(runtime, fname) {
+                // An `export "C"` function keeps its C name, so one named for a C
+                // function the compiler declares itself, strlen, would be both
+                // defined and declared in the module.
+                emit(r, export_runtime_msg(fname), f.lo, f.hi)
             } else if map_has(foreigns, fname) {
-                // A foreign function is a C symbol the module declares, so a dusk
-                // function of the same name collides with it the same way. A private
-                // function in an imported file carries its file suffix by now and
-                // cannot meet a foreign name.
-                emit(r, quoted_msg("", fname, " is declared foreign in this program; a function cannot take a foreign function's name"), f.lo, f.hi)
+                // A call of the name could mean the foreign function or this one, and
+                // dusk has no overloading. A private function in an imported file
+                // carries its file suffix by now and cannot meet a foreign name.
+                decl_lo: int64 = unwrap_or(map_get(foreigns, fname), 0)
+                emit(r, foreign_clash_msg((*r).files, fname, decl_lo, f.lo), f.lo, f.hi)
             }
             map_put((*r).globals, fname, 1)
         } else if it.kind == ik_struct() {
@@ -137,11 +107,12 @@ func collect_imports(r: *Resolver) -> void {
     }
 }
 
-func resolver_new(a: *Ast) -> *Resolver {
+func resolver_new(a: *Ast, files: *Vector<FileSrc>) -> *Resolver {
     scopes: *Vector<*Map<string, Var>> = alloc(vec_new())
     errors: *Vector<SpanDiagnostic> = alloc(vec_new())
     r: *Resolver = alloc(Resolver {
         ast: a,
+        files: files,
         globals: new_set(),
         imports: new_set(),
         scopes: scopes,
@@ -150,6 +121,7 @@ func resolver_new(a: *Ast) -> *Resolver {
         errors: errors,
     })
     collect_globals(r)
+    check_foreign_decls(a, files, errors)
     collect_imports(r)
     return r
 }
@@ -679,8 +651,13 @@ func resolver_run(r: *Resolver) -> void {
     }
 }
 
-export func resolve_check(a: *Ast) -> *Vector<SpanDiagnostic> {
-    r: *Resolver = resolver_new(a)
+/** Resolves names over the merged program and reports every scope and name error.
+ *  @param a the merged program
+ *  @param files the loaded files, which a refusal reads to name the module a
+ *  declaration came from
+ *  @return the diagnostics */
+export func resolve_check(a: *Ast, files: *Vector<FileSrc>) -> *Vector<SpanDiagnostic> {
+    r: *Resolver = resolver_new(a, files)
     resolver_run(r)
     return (*r).errors
 }

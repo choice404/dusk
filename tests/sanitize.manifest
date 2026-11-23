@@ -1,0 +1,72 @@
+# The 2.0.0 records that build with --sanitize and so need clang's sanitizer
+# runtimes, the compiler-rt package, on the machine. A sanitized binary reserves far
+# more address space than the suite's ulimit -v allows, so this manifest runs under
+# a CPU limit and a timeout only:
+#
+# DUSK_HOME=$PWD DUSK_BIN=target/dusk-out/dusk target/dusk-out/testrun tests/sanitize.manifest
+---
+# Every load and store of a dusk function is checked under address, so a write one
+# byte past a C library block is reported in the dusk function that makes it.
+test asan_c_overflow
+mode run_raw
+flags --sanitize=address
+file examples/asan_c_overflow.dusk
+ok false
+err_has AddressSanitizer: heap-buffer-overflow
+out 
+err_has in poke.d
+---
+test asan_hello_ok
+mode run_raw
+flags --sanitize=address
+file examples/hello.dusk
+ok true
+out hello, world\n
+err_absent Sanitizer
+---
+test asan_ubsan_names_ok
+mode run_raw
+flags --sanitize=address,undefined
+file examples/name_runtime_names_ok.dusk
+ok true
+out 5\n1\n99\n4\nabcd\n99\nthe dusk cool_thread_spawn\n6\n
+err_absent Sanitizer
+err_absent runtime error
+---
+# Two threads adding to one word with no lock are a data race in the dusk function
+# that writes it; the locked twin and a channel relay are clean.
+test tsan_race_reported
+mode run_raw
+flags --sanitize=thread
+file examples/tsan_race_reported.dusk
+ok false
+out true\n
+err_has ThreadSanitizer: data race
+err_has bump.d
+---
+test tsan_mutex_ok
+mode run_raw
+flags --sanitize=thread
+file examples/countermutex.dusk
+ok true
+out 10000\n
+err_absent ThreadSanitizer
+---
+test tsan_channel_ok
+mode run_raw
+flags --sanitize=thread
+file examples/chanrelay_ok.dusk
+ok true
+out 42\n
+err_absent ThreadSanitizer
+---
+# undefined instruments the runtime and every @csource; a signed overflow in the C
+# file is reported by its line.
+test ubsan_csource_reported
+mode run_raw
+flags --sanitize=undefined
+file examples/ubsan_csource.dusk
+ok true
+out -2147483648\n
+err_has ubsan_csource.c:3:14: runtime error: signed integer overflow
+---

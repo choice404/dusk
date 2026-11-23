@@ -25,7 +25,43 @@ test link_symbols_internal_wrapped_main
 mode special
 special symbols_internal
 file examples/voidmain_argv_exit0.dusk
-args dusk__main
+args main
+---
+# A dusk function named for a runtime function, for strlen, or for a function the
+# backend calls by name is a local symbol with the suffix, and at -O2 each still
+# answers with its own value while the compiler's own calls reach C.
+test link_symbols_runtime_names
+mode special
+special symbols_internal
+file examples/name_runtime_names_ok.dusk
+args cool_gen_alloc cool_helper strlen cool_thread_spawn apply
+---
+test link_symbols_libcall_names
+mode special
+special symbols_internal
+file examples/link_libcall_names_ok.dusk
+args memcpy memset memmove fmod pow rem main
+---
+test name_runtime_names_release
+mode special
+special release_out
+file examples/name_runtime_names_ok.dusk
+out 5\n1\n99\n4\nabcd\n99\nthe dusk cool_thread_spawn\n6\n
+---
+test link_libcall_names_release
+mode special
+special release_out
+file examples/link_libcall_names_ok.dusk
+out 65\n65\n1.5\n27\n2\n3\n4\n42\n7\n
+---
+# A library archive's C source that calls a dusk function by its bare name is
+# refused by name too: ld -r would carry the undefined name into the archive for
+# the host's link to bind to whatever it finds.
+test link_csource_bare_lib_fail
+mode build_fail
+flags --lib
+file examples/link_csource_bare_fail.dusk
+err_has link_csource_call.c: 6:9: error: C source calls dusk function 'dusk_twice' by name; declare it export "C"
 ---
 # The build flags are refused by name when they cannot build.
 test flag_unknown_sanitizer_fail
@@ -67,3 +103,68 @@ flags --heap-sites
 file examples/voidmain_argv_exit0.dusk
 args --heap-sites b
 out 3\n--heap-sites\nb\n
+---
+# ir reads the same flags, wherever they sit among its words, and refuses what it
+# cannot emit.
+test flag_ir_wasm_sites_fail
+mode tool
+argv ir --target=wasm32 --heap-sites examples/hello.dusk
+code 1
+---
+test flag_ir_unknown_fail
+mode tool
+argv ir --bogus examples/hello.dusk
+code 1
+---
+test flag_ir_sites_ok
+mode tool
+argv ir examples/hello.dusk --heap-sites
+code 0
+---
+# A --heap-sites build prints exactly what the plain build prints when nothing is
+# live at exit, reports what is live at exit when something is, and reports on
+# demand at each heap_report call; every report checks the registry walk against
+# the counters.
+test sites_clean
+mode run_raw
+flags --heap-sites
+file examples/hello.dusk
+ok true
+out hello, world\n
+err_eq 
+---
+test sites_exit_report
+mode run_raw
+flags --heap-sites
+file examples/heap_counters_ok.dusk
+ok true
+out 1\n8\n0\n1\n7\n0\ntrue\n0\n0\ntrue\n2\ntrue\n
+err_has dusk heap: 4 blocks, 60 bytes live
+err_absent build with --heap-sites
+---
+test sites_on_demand
+mode run_raw
+flags --heap-sites
+file examples/sites_on_demand.dusk
+ok true
+out abcd\nijkl\n
+err_has dusk heap: 3 blocks, 15 bytes live
+err_has dusk heap: 1 block, 5 bytes live
+err_absent build with --heap-sites
+---
+test sites_on_demand_plain
+mode run_raw
+file examples/sites_on_demand.dusk
+ok true
+out abcd\nijkl\n
+err_eq dusk heap: 3 blocks, 15 bytes live\ndusk heap: build with --heap-sites to see allocation sites\ndusk heap: 1 block, 5 bytes live\ndusk heap: build with --heap-sites to see allocation sites\n
+---
+test sites_counter_agree
+mode run_raw
+flags --heap-sites
+file examples/sites_counter_agree.dusk
+ok true
+out kept!\n
+err_has dusk heap: 0 blocks, 0 bytes live
+err_absent counter drift
+---

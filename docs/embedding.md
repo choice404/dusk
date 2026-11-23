@@ -105,7 +105,7 @@ A loader that opens a shared object at run time, Python's `ctypes` and Ruby's `F
 
 An exported function's parameters and return must be C legal, the same set the foreign boundary already means: a scalar (an integer of any width, `float32`, `float64`, `bool`, `char`, or `rune`), a `*raw T`, or a `*void`, and the return may also be `void`. A string, a slice, a managed `*T`, a closure, an interface value, a collected value, a future, and an error never cross. A struct by value on an export is not supported yet; pass a pointer to it, or write a small `@csource` C adapter for the shape.
 
-Three names are refused, each with its own diagnostic: an export may not be generic, may not be named `main`, and may not begin with `cool_`, which the runtime reserves. The one collision the compiler cannot catch is a symbol your host already links under the same name, so give your exports a library prefix, `mathlib_` above.
+Three names are refused, each with its own diagnostic: an export may not be generic, may not be named `main` or `__main_argc_argv`, the C entry points of a native and a wasm build, and may not begin with `cool_`, which the runtime reserves. The one collision the compiler cannot catch is a symbol your host already links under the same name, so give your exports a library prefix, `mathlib_` above.
 
 ## Library mode rules
 

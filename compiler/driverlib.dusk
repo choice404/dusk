@@ -4,6 +4,7 @@
 @import std.os
 @import diag
 @import driverlink
+@import drivercs
 
 // The object file name for a C or IR source: its basename with the trailing
 // extension replaced by .o, so runtime/collect.c becomes collect.o and an
@@ -274,7 +275,7 @@ func merge_and_localize(out: string, mod_obj: string, cs_objs: *Vector<string>, 
 // the host's own symbols. @link libraries are not archived: they stay external
 // dependencies the host links, named in the header. Returns 0 on success, non-zero
 // on the first tool failure.
-export func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, exports: *Vector<string>, opt: string) -> int64 {
+export func archive_lib(home: string, ll: string, stem: string, out: string, csources: *Vector<string>, exports: *Vector<string>, fn_names: *Vector<string>, opt: string) -> int64 {
     rt: string = path_join(home, "runtime")
     objs: *Vector<string> = alloc(vec_new())
 
@@ -295,6 +296,12 @@ export func archive_lib(home: string, ll: string, stem: string, out: string, cso
             d: Diagnostic = diag_new(src2, 0, 0, "clang failed to compile a @csource file")
             diag_emit(d)
             return cc
+        }
+        // A @csource that calls a dusk function by its bare name leaves that name
+        // undefined in the object, and ld -r would carry it into the archive for the
+        // host's link to bind to whatever it finds, so it is refused here.
+        if !csource_bare_calls_ok(src2, obj2, fn_names) {
+            return 1
         }
         vec_push(cs_objs, obj2)
     }

@@ -1,0 +1,26 @@
+// Two threads add to one shared word with no lock. The total is wrong more often
+// than not, and under --sanitize=thread the unlocked writes are reported as a data
+// race in the dusk function that makes them; countermutex.dusk is the locked twin.
+@paradigm procedural
+
+func bump(buf: *raw int64, n: int64) -> void {
+    for i in 0..n {
+        buf[0] = buf[0] + 1
+    }
+}
+
+func main() -> int32 {
+    buf: *raw int64 = alloc_bytes(8)
+    buf[0] = 0
+    t1, e1 := spawn(lambda () -> void { bump(buf, 20000) })
+    e1.ignore()
+    t2, e2 := spawn(lambda () -> void { bump(buf, 20000) })
+    e2.ignore()
+    j1 := join(t1)
+    j1.ignore()
+    j2 := join(t2)
+    j2.ignore()
+    println(buf[0] > 0)
+    free(buf)
+    return 0
+}

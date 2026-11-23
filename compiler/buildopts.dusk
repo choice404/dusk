@@ -9,6 +9,7 @@
 @paradigm procedural
 
 @import std.string
+@import std.os
 @import genopts
 
 /** What a build or run command was asked for, read off its words. gen is what
@@ -169,4 +170,157 @@ export func parse_build_words(argv: string[], start: int64, cmd: string) -> (Bui
         return (with_bad(bo, combo), rest)
     }
     return (bo, rest)
+}
+
+/** The list clang's -fsanitize takes for a sanitizer bit set, address or thread
+ *  first and undefined after it, the one order every command line writes.
+ *  @param mask a bit set of san_address, san_undefined, and san_thread
+ *  @return the comma separated list, empty for no sanitizer */
+export func san_clang_list(mask: int64) -> string {
+    mut head: string = ""
+    if (mask & san_address()) != 0 { head = "address" }
+    if (mask & san_thread()) != 0 { head = "thread" }
+    if (mask & san_undefined()) == 0 {
+        return head
+    }
+    if str_len(head) == 0 {
+        return "undefined"
+    }
+    return head + ",undefined"
+}
+
+/** The flags the module, every @csource, and the link line carry: -O2 for a release
+ *  build; with a sanitizer, the sanitizer itself, a frame pointer, and debug info, so
+ *  a report's stacks name C frames by line; with heap sites, the define that compiles
+ *  the runtime's site tracking in, on the link line too, where a runtime the cache
+ *  could not supply is compiled from source.
+ *  @param bo the build's options
+ *  @return the flags, empty for a plain build */
+export func module_flags(bo: BuildOpts) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    if bo.release {
+        sb_push(b, "-O2")
+    }
+    if bo.gen.sanitize != 0 {
+        if sb_size(b) > 0 { sb_push_char(b, 32) }
+        sb_push(b, "-fsanitize=")
+        sb_push(b, san_clang_list(bo.gen.sanitize))
+        sb_push(b, " -fno-omit-frame-pointer -g")
+    }
+    if bo.gen.heap_sites {
+        if sb_size(b) > 0 { sb_push_char(b, 32) }
+        sb_push(b, "-DCOOL_HEAP_SITES")
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** The flags the runtime's own objects compile with: -O2 as always, or under a
+ *  sanitizer -O1 with the sanitizer, a frame pointer, and debug info, which is the
+ *  level the sanitizers document their reports at; with heap sites the define after
+ *  either. The flags ride the runtime cache's key, so each set has its own objects.
+ *  @param bo the build's options
+ *  @return the flags */
+export func runtime_flags(bo: BuildOpts) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    if bo.gen.sanitize != 0 {
+        sb_push(b, "-O1 -g -fno-omit-frame-pointer -fsanitize=")
+        sb_push(b, san_clang_list(bo.gen.sanitize))
+    } else {
+        sb_push(b, "-O2")
+    }
+    if bo.gen.heap_sites {
+        sb_push(b, " -DCOOL_HEAP_SITES")
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+/** Whether clang can link a program against the sanitizer runtimes the mask names,
+ *  by linking an empty C program with them. A plain build never asks, so the
+ *  sanitizer runtimes are a dependency of a sanitized build alone.
+ *  @param mask the sanitizer bit set
+ *  @return true when the link succeeded */
+export func san_preflight(mask: int64) -> bool {
+    list: string = san_clang_list(mask)
+    cmd: string = "printf 'int main(void){return 0;}\\n' | clang -fsanitize=" + list + " -x c - -o /dev/null > /dev/null 2>&1"
+    code: int64 = run(cmd)
+    free(cmd)
+    return code == 0
+}
+
+/** The refusal when san_preflight fails.
+ *  @param mask the sanitizer bit set
+ *  @return the sentence */
+export func san_preflight_msg(mask: int64) -> string {
+    list: string = san_clang_list(mask)
+    return "dusk: --sanitize=" + list + " needs clang's sanitizer runtimes (the compiler-rt package), and clang could not link against them"
+}
+
+/** What the ir command was asked for: the options codegen reads, whether to emit for
+ *  wasm32, the file, and the first refusal, the way BuildOpts carries them. */
+export struct IrOpts {
+    gen: GenOpts,
+    wasm: bool,
+    file: string,
+    has_file: bool,
+    bad: string,
+    has_bad: bool,
+}
+
+// The refusal for options ir parsed but cannot emit together, or an empty string.
+func ir_combination_msg(gen: GenOpts, wasm: bool) -> string {
+    both: int64 = san_address() | san_thread()
+    if (gen.sanitize & both) == both {
+        return "dusk: --sanitize=address and --sanitize=thread cannot be combined; build one binary for each"
+    }
+    if wasm && (gen.sanitize != 0 || gen.heap_sites) {
+        return "dusk: --sanitize and --heap-sites are native only; ir --target=wasm32 takes neither"
+    }
+    return ""
+}
+
+/** Reads the flags and the file of ir from argv[start..]: --target=wasm32,
+ *  --heap-sites, and --sanitize=<list>, in any order, and the first word that is not
+ *  a flag as the file. Any other word spelled as a flag is refused by name.
+ *  @param argv the command line
+ *  @param start the index of the first word after the command
+ *  @return the options */
+export func parse_ir_words(argv: string[], start: int64) -> IrOpts {
+    mut wasm: bool = false
+    mut sanitize: int64 = 0
+    mut heap_sites: bool = false
+    mut bad: string = ""
+    mut file: string = ""
+    mut has_file: bool = false
+    for i in start..argv.len {
+        a: string = argv[i]
+        if str_eq(a, "--target=wasm32") {
+            wasm = true
+        } else if str_eq(a, "--heap-sites") {
+            heap_sites = true
+        } else if starts_with(a, "--sanitize=") {
+            mask, word := parse_sanitize_list(substring(a, 11, str_len(a)))
+            if mask == 0 && str_len(bad) == 0 {
+                bad = f"dusk: unknown sanitizer '{word}'; --sanitize takes address, undefined, and thread"
+            }
+            sanitize = sanitize | mask
+        } else if is_flag_word(a) {
+            if str_len(bad) == 0 {
+                bad = f"dusk: unknown ir flag '{a}'; ir takes --target=wasm32, --heap-sites, and --sanitize=<list>"
+            }
+        } else if !has_file {
+            file = a
+            has_file = true
+        }
+    }
+    gen: GenOpts = GenOpts { sanitize: sanitize, heap_sites: heap_sites }
+    if str_len(bad) == 0 {
+        bad = ir_combination_msg(gen, wasm)
+    }
+    return IrOpts { gen: gen, wasm: wasm, file: file, has_file: has_file, bad: bad, has_bad: str_len(bad) > 0 }
 }

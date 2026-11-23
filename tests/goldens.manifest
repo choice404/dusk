@@ -1342,7 +1342,7 @@ mode run_raw
 file examples/doublefree_fault.dusk
 out 5\n
 ok false
-err_has fatal: double free
+err_has fatal: double free at examples/doublefree_fault.dusk:13
 ---
 test a_collected_root_in_main_survives_a_plain_build
 mode run
@@ -3918,10 +3918,15 @@ mode check_fail
 file examples/export_bool_reject.dusk
 err_has cannot be bool; use char or int8 at the boundary
 ---
-test export_dusk_main_reject
+test export_wasm_entry_reject
 mode check_fail
-file examples/export_dusk_main_reject.dusk
-err_has an exported C function cannot be named 'main'
+file examples/export_wasm_entry_reject.dusk
+err_has an exported C function cannot be named '__main_argc_argv', the C entry point of a wasm build
+---
+test export_dusk_main_ok
+mode run
+file examples/export_dusk_main_ok.dusk
+out 42\n
 ---
 test json_roundtrip
 mode run
@@ -7155,7 +7160,7 @@ mode run_raw
 file examples/freeliteral_fault.dusk
 out abcd\nheap ok\nlit\n
 ok false
-err_has fatal: free of a string literal or other constant; it was never allocated
+err_has fatal: free of a string literal or other constant at examples/freeliteral_fault.dusk:20; it was never allocated
 ---
 # Builtin fetches a fixture package, takes the fixture repository out of reach, and then
 # fetches the same source into a second project, which only the bare mirror the first
@@ -10900,48 +10905,100 @@ mode run
 file examples/link_libm_names_ok.dusk
 out 5\n97\n2.75\n
 ---
-# A C source that calls a plain export func by name no longer links: export is
-# visibility between dusk files, and the function's symbol is internal.
+# A C source that calls a plain export func by name is refused by name: export is
+# visibility between dusk files, and the function's symbol is internal, so the C
+# call could only reach something else. One that calls a C library name the dusk
+# file also defines is refused the same way rather than linking to the library.
 test link_csource_bare_fail
 mode build_fail
 file examples/link_csource_bare_fail.dusk
-err_has clang failed to link the module
+err_has link_csource_call.c: 6:9: error: C source calls dusk function 'dusk_twice' by name; declare it export "C"
+err_absent clang failed
+---
+test link_csource_libc_name_fail
+mode build_fail
+file examples/link_csource_libc_name_fail.dusk
+err_has link_csource_libc_name.c: 4:5: error: C source calls dusk function 'getuid' by name; declare it export "C"
 ---
 test link_csource_exportc_ok
 mode run
 file examples/link_csource_exportc_ok.dusk
 out 41\n
 ---
-# A top level function cannot take a name the emitted module declares for itself:
-# the runtime's cool_ prefix, the strlen the prelude calls, main's dusk__main body,
-# or any name a foreign block of the program declares, the standard library's too.
-test name_cool_prefix_fail
-mode check_fail
-file examples/name_cool_prefix_fail.dusk
-err_has 'cool_helper' starts with 'cool_', which is reserved for the runtime; a function cannot take it
+# A dusk function's symbol carries a suffix no C identifier can spell, so a function
+# may take a runtime cool_ name, strlen, memcpy, fmod, pow, dusk__main, or the wasm
+# entry's name, and each call reaches the dusk function while the compiler's own
+# calls by those names still reach C. The -O2 half of the libcall record lives in
+# tests/gauge.manifest.
+test name_runtime_names_ok
+mode run
+file examples/name_runtime_names_ok.dusk
+out 5\n1\n99\n4\nabcd\n99\nthe dusk cool_thread_spawn\n6\n
 ---
+test name_dusk_main_ok
+mode run
+file examples/name_dusk_main_ok.dusk
+out 3\n2\n
+---
+test name_dusk_main_wasm_ir
+mode tool
+argv ir --target=wasm32 examples/name_dusk_main_ok.dusk
+code 0
+---
+test link_libcall_names_ok
+mode run
+file examples/link_libcall_names_ok.dusk
+out 65\n65\n1.5\n27\n2\n3\n4\n42\n7\n
+---
+# What still collides is refused at check: an export "C" function keeps its C name,
+# so it cannot take a C function the compiler calls itself; a function cannot take
+# a name a foreign block of the program declares, the standard library's too, since
+# a call by that name would mean two things; and a foreign declaration cannot name
+# the C entry point or restate a runtime function or another foreign declaration
+# with a different prototype.
 test name_strlen_fail
 mode check_fail
 file examples/name_strlen_fail.dusk
-err_has 'strlen' is a C function the compiler calls itself; a function cannot take its name
----
-test name_dusk_main_fail
-mode check_fail
-file examples/name_dusk_main_fail.dusk
-err_has 'dusk__main' is the name the compiler gives the body of main; a function cannot take it
+err_has 'strlen' is a C function the compiler calls itself; an export "C" function cannot take its name
 ---
 test name_foreign_same_file_fail
 mode check_fail
 file examples/name_foreign_same_file_fail.dusk
-err_has 'getpid' is declared foreign in this program; a function cannot take a foreign function's name
+err_has 'getpid' is declared foreign in this file; a function cannot take a foreign function's name
 ---
 test name_foreign_std_fail
 mode check_fail
 file examples/name_foreign_std_fail.dusk
-err_has 'abort' is declared foreign in this program; a function cannot take a foreign function's name
+err_has 'abort' is declared foreign in std.vector; a function cannot take a foreign function's name
 ---
-# Methods and an imported file's private helpers never meet a C symbol, so they may
-# use the names a top level function cannot.
+test name_foreign_main_fail
+mode check_fail
+file examples/name_foreign_main_fail.dusk
+err_has name_foreign_main_fail.dusk: 6:10: error: 'main' is the program's C entry point; a foreign function cannot take its name
+---
+test name_foreign_runtime_fail
+mode check_fail
+file examples/name_foreign_runtime_fail.dusk
+err_has name_foreign_runtime_fail.dusk: 7:10: error: foreign 'cool_gen_alloc' differs from the compiler's own declaration of it
+---
+test name_foreign_restate_ok
+mode run
+file examples/name_foreign_restate_ok.dusk
+out 0\n
+---
+test name_foreign_mismatch_fail
+mode check_fail
+file examples/name_foreign_mismatch_fail.dusk
+err_has name_foreign_mismatch_mod.dusk: 4:10: error: foreign 'getpid' differs from its declaration in examples/name_foreign_mismatch_fail.dusk; every foreign declaration of a name must say the same
+---
+# An imported file's private helper is judged by the name it was written with, so a
+# private cool beside the root's own cool builds and each call reaches its own.
+test name_private_cool_ok
+mode run
+file examples/name_private_cool_ok.dusk
+out 42\n1\n
+---
+# Methods and an imported file's private helpers never meet a C symbol either.
 test name_method_ok
 mode check_ok
 file examples/name_method_ok.dusk
@@ -11042,7 +11099,7 @@ mode run_raw
 file examples/free_lit_helper_fault.dusk
 out heap\nlit\n
 ok false
-err_has fatal: free of a string literal or other constant
+err_has fatal: free of a string literal or other constant at examples/free_lit_helper_fault.dusk:19; it was never allocated
 err_absent unreachable
 ---
 # The generational heap's gauges: live blocks, the bytes they asked for, and the

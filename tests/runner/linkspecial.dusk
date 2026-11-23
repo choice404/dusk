@@ -3,7 +3,8 @@
 // the binary prints, the general form of release_collector, so a program whose
 // output the optimizer could change is pinned at both levels. symbols_internal
 // builds a file and reads the binary's symbol table, so the linkage the compiler
-// gives a dusk function is checked where the linker sees it.
+// gives a dusk function is checked where the linker sees it, against a baseline
+// program so the check needs no list of the source's functions.
 
 @paradigm procedural
 
@@ -85,9 +86,8 @@ export func release_out(rec: Record, bin: string) -> string {
     return ""
 }
 
-// Whether one line of llvm-nm output names the symbol sym: the last space
-// separated field of the line is the name.
-func nm_line_names(line: string, sym: string) -> bool {
+// The name of one line of llvm-nm output, its last space separated field.
+func nm_name(line: string) -> string {
     n: int64 = str_len(line)
     mut start: int64 = 0
     for i in 0..n {
@@ -95,27 +95,113 @@ func nm_line_names(line: string, sym: string) -> bool {
             start = i + 1
         }
     }
-    name: string = substring(line, start, n)
-    hit: bool = str_eq(name, sym)
-    free(name)
-    return hit
+    return substring(line, start, n)
 }
 
-// Whether any line of the symbol listing names sym.
-func nm_lists(lines: *Vector<string>, sym: string) -> bool {
+// The type letter of one line of llvm-nm output, the field before the name, or 0
+// for a line too short to carry one.
+func nm_kind(line: string) -> int64 {
+    n: int64 = str_len(line)
+    mut start: int64 = 0
+    for i in 0..n {
+        if line[i] == 32 {
+            start = i + 1
+        }
+    }
+    if start < 2 {
+        return 0
+    }
+    return line[start - 2]
+}
+
+// Whether a line of llvm-nm output is a function: a text symbol, global or weak.
+func nm_is_function(line: string) -> bool {
+    k: int64 = nm_kind(line)
+    return k == 84 || k == 87 || k == 116 || k == 119
+}
+
+// Whether any line of the symbol listing names sym with the type letter kind.
+func nm_lists_kind(lines: *Vector<string>, sym: string, kind: int64) -> bool {
     for line in lines {
-        if nm_line_names(line, sym) {
+        name: string = nm_name(line)
+        hit: bool = str_eq(name, sym) && nm_kind(line) == kind
+        free(name)
+        if hit {
             return true
         }
     }
     return false
 }
 
-/** Builds the record's file and lists the binary's defined external symbols with
- *  llvm-nm. The check passes when main is listed and none of the function names
- *  in the record's args is: every dusk function but the C entry has internal
- *  linkage, so a dusk name never reaches the global symbol table.
- *  @param rec the record, which needs a file and lists the source's functions in args
+// Lists the defined symbols of a built binary with llvm-nm, the external ones only
+// when extern_only is set; an empty listing and a reason on failure.
+func nm_list(file: string, tag: string, extern_only: bool) -> (*Vector<string>, string) {
+    stem: string = source_stem(file)
+    qexe: string = quote("target/dusk-out/" + stem)
+    mut opts: string = "--defined-only"
+    if extern_only {
+        opts = "--defined-only --extern-only"
+    }
+    out: string = "target/testrun/" + tag + "_nm.txt"
+    rc: int64 = run("llvm-nm " + opts + " " + qexe + " > " + out + " 2>&1")
+    free(qexe)
+    listing: string = slurp(out)
+    if rc != 0 {
+        empty: *Vector<string> = alloc(vec_new())
+        return (empty, "llvm-nm could not read the binary: " + listing)
+    }
+    return (str_split(listing, "\n"), "")
+}
+
+// The program the baseline is built from: a main and nothing else, so its
+// external functions are the C entry, the runtime's, and the C start files'.
+func baseline_source() -> string {
+    return "@paradigm procedural\n\nfunc main() -> int32 {\n    return 0\n}\n"
+}
+
+// The external functions of the record's binary that the baseline lacks, the ones
+// the record's own source put in the global table, joined by spaces.
+func extra_externals(record_lines: *Vector<string>, base_lines: *Vector<string>) -> string {
+    b: *StringBuilder = alloc(sb_new())
+    for line in record_lines {
+        if nm_is_function(line) {
+            name: string = nm_name(line)
+            if !nm_lists(base_lines, name) {
+                if sb_size(b) > 0 {
+                    sb_push_char(b, 32)
+                }
+                sb_push(b, name)
+            }
+            free(name)
+        }
+    }
+    out: string = substring(sb_cstr(b), 0, sb_size(b))
+    sb_free(b)
+    free(b)
+    return out
+}
+
+// Whether any line of the symbol listing names sym.
+func nm_lists(lines: *Vector<string>, sym: string) -> bool {
+    for line in lines {
+        name: string = nm_name(line)
+        hit: bool = str_eq(name, sym)
+        free(name)
+        if hit {
+            return true
+        }
+    }
+    return false
+}
+
+/** Builds the record's file and a baseline program that defines main alone, and
+ *  lists both binaries' defined external symbols with llvm-nm. The check passes
+ *  when the record's binary has no external function the baseline lacks, so no
+ *  function of the source reached the global symbol table, whatever its name, and
+ *  when each function the record's args names is in the full listing as a local
+ *  function under its internal symbol, the name with the .d suffix, so the record
+ *  proves the symbol form too.
+ *  @param rec the record, which needs a file and may name functions in args
  *  @param bin the compiler under test
  *  @return the empty string on success, else the reason */
 export func symbols_internal(rec: Record, bin: string) -> string {
@@ -126,26 +212,41 @@ export func symbols_internal(rec: Record, bin: string) -> string {
     if md != 0 {
         return "could not make target/testrun"
     }
-    berr: string = build_file(bin, "", rec.file, "target/testrun/syms_build.txt")
+    we: error = write_file("target/testrun/syms_base.dusk", baseline_source())
+    if we.exists() {
+        return "could not write the baseline program"
+    }
+    bb: string = build_file(bin, "", "target/testrun/syms_base.dusk", "target/testrun/syms_base_build.txt")
+    if str_len(bb) > 0 {
+        return "the baseline: " + bb
+    }
+    base, berr := nm_list("target/testrun/syms_base.dusk", "syms_base", true)
     if str_len(berr) > 0 {
-        return berr
+        return "the baseline: " + berr
     }
-    stem: string = source_stem(rec.file)
-    qexe: string = quote("target/dusk-out/" + stem)
-    rc: int64 = run("llvm-nm --defined-only --extern-only " + qexe + " > target/testrun/syms_nm.txt 2>&1")
-    free(qexe)
-    listing: string = slurp("target/testrun/syms_nm.txt")
-    if rc != 0 {
-        return "llvm-nm could not read the binary: " + listing
+    rb: string = build_file(bin, "", rec.file, "target/testrun/syms_build.txt")
+    if str_len(rb) > 0 {
+        return rb
     }
-    lines: *Vector<string> = str_split(listing, "\n")
-    if !nm_lists(lines, "main") {
-        return "main is not a defined external symbol of the binary"
+    ext, eerr := nm_list(rec.file, "syms", true)
+    if str_len(eerr) > 0 {
+        return eerr
+    }
+    if !nm_lists_kind(ext, "main", 84) {
+        return "main is not a defined external function of the binary"
+    }
+    extra: string = extra_externals(ext, base)
+    if str_len(extra) > 0 {
+        return f"functions of the source are external symbols of the binary: {extra}"
+    }
+    all, aerr := nm_list(rec.file, "syms_all", false)
+    if str_len(aerr) > 0 {
+        return aerr
     }
     names: *Vector<string> = split_ws(rec.args)
     for name in names {
-        if nm_lists(lines, name) {
-            return f"the dusk function '{name}' is an external symbol of the binary"
+        if !nm_lists_kind(all, name + ".d", 116) {
+            return f"the dusk function '{name}' is not a local function '{name}.d' of the binary"
         }
     }
     return ""

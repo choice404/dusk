@@ -1,0 +1,60 @@
+@paradigm procedural
+
+@import std.async.future
+@import std.async.loop
+
+// A dusk function's symbol carries a suffix no C identifier can spell, so a function
+// may take a name the compiler itself calls under its C spelling: a runtime function
+// with the cool_ prefix, or strlen. Each name here means the dusk function, called
+// directly, through a function value, as a thread's body, and as an async task,
+// while the string the + builds is still allocated by the runtime's own
+// cool_gen_alloc, the task by its own cool_task_new, and the for over a string still
+// measures it with the C library's strlen.
+func cool_gen_alloc(n: int64) -> int64 {
+    return n + 1
+}
+
+func cool_helper() -> int64 {
+    return 1
+}
+
+func strlen(s: string) -> int64 {
+    return 99
+}
+
+func cool_thread_spawn() -> void {
+    println("the dusk cool_thread_spawn")
+}
+
+async func cool_task_new() -> int32 {
+    return 6
+}
+
+func apply(f: (string) -> int64, s: string) -> int64 {
+    return f(s)
+}
+
+func main() -> int32 {
+    println(cool_gen_alloc(4))
+    println(cool_helper())
+    println(strlen("abc"))
+    s: string = "ab" + "cd"
+    mut n: int64 = 0
+    for c in s {
+        n++
+    }
+    println(n)
+    println(s)
+    free(s)
+    println(apply(strlen, "xyz"))
+    t, e := spawn(lambda () -> void { cool_thread_spawn() })
+    e.ignore()
+    j := join(t)
+    j.ignore()
+    le := loop_init()
+    le.ignore()
+    rc := async_run(cool_task_new())
+    loop_free()
+    println(rc)
+    return 0
+}

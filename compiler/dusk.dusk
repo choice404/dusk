@@ -38,10 +38,11 @@ func usage() -> void {
     printerr("  mono <file>   check, then dump the mono-expanded ground module")
     printerr("  ir <file>     lower the mono-expanded module to LLVM IR")
     printerr("  ir --target=wasm32 <file>  cross-emit the LLVM IR for wasm32-wasip1")
+    printerr("  ir --heap-sites, ir --sanitize=<list>  the IR those builds compile")
     printerr("  build <file>  lower, link, and write target/dusk-out")
     printerr("  build --release <file>  the same build at -O2, slower to link and faster to run")
     printerr("  build --lib <file>  archive the module and its runtime into libstem.a + stem.h")
-    printerr("  build --heap-sites <file>  record where every heap block was allocated")
+    printerr("  build --heap-sites <file>  report the heap blocks still live at exit, by allocation site")
     printerr("  build --sanitize=<list> <file>  instrument with address, undefined, or thread")
     printerr("  run <file>    build and run, forwarding trailing args")
     printerr("  run [--heap-sites] [--sanitize=<list>] <file>  run takes those two before the file")
@@ -53,14 +54,9 @@ func usage() -> void {
 }
 
 // Whether a command that reached here with no file compiles a project rather than one
-// named file. ir is here beside check because it compiles a whole program too, and
-// reading a project's IR without naming its root is how the emitted bytes of a build
-// get compared. build and run take a project as well, through project_build, once
-// their flags are read.
+// named file. build, run, and ir take a project as well, once their flags are read.
 func takes_project(cmd: string) -> bool {
-    if str_eq(cmd, "check") { return true }
-    if str_eq(cmd, "ir") { return true }
-    return false
+    return str_eq(cmd, "check")
 }
 
 // Reports why there is nothing to compile: the manifest's own fault when one is there
@@ -86,9 +82,9 @@ func project_build(prog: string, argv: string[], run_it: bool, bo: BuildOpts) ->
     return build_module(prog, pr.path, run_it, argv, argv.len, true, bo)
 }
 
-// Checks or emits the IR of the project the working directory sits in. Every other
-// command is asked about one file, so it still says so; build and run read their
-// own flags first and reach the project through project_build.
+// Checks the project the working directory sits in. Every other
+// command is asked about one file, so it still says so; build, run, and ir read
+// their own flags first and reach the project on their own.
 func run_project_cmd(cmd: string, argv: string[]) -> int32 {
     if !takes_project(cmd) {
         printerr("dusk: this command needs a file argument")
@@ -99,10 +95,7 @@ func run_project_cmd(cmd: string, argv: string[]) -> int32 {
     if !pr.ok {
         return no_project(pr)
     }
-    if str_eq(cmd, "check") {
-        return cmd_check(pr.path, argv[0], true)
-    }
-    return cmd_ir(pr.path, argv[0], default_target(), true)
+    return cmd_check(pr.path, argv[0], true)
 }
 
 // `dusk build --lib` with no file archives the project: the manifest's @root is the
@@ -154,6 +147,30 @@ func run_run_cmd(argv: string[]) -> int32 {
     return build_module(argv[0], b.file, true, argv, rest, false, b)
 }
 
+// Dispatches `ir`: its flags, --target=wasm32 for the wasm32-wasip1 cross emit the
+// browser playground is built with, --heap-sites, and --sanitize=<list>, sit anywhere
+// among the words, and with no file it emits the IR of the project the working
+// directory sits under, which is how the emitted bytes of a build get compared.
+func run_ir_cmd(argv: string[]) -> int32 {
+    io: IrOpts = parse_ir_words(argv, 2)
+    if io.has_bad {
+        printerr(io.bad)
+        return 1
+    }
+    mut target: string = default_target()
+    if io.wasm {
+        target = wasm_target()
+    }
+    if io.has_file {
+        return cmd_ir(io.file, argv[0], target, false, io.gen)
+    }
+    pr: ProjectRoot = project_root()
+    if !pr.ok {
+        return no_project(pr)
+    }
+    return cmd_ir(pr.path, argv[0], target, true, io.gen)
+}
+
 // Dispatches a command that takes a source file argument, reporting a usage error
 // when the file is missing.
 func run_file_cmd(cmd: string, argv: string[]) -> int32 {
@@ -184,15 +201,6 @@ func run_file_cmd(cmd: string, argv: string[]) -> int32 {
     }
     if str_eq(cmd, "mono") {
         return cmd_mono(path, argv[0])
-    }
-    if str_eq(cmd, "ir") {
-        // `ir --target=wasm32 <file>` cross-emits for wasm32-wasip1, the form the
-        // browser playground is built with; the flag sits at argv[2] and the file
-        // at argv[3], mirroring build --lib. Without it, the native triple.
-        if argv.len >= 4 && str_eq(argv[2], "--target=wasm32") {
-            return cmd_ir(argv[3], argv[0], wasm_target(), false)
-        }
-        return cmd_ir(path, argv[0], default_target(), false)
     }
     if str_eq(cmd, "esc") {
         return cmd_esc(path, argv[0])
@@ -244,7 +252,7 @@ func main(argc: int32, argv: string[]) -> int32 {
         return run_file_cmd(cmd, argv)
     }
     if str_eq(cmd, "ir") {
-        return run_file_cmd(cmd, argv)
+        return run_ir_cmd(argv)
     }
     if str_eq(cmd, "build") {
         return run_build_cmd(argv)

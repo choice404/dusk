@@ -1,0 +1,19 @@
+@paradigm procedural
+
+// A dusk function writes one byte past a five byte block the C library handed out.
+// Under --sanitize=address every load and store of a dusk function is checked, so
+// the write is reported where it happens, in poke, before anything prints after it.
+foreign "C" {
+    func malloc(n: int64) -> *raw char
+}
+
+func poke(p: *raw char, i: int64) -> void {
+    p[i] = 'x'
+}
+
+func main(argc: int32, argv: string[]) -> int32 {
+    p: *raw char = malloc(5)
+    poke(p, 4 + int64(argc))
+    println("after")
+    return 0
+}

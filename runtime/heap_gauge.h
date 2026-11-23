@@ -35,6 +35,10 @@ static const char *cool_heap_plural(int64_t n, const char *one, const char *many
     return n == 1 ? one : many;
 }
 
+#ifdef COOL_HEAP_SITES
+/* The report by allocation site, its exit hook, and its opt in signal. */
+#include "heap_report.h"
+#else
 /* Prints the heap's live totals to stderr. The totals are recomputed from a walk of
    the registry, every entry whose size word has no parked bit, and compared with
    the counters, so every report is also the standing check that the counters
@@ -66,3 +70,4 @@ void cool_heap_report(void) {
     fputs("dusk heap: build with --heap-sites to see allocation sites\n", stderr);
     pthread_mutex_unlock(&cool_heap_lock);
 }
+#endif
